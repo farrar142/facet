@@ -22,6 +22,7 @@ Rust는 [rustup](https://rustup.rs)으로 설치한다. 툴체인과 `rustfmt`·
 
 - `crates/facet-core` — 코어. 화면에 의존하지 않는 라이브러리. 동작과 테스트는 여기에 둔다.
 - `crates/facet-app` — 앱 실행 파일(`facet`). 코어를 부르기만 하는 얇은 껍질.
+- `crates/facet-win` — Windows API 안전 래퍼. 작업 공간에서 유일하게 `unsafe_code`를 허용하고 안전한 함수만 드러낸다(ADR-0002). 셸 호출은 COM을 초기화한 전용 일꾼 스레드(`ShellWorker`)에서 한다. Windows 전용 부분은 `cfg(windows)`로 둔다.
 - `crates/facet-bench` — 측정 도구(`facet-bench`): 시험 폴더 생성과 코어 벤치마크.
 - `xtask` — 저장소 작업 명령(`cargo xtask`).
 - 인덱서 서비스·셸 확장 도우미 같은 다른 실행 파일은 `crates/` 아래 새 크레이트로 추가한다(작업 공간 멤버는 `crates/*`).
