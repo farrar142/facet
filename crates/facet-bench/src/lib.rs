@@ -2,11 +2,13 @@
 //!
 //! - 시험 폴더 생성: 실제 폴더와 비슷한 모양(한글·이모지·긴 이름, 폴더와 파일이 섞임)의
 //!   항목을 정해진 수만큼 만든다. 같은 수로 다시 돌리면 결과가 같다.
-//! - 코어 벤치마크: 「위치의 항목 목록 읽기」([`facet_core::list_location`])를 재고
+//! - 코어 벤치마크: 「위치의 항목 목록 읽기」(파일 시스템 공급자의 [`Provider::list`])를 재고
 //!   상한([`LIST_LIMIT`])과 비교한다. `cargo xtask ci`가 이것을 부른다.
 //! - 인덱스 벤치마크: 시험 폴더와 같은 이름의 합성 인덱스([`synthetic_index`])를 만들어
 //!   메모리([`INDEX_MEMORY_LIMIT`])와 부분 일치 질의 시간([`QUERY_LIMIT`])을 잰다.
 //!   `cargo xtask ci`가 이것도 부른다.
+
+pub mod screen;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -15,7 +17,12 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use facet_core::{ListError, list_location};
+use facet_core::{FileSystemProvider, ListError, Location, Provider};
+
+/// 파일 시스템 공급자로 실제 폴더 `path`의 항목 목록을 읽는다.
+fn list_folder(path: &Path) -> Result<Vec<facet_core::Item>, ListError> {
+    FileSystemProvider.list(&Location::file_system(path))
+}
 
 /// 벤치마크 폴더의 기본 항목 수.
 pub const DEFAULT_COUNT: usize = 100_000;
@@ -143,7 +150,7 @@ pub fn make_test_folder(path: &Path, count: usize) -> Result<MakeReport, TestFol
         .collect();
 
     // 먼저 전부 확인한 뒤에야 쓴다: 모르는 항목이 있으면 아무것도 바꾸지 않는다.
-    let existing = list_location(path).map_err(|e| TestFolderError::Io {
+    let existing = list_folder(path).map_err(|e| TestFolderError::Io {
         path: path.to_path_buf(),
         source: io::Error::other(e.to_string()),
     })?;
@@ -214,11 +221,11 @@ impl Measurement {
 
 /// `path`의 목록 읽기를 `runs`번 잰다. 재기 전에 한 번 읽어 캐시를 데운다.
 pub fn measure_list(path: &Path, runs: usize) -> Result<Measurement, ListError> {
-    let mut item_count = list_location(path)?.len();
+    let mut item_count = list_folder(path)?.len();
     let mut times = Vec::with_capacity(runs);
     for _ in 0..runs {
         let start = Instant::now();
-        let items = list_location(path)?;
+        let items = list_folder(path)?;
         times.push(start.elapsed());
         item_count = items.len();
     }
