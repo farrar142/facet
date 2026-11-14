@@ -141,6 +141,15 @@ jobs:
             --max-turns 200
             --allowedTools "Bash,Read,Edit,Write,Glob,Grep"
 
+      # Put the agent's commits on top of today's main: sibling tickets or factory changes
+      # may have landed during the run. Pushing a branch based on an older main also
+      # counts as editing workflow files, which GITHUB_TOKEN may not do.
+      - name: Rebase onto main
+        if: steps.guard.outputs.go == 'true'
+        run: |
+          git fetch origin main
+          git rebase origin/main
+
       # Deterministic gate: the agent's word is not enough.
       - name: Automated checks
         if: steps.guard.outputs.go == 'true'
@@ -174,6 +183,10 @@ jobs:
         run: |
           gh pr merge "$PR_URL" --squash
           git push origin --delete "$BRANCH" || true
+          # A GITHUB_TOKEN merge does not reliably close the ticket via `Closes #N`; close it here
+          # so its dependents become unblocked before the next step looks for them.
+          gh issue close "$N" --repo "$REPO" --reason completed --comment "Merged in $PR_URL" || true
+          gh issue edit "$N" --repo "$REPO" --remove-label in-progress || true
 
       # A merge made with GITHUB_TOKEN closes the ticket without firing `issues: closed`,
       # so the frontier job would never run. Dispatch the next tickets here instead.
