@@ -23,17 +23,24 @@ Rust는 [rustup](https://rustup.rs)으로 설치한다. 툴체인과 `rustfmt`·
 - `crates/facet-core` — 코어. 화면에 의존하지 않는 라이브러리. 동작과 테스트는 여기에 둔다.
 - `crates/facet-app` — 앱 실행 파일(`facet`). 코어를 부르기만 하는 얇은 껍질.
 - `crates/facet-bench` — 측정 도구(`facet-bench`): 시험 폴더 생성과 코어 벤치마크.
+- `crates/facet-indexer` — 인덱서 서비스 실행 파일(`facet-indexer`). 지금은 개발용 하위 명령 `dump-mft`만 있다. `unsafe`와 Windows API는 작업 공간에서 이 크레이트에만 두고(Windows 전용 코드는 `#[cfg(windows)]`), 작업 공간의 `unsafe_code` 금지를 끈 크레이트도 이것 하나다.
 - `xtask` — 저장소 작업 명령(`cargo xtask`).
-- 인덱서 서비스·셸 확장 도우미 같은 다른 실행 파일은 `crates/` 아래 새 크레이트로 추가한다(작업 공간 멤버는 `crates/*`).
+- 셸 확장 도우미 같은 다른 실행 파일은 `crates/` 아래 새 크레이트로 추가한다(작업 공간 멤버는 `crates/*`).
 
 명령:
 
 - 빌드: `cargo build`
 - 테스트: `cargo test --workspace`
 - 앱 실행: `cargo run -p facet-app -- [폴더 경로]` — 그 폴더(빼면 현재 폴더)의 항목 목록을 창에 띄운다. 「도움말 → facet 정보」가 정보 화면(`AboutSlint`)이다. 항목을 고르고 F2를 누르면 그 행에 이름 입력란이 뜬다(Enter 확정, Esc 취소). 지금은 입력값을 상태 줄에 보일 뿐 파일 이름은 바꾸지 않는다.
-- 자동 검사 전체: `cargo xtask ci` — 형식 검사(`cargo fmt --check`) → lint(`cargo clippy --all-targets`, 경고를 오류로) → 빌드 → 테스트 → 코어 벤치마크를 차례로 돌리고, 한 단계라도 실패하면 0이 아닌 코드로 끝난다. PR을 열기 전에 이것을 통과시킨다.
+- 자동 검사 전체: `cargo xtask ci` — 형식 검사(`cargo fmt --check`) → lint(`cargo clippy --all-targets`, 경고를 오류로) → 빌드 → 테스트 → 실제 볼륨 테스트(관리자일 때만, 아래) → 코어 벤치마크를 차례로 돌리고, 한 단계라도 실패하면 0이 아닌 코드로 끝난다. PR을 열기 전에 이것을 통과시킨다.
 - 형식 고치기: `cargo fmt --all`
 - 배포 산출물 만들기: `cargo xtask dist <label>` — `target/dist/`를 비우고 facet을 release로 빌드해 `facet-<label>-windows-x64.zip`(`facet.exe`, `LICENSE`, `NOTICE.txt`)과 그 `.sha256`을 만든다. `<label>`은 `nightly`나 태그 이름(예: `v0.1.0`). `.github/workflows/release.yml`이 부른다.
+
+## 실제 볼륨 테스트와 MFT 조각
+
+- 실제 볼륨 테스트: 관리자 권한과 NTFS 볼륨이 필요한 테스트. 이름을 `real_volume_`으로 시작하고 `#[ignore = "실제 볼륨 테스트 ..."]`를 붙여 기본 `cargo test --workspace`에서 뺀다. 시험 볼륨의 드라이브 문자는 환경 변수 `FACET_TEST_VOLUME`(예: `T:`)으로 받는다. `cargo xtask ci`는 관리자일 때 시험 VHD(64MB, NTFS)를 `diskpart`로 만들어 붙이고 `cargo test --workspace -- --ignored real_volume_`으로 이 테스트만 돌린 뒤 VHD를 뗀다. 관리자가 아니거나 Windows가 아니면 건너뛴다고 출력한다. GitHub 호스트 Windows 러너는 관리자로 돈다. 예: `crates/facet-indexer/tests/real_volume.rs`.
+- MFT 떠 내기: `cargo run -p facet-indexer -- dump-mft <볼륨> <출력 파일> [--start N] [--count N]`(관리자) — 볼륨의 MFT 원시 레코드를 디스크 그대로 파일로 떠 낸다. 관리자가 아니면 그 이유를 알리고 끝난다.
+- MFT 조각: `testdata/mft/` — MFT 파서 테스트용 조각과 기대값 목록. `cargo xtask mft-fixture`(관리자)로 다시 만든다. 담긴 경우, 형식, 손으로 따라 하는 방법은 `testdata/mft/README.md`.
 
 ## 시험 폴더와 벤치마크
 
