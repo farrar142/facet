@@ -17,6 +17,29 @@
 //! assert_eq!(hits[0].path, r"C:\문서\Report.txt");
 //! ```
 //!
+//! 결과를 정렬하고 조각으로 나눠 받으려면 [`Index::search`]와 [`Index::resume`]을 쓴다.
+//! 응답([`Page`])은 결과 조각, 전체 개수, 이어 받기 표지([`Cursor`])를 담는다.
+//!
+//! ```
+//! use facet_index::{Index, NewItem, Order, Query, ResumeError, SortKey};
+//!
+//! let mut index = Index::new(r"C:\", 5);
+//! for (n, size) in [(40, 30), (41, 10), (42, 20)] {
+//!     index.insert(NewItem { number: n, parent: 5, name: &format!("{n}.txt"), size,
+//!                            modified: 0, attributes: 0 }).unwrap();
+//! }
+//! let page = index.search(&Query::name_contains("txt").sort(SortKey::Size, Order::Ascending).limit(2));
+//! assert_eq!((page.hits[0].size, page.hits[1].size, page.total), (10, 20, 3));
+//! let rest = index.resume(page.next.unwrap(), 2).unwrap();
+//! assert_eq!(rest.hits[0].size, 30);
+//!
+//! // 인덱스가 바뀌면 앞선 표지는 무효다.
+//! let page = index.search(&Query::name_contains("txt").limit(1));
+//! index.insert(NewItem { number: 43, parent: 5, name: "new.txt", size: 0, modified: 0,
+//!                        attributes: 0 }).unwrap();
+//! assert_eq!(index.resume(page.next.unwrap(), 1).unwrap_err(), ResumeError::Stale);
+//! ```
+//!
 //! # 메모리 배치
 //!
 //! 항목 100만 개를 150MB 미만에 담으려고(spec #22) 항목마다 힙 할당을 하지 않는다.
@@ -27,9 +50,12 @@
 //! - 항목은 고정 크기 레코드(이름 위치, 부모 번호, 크기, 날짜, 속성)로 넣은 순서대로 둔다.
 //! - 경로 문자열은 결과를 낼 때만 부모 번호를 따라 만든다. 부모 번호로 찾는 표는 폴더만 담는다.
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt;
 use std::mem::size_of;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use memchr::memmem;
 
@@ -232,10 +258,35 @@ impl Filter {
     }
 }
 
-/// 인덱스에 보내는 질의: 조건 하나(또는 조건 트리)와 결과 수 제한.
+/// 결과를 정렬하는 기준.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortKey {
+    /// 이름. 대소문자를 접은 이름의 글자(유니코드 코드 포인트) 순서다.
+    Name,
+    /// 전체 경로. 경로 조각(폴더 이름)마다 이름 순서로 비교하므로 폴더 안의 항목이 폴더 바로
+    /// 뒤에 모인다.
+    Path,
+    /// 바이트 크기.
+    Size,
+    /// 수정 날짜.
+    Modified,
+}
+
+/// 정렬 방향.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Order {
+    /// 작은 것부터(기본).
+    #[default]
+    Ascending,
+    /// 큰 것부터.
+    Descending,
+}
+
+/// 인덱스에 보내는 질의: 조건 하나(또는 조건 트리)와 정렬, 결과 수 제한.
 #[derive(Debug, Clone)]
 pub struct Query {
     plan: Plan,
+    sort: Option<(SortKey, Order)>,
     limit: Option<usize>,
 }
 
@@ -251,6 +302,7 @@ impl Query {
     pub fn name_contains(part: &str) -> Self {
         Self {
             plan: Plan::Contains(fold(part)),
+            sort: None,
             limit: None,
         }
     }
@@ -264,14 +316,77 @@ impl Query {
             } => Plan::Contains(part),
             node => Plan::Filter(Filter(node)),
         };
-        Self { plan, limit: None }
+        Self {
+            plan,
+            sort: None,
+            limit: None,
+        }
     }
 
-    /// 결과를 많아야 `n`개만 받는다.
+    /// 결과를 `key` 기준 `order` 방향으로 정렬한다. 기준 값이 같은 항목끼리는 인덱스에 넣은
+    /// 순서다. 정렬을 주지 않으면 결과는 넣은 순서다.
+    pub fn sort(mut self, key: SortKey, order: Order) -> Self {
+        self.sort = Some((key, order));
+        self
+    }
+
+    /// 결과를 많아야 `n`개만 받는다. 나머지는 [`Page::next`]로 이어 받는다.
     pub fn limit(mut self, n: usize) -> Self {
         self.limit = Some(n);
         self
     }
+}
+
+/// 질의나 이어 받기의 응답: 결과 조각, 전체 개수, 이어 받기 표지.
+#[derive(Debug, Clone)]
+pub struct Page {
+    /// 이번 조각의 결과. 정렬을 주었으면 정렬 순서다.
+    pub hits: Vec<Hit>,
+    /// 질의에 맞는 결과 전체의 개수(결과 수 제한과 상관없다). 이어 받아도 처음 질의의 값이다.
+    pub total: usize,
+    /// 남은 결과가 있으면 그것을 받을 표지. 다 받았으면 `None`.
+    pub next: Option<Cursor>,
+}
+
+/// 이어 받기 표지. 앞선 질의에서 아직 내보내지 않은 결과를 들고 있다가
+/// [`Index::resume`]으로 다음 조각을 낸다.
+///
+/// 표지를 만든 뒤 인덱스가 바뀌면(항목을 넣는 등) 표지는 무효가 되어
+/// [`ResumeError::Stale`]을 낸다. 다른 인덱스에 내밀어도 무효다.
+#[derive(Debug, Clone)]
+pub struct Cursor {
+    /// 표지를 만들 때의 인덱스 판 번호.
+    stamp: u64,
+    sort: Option<(SortKey, Order)>,
+    total: usize,
+    /// 아직 내보내지 않은 결과의 레코드 위치. 정렬이 없으면 넣은 순서이고, 정렬이 있으면
+    /// 순서가 정해져 있지 않다(조각을 낼 때마다 앞쪽만 골라 정렬한다).
+    rest: Vec<u32>,
+}
+
+/// 이어 받지 못한 까닭.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeError {
+    /// 표지를 만든 뒤 인덱스가 바뀌었거나 다른 인덱스의 표지다. 다시 질의해야 한다.
+    Stale,
+}
+
+impl fmt::Display for ResumeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Stale => "인덱스가 바뀌어 이어 받을 수 없습니다. 다시 질의하십시오",
+        })
+    }
+}
+
+impl std::error::Error for ResumeError {}
+
+/// 인덱스 판 번호를 내는 프로세스 전체의 계수기. 인덱스가 만들어지거나 바뀔 때마다 새 값을
+/// 받으므로, 서로 다른 인덱스나 바뀌기 전후의 같은 인덱스는 판 번호가 다르다.
+static NEXT_STAMP: AtomicU64 = AtomicU64::new(1);
+
+fn new_stamp() -> u64 {
+    NEXT_STAMP.fetch_add(1, AtomicOrdering::Relaxed)
 }
 
 /// 질의 결과 항목 하나.
@@ -313,6 +428,9 @@ pub struct Index {
     original_starts: Vec<(u32, u32)>,
     /// 폴더의 항목 번호 → 레코드 위치. 같은 번호가 또 오면 처음 것을 쓴다.
     folders: HashMap<u64, u32>,
+    /// 판 번호. 만들 때와 바뀔 때마다 [`new_stamp`]로 새로 받는다. 이어 받기 표지가 이 값으로
+    /// 무효를 가린다. 복제본은 내용이 같으므로 같은 값을 갖는다.
+    stamp: u64,
 }
 
 impl Index {
@@ -331,6 +449,7 @@ impl Index {
             originals: String::new(),
             original_starts: Vec::new(),
             folders: HashMap::new(),
+            stamp: new_stamp(),
         }
     }
 
@@ -377,7 +496,14 @@ impl Index {
         if item.attributes & ATTRIBUTE_DIRECTORY != 0 {
             self.folders.entry(item.number).or_insert(index);
         }
+        self.changed();
         Ok(())
+    }
+
+    /// 인덱스가 바뀌었다고 표시해 앞서 낸 이어 받기 표지를 무효로 만든다.
+    /// 인덱스를 바꾸는 공개 메서드는 모두 바꾼 뒤 이것을 부른다.
+    fn changed(&mut self) {
+        self.stamp = new_stamp();
     }
 
     /// 넣은 항목 수(경로를 만들 수 없는 항목도 센다).
@@ -406,44 +532,157 @@ impl Index {
             + folder_buckets * (size_of::<(u64, u32)>() + 1)
     }
 
-    /// 질의를 실행해 결과를 넣은 순서대로 돌려준다.
+    /// 질의를 실행해 결과 조각만 돌려준다. [`Index::search`]의 `hits`와 같다.
     pub fn query(&self, query: &Query) -> Vec<Hit> {
-        let limit = query.limit.unwrap_or(usize::MAX);
-        let mut hits = Vec::new();
-        if limit == 0 {
-            return hits;
+        self.search(query).hits
+    }
+
+    /// 질의를 실행해 결과 조각, 전체 개수, 이어 받기 표지를 돌려준다.
+    ///
+    /// 맞는 항목을 모두 찾아 세지만, 정렬은 결과 수 제한만큼의 앞쪽만 골라서 하고 경로 문자열도
+    /// 내보낼 결과에만 만든다. 그래서 결과가 많아도 제한이 작으면 빠르다.
+    pub fn search(&self, query: &Query) -> Page {
+        let rest = self.matching(&query.plan);
+        let cursor = Cursor {
+            stamp: self.stamp,
+            sort: query.sort,
+            total: rest.len(),
+            rest,
+        };
+        self.page(cursor, query.limit.unwrap_or(usize::MAX))
+    }
+
+    /// 이어 받기 표지로 다음 결과 조각을 많아야 `limit`개 받는다.
+    ///
+    /// 표지를 만든 뒤 인덱스가 바뀌었거나 다른 인덱스의 표지면 [`ResumeError::Stale`]이다.
+    /// 그때는 다시 질의한다.
+    pub fn resume(&self, cursor: Cursor, limit: usize) -> Result<Page, ResumeError> {
+        if cursor.stamp != self.stamp {
+            return Err(ResumeError::Stale);
         }
-        let folded = match &query.plan {
+        Ok(self.page(cursor, limit))
+    }
+
+    /// 표지가 든 결과에서 앞쪽 `limit`개를 꺼내 조각을 만든다.
+    fn page(&self, mut cursor: Cursor, limit: usize) -> Page {
+        let take = limit.min(cursor.rest.len());
+        let front = match cursor.sort {
+            None => cursor.rest.drain(..take).collect(),
+            Some((SortKey::Path, order)) => {
+                // 열쇠는 (부모 폴더의 조상 열, 항목 자신)이다. 조상 열은 볼륨 루트 바로 아래
+                // 조상부터 부모까지의 레코드 위치로, 부모 폴더마다 한 번만 만들어 나눠 쓴다.
+                // 경로 문자열은 만들지 않고, 비교할 때 조각 이름을 버퍼에서 바로 읽는다.
+                let mut folder_keys: HashMap<u32, Rc<[u32]>> = HashMap::new();
+                let at_root: Rc<[u32]> = Rc::from([]);
+                let mut keyed: Vec<(Rc<[u32]>, u32)> = cursor
+                    .rest
+                    .iter()
+                    .map(|&at| {
+                        let parent = self.records[at as usize].parent;
+                        let key = match self.folders.get(&parent) {
+                            Some(&folder) if parent != self.root_number => folder_keys
+                                .entry(folder)
+                                .or_insert_with(|| self.path_key(folder as usize).into())
+                                .clone(),
+                            _ => at_root.clone(),
+                        };
+                        (key, at)
+                    })
+                    .collect();
+                let front = take_smallest(&mut keyed, take, |a, b| {
+                    let a_path = a.0.iter().chain([&a.1]);
+                    let b_path = b.0.iter().chain([&b.1]);
+                    directed(self.compare_paths(a_path, b_path), order).then(a.1.cmp(&b.1))
+                });
+                cursor.rest = keyed.into_iter().map(|(_, at)| at).collect();
+                front.into_iter().map(|(_, at)| at).collect()
+            }
+            Some((key, order)) => take_smallest(&mut cursor.rest, take, |&a, &b| {
+                directed(self.compare(key, a as usize, b as usize), order).then(a.cmp(&b))
+            }),
+        };
+        let hits = front
+            .into_iter()
+            .filter_map(|at| self.hit(at as usize))
+            .collect();
+        let total = cursor.total;
+        let next = (!cursor.rest.is_empty()).then_some(cursor);
+        Page { hits, total, next }
+    }
+
+    /// 두 레코드를 `key`(경로 말고) 기준으로 비교한다.
+    fn compare(&self, key: SortKey, a: usize, b: usize) -> Ordering {
+        let (ra, rb) = (&self.records[a], &self.records[b]);
+        match key {
+            SortKey::Size => ra.size.cmp(&rb.size),
+            SortKey::Modified => ra.modified.cmp(&rb.modified),
+            SortKey::Name | SortKey::Path => self
+                .folded_name(a)
+                .cmp(self.folded_name(b))
+                .then_with(|| self.name(a).cmp(self.name(b))),
+        }
+    }
+
+    /// 경로 정렬 열쇠: 볼륨 루트 바로 아래 조상부터 항목 자신까지의 레코드 위치.
+    fn path_key(&self, index: usize) -> Vec<u32> {
+        let mut key: Vec<u32> = self
+            .chain(index)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|at| at as u32)
+            .collect();
+        key.reverse();
+        key
+    }
+
+    /// 두 경로 정렬 열쇠를 경로 조각마다 접은 이름으로 비교한다. 앞 조각이 모두 같으면
+    /// 짧은 쪽(폴더 자신)이 앞이다.
+    fn compare_paths<'k>(
+        &self,
+        mut a: impl Iterator<Item = &'k u32>,
+        mut b: impl Iterator<Item = &'k u32>,
+    ) -> Ordering {
+        loop {
+            match (a.next(), b.next()) {
+                (Some(x), Some(y)) if x == y => {}
+                (Some(&x), Some(&y)) => match self.compare(SortKey::Name, x as usize, y as usize) {
+                    Ordering::Equal => {}
+                    other => return other,
+                },
+                (Some(_), None) => return Ordering::Greater,
+                (None, Some(_)) => return Ordering::Less,
+                (None, None) => return Ordering::Equal,
+            }
+        }
+    }
+
+    /// 질의에 맞고 볼륨 루트까지 경로를 만들 수 있는 레코드 위치들(넣은 순서).
+    fn matching(&self, plan: &Plan) -> Vec<u32> {
+        let mut found = Vec::new();
+        let mut reach = Reach::new(self);
+        let folded = match plan {
             Plan::Contains(folded) => folded,
             Plan::Filter(filter) => {
                 for index in 0..self.records.len() {
                     let mut item = Item::new(self, index);
-                    if self.matches(filter, &mut item)
-                        && let Some(hit) = item.into_hit()
-                    {
-                        hits.push(hit);
-                        if hits.len() >= limit {
-                            break;
-                        }
+                    if self.matches(filter, &mut item) && item.reachable(&mut reach) {
+                        found.push(index as u32);
                     }
                 }
-                return hits;
+                return found;
             }
         };
         if folded.contains(NAME_END) {
-            return hits;
+            return found;
         }
 
         if folded.is_empty() {
-            for index in 0..self.records.len() {
-                if let Some(hit) = self.hit(index) {
-                    hits.push(hit);
-                    if hits.len() >= limit {
-                        break;
-                    }
-                }
-            }
-            return hits;
+            found.extend(
+                (0..self.records.len())
+                    .filter(|&index| reach.reachable(index))
+                    .map(|index| index as u32),
+            );
+            return found;
         }
 
         // 접은 이름 버퍼 전체를 한 번에 훑는다. 찾을 조각에 `\0`이 없으므로 이름 경계를 넘는
@@ -451,17 +690,14 @@ impl Index {
         let finder = memmem::Finder::new(folded.as_bytes());
         let haystack = self.folded.as_bytes();
         let mut from = 0;
-        while let Some(found) = finder.find(&haystack[from..]) {
-            let index = self.record_at(from + found);
-            if let Some(hit) = self.hit(index) {
-                hits.push(hit);
-                if hits.len() >= limit {
-                    break;
-                }
+        while let Some(found_at) = finder.find(&haystack[from..]) {
+            let index = self.record_at(from + found_at);
+            if reach.reachable(index) {
+                found.push(index as u32);
             }
             from = self.folded_name_end(index) + 1;
         }
-        hits
+        found
     }
 
     /// 조건 트리를 항목 하나에 평가한다.
@@ -523,8 +759,15 @@ impl Index {
         }
     }
 
-    /// `index`번 레코드의 전체 경로. 볼륨 루트까지 부모를 따라갈 수 없으면 `None`.
-    fn path(&self, index: usize) -> Option<String> {
+    /// `index`번 레코드의 접은 이름.
+    fn folded_name(&self, index: usize) -> &str {
+        let start = self.records[index].name_start as usize;
+        &self.folded[start..self.folded_name_end(index)]
+    }
+
+    /// `index`번 레코드부터 볼륨 루트 바로 아래 조상까지의 레코드 위치들.
+    /// 볼륨 루트까지 부모를 따라갈 수 없으면 `None`.
+    fn chain(&self, index: usize) -> Option<Vec<usize>> {
         let mut chain = vec![index];
         let mut parent = self.records[index].parent;
         while parent != self.root_number {
@@ -536,7 +779,12 @@ impl Index {
             chain.push(at as usize);
             parent = self.records[at as usize].parent;
         }
+        Some(chain)
+    }
 
+    /// `index`번 레코드의 전체 경로. 볼륨 루트까지 부모를 따라갈 수 없으면 `None`.
+    fn path(&self, index: usize) -> Option<String> {
+        let chain = self.chain(index)?;
         let mut path = self.root.clone();
         for (n, &at) in chain.iter().rev().enumerate() {
             if n > 0 {
@@ -582,9 +830,7 @@ impl<'a> Item<'a> {
     }
 
     fn folded_name(&self) -> &'a str {
-        let owner = self.owner;
-        let start = owner.records[self.index].name_start as usize;
-        &owner.folded[start..owner.folded_name_end(self.index)]
+        self.owner.folded_name(self.index)
     }
 
     fn built_path(&mut self) -> &Option<(String, String)> {
@@ -597,11 +843,97 @@ impl<'a> Item<'a> {
         self.built_path().as_ref().map(|(_, f)| f.as_str())
     }
 
-    fn into_hit(mut self) -> Option<Hit> {
-        self.built_path();
-        let (owner, index) = (self.owner, self.index);
-        self.path.flatten().map(|(p, _)| owner.hit_with(index, p))
+    /// 볼륨 루트까지 경로를 만들 수 있는가. 경로를 이미 만들었으면 그 결과를 쓴다.
+    fn reachable(&self, reach: &mut Reach<'_>) -> bool {
+        match &self.path {
+            Some(built) => built.is_some(),
+            None => reach.reachable(self.index),
+        }
     }
+}
+
+/// 질의 하나 동안 폴더마다 볼륨 루트까지 닿는지 기억해 두고 항목이 닿는지 가린다.
+/// [`Index::chain`]과 같은 판정을, 같은 폴더를 두 번 따라가지 않고 한다.
+struct Reach<'a> {
+    owner: &'a Index,
+    /// 레코드 위치마다 [`Reach::UNKNOWN`]·[`Reach::VISITING`]·[`Reach::YES`]·[`Reach::NO`].
+    /// 폴더 레코드에만 쓴다.
+    memo: Vec<u8>,
+    /// 따라가는 중인 폴더들. 판정이 나면 모두 같은 값으로 적는다.
+    walked: Vec<usize>,
+}
+
+impl<'a> Reach<'a> {
+    const UNKNOWN: u8 = 0;
+    const VISITING: u8 = 1;
+    const YES: u8 = 2;
+    const NO: u8 = 3;
+
+    fn new(owner: &'a Index) -> Self {
+        Self {
+            owner,
+            memo: vec![Self::UNKNOWN; owner.records.len()],
+            walked: Vec::new(),
+        }
+    }
+
+    /// `index`번 레코드가 부모를 따라 볼륨 루트까지 닿는가. 부모가 없거나 폴더가 아니거나
+    /// 고리를 이루면 닿지 않는다.
+    fn reachable(&mut self, index: usize) -> bool {
+        let owner = self.owner;
+        let mut parent = owner.records[index].parent;
+        let reached = loop {
+            if parent == owner.root_number {
+                break true;
+            }
+            let Some(&at) = owner.folders.get(&parent) else {
+                break false;
+            };
+            let at = at as usize;
+            match self.memo[at] {
+                Self::YES => break true,
+                // 이번에 따라가는 중인 폴더를 다시 만나면 고리다.
+                Self::NO | Self::VISITING => break false,
+                _ => {}
+            }
+            self.memo[at] = Self::VISITING;
+            self.walked.push(at);
+            parent = owner.records[at].parent;
+        };
+        let mark = if reached { Self::YES } else { Self::NO };
+        for at in self.walked.drain(..) {
+            self.memo[at] = mark;
+        }
+        reached
+    }
+}
+
+/// 비교 결과를 정렬 방향에 맞춘다.
+fn directed(ordering: Ordering, order: Order) -> Ordering {
+    match order {
+        Order::Ascending => ordering,
+        Order::Descending => ordering.reverse(),
+    }
+}
+
+/// `items`에서 `cmp` 순서로 가장 작은 `n`개를 정렬해 꺼내고, 나머지는 순서 없이 남긴다.
+/// 전체를 정렬하지 않고 고르기(`select_nth_unstable`)로 앞쪽만 가르므로 O(전체 + n log n)이다.
+fn take_smallest<T>(
+    items: &mut Vec<T>,
+    n: usize,
+    mut cmp: impl FnMut(&T, &T) -> Ordering,
+) -> Vec<T> {
+    let n = n.min(items.len());
+    if n == 0 {
+        return Vec::new();
+    }
+    if n < items.len() {
+        items.select_nth_unstable_by(n - 1, &mut cmp);
+    }
+    let rest = items.split_off(n);
+    let mut front = std::mem::replace(items, rest);
+    front.sort_unstable_by(cmp);
+    front
 }
 
 fn in_range(value: u64, min: Option<u64>, max: Option<u64>) -> bool {
