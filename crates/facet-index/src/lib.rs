@@ -59,7 +59,9 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use memchr::memmem;
 
+mod store;
 mod usn;
+pub use store::{FORMAT_VERSION, StoreError};
 pub use usn::{
     Freshness, JournalInfo, JournalState, RebuildReason, SecurityChange, USN_REASON_FILE_CREATE,
     USN_REASON_FILE_DELETE, USN_REASON_RENAME_NEW_NAME, USN_REASON_RENAME_OLD_NAME,

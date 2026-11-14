@@ -23,6 +23,7 @@ const USAGE: &str = "\
       항목 N개(기본 1000000)의 합성 인덱스를 만들어 메모리를 재고(150MB 이상이면 실패),
       부분 일치 질의와 결과 10만 개를 경로로 정렬하는 질의(둘 다 결과 100개 제한)를
       N회(기본 5)씩 재어 중앙값이 상한(기본 300ms)을 넘으면 실패한다.
+      인덱스 파일 저장·읽기 시간도 출력한다(상한 없음).
   facet-bench screen <경로> --app <facet 실행 파일> [--count N] [--runs N] [--scroll-runs N]
                      [--scroll-rows N] [--refresh-hz N] [--json <파일>]
       시험 폴더를 만들거나 확인한 뒤 앱을 측정 모드로 띄워 콜드 스타트(--runs회, 기본 5)와
@@ -218,6 +219,7 @@ fn index(args: &Args) -> Result<(), String> {
         INDEX_MEMORY_LIMIT as f64 / 1e6
     );
     check_memory(bytes, INDEX_MEMORY_LIMIT)?;
+    report_store(&index, args.runs)?;
 
     let query = facet_index::Query::name_contains(BENCH_QUERY).limit(BENCH_RESULT_LIMIT);
     let m = measure_query(&index, &query, args.runs);
@@ -242,6 +244,48 @@ fn index(args: &Args) -> Result<(), String> {
         m.times.len()
     );
     report_query(&m, limit)
+}
+
+/// 인덱스 저장·읽기 시간을 잰다(재부팅 뒤 바로 검색의 근거). 시간 상한은 두지 않고 출력만 한다.
+/// 읽은 인덱스가 같은 항목 수가 아니면 실패한다.
+fn report_store(index: &facet_index::Index, runs: usize) -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!("facet-bench-store-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join("bench.idx");
+    let result = (|| {
+        let mut saves = Vec::new();
+        let mut loads = Vec::new();
+        for _ in 0..runs {
+            let t = Instant::now();
+            index.save(&path).map_err(|e| e.to_string())?;
+            saves.push(t.elapsed());
+            let t = Instant::now();
+            let loaded = facet_index::Index::load(&path).map_err(|e| e.to_string())?;
+            loads.push(t.elapsed());
+            if loaded.len() != index.len() {
+                return Err(format!(
+                    "읽은 인덱스의 항목 수가 다릅니다: {} / {}",
+                    loaded.len(),
+                    index.len()
+                ));
+            }
+        }
+        let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+        let median = |mut v: Vec<Duration>| {
+            v.sort();
+            v[v.len() / 2]
+        };
+        println!(
+            "인덱스 파일 ({:.1}MB, {}회): 저장 중앙값 {:.1}ms, 읽기 중앙값 {:.1}ms",
+            size as f64 / 1e6,
+            runs,
+            ms(median(saves)),
+            ms(median(loads))
+        );
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    result
 }
 
 /// 질의 측정값을 출력하고 중앙값이 `limit`을 넘으면 실패한다.
