@@ -16,8 +16,9 @@ name = "facet-indexer"
 path = "src/main.rs"
 
 # 작업 공간 lint와 같되 unsafe_code만 뺐다. 볼륨 핸들·DeviceIoControl 같은 Windows API는 `unsafe`가
-# 필요하고, spec(#22)이 `unsafe`와 Windows API를 이 크레이트에만 가두기로 했다. 작업 공간에서
-# `unsafe_code` 금지를 끈 크레이트는 이것 하나다(facet-app은 forbid 대신 deny로 여전히 막는다).
+# 필요하고, spec(#22)이 서비스 쪽 `unsafe`와 Windows API를 이 크레이트에 가두기로 했다. 작업 공간에서
+# `unsafe_code` 금지를 끈 크레이트는 이것과 앱 쪽 안전 래퍼 facet-win 둘이다(ADR-0002;
+# facet-app은 forbid 대신 deny로 여전히 막는다).
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 

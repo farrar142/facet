@@ -23,8 +23,9 @@ Rust는 [rustup](https://rustup.rs)으로 설치한다. 툴체인과 `rustfmt`·
 - `crates/facet-core` — 코어. 화면에 의존하지 않는 라이브러리. 동작과 테스트는 여기에 둔다.
 - `crates/facet-app` — 앱 실행 파일(`facet`). 코어를 부르기만 하는 얇은 껍질.
 - `crates/facet-index` — 인덱스: 항목 넣기와 질의 실행. 화면도 Windows API도 쓰지 않는 순수 크레이트(spec #22의 크레이트 (1)).
+- `crates/facet-win` — Windows API 안전 래퍼. 앱 프로세스 쪽에서 `unsafe_code`를 허용하는 유일한 크레이트이고 안전한 함수만 드러낸다(ADR-0002). 셸 호출은 COM을 초기화한 전용 일꾼 스레드(`ShellWorker`)에서 한다. Windows 전용 부분은 `cfg(windows)`로 둔다.
 - `crates/facet-bench` — 측정 도구(`facet-bench`): 시험 폴더 생성, 코어 벤치마크, 인덱스 벤치마크.
-- `crates/facet-indexer` — 인덱서 서비스 실행 파일(`facet-indexer`). 지금은 개발용 하위 명령 `dump-mft`만 있다. `unsafe`와 Windows API는 작업 공간에서 이 크레이트에만 두고(Windows 전용 코드는 `#[cfg(windows)]`), 작업 공간의 `unsafe_code` 금지를 끈 크레이트도 이것 하나다.
+- `crates/facet-indexer` — 인덱서 서비스 실행 파일(`facet-indexer`). 지금은 개발용 하위 명령 `dump-mft`만 있다. 서비스 쪽 `unsafe`와 Windows API는 이 크레이트에만 둔다(Windows 전용 코드는 `#[cfg(windows)]`). 작업 공간의 `unsafe_code` 금지를 끈 크레이트는 이것과 `facet-win` 둘이다(ADR-0002).
 - `xtask` — 저장소 작업 명령(`cargo xtask`).
 - 셸 확장 도우미 같은 다른 실행 파일은 `crates/` 아래 새 크레이트로 추가한다(작업 공간 멤버는 `crates/*`).
 
