@@ -57,15 +57,46 @@ $ErrorActionPreference = 'SilentlyContinue'
 'memory_bytes=' + (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
 $os = Get-CimInstance Win32_OperatingSystem
 'os=' + $os.Caption + ' ' + $os.Version
-'disk=' + (Get-CimInstance Win32_DiskDrive | Select-Object -First 1).Model
 'refresh_hz=' + (Get-CimInstance Win32_VideoController | Where-Object { $_.CurrentRefreshRate } | Select-Object -First 1).CurrentRefreshRate
 ";
 
+/// `path`가 있는 드라이브 문자(대문자). `C:\…`·`\\?\C:\…`가 아니면(UNC 경로 등) `None`.
+pub fn drive_letter(path: &Path) -> Option<char> {
+    use std::path::{Component, Prefix};
+    match path.components().next()? {
+        Component::Prefix(p) => match p.kind() {
+            Prefix::Disk(d) | Prefix::VerbatimDisk(d) => Some(char::from(d).to_ascii_uppercase()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// 사양을 읽는 PowerShell 스크립트. 디스크는 첫 번째 물리 디스크가 아니라
+/// `folder`가 있는 드라이브의 디스크를 적는다(이름과 연결 방식, 예: `… SSD (NVMe)`).
+pub fn spec_script(folder: &Path) -> String {
+    let mut script = SPEC_SCRIPT.to_owned();
+    if let Some(letter) = drive_letter(folder) {
+        let _ = writeln!(
+            script,
+            "$d = Get-Partition -DriveLetter {letter} | Get-Disk\n\
+             'disk=' + $d.FriendlyName + ' (' + $d.BusType + ')'"
+        );
+    }
+    script
+}
+
 impl SystemSpec {
-    /// PowerShell로 이 기계의 사양을 읽는다. 읽지 못한 항목은 비운다.
-    pub fn collect() -> Self {
+    /// PowerShell로 이 기계의 사양과 `folder`가 있는 디스크를 읽는다. 읽지 못한 항목은 비운다.
+    pub fn collect(folder: &Path) -> Self {
+        let folder = std::path::absolute(folder).unwrap_or_else(|_| folder.to_path_buf());
         Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", SPEC_SCRIPT])
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &spec_script(&folder),
+            ])
             .stdin(Stdio::null())
             .output()
             .ok()
@@ -126,6 +157,8 @@ pub struct Verdict {
     /// 프레임 최악값의 상한(한 프레임의 두 배).
     pub frame_worst_limit: Duration,
     pub frame_pass: bool,
+    /// 상한을 넘은 프레임 수. 최악값 하나만 튄 것인지(기계의 순간 정지 등) 늘 끊기는 것인지 가른다.
+    pub frames_over_limit: usize,
     /// 주사율을 알아내지 못해 [`ASSUMED_REFRESH_HZ`]를 가정했다.
     pub refresh_assumed: bool,
 }
@@ -149,6 +182,11 @@ impl ScreenResult {
             frame_worst,
             frame_worst_limit,
             frame_pass: !self.frames.is_empty() && frame_worst <= frame_worst_limit,
+            frames_over_limit: self
+                .frames
+                .iter()
+                .filter(|f| **f > frame_worst_limit)
+                .count(),
             refresh_assumed: self.spec.refresh_hz.is_none(),
         }
     }
@@ -226,10 +264,11 @@ impl ScreenResult {
         );
         let _ = writeln!(
             t,
-            "\n스크롤: 프레임마다 {}행, {}회, 프레임 {}개",
+            "\n스크롤: 프레임마다 {}행, {}회, 프레임 {}개 (상한을 넘은 프레임 {}개)",
             self.scroll_rows,
             self.scroll_runs,
-            self.frames.len()
+            self.frames.len(),
+            v.frames_over_limit
         );
         let _ = writeln!(t, "전체: {}", mark(v.pass()));
         t
@@ -285,6 +324,7 @@ impl ScreenResult {
             "    \"frame_worst_limit_ms\": {},",
             ms(v.frame_worst_limit)
         );
+        let _ = writeln!(j, "    \"frames_over_limit\": {},", v.frames_over_limit);
         let _ = writeln!(j, "    \"pass\": {}", v.frame_pass);
         let _ = writeln!(j, "  }},");
         let _ = writeln!(j, "  \"pass\": {}", v.pass());
@@ -401,7 +441,7 @@ pub fn measure(plan: &Plan<'_>) -> Result<ScreenResult, String> {
         check_rows(&r)?;
         frames.extend(r.frames);
     }
-    let mut spec = SystemSpec::collect();
+    let mut spec = SystemSpec::collect(plan.folder);
     if plan.refresh_hz.is_some() {
         spec.refresh_hz = plan.refresh_hz;
     }

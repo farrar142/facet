@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! rows 100000        # 앱이 읽은 항목 수
-//! first_frame_us 123 # 측정 도구가 앱을 띄운 때부터 목록이 처음 그려질 때까지(마이크로초)
+//! first_frame_us 123 # 측정 도구가 앱을 띄운 때부터 목록이 든 첫 프레임이 창에 나올 때까지(마이크로초)
 //! frame_us 16700     # 스크롤 중 프레임 하나의 시간(마이크로초). 프레임마다 한 줄
 //! ```
 
@@ -25,7 +25,7 @@ pub const ENV_SCROLL_ROWS: &str = "FACET_MEASURE_SCROLL_ROWS";
 pub struct ScreenReport {
     /// 앱이 읽은 항목 수.
     pub rows: usize,
-    /// 실행부터 목록이 처음 그려질 때까지.
+    /// 실행부터 목록이 든 첫 프레임이 창에 나올 때까지.
     pub first_frame: Option<Duration>,
     /// 스크롤하는 동안의 프레임 시간들.
     pub frames: Vec<Duration>,
