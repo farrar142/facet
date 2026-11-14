@@ -36,15 +36,15 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       REPO: ${{ github.repository }}
     steps:
-      - name: Dispatch unblocked approved tickets
+      # Runs are serial (see the implement job), so dispatch only the first one.
+      - name: Dispatch the next unblocked approved ticket
         run: |
-          for n in $(gh issue list --repo "$REPO" --state open --label ready-for-agent --json number --jq '.[].number'); do
+          for n in $(gh issue list --repo "$REPO" --state open --label ready-for-agent --limit 200 --json number --jq 'sort_by(.number) | .[].number'); do
             open=$(gh api "repos/$REPO/issues/$n" --jq '.issue_dependencies_summary.blocked_by // 0')
             if [ "$open" -eq 0 ]; then
               echo "dispatch #$n"
               gh workflow run factory-implementer.yml --repo "$REPO" -f issue="$n"
-            else
-              echo "#$n still has $open open blocker(s)"
+              exit 0
             fi
           done
 
@@ -54,8 +54,13 @@ jobs:
       (github.event.action == 'labeled' && github.event.label.name == 'ready-for-agent')
     runs-on: windows-latest
     timeout-minutes: 180
+    # One ticket at a time across the repo (decision 2026-11-15): parallel runs kept
+    # editing the same files. A group keeps at most one pending run and cancels older
+    # pending ones, so runs are chained instead: every run ends by dispatching the next
+    # unblocked ticket (the "Dispatch next ticket" step). A cancelled run leaves its
+    # ticket labelled `ready-for-agent`, so the chain picks it up later.
     concurrency:
-      group: factory-implementer-${{ github.event.issue.number || inputs.issue }}
+      group: factory-implementer
       cancel-in-progress: false
     defaults:
       run:
@@ -239,23 +244,15 @@ jobs:
           gh issue close "$N" --repo "$REPO" --reason completed --comment "Merged in $PR_URL" || true
           gh issue edit "$N" --repo "$REPO" --remove-label in-progress || true
 
-      # A merge made with GITHUB_TOKEN closes the ticket without firing `issues: closed`,
-      # so the frontier job would never run. Dispatch the next tickets here instead.
-      - name: Dispatch next tickets
+      # A merge made with GITHUB_TOKEN fires no push event, so start main's CI and nightly here.
+      - name: Build main
         if: steps.guard.outputs.go == 'true'
         run: |
-          # Same reason: the merge's push to main fires nothing, so start main's CI and nightly here.
           gh workflow run ci.yml --repo "$REPO" --ref main || echo "::warning::could not dispatch ci.yml"
           gh workflow run release.yml --repo "$REPO" --ref main || echo "::warning::could not dispatch release.yml"
-          sleep 15
-          for n in $(gh issue list --repo "$REPO" --state open --label ready-for-agent --json number --jq '.[].number'); do
-            open=$(gh api "repos/$REPO/issues/$n" --jq '.issue_dependencies_summary.blocked_by // 0')
-            if [ "$open" -eq 0 ]; then
-              echo "dispatch #$n"
-              gh workflow run factory-implementer.yml --repo "$REPO" -f issue="$n"
-            fi
-          done
 
+      # One failure: put the ticket back in the queue; the retry runs on Opus.
+      # Two failures: leave it to the managing session (`ready-for-human`, ADR-0001).
       - name: Record failure
         if: failure() && steps.guard.outputs.go == 'true'
         run: |
@@ -266,5 +263,24 @@ jobs:
           gh issue edit "$N" --repo "$REPO" --remove-label in-progress
           if [ "$fails" -ge 2 ]; then
             gh issue edit "$N" --repo "$REPO" --add-label ready-for-human
-            gh issue comment "$N" --repo "$REPO" --body "Implementer failed $fails times. Handing this ticket to a human."
+            gh issue comment "$N" --repo "$REPO" --body "Implementer failed $fails times. The managing session takes this ticket out of the factory."
+          else
+            gh issue edit "$N" --repo "$REPO" --add-label ready-for-agent
           fi
+
+      # Keep the chain going whatever happened above, including skipped (blocked) runs:
+      # the merge closes the ticket without firing `issues: closed`, so the frontier job
+      # would not run. Lowest-numbered unblocked approved ticket first.
+      - name: Dispatch next ticket
+        if: always()
+        run: |
+          sleep 10
+          for n in $(gh issue list --repo "$REPO" --state open --label ready-for-agent --limit 200 --json number --jq 'sort_by(.number) | .[].number'); do
+            open=$(gh api "repos/$REPO/issues/$n" --jq '.issue_dependencies_summary.blocked_by // 0')
+            if [ "$open" -eq 0 ]; then
+              echo "dispatch #$n"
+              gh workflow run factory-implementer.yml --repo "$REPO" -f issue="$n"
+              exit 0
+            fi
+          done
+          echo "::notice::no unblocked approved ticket left"
