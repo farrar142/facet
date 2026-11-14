@@ -4,10 +4,14 @@
 //! 이 크레이트를 부르기만 한다.
 
 pub mod file_list;
+mod file_system;
 mod location;
 pub mod measure;
+mod provider;
 
-pub use location::{Item, ListError, list_location};
+pub use file_system::FileSystemProvider;
+pub use location::{Attributes, Item, ListError, Location};
+pub use provider::{PathSegment, Provider, provider_for};
 
 /// 코어 크레이트의 버전.
 pub fn version() -> &'static str {
