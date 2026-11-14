@@ -4,6 +4,9 @@ on:
   pull_request:
   push:
     branches: [main]
+  # 공장 Implementer가 GITHUB_TOKEN으로 연 PR은 CI가 자동으로 돌지 않으므로
+  # `gh workflow run ci.yml --ref <브랜치>`로 직접 띄운다.
+  workflow_dispatch:
 
 permissions:
   contents: read
