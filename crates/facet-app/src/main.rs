@@ -63,7 +63,7 @@ fn main() -> Result<(), slint::PlatformError> {
         // 입력란이 화면 밖 행에 열리지 않게 먼저 그 행을 보인다.
         show_row(&ui, index);
         ui.set_edit_text(input.original().into());
-        ui.set_notice(SharedString::new());
+        ui.set_notice(Notice::None);
         ui.set_editing(i32::try_from(index).unwrap_or(i32::MAX));
         *state.borrow_mut() = Some(input);
     });
@@ -73,7 +73,10 @@ fn main() -> Result<(), slint::PlatformError> {
         let Some(ui) = weak.upgrade() else { return };
         ui.set_editing(-1);
         if let Some(input) = state.borrow_mut().take() {
-            ui.set_notice(input.confirm(&text).message().into());
+            let entered = input.confirm(&text);
+            ui.set_notice_entered(entered.entered.into());
+            ui.set_notice_original(entered.original.into());
+            ui.set_notice(Notice::Entered);
         }
     });
     let weak = ui.as_weak();
@@ -82,7 +85,8 @@ fn main() -> Result<(), slint::PlatformError> {
         let Some(ui) = weak.upgrade() else { return };
         ui.set_editing(-1);
         if let Some(input) = state.borrow_mut().take() {
-            ui.set_notice(input.cancel().into());
+            input.cancel();
+            ui.set_notice(Notice::Cancelled);
         }
     });
 

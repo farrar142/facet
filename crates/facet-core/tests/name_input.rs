@@ -65,18 +65,6 @@ fn 취소해도_파일_시스템은_그대로다() {
     let dir = folder_with(&["원래 이름.txt"]);
     let before = list_location(dir.path()).unwrap();
     let input = NameInput::open(&before, Some(0)).unwrap();
-    assert!(input.cancel().contains("취소"));
+    input.cancel();
     assert_eq!(list_location(dir.path()).unwrap(), before);
-}
-
-#[test]
-fn 확정한_값을_알리는_문구는_입력값을_담고_이름을_바꾸지_않았다고_말한다() {
-    let dir = folder_with(&["원래 이름.txt"]);
-    let items = list_location(dir.path()).unwrap();
-    let entered = NameInput::open(&items, Some(0))
-        .unwrap()
-        .confirm("새 폴더 가나다");
-    let message = entered.message();
-    assert!(message.contains("「새 폴더 가나다」"), "{message}");
-    assert!(message.contains("바꾸지 않았습니다"), "{message}");
 }
