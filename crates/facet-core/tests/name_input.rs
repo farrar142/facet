@@ -65,7 +65,7 @@ fn 취소해도_파일_시스템은_그대로다() {
     let dir = folder_with(&["원래 이름.txt"]);
     let before = list_location(dir.path()).unwrap();
     let input = NameInput::open(&before, Some(0)).unwrap();
-    input.cancel();
+    assert!(input.cancel().contains("취소"));
     assert_eq!(list_location(dir.path()).unwrap(), before);
 }
 

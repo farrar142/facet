@@ -52,8 +52,10 @@ impl NameInput {
         }
     }
 
-    /// 입력을 취소한다. 아무것도 남기지 않는다.
-    pub fn cancel(self) {}
+    /// 입력을 취소한다. 아무것도 남기지 않고, 사용자에게 알릴 문구를 돌려준다.
+    pub fn cancel(self) -> &'static str {
+        "이름 입력을 취소했습니다"
+    }
 }
 
 impl EnteredName {

@@ -30,8 +30,7 @@ Rust는 [rustup](https://rustup.rs)으로 설치한다. 툴체인과 `rustfmt`·
 
 - 빌드: `cargo build`
 - 테스트: `cargo test --workspace`
-- 앱 실행: `cargo run -p facet-app -- [폴더 경로]` — 그 폴더(빼면 현재 폴더)의 항목 목록을 창에 띄운다. 「도움말 → facet 정보」가 정보 화면(`AboutSlint`)이다.
-- 자동 검사 전체: `cargo xtask ci` — 형식 검사(`cargo fmt --check`) → lint(`cargo clippy --all-targets`, 경고를 오류로) → 빌드 → 테스트 → 코어 벤치마크를 차례로 돌리고, 한 단계라도 실패하면 0이 아닌 코드로 끝난다. PR을 열기 전에 이것을 통과시킨다.
+- 앱 실행: `cargo run -p facet-app -- [폴더 경로]` — 그 폴더(빼면 현재 폴더)의 항목 목록을 창에 띄운다. 「도움말 → facet 정보」가 정보 화면(`AboutSlint`)이다. 항목을 고르고 F2를 누르면 그 행에 이름 입력란이 뜬다(Enter 확정, Esc 취소). 지금은 입력값을 상태 줄에 보일 뿐 파일 이름은 바꾸지 않는다.- 자동 검사 전체: `cargo xtask ci` — 형식 검사(`cargo fmt --check`) → lint(`cargo clippy --all-targets`, 경고를 오류로) → 빌드 → 테스트 → 코어 벤치마크를 차례로 돌리고, 한 단계라도 실패하면 0이 아닌 코드로 끝난다. PR을 열기 전에 이것을 통과시킨다.
 - 형식 고치기: `cargo fmt --all`
 - 배포 산출물 만들기: `cargo xtask dist <label>` — `target/dist/`를 비우고 facet을 release로 빌드해 `facet-<label>-windows-x64.zip`(`facet.exe`, `LICENSE`, `NOTICE.txt`)과 그 `.sha256`을 만든다. `<label>`은 `nightly`나 태그 이름(예: `v0.1.0`). `.github/workflows/release.yml`이 부른다.
 
@@ -56,3 +55,7 @@ Rust는 [rustup](https://rustup.rs)으로 설치한다. 툴체인과 `rustfmt`·
 - 앱 쪽 계측은 환경 변수(`FACET_MEASURE_OUT` 등, 약속은 `crates/facet-core/src/measure.rs`)가 있을 때만 켜진다. 평소 실행은 그리기 알림도 걸지 않으며, 목록이 들어갔다고 원자 변수에 값 하나를 쓸 뿐이다.
 
 CI(`.github/workflows/ci.yml`)는 PR과 `main` push에서 Windows 러너로 `cargo xtask ci`만 부른다. 검사를 바꾸려면 workflow가 아니라 `xtask/src/main.rs`를 고친다. 의존성을 바꾸면 `Cargo.lock`도 함께 커밋한다(검사는 `--locked`로 돈다).
+
+## 한글 IME 체크리스트
+
+화면은 자동 테스트하지 않는다. 한글 입력은 사람이 Windows 기계에서 [`docs/ime-checklist.md`](docs/ime-checklist.md)를 따라 F2 이름 입력란으로 확인한다. Slint나 입력 처리 코드를 바꾸면 이 목록을 다시 돈다.
