@@ -22,7 +22,8 @@ Rust는 [rustup](https://rustup.rs)으로 설치한다. 툴체인과 `rustfmt`·
 
 - `crates/facet-core` — 코어. 화면에 의존하지 않는 라이브러리. 동작과 테스트는 여기에 둔다.
 - `crates/facet-app` — 앱 실행 파일(`facet`). 코어를 부르기만 하는 얇은 껍질.
-- `crates/facet-bench` — 측정 도구(`facet-bench`): 시험 폴더 생성과 코어 벤치마크.
+- `crates/facet-index` — 인덱스: 항목 넣기와 질의 실행. 화면도 Windows API도 쓰지 않는 순수 크레이트(spec #22의 크레이트 (1)).
+- `crates/facet-bench` — 측정 도구(`facet-bench`): 시험 폴더 생성, 코어 벤치마크, 인덱스 벤치마크.
 - `crates/facet-indexer` — 인덱서 서비스 실행 파일(`facet-indexer`). 지금은 개발용 하위 명령 `dump-mft`만 있다. `unsafe`와 Windows API는 작업 공간에서 이 크레이트에만 두고(Windows 전용 코드는 `#[cfg(windows)]`), 작업 공간의 `unsafe_code` 금지를 끈 크레이트도 이것 하나다.
 - `xtask` — 저장소 작업 명령(`cargo xtask`).
 - 셸 확장 도우미 같은 다른 실행 파일은 `crates/` 아래 새 크레이트로 추가한다(작업 공간 멤버는 `crates/*`).
@@ -32,7 +33,7 @@ Rust는 [rustup](https://rustup.rs)으로 설치한다. 툴체인과 `rustfmt`·
 - 빌드: `cargo build`
 - 테스트: `cargo test --workspace`
 - 앱 실행: `cargo run -p facet-app -- [폴더 경로]` — 그 폴더(빼면 현재 폴더)의 항목 목록을 창에 띄운다. 「도움말 → facet 정보」가 정보 화면(`AboutSlint`)이다. 항목을 고르고 F2를 누르면 그 행에 이름 입력란이 뜬다(Enter 확정, Esc 취소). 지금은 입력값을 상태 줄에 보일 뿐 파일 이름은 바꾸지 않는다.
-- 자동 검사 전체: `cargo xtask ci` — 형식 검사(`cargo fmt --check`) → lint(`cargo clippy --all-targets`, 경고를 오류로) → 빌드 → 테스트 → 실제 볼륨 테스트(관리자일 때만, 아래) → 코어 벤치마크를 차례로 돌리고, 한 단계라도 실패하면 0이 아닌 코드로 끝난다. PR을 열기 전에 이것을 통과시킨다.
+- 자동 검사 전체: `cargo xtask ci` — 형식 검사(`cargo fmt --check`) → lint(`cargo clippy --all-targets`, 경고를 오류로) → 빌드 → 테스트 → 실제 볼륨 테스트(관리자일 때만, 아래) → 코어 벤치마크 → 인덱스 벤치마크를 차례로 돌리고, 한 단계라도 실패하면 0이 아닌 코드로 끝난다. PR을 열기 전에 이것을 통과시킨다.
 - 형식 고치기: `cargo fmt --all`
 - 배포 산출물 만들기: `cargo xtask dist <label>` — `target/dist/`를 비우고 facet을 release로 빌드해 `facet-<label>-windows-x64.zip`(`facet.exe`, `LICENSE`, `NOTICE.txt`)과 그 `.sha256`을 만든다. `<label>`은 `nightly`나 태그 이름(예: `v0.1.0`). `.github/workflows/release.yml`이 부른다.
 
@@ -45,9 +46,12 @@ Rust는 [rustup](https://rustup.rs)으로 설치한다. 툴체인과 `rustfmt`·
 ## 시험 폴더와 벤치마크
 
 - 시험 폴더 만들기: `cargo xtask test-folder [경로] [--count N]` — N개(기본 100000) 항목이 든 폴더를 만든다. 경로를 빼면 임시 폴더 아래 `facet-test-folders/items-N`(Windows에서는 `%TEMP%\facet-test-folders\items-N`). CI 캐시에 섞이지 않게 `target/` 밑에 두지 않는다. 이름에 한글·이모지·긴 이름이 섞이고 열 개 중 두 개가 폴더다. 같은 명령을 다시 돌리면 빠진 항목만 채워 결과(이름·종류·크기)가 같다. 시험 폴더의 항목이 아닌 것이 들어 있으면 아무것도 지우지 않고 멈춘다.
-- 코어 벤치마크: `cargo xtask bench` — 릴리스 빌드로 `facet-test-folders/items-100000`을 만들거나 확인한 뒤 「위치의 항목 목록 읽기」를 한 번 데우고 5회 재어 중앙값·최악값을 출력한다. `cargo xtask ci`의 마지막 단계이기도 하다.
+- 벤치마크: `cargo xtask bench` — 릴리스 빌드로 두 가지를 잰다. `cargo xtask ci`의 마지막 두 단계이기도 하다.
+  - 코어 벤치마크: `facet-test-folders/items-100000`을 만들거나 확인한 뒤 「위치의 항목 목록 읽기」를 한 번 데우고 5회 재어 중앙값·최악값을 출력한다.
+  - 인덱스 벤치마크: 시험 폴더와 같은 이름의 합성 인덱스 100만 개를 메모리에 만들어 메모리 사용을 출력하고, 부분 일치 질의(결과 100개 제한, 끝쪽 항목 하나만 맞아 인덱스 전체를 훑는 조각)를 한 번 데우고 5회 재어 중앙값·최악값을 출력한다.
 - 기준과 상한: 로컬 기준은 10만 항목 100ms 미만(`LIST_TARGET`), CI 상한은 그 10배인 1000ms(`LIST_LIMIT`, `crates/facet-bench/src/lib.rs`). 중앙값이 상한을 넘으면 넘은 수치를 출력하고 실패한다. 공유 러너의 편차를 견디면서 알고리즘이 한 단계 나빠지는 실수만 잡으려는 값이다(`docs/roadmap.md`의 「속도는 두 군데서 지킨다」). 미세한 회귀는 잡지 않는다.
-- 다른 수나 상한으로 직접 재기: `cargo run --release -p facet-bench -- list <경로> [--count N] [--runs N] [--limit-ms N]`.
+- 인덱스 기준과 상한: 질의 로컬 기준 30ms(`QUERY_TARGET`), CI 상한 300ms(`QUERY_LIMIT`). 메모리는 100만 개에 150MB(10진, `INDEX_MEMORY_LIMIT`) 미만이어야 하고 넘으면 실패한다. 메모리는 인덱스가 할당한 용량(`Index::memory_bytes`)으로 센다.
+- 다른 수나 상한으로 직접 재기: `cargo run --release -p facet-bench -- list <경로> [--count N] [--runs N] [--limit-ms N]`, `cargo run --release -p facet-bench -- index [--count N] [--runs N] [--limit-ms N]`.
 
 ## 화면 수치 측정
 
