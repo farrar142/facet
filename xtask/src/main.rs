@@ -5,7 +5,11 @@
 //! - `test-folder`: 시험 폴더를 만든다(`facet-bench make-folder`).
 //! - `bench`: 코어 벤치마크만 돌린다(`facet-bench list`, 릴리스 빌드).
 //!
+//! - `dist <label>`: release 빌드한 facet을 portable zip과 체크섬으로 묶는다(`dist` 모듈).
+//!
 //! 벤치마크 상한과 그 근거는 `crates/facet-bench/src/lib.rs`의 `LIST_LIMIT`에 있다.
+
+mod dist;
 
 use std::env;
 use std::path::PathBuf;
@@ -18,7 +22,10 @@ const USAGE: &str = "\
   ci                             형식 검사, lint(경고를 오류로), 빌드, 테스트, 코어 벤치마크를 차례로 돌린다
   test-folder [경로] [--count N]  N개(기본 100000) 항목이 든 시험 폴더를 만든다.
                                  경로를 빼면 임시 폴더의 facet-test-folders/items-N
-  bench                          10만 항목 시험 폴더를 만들거나 확인하고 코어 목록 읽기를 잰다(릴리스 빌드)";
+  bench                          10만 항목 시험 폴더를 만들거나 확인하고 코어 목록 읽기를 잰다(릴리스 빌드)
+  dist <label>                   facet을 릴리스 빌드해 target/dist/에 facet-<label>-windows-x64.zip과
+                                 그 .sha256을 만든다. label은 nightly나 태그 이름(예: v0.1.0)이고
+                                 영문자·숫자·`.`·`-`·`_`만 쓸 수 있다";
 
 /// 벤치마크 폴더의 항목 수.
 const BENCH_COUNT: &str = "100000";
@@ -30,6 +37,13 @@ fn main() -> ExitCode {
         Some("bench") => run_steps("bench", &[bench_step()]),
         Some("test-folder") => match test_folder_step(&args[1..]) {
             Ok(step) => run_steps("test-folder", &[step]),
+            Err(e) => {
+                eprintln!("{e}\n\n{USAGE}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("dist") => match dist_label(&args[1..]) {
+            Ok(label) => run_dist(label),
             Err(e) => {
                 eprintln!("{e}\n\n{USAGE}");
                 ExitCode::FAILURE
@@ -151,6 +165,66 @@ fn test_folder_step(rest: &[String]) -> Result<Step, String> {
     })
 }
 
+/// `dist` 뒤의 인자에서 label 하나를 꺼내 검사한다.
+fn dist_label(rest: &[String]) -> Result<&str, String> {
+    match rest {
+        [label] => dist::validate_label(label).map(|()| label.as_str()),
+        [] => Err("label이 없습니다".to_owned()),
+        [_, extra, ..] => Err(format!("알 수 없는 인자: {extra}")),
+    }
+}
+
+/// `target/dist/`를 비우고, facet을 release로 빌드하고, zip과 체크섬을 만든다.
+///
+/// 폴더를 먼저 비우므로 빌드가 실패해도 앞선 산출물이나 반쪽 파일이 남지 않는다.
+fn run_dist(label: &str) -> ExitCode {
+    let root = workspace_root();
+    let dist_dir = root.join("target").join("dist");
+    if let Err(e) = dist::clean_dir(&dist_dir) {
+        eprintln!("xtask dist: {}를 비우지 못함: {e}", dist_dir.display());
+        return ExitCode::FAILURE;
+    }
+
+    let build = step(
+        "release 빌드",
+        &["build", "--release", "--locked", "-p", "facet-app"],
+    );
+    if run_steps("dist", &[build]) != ExitCode::SUCCESS {
+        return ExitCode::FAILURE;
+    }
+
+    let target_dir = env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .map(|p| if p.is_relative() { root.join(p) } else { p })
+        .unwrap_or_else(|| root.join("target"));
+    let entries = [
+        dist::Entry {
+            name: "facet.exe",
+            source: target_dir
+                .join("release")
+                .join(format!("facet{}", env::consts::EXE_SUFFIX)),
+        },
+        dist::Entry {
+            name: "LICENSE",
+            source: root.join("LICENSE"),
+        },
+        dist::Entry {
+            name: "NOTICE.txt",
+            source: root.join("NOTICE.txt"),
+        },
+    ];
+    match dist::package(&dist_dir, label, &entries) {
+        Ok(zip) => {
+            println!("xtask dist: {} 와 .sha256을 만듦", zip.display());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("xtask dist: 묶기 실패: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn run_steps(task: &str, steps: &[Step]) -> ExitCode {
     let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
     let root = workspace_root();
@@ -189,4 +263,23 @@ fn workspace_root() -> PathBuf {
         .parent()
         .map(PathBuf::from)
         .unwrap_or(manifest_dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dist_label;
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn dist_takes_exactly_one_safe_label() {
+        assert_eq!(dist_label(&args(&["nightly"])), Ok("nightly"));
+        assert_eq!(dist_label(&args(&["v0.1.0"])), Ok("v0.1.0"));
+        assert!(dist_label(&args(&[])).is_err());
+        assert!(dist_label(&args(&["a/b"])).is_err());
+        assert!(dist_label(&args(&["a b"])).is_err());
+        assert!(dist_label(&args(&["nightly", "extra"])).is_err());
+    }
 }

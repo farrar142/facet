@@ -1,0 +1,16 @@
+facet
+https://github.com/farrar142/facet
+
+facet's own source code is licensed under the MIT License.
+See the LICENSE file for the full text.
+
+This application uses Slint for its user interface.
+Slint is licensed to facet under the Slint Royalty-free Desktop, Mobile,
+and Web Applications License, Version 2.0
+(SPDX: LicenseRef-Slint-Royalty-free-2.0).
+Copyright (c) SixtyFPS GmbH.
+https://slint.dev
+
+The MIT License covers facet's code only. Slint remains under its own
+license terms. Anyone who redistributes a modified facet chooses their own
+Slint license (GPLv3, Royalty-free, or Commercial) and must meet its terms.
