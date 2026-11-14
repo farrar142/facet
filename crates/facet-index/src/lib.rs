@@ -59,6 +59,13 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use memchr::memmem;
 
+mod usn;
+pub use usn::{
+    Freshness, JournalInfo, JournalState, RebuildReason, SecurityChange, USN_REASON_FILE_CREATE,
+    USN_REASON_FILE_DELETE, USN_REASON_RENAME_NEW_NAME, USN_REASON_RENAME_OLD_NAME,
+    USN_REASON_SECURITY_CHANGE, UsnError, UsnOutcome,
+};
+
 /// 폴더 속성 비트(Windows `FILE_ATTRIBUTE_DIRECTORY`). 이 비트가 있는 항목만 부모가 될 수 있다.
 pub const ATTRIBUTE_DIRECTORY: u32 = 0x10;
 
@@ -402,9 +409,11 @@ pub struct Hit {
     pub attributes: u32,
 }
 
-/// 항목 하나의 고정 크기 레코드(32바이트).
+/// 항목 하나의 고정 크기 레코드(40바이트).
 #[derive(Debug, Clone, Copy)]
 struct Record {
+    /// 항목 번호. USN 레코드가 가리키는 항목을 찾는 데 쓴다.
+    number: u64,
     size: u64,
     modified: u64,
     parent: u64,
@@ -431,7 +440,19 @@ pub struct Index {
     /// 판 번호. 만들 때와 바뀔 때마다 [`new_stamp`]로 새로 받는다. 이어 받기 표지가 이 값으로
     /// 무효를 가린다. 복제본은 내용이 같으므로 같은 값을 갖는다.
     stamp: u64,
+    /// 지운 레코드 수. 지운 레코드는 자리만 남고 부모가 [`DEAD`]라 어떤 질의에도 나오지 않는다.
+    dead: usize,
+    /// (항목 번호, 부모 번호) → 레코드 위치. USN 레코드를 처음 적용할 때 만든다.
+    /// 같은 폴더에 하드 링크가 여럿이면 마지막 것만 가진다.
+    locator: Option<HashMap<(u64, u64), u32>>,
+    /// 이름바꾸기 옛 이름 레코드를 받고 새 이름 레코드를 기다리는 항목: 번호 → 옛 부모 번호.
+    pending_renames: HashMap<u64, u64>,
+    /// 볼륨 저널 상태. 아직 모르면 `None`.
+    journal: Option<JournalState>,
 }
+
+/// 지운 레코드의 부모 번호. 이 번호의 폴더는 없으므로 지운 레코드는 루트에 닿지 않는다.
+const DEAD: u64 = u64::MAX;
 
 impl Index {
     /// 빈 인덱스. `root`는 볼륨 루트 경로(`C:\` 또는 `C:`), `root_number`는 루트 폴더의
@@ -450,6 +471,10 @@ impl Index {
             original_starts: Vec::new(),
             folders: HashMap::new(),
             stamp: new_stamp(),
+            dead: 0,
+            locator: None,
+            pending_renames: HashMap::new(),
+            journal: None,
         }
     }
 
@@ -487,6 +512,7 @@ impl Index {
             self.originals.push_str(item.name);
         }
         self.records.push(Record {
+            number: item.number,
             size: item.size,
             modified: item.modified,
             parent: item.parent,
@@ -495,6 +521,9 @@ impl Index {
         });
         if item.attributes & ATTRIBUTE_DIRECTORY != 0 {
             self.folders.entry(item.number).or_insert(index);
+        }
+        if let Some(locator) = &mut self.locator {
+            locator.insert((item.number, item.parent), index);
         }
         self.changed();
         Ok(())
@@ -506,14 +535,14 @@ impl Index {
         self.stamp = new_stamp();
     }
 
-    /// 넣은 항목 수(경로를 만들 수 없는 항목도 센다).
+    /// 들어 있는 항목 수(경로를 만들 수 없는 항목도 센다, 지운 항목은 세지 않는다).
     pub fn len(&self) -> usize {
-        self.records.len()
+        self.records.len() - self.dead
     }
 
     /// 항목이 하나도 없는가.
     pub fn is_empty(&self) -> bool {
-        self.records.is_empty()
+        self.len() == 0
     }
 
     /// 인덱스가 잡고 있는 힙 메모리의 바이트 수. 할당한 용량으로 세므로 실제보다 작지 않다.
@@ -530,6 +559,13 @@ impl Index {
             + self.originals.capacity()
             + self.original_starts.capacity() * size_of::<(u32, u32)>()
             + folder_buckets * (size_of::<(u64, u32)>() + 1)
+            + self.locator.as_ref().map_or(0, |l| {
+                let buckets = match l.capacity() {
+                    0 => 0,
+                    cap => (cap * 8).div_ceil(7).next_power_of_two(),
+                };
+                buckets * (size_of::<((u64, u64), u32)>() + 1)
+            })
     }
 
     /// 질의를 실행해 결과 조각만 돌려준다. [`Index::search`]의 `hits`와 같다.
