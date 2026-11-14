@@ -84,6 +84,14 @@ jobs:
             gh issue edit "$N" --repo "$REPO" --remove-label ready-for-agent --add-label in-progress
           fi
           echo "go=$go" >> "$GITHUB_OUTPUT"
+          # Model: the ticket's model label (set by Decompose), Sonnet when there is none,
+          # and Opus for any retry after a failed run.
+          model=claude-sonnet-5-5
+          case ",$labels," in *,model:opus,*) model=claude-opus-5-5;; esac
+          fails=$(gh issue view "$N" --repo "$REPO" --json comments --jq '[.comments[].body | select(contains("<!-- factory-implementer-failed -->"))] | length')
+          if [ "$fails" -gt 0 ]; then model=claude-opus-5-5; fi
+          echo "::notice::#$N runs on $model (earlier failures: $fails)"
+          echo "model=$model" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
         if: steps.guard.outputs.go == 'true'
@@ -129,7 +137,7 @@ jobs:
             Ticket: #${{ env.N }} in ${{ github.repository }}. You are on branch ${{ env.BRANCH }}.
             Read .github/factory/implementer.md and follow it exactly.
           claude_args: >-
-            --model claude-opus-5-5
+            --model ${{ steps.guard.outputs.model }}
             --max-turns 200
             --allowedTools "Bash,Read,Edit,Write,Glob,Grep"
 

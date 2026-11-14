@@ -35,6 +35,8 @@ facet은 Windows 파일 탐색기를 대체할 앱이다. 스택은 아직 정�
 | Decompose | `spec` 라벨, 또는 수동 실행(`workflow_dispatch`, spec 번호) | spec을 하위 이슈(티켓)로 나누고 blocked-by(native dependency)를 기록한다. 지시는 `.github/factory/decompose.md` | 없음. 티켓에 `ready-for-agent`를 붙이지 않는다 | 사람이 분해 결과를 검토하고 티켓에 직접 `ready-for-agent`를 붙인다 | spec 번호로 concurrency group. 하위 이슈가 이미 있으면 에이전트를 부르기 전에 종료한다 |
 | Explore | 이슈 생성 (`needs-triage`) | 코드베이스와 대조해 분류한다 | 쉬운 건은 `ready-for-agent`, 나머지는 `ready-for-human` / `needs-info` / `wontfix` | 라벨 변경 | 이슈 번호로 concurrency group. `needs-triage`가 있을 때만 실행한다 |
 
+**모델 배정**: Decompose가 티켓마다 `model:sonnet` 또는 `model:opus` 라벨을 하나 붙인다. 기준은 `.github/factory/decompose.md`에 있다. Implementer는 그 라벨대로 모델을 쓰고, 라벨이 없으면 Sonnet을 쓴다. 한 번이라도 실패한 티켓을 다시 돌릴 때는 Opus로 올린다. Decompose 자신은 Opus로 돈다.
+
 같은 티켓에서 실패한 run이 2번 쌓이면 더 돌리지 않고 `ready-for-human`을 붙여 사람에게 넘긴다.
 
 ### 켜는 순서
