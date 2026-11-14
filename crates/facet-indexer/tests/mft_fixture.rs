@@ -54,7 +54,13 @@ fn fixture_records_match_expected_list() {
     let has = |pred: &dyn Fn(&Line) -> bool| lines.iter().any(pred);
     assert!(has(&|l| l.path.contains("한글")));
     assert!(has(&|l| l.path.contains('😀')));
-    assert!(has(&|l| l.path.rsplit('\\').next().unwrap().encode_utf16().count() >= 200));
+    let name_len = |l: &Line| {
+        l.path
+            .rsplit('\\')
+            .next()
+            .map_or(0, |n| n.encode_utf16().count())
+    };
+    assert!(has(&|l| name_len(l) >= 200));
     assert!(has(&|l| l.path.matches('\\').count() >= 5));
     assert!(has(&|l| l.kind == "지운 파일"));
     assert!(has(&|l| l.kind == "확장 레코드"));
