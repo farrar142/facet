@@ -20,6 +20,7 @@ concurrency:
 permissions:
   contents: read
   issues: write
+  actions: write
   id-token: write
 
 jobs:
@@ -55,3 +56,25 @@ jobs:
             --model claude-opus-5-5
             --max-turns 80
             --allowedTools "Bash(gh:*),Read,Glob,Grep"
+
+      # The owner approves tickets without review (decision 2026-11-15): label every new
+      # ticket `ready-for-agent` and start the serial Implementer chain. GITHUB_TOKEN label
+      # changes fire no events, so dispatch the first unblocked ticket explicitly.
+      - name: Approve tickets and start the chain
+        if: steps.guard.outputs.sub_issues == '0'
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          subs=$(gh api "repos/$REPO/issues/$SPEC/sub_issues" --paginate --jq '.[] | select(.state == "open") | .number' | sort -n)
+          if [ -z "$subs" ]; then echo "::error::Decompose created no tickets for #$SPEC"; exit 1; fi
+          for n in $subs; do gh issue edit "$n" --repo "$REPO" --add-label ready-for-agent; done
+          sleep 5
+          for n in $(gh issue list --repo "$REPO" --state open --label ready-for-agent --limit 200 --json number --jq 'sort_by(.number) | .[].number'); do
+            open=$(gh api "repos/$REPO/issues/$n" --jq '.issue_dependencies_summary.blocked_by // 0')
+            if [ "$open" -eq 0 ]; then
+              echo "dispatch #$n"
+              gh workflow run factory-implementer.yml --repo "$REPO" -f issue="$n"
+              exit 0
+            fi
+          done
+          echo "::warning::no ticket of #$SPEC is unblocked"

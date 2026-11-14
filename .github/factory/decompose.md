@@ -26,7 +26,7 @@ Publish one issue per ticket, **blockers first**, so each ticket's edges can ref
 
 - Make each ticket a **sub-issue** of the spec.
 - Record blocking edges as GitHub's **native** blocked-by dependencies.
-- **Do not apply `ready-for-agent`**. A human approves tickets by labelling them.
+- **Do not apply `ready-for-agent`** yourself. When you finish, the workflow labels every open ticket of the spec and starts implementing them in order, without human review. So every ticket must be implementable as written.
 - Apply exactly one **model label** to each ticket, choosing the model the Implementer run will use:
   - `model:sonnet` (the default): the ticket follows a pattern the codebase already has, its acceptance criteria are mechanical to check, or it is mostly tooling, docs or wiring.
   - `model:opus`: the ticket sets a new pattern later tickets will copy (a first public interface, a first UI screen), needs design judgement the spec leaves open, touches concurrency, unsafe code or Windows APIs, or has acceptance criteria that tests can only partly check.
@@ -63,6 +63,6 @@ Finish with one comment on the spec issue:
 
 - A numbered list of the tickets you created, in dependency order: `#<n> <title>: blocked by #<n>, #<n>` (or "none").
 - The judgement calls you made (granularity, edges, anything the spec left ambiguous).
-- A line saying the tickets carry no `ready-for-agent` label and wait for a human to review and label them.
+- A line saying the workflow will label the tickets `ready-for-agent` and implement them one at a time.
 
 If you cannot finish (the spec is too vague to slice, or a `gh` call keeps failing), publish nothing more, and comment on the spec with what blocked you.

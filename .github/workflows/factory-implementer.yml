@@ -70,6 +70,9 @@ jobs:
       BRANCH: agent/issue-${{ github.event.issue.number || inputs.issue }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       REPO: ${{ github.repository }}
+      # Spec issues in roadmap order (docs/roadmap.md, S2..S18 without S7 which ran with S1).
+      # Each spec's prerequisites come earlier in this list. S19 (#67) is a draft: add it after grilling.
+      SPEC_QUEUE: "17 18 19 20 21 23 24 25 26 27 28 29 30 31 32 33"
     steps:
       - name: Guard and claim
         id: guard
@@ -284,3 +287,31 @@ jobs:
             fi
           done
           echo "::notice::no unblocked approved ticket left"
+
+          # Queue empty: move on to the next spec (decision 2026-11-15, roadmap order).
+          # Wait while anything is still running, queued or being decomposed.
+          busy=$(gh issue list --repo "$REPO" --state open --label in-progress --json number --jq length)
+          queued=$(gh issue list --repo "$REPO" --state open --label ready-for-agent --json number --jq length)
+          if [ "$busy" -gt 0 ] || [ "$queued" -gt 0 ]; then
+            echo "::notice::$busy in progress, $queued waiting on blockers; not moving to the next spec yet"
+            exit 0
+          fi
+          for s in $(gh issue list --repo "$REPO" --state open --label spec --json number --jq '.[].number'); do
+            read -r total done < <(gh api "repos/$REPO/issues/$s" --jq '"\(.sub_issues_summary.total // 0) \(.sub_issues_summary.completed // 0)"')
+            if [ "$total" -eq 0 ]; then
+              echo "::notice::spec #$s is still being decomposed"; exit 0
+            fi
+            if [ "$total" -eq "$done" ]; then
+              gh issue close "$s" --repo "$REPO" --reason completed --comment "All $total tickets merged."
+            fi
+          done
+          for s in $SPEC_QUEUE; do
+            read -r state labels < <(gh issue view "$s" --repo "$REPO" --json state,labels --jq '[.state, ([.labels[].name] | join(","))] | @tsv')
+            [ "$state" = OPEN ] || continue
+            case ",$labels," in *,spec,*) continue;; esac
+            echo "next spec: #$s"
+            gh issue edit "$s" --repo "$REPO" --add-label spec
+            gh workflow run factory-decompose.yml --repo "$REPO" -f issue="$s"
+            exit 0
+          done
+          echo "::notice::every spec in the queue is labelled; the factory is idle"

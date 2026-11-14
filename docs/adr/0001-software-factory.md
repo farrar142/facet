@@ -32,7 +32,7 @@ facet은 Windows 파일 탐색기를 대체할 앱이다. 스택은 아직 정�
 | Task | Trigger | 하는 일 | 다음 run | 사람이 다시 들어오는 곳 | 중복 방지 |
 | --- | --- | --- | --- | --- | --- |
 | Implementer | `ready-for-agent` 라벨(사람이 붙임), 수동 실행, 또는 티켓이 닫힐 때 `frontier` job의 dispatch | 열린 blocker가 없을 때만 시작한다. 에이전트는 수정·커밋만 한다. workflow가 `cargo xtask ci`를 다시 돌리고, 통과하면 push·PR을 열고 **바로 squash 병합한다**. 지시는 `.github/factory/implementer.md` | 성공·실패·건너뜀과 관계없이 막힘이 풀린 승인 티켓 중 번호가 가장 작은 하나를 dispatch한다(사슬). 처음 실패한 티켓은 `ready-for-agent`를 다시 붙여 대기열에 돌려 놓는다. GITHUB_TOKEN으로 한 병합은 `issues: closed`를 트리거하지 않으므로 run이 직접 한다. 사람이 병합해 티켓이 닫힐 때는 `frontier` job이 같은 일을 한다 | `ready-for-agent`를 붙이는 것이 승인이다. 병합 전 리뷰는 없다. 손으로 확인할 것은 run이 spec 이슈에 댓글로 남긴다 | 저장소 전체에 concurrency group `factory-implementer` 하나라 한 번에 티켓 하나만 돈다(직렬, 대표 결정 2026-11-15). 시작 시 `ready-for-agent`를 떼고 `in-progress`를 붙인다. 막힌 티켓은 라벨을 그대로 둔다 |
-| Decompose | `spec` 라벨, 또는 수동 실행(`workflow_dispatch`, spec 번호) | spec을 하위 이슈(티켓)로 나누고 blocked-by(native dependency)를 기록한다. 지시는 `.github/factory/decompose.md` | 없음. 티켓에 `ready-for-agent`를 붙이지 않는다 | 사람이 분해 결과를 검토하고 티켓에 직접 `ready-for-agent`를 붙인다 | spec 번호로 concurrency group. 하위 이슈가 이미 있으면 에이전트를 부르기 전에 종료한다 |
+| Decompose | `spec` 라벨, 또는 수동 실행(`workflow_dispatch`, spec 번호) | spec을 하위 이슈(티켓)로 나누고 blocked-by(native dependency)를 기록한다. 지시는 `.github/factory/decompose.md` | 에이전트가 끝나면 workflow가 새 티켓 모두에 `ready-for-agent`를 붙이고 Implementer 사슬을 시작한다(대표 결정 2026-11-15: 분해 결과 검토 없음) | 없음. 관리 세션이 분해 결과와 실패를 지켜본다 | spec 번호로 concurrency group. 하위 이슈가 이미 있으면 에이전트를 부르기 전에 종료한다 |
 | Explore | 이슈 생성 (`needs-triage`) | 코드베이스와 대조해 분류한다 | 쉬운 건은 `ready-for-agent`, 나머지는 `ready-for-human` / `needs-info` / `wontfix` | 라벨 변경 | 이슈 번호로 concurrency group. `needs-triage`가 있을 때만 실행한다 |
 
 **모델 배정**: Decompose가 티켓마다 `model:sonnet` 또는 `model:opus` 라벨을 하나 붙인다. 기준은 `.github/factory/decompose.md`에 있다. Implementer는 그 라벨대로 모델을 쓰고, 라벨이 없으면 Sonnet을 쓴다. 한 번이라도 실패한 티켓을 다시 돌릴 때는 Opus로 올린다. Decompose 자신은 Opus로 돈다.
@@ -64,3 +64,12 @@ PR이 쌓이면 Automated review task(그리고 그 짝인 Rework task)를 넣�
 - Claude Code cloud 같은 번들 플랫폼은 Linux라 Windows 빌드·테스트를 못 하므로 쓰지 않았다.
 - 자체 호스트 Windows 러너는 공개 저장소에서 외부 PR이 내 기계에서 돌 위험이 있어 쓰지 않았다. 빌드가 너무 느려지면 다시 검토한다.
 - 구독 OAuth 토큰을 쓰므로 공장 run이 구독 사용량을 함께 쓴다.
+
+### spec 사슬 (2026-11-15, 대표 결정)
+
+대표가 자는 동안에도 공장이 멈추지 않게, 다음 spec으로 넘어가는 일도 공장이 한다.
+
+- Implementer run이 끝날 때 다음 티켓이 없고, `in-progress`도 막힌 `ready-for-agent`도 남지 않았으면 다음 spec으로 넘어간다.
+- 먼저 하위 이슈가 모두 닫힌 spec 이슈를 닫는다. 그다음 `SPEC_QUEUE`(로드맵 순서, `factory-implementer.yml`)에서 아직 `spec` 라벨이 없는 첫 spec에 라벨을 붙이고 Decompose를 dispatch한다. 분해 중인 spec(하위 이슈 0개)이 있으면 기다린다.
+- Decompose는 끝나면 새 티켓에 `ready-for-agent`를 붙이고 사슬을 시작한다.
+- 두 번 실패한 티켓(`ready-for-human`)은 사슬을 멈추지 않는다. 관리 세션이 따로 처리한다.
