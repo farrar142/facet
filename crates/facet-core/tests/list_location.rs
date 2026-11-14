@@ -175,10 +175,17 @@ struct Lock<'a>(&'a Path);
 impl<'a> Lock<'a> {
     /// 모든 사용자(Everyone, S-1-1-0)에게 폴더 내용 나열을 거부하는 ACE를 단다.
     /// 소유자는 그래도 권한 목록을 고칠 수 있어 되돌릴 수 있다.
+    ///
+    /// 백업 권한(SeBackupPrivilege)이 켜진 프로세스는 거부 ACE를 무시하므로,
+    /// 막은 뒤에도 읽히면 막을 수 없는 환경으로 보고 `None`을 돌려준다.
     fn new(path: &'a Path) -> Option<Self> {
         let ok = icacls(path, &["/deny", "*S-1-1-0:(RD)"]);
         assert!(ok, "icacls로 읽기를 막지 못했다");
-        Some(Self(path))
+        let lock = Self(path);
+        if fs::read_dir(path).is_ok() {
+            return None;
+        }
+        Some(lock)
     }
 }
 

@@ -1,0 +1,21 @@
+[package]
+name = "facet-bench"
+description = "facet 측정 도구: 시험 폴더 생성과 코어 벤치마크"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "facet-bench"
+path = "src/main.rs"
+
+[dependencies]
+facet-core.workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[lints]
+workspace = true
