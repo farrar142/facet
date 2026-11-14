@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+use facet_bench::screen::{self, DEFAULT_SCROLL_ROWS, Plan};
 use facet_bench::{
     DEFAULT_COUNT, LIST_LIMIT, LIST_TARGET, check_limit, make_test_folder, measure_list,
 };
@@ -14,7 +15,12 @@ const USAGE: &str = "\
       N개(기본 100000) 항목이 든 시험 폴더를 만든다. 다시 돌려도 결과가 같다.
   facet-bench list <경로> [--count N] [--runs N] [--limit-ms N]
       시험 폴더를 만들거나 확인한 뒤 코어 목록 읽기를 N회(기본 5) 재고,
-      중앙값이 상한(기본 1000ms)을 넘으면 실패한다.";
+      중앙값이 상한(기본 1000ms)을 넘으면 실패한다.
+  facet-bench screen <경로> --app <facet 실행 파일> [--count N] [--runs N] [--scroll-runs N]
+                     [--scroll-rows N] [--refresh-hz N] [--json <파일>]
+      시험 폴더를 만들거나 확인한 뒤 앱을 측정 모드로 띄워 콜드 스타트(--runs회, 기본 5)와
+      스크롤 프레임 시간(--scroll-runs회, 기본 1)을 잰다. 표를 출력하고 --json이면 JSON도 쓴다.
+      통과 기준을 못 맞추면 실패한다. 보통 `cargo xtask measure`로 부른다.";
 
 const DEFAULT_RUNS: usize = 5;
 
@@ -24,6 +30,11 @@ struct Args {
     count: usize,
     runs: usize,
     limit: Duration,
+    app: Option<PathBuf>,
+    scroll_runs: usize,
+    scroll_rows: usize,
+    refresh_hz: Option<f64>,
+    json: Option<PathBuf>,
 }
 
 fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
@@ -32,7 +43,34 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut count = DEFAULT_COUNT;
     let mut runs = DEFAULT_RUNS;
     let mut limit = LIST_LIMIT;
+    let mut app = None;
+    let mut scroll_runs = 1;
+    let mut scroll_rows = DEFAULT_SCROLL_ROWS;
+    let mut refresh_hz = None;
+    let mut json = None;
     while let Some(arg) = it.next() {
+        let mut text = |name: &str| it.next().ok_or(format!("{name} 뒤에 값이 없습니다"));
+        match arg.as_str() {
+            "--app" => {
+                app = Some(PathBuf::from(text("--app")?));
+                continue;
+            }
+            "--json" => {
+                json = Some(PathBuf::from(text("--json")?));
+                continue;
+            }
+            "--refresh-hz" => {
+                let v = text("--refresh-hz")?;
+                refresh_hz = Some(
+                    v.parse::<f64>()
+                        .ok()
+                        .filter(|hz| *hz > 0.0)
+                        .ok_or(format!("--refresh-hz의 값이 양수가 아닙니다: {v}"))?,
+                );
+                continue;
+            }
+            _ => {}
+        }
         let mut number = |name: &str| -> Result<u64, String> {
             let v = it.next().ok_or(format!("{name} 뒤에 값이 없습니다"))?;
             v.parse()
@@ -41,6 +79,8 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         match arg.as_str() {
             "--count" => count = number("--count")? as usize,
             "--runs" => runs = (number("--runs")? as usize).max(1),
+            "--scroll-runs" => scroll_runs = number("--scroll-runs")? as usize,
+            "--scroll-rows" => scroll_rows = (number("--scroll-rows")? as usize).max(1),
             "--limit-ms" => limit = Duration::from_millis(number("--limit-ms")?),
             _ if path.is_none() && !arg.starts_with("--") => path = Some(PathBuf::from(arg)),
             _ => return Err(format!("알 수 없는 인자: {arg}")),
@@ -53,6 +93,11 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         count,
         runs,
         limit,
+        app,
+        scroll_runs,
+        scroll_rows,
+        refresh_hz,
+        json,
     })
 }
 
@@ -67,6 +112,7 @@ fn main() -> ExitCode {
     let result = match args.command.as_str() {
         "make-folder" => make_folder(&args),
         "list" => make_folder(&args).and_then(|()| list(&args)),
+        "screen" => make_folder(&args).and_then(|()| screen(&args)),
         other => Err(format!("알 수 없는 명령: {other}\n\n{USAGE}")),
     };
     match result {
@@ -121,4 +167,33 @@ fn list(args: &Args) -> Result<(), String> {
     check_limit(&m, args.limit)?;
     println!("  상한 안: 통과");
     Ok(())
+}
+
+fn screen(args: &Args) -> Result<(), String> {
+    let app = args.app.as_deref().ok_or("--app이 없습니다")?;
+    let plan = Plan {
+        app,
+        folder: &args.path,
+        item_count: args.count,
+        runs: args.runs,
+        scroll_runs: args.scroll_runs,
+        scroll_rows: args.scroll_rows,
+        refresh_hz: args.refresh_hz,
+    };
+    let result = screen::measure(&plan)?;
+    println!(
+        "
+{}",
+        result.to_table()
+    );
+    if let Some(json) = &args.json {
+        std::fs::write(json, result.to_json())
+            .map_err(|e| format!("{}를 쓰지 못함: {e}", json.display()))?;
+        println!("JSON: {}", json.display());
+    }
+    if result.verdict().pass() {
+        Ok(())
+    } else {
+        Err("통과 기준을 맞추지 못했습니다".to_owned())
+    }
 }

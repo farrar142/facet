@@ -5,6 +5,7 @@
 
 pub mod file_list;
 mod location;
+pub mod measure;
 
 pub use location::{Item, ListError, list_location};
 
