@@ -2,9 +2,14 @@
 
 use std::fs;
 
-use facet_core::list_location;
 use facet_core::name_input::NameInput;
+use facet_core::{Item, ListError, Location, provider_for};
 use tempfile::TempDir;
+
+fn list_location(path: &std::path::Path) -> Result<Vec<Item>, ListError> {
+    let location = Location::file_system(path);
+    provider_for(&location).list(&location)
+}
 
 fn folder_with(names: &[&str]) -> TempDir {
     let dir = TempDir::new().unwrap();

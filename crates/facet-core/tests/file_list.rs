@@ -3,11 +3,11 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{FixedOffset, Utc};
-use facet_core::Item;
 use facet_core::file_list::{
     Movement, format_modified, format_modified_local, format_size, item_text, move_selection,
     scroll_to_show,
 };
+use facet_core::{Attributes, Item};
 
 // ---- 선택 이동 ----
 
@@ -155,6 +155,7 @@ fn item_text_shows_kind_size_and_local_time() {
         is_folder: false,
         size: 2048,
         modified,
+        attributes: Attributes::default(),
     };
     let text = item_text(&file);
     assert_eq!(text.name, "한글 이름 😀.txt");
@@ -168,6 +169,7 @@ fn item_text_shows_kind_size_and_local_time() {
         is_folder: true,
         size: 0,
         modified,
+        attributes: Attributes::default(),
     };
     let text = item_text(&folder);
     assert_eq!(text.kind, "폴더");

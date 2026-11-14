@@ -7,12 +7,13 @@ use std::time::Duration;
 use facet_bench::{
     Measurement, TestFolderError, check_limit, make_test_folder, measure_list, test_folder_entry,
 };
-use facet_core::list_location;
+use facet_core::{FileSystemProvider, Location, Provider};
 use tempfile::TempDir;
 
 /// 폴더를 이름 → (폴더 여부, 크기)로 읽는다.
 fn snapshot(path: &std::path::Path) -> BTreeMap<String, (bool, u64)> {
-    list_location(path)
+    FileSystemProvider
+        .list(&Location::file_system(path))
         .unwrap()
         .into_iter()
         .map(|i| {
