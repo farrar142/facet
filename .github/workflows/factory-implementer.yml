@@ -4,8 +4,9 @@
 # when every blocker of the ticket is closed; otherwise the label stays and the
 # `frontier` job dispatches the ticket once its last blocker closes.
 #
-# The agent edits and commits. The workflow itself runs `cargo xtask ci`, pushes
-# and opens the draft PR, so no PR exists without passing automated checks.
+# The agent edits and commits. The workflow itself runs `cargo xtask ci`, pushes,
+# opens the PR and squash-merges it: no human review (decision 2026-11-15), so the
+# automated checks are the only brake.
 name: factory-implementer
 
 on:
@@ -137,11 +138,32 @@ jobs:
           if [ -n "$url" ]; then
             gh pr edit "$url" --body-file "$body"
           else
-            url=$(gh pr create --repo "$REPO" --draft --base main --head "$BRANCH" --title "$title" --body-file "$body")
+            url=$(gh pr create --repo "$REPO" --base main --head "$BRANCH" --title "$title" --body-file "$body")
           fi
           echo "PR: $url"
-          # A push made with GITHUB_TOKEN triggers no workflows, so start CI on the branch explicitly.
-          gh workflow run ci.yml --repo "$REPO" --ref "$BRANCH" || echo "::warning::could not dispatch ci.yml"
+          echo "PR_URL=$url" >> "$GITHUB_ENV"
+
+      # No human review (decision 2026-11-15): `cargo xtask ci` above is the brake.
+      # A conflict with a sibling ticket merged meanwhile fails the merge and the run.
+      - name: Merge
+        if: steps.guard.outputs.go == 'true'
+        run: |
+          gh pr merge "$PR_URL" --squash
+          git push origin --delete "$BRANCH" || true
+
+      # A merge made with GITHUB_TOKEN closes the ticket without firing `issues: closed`,
+      # so the frontier job would never run. Dispatch the next tickets here instead.
+      - name: Dispatch next tickets
+        if: steps.guard.outputs.go == 'true'
+        run: |
+          sleep 15
+          for n in $(gh issue list --repo "$REPO" --state open --label ready-for-agent --json number --jq '.[].number'); do
+            open=$(gh api "repos/$REPO/issues/$n" --jq '.issue_dependencies_summary.blocked_by // 0')
+            if [ "$open" -eq 0 ]; then
+              echo "dispatch #$n"
+              gh workflow run factory-implementer.yml --repo "$REPO" -f issue="$n"
+            fi
+          done
 
       - name: Record failure
         if: failure() && steps.guard.outputs.go == 'true'

@@ -2,7 +2,7 @@
 
 You implement one ticket on a Windows CI runner, unattended. Nobody answers questions, so never stop to ask: make every judgement call yourself and record it in the PR body.
 
-The workflow around you has already created your branch. After you finish, it runs `cargo xtask ci`, pushes the branch and opens a draft PR. **Do not push and do not open a PR yourself.**
+The workflow around you has already created your branch. After you finish, it runs `cargo xtask ci`, pushes the branch, opens a PR and **merges it without human review**. `cargo xtask ci` is the only brake, so leave nothing to a reviewer that a test could check. **Do not push and do not open a PR yourself.**
 
 ## 1. Read
 
@@ -24,7 +24,7 @@ Write the PR body to `.factory/pr-body.md` (git-ignored; do not commit it), in K
 - What changed, from the user's perspective.
 - How each acceptance criterion is met, or why it is not.
 - The judgement calls you made.
-- What a human reviewer should check by hand (for example screen behaviour that CI cannot see).
+- What a human should check by hand later (for example screen behaviour that CI cannot see). Nobody reviews before merge, so also comment this list on the ticket's parent spec issue.
 
 The workflow appends `Closes #<n>` itself.
 

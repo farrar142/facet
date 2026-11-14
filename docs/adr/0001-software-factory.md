@@ -31,7 +31,7 @@ facet은 Windows 파일 탐색기를 대체할 앱이다. 스택은 아직 정�
 
 | Task | Trigger | 하는 일 | 다음 run | 사람이 다시 들어오는 곳 | 중복 방지 |
 | --- | --- | --- | --- | --- | --- |
-| Implementer | `ready-for-agent` 라벨(사람이 붙임), 수동 실행, 또는 티켓이 닫힐 때 `frontier` job의 dispatch | 열린 blocker가 없을 때만 시작한다. 에이전트는 수정·커밋만 한다. workflow가 `cargo xtask ci`를 다시 돌리고, 통과하면 push·draft PR을 연 뒤 `ci.yml`을 dispatch한다(GITHUB_TOKEN으로 한 push는 workflow를 트리거하지 않으므로). 지시는 `.github/factory/implementer.md` | 없음. PR 병합으로 티켓이 닫히면 `frontier`가 막힘이 풀린 승인 티켓을 dispatch한다 | 사람이 PR을 리뷰·병합한다. 사람이 붙인 `ready-for-agent`가 승인이다 | concurrency group `factory-implementer-<번호>`. 시작 시 `ready-for-agent`를 떼고 `in-progress`를 붙인다. 막힌 티켓은 라벨을 그대로 둔다 |
+| Implementer | `ready-for-agent` 라벨(사람이 붙임), 수동 실행, 또는 티켓이 닫힐 때 `frontier` job의 dispatch | 열린 blocker가 없을 때만 시작한다. 에이전트는 수정·커밋만 한다. workflow가 `cargo xtask ci`를 다시 돌리고, 통과하면 push·PR을 열고 **바로 squash 병합한다**. 지시는 `.github/factory/implementer.md` | 막힘이 풀린 승인 티켓을 dispatch한다. GITHUB_TOKEN으로 한 병합은 `issues: closed`를 트리거하지 않으므로 run이 직접 한다. 사람이 병합해 티켓이 닫힐 때는 `frontier` job이 같은 일을 한다 | `ready-for-agent`를 붙이는 것이 승인이다. 병합 전 리뷰는 없다. 손으로 확인할 것은 run이 spec 이슈에 댓글로 남긴다 | concurrency group `factory-implementer-<번호>`. 시작 시 `ready-for-agent`를 떼고 `in-progress`를 붙인다. 막힌 티켓은 라벨을 그대로 둔다 |
 | Decompose | `spec` 라벨, 또는 수동 실행(`workflow_dispatch`, spec 번호) | spec을 하위 이슈(티켓)로 나누고 blocked-by(native dependency)를 기록한다. 지시는 `.github/factory/decompose.md` | 없음. 티켓에 `ready-for-agent`를 붙이지 않는다 | 사람이 분해 결과를 검토하고 티켓에 직접 `ready-for-agent`를 붙인다 | spec 번호로 concurrency group. 하위 이슈가 이미 있으면 에이전트를 부르기 전에 종료한다 |
 | Explore | 이슈 생성 (`needs-triage`) | 코드베이스와 대조해 분류한다 | 쉬운 건은 `ready-for-agent`, 나머지는 `ready-for-human` / `needs-info` / `wontfix` | 라벨 변경 | 이슈 번호로 concurrency group. `needs-triage`가 있을 때만 실행한다 |
 
@@ -42,7 +42,7 @@ facet은 Windows 파일 탐색기를 대체할 앱이다. 스택은 아직 정�
 브레이크(자동 검사·사람 리뷰)가 신뢰를 얻는 만큼만 트리거를 켠다.
 
 1. **Decompose (2026-11-15 켬)**: 코드를 빌드하지 않으므로 CI 없이 켠다. 티켓에 `ready-for-agent`를 붙이지 않으므로 다른 run을 트리거하지 않는다. 첫 대상은 S0(#1)이다. S0 티켓은 공장 밖(로컬 implement)에서 구현하므로 라벨 없이 둔다.
-2. **Implementer**: 전제 조건은 자동 검사다. 빌드·lint·test CI workflow를 만든다(S0, #1). 자동 검사 전체는 명령 하나 `cargo xtask ci`로 돈다. `.github/workflows/ci.yml`도 Implementer run도 이 명령을 쓴다. 자동 검사가 없으면 Implementer를 켜지 않는다. 켠 뒤에도 사람이 직접 `ready-for-agent`를 붙일 때만 돌고, PR마다 사람이 리뷰한다. Implementer는 `labeled` 이벤트로만 돌기 때문에, 켜기 전부터 열려 있던 티켓을 저절로 집어 가지 않는다.
+2. **Implementer**: 전제 조건은 자동 검사다. 빌드·lint·test CI workflow를 만든다(S0, #1). 자동 검사 전체는 명령 하나 `cargo xtask ci`로 돈다. `.github/workflows/ci.yml`도 Implementer run도 이 명령을 쓴다. 자동 검사가 없으면 Implementer를 켜지 않는다. 2026-11-15에 켰다. 대표 결정으로 S0의 #3 #5 #6 #7 #8을 맡기고, **병합 전 사람 리뷰를 뺐다**. 브레이크는 `cargo xtask ci` 하나뿐이다. 그래서 같은 실수가 반복되면 사람 리뷰를 다시 넣기보다 검사를 더 엄격하게 만들거나 Automated review task를 넣는다.
 3. **Explore**: 외부 사용자가 이슈를 올리기 시작하면 켠다. 처음에는 일부 이슈에만 적용한다.
 
 PR이 쌓이면 Automated review task(그리고 그 짝인 Rework task)를 넣어 브레이크를 추가한다.
