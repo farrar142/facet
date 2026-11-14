@@ -41,6 +41,15 @@ jobs:
           echo "sub_issues=$n" >> "$GITHUB_OUTPUT"
           if [ "$n" -gt 0 ]; then echo "::notice::#$SPEC already has $n sub-issues; skipping."; fi
 
+      # TEMP: check the token's shape without printing it. Remove once runs pass.
+      - name: Inspect token shape
+        env:
+          T: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          echo "length=${#T}"
+          echo "prefix=${T:0:13}"
+          case "$T" in *[[:space:]]*) echo "contains whitespace: yes";; *) echo "contains whitespace: no";; esac
+
       - name: Decompose
         if: steps.guard.outputs.sub_issues == '0'
         uses: anthropics/claude-code-action@v1
