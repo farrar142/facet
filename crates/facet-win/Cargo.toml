@@ -1,0 +1,30 @@
+[package]
+name = "facet-win"
+description = "facet의 Windows API 안전 래퍼: unsafe 호출을 이 크레이트 안에 가두고 안전한 함수만 드러낸다"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# 작업 공간에서 이 크레이트만 unsafe_code를 허용한다(ADR-0002: 셸 호출의 unsafe를 래퍼 하나에 가둔다).
+# 그 대신 unsafe 블록마다 SAFETY 주석을 요구한다. 다른 크레이트는 계속 작업 공간 lint(forbid)를 따른다.
+[lints.rust]
+unsafe_code = "allow"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
