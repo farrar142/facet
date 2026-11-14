@@ -6,6 +6,8 @@ use std::time::SystemTime;
 
 use chrono::{DateTime, TimeZone, Utc};
 
+use crate::Item;
+
 /// 선택을 옮기는 키보드 동작.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Movement {
@@ -100,4 +102,36 @@ where
     };
     utc.map(|t| t.with_timezone(tz).format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_default()
+}
+
+/// 수정 시각을 이 컴퓨터의 시간대로 [`format_modified`]한다.
+pub fn format_modified_local(time: SystemTime) -> String {
+    format_modified(time, &chrono::Local)
+}
+
+/// 파일 목록 한 행에 보일 문자열.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemText {
+    /// 항목 이름. UTF-16으로 짝이 맞지 않는 부분은 U+FFFD로 바꾼다.
+    pub name: String,
+    /// 「폴더」 또는 「파일」.
+    pub kind: &'static str,
+    /// 파일은 [`format_size`], 폴더는 빈 문자열.
+    pub size: String,
+    /// [`format_modified_local`].
+    pub modified: String,
+}
+
+/// 항목 하나를 파일 목록 한 행의 문자열로.
+pub fn item_text(item: &Item) -> ItemText {
+    ItemText {
+        name: item.name.to_string_lossy().into_owned(),
+        kind: if item.is_folder { "폴더" } else { "파일" },
+        size: if item.is_folder {
+            String::new()
+        } else {
+            format_size(item.size)
+        },
+        modified: format_modified_local(item.modified),
+    }
 }
