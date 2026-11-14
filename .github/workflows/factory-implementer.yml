@@ -144,11 +144,40 @@ jobs:
       # Put the agent's commits on top of today's main: sibling tickets or factory changes
       # may have landed during the run. Pushing a branch based on an older main also
       # counts as editing workflow files, which GITHUB_TOKEN may not do.
+      # On a conflict, fall back to a merge and let the agent resolve it (the PR is squashed anyway).
       - name: Rebase onto main
+        id: rebase
         if: steps.guard.outputs.go == 'true'
         run: |
           git fetch origin main
-          git rebase origin/main
+          if git rebase origin/main; then
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+          else
+            git rebase --abort
+            git merge --no-edit origin/main || true
+            echo "::warning::conflicts with main: $(git diff --name-only --diff-filter=U | tr '\n' ' ')"
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve conflicts
+        if: steps.guard.outputs.go == 'true' && steps.rebase.outputs.conflict == 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          path_to_claude_code_executable: ${{ steps.claude.outputs.path }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          allowed_bots: github-actions
+          prompt: |
+            You are the Implementer run for ticket #${{ env.N }} in ${{ github.repository }}.
+            You already implemented the ticket on branch ${{ env.BRANCH }}. Other tickets merged into
+            main meanwhile, and merging origin/main left conflicts (see `git status`).
+            Resolve every conflict so that both your ticket's behaviour and main's changes survive.
+            Never drop main's changes to make yours fit. Then run `cargo xtask ci` until it passes,
+            and finish with `git commit --no-edit`. Do not push.
+          claude_args: >-
+            --model ${{ steps.guard.outputs.model }}
+            --max-turns 60
+            --allowedTools "Bash,Read,Edit,Write,Glob,Grep"
 
       # Deterministic gate: the agent's word is not enough.
       - name: Automated checks
