@@ -1,0 +1,157 @@
+# Factory task: Implementer (docs/adr/0001-software-factory.md)
+#
+# A human approves a ticket by labelling it `ready-for-agent`. A run starts only
+# when every blocker of the ticket is closed; otherwise the label stays and the
+# `frontier` job dispatches the ticket once its last blocker closes.
+#
+# The agent edits and commits. The workflow itself runs `cargo xtask ci`, pushes
+# and opens the draft PR, so no PR exists without passing automated checks.
+name: factory-implementer
+
+on:
+  issues:
+    types: [labeled, closed]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Ticket number to implement
+        required: true
+        type: number
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: write
+  id-token: write
+
+jobs:
+  # A ticket closed (usually by a merged PR): dispatch every approved ticket
+  # whose blockers are now all closed.
+  frontier:
+    if: github.event_name == 'issues' && github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Dispatch unblocked approved tickets
+        run: |
+          for n in $(gh issue list --repo "$REPO" --state open --label ready-for-agent --json number --jq '.[].number'); do
+            open=$(gh api "repos/$REPO/issues/$n" --jq '.issue_dependencies_summary.blocked_by // 0')
+            if [ "$open" -eq 0 ]; then
+              echo "dispatch #$n"
+              gh workflow run factory-implementer.yml --repo "$REPO" -f issue="$n"
+            else
+              echo "#$n still has $open open blocker(s)"
+            fi
+          done
+
+  implement:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.action == 'labeled' && github.event.label.name == 'ready-for-agent')
+    runs-on: windows-latest
+    timeout-minutes: 180
+    concurrency:
+      group: factory-implementer-${{ github.event.issue.number || inputs.issue }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+    env:
+      N: ${{ github.event.issue.number || inputs.issue }}
+      BRANCH: agent/issue-${{ github.event.issue.number || inputs.issue }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Guard and claim
+        id: guard
+        run: |
+          read -r state labels < <(gh issue view "$N" --repo "$REPO" --json state,labels --jq '[.state, ([.labels[].name] | join(","))] | @tsv')
+          go=true
+          if [ "$state" != "OPEN" ]; then echo "::notice::#$N is not open"; go=false; fi
+          case ",$labels," in *,ready-for-agent,*) ;; *) echo "::notice::#$N is not labelled ready-for-agent"; go=false;; esac
+          if $go; then
+            open=$(gh api "repos/$REPO/issues/$N" --jq '.issue_dependencies_summary.blocked_by // 0')
+            if [ "$open" -gt 0 ]; then
+              echo "::notice::#$N has $open open blocker(s); the frontier job will dispatch it later"
+              go=false
+            fi
+          fi
+          if $go; then
+            gh issue edit "$N" --repo "$REPO" --remove-label ready-for-agent --add-label in-progress
+          fi
+          echo "go=$go" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.guard.outputs.go == 'true'
+        with:
+          fetch-depth: 0
+
+      - name: Prepare branch
+        if: steps.guard.outputs.go == 'true'
+        run: |
+          git config user.name "facet-factory[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          mkdir -p .factory
+          echo ".factory/" >> .git/info/exclude
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.guard.outputs.go == 'true'
+
+      - name: Implement
+        if: steps.guard.outputs.go == 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            You are the Implementer run of this repo's software factory.
+            Ticket: #${{ env.N }} in ${{ github.repository }}. You are on branch ${{ env.BRANCH }}.
+            Read .github/factory/implementer.md and follow it exactly.
+          claude_args: >-
+            --model claude-opus-5-5
+            --max-turns 200
+            --allowedTools "Bash,Read,Edit,Write,Glob,Grep"
+
+      # Deterministic gate: the agent's word is not enough.
+      - name: Automated checks
+        if: steps.guard.outputs.go == 'true'
+        run: cargo xtask ci
+
+      - name: Push and open draft PR
+        if: steps.guard.outputs.go == 'true'
+        run: |
+          if [ "$(git rev-list --count origin/main..HEAD)" -eq 0 ]; then
+            echo "::error::the agent made no commits"; exit 1
+          fi
+          git push --force origin "$BRANCH"
+          body=.factory/pr-body.md
+          [ -s "$body" ] || echo "(the agent wrote no PR body)" > "$body"
+          printf '\n\nCloses #%s\n\n_Opened by the factory Implementer run: %s_\n' "$N" \
+            "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> "$body"
+          title=$(gh issue view "$N" --repo "$REPO" --json title --jq .title)
+          url=$(gh pr list --repo "$REPO" --head "$BRANCH" --state open --json url --jq '.[0].url')
+          if [ -n "$url" ]; then
+            gh pr edit "$url" --body-file "$body"
+          else
+            url=$(gh pr create --repo "$REPO" --draft --base main --head "$BRANCH" --title "$title" --body-file "$body")
+          fi
+          echo "PR: $url"
+          # A push made with GITHUB_TOKEN triggers no workflows, so start CI on the branch explicitly.
+          gh workflow run ci.yml --repo "$REPO" --ref "$BRANCH" || echo "::warning::could not dispatch ci.yml"
+
+      - name: Record failure
+        if: failure() && steps.guard.outputs.go == 'true'
+        run: |
+          marker='<!-- factory-implementer-failed -->'
+          gh issue comment "$N" --repo "$REPO" --body "$marker
+          Implementer run failed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          fails=$(gh issue view "$N" --repo "$REPO" --json comments --jq "[.comments[].body | select(contains(\"$marker\"))] | length")
+          gh issue edit "$N" --repo "$REPO" --remove-label in-progress
+          if [ "$fails" -ge 2 ]; then
+            gh issue edit "$N" --repo "$REPO" --add-label ready-for-human
+            gh issue comment "$N" --repo "$REPO" --body "Implementer failed $fails times. Handing this ticket to a human."
+          fi
