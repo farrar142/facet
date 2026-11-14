@@ -12,6 +12,7 @@ publish = false
 
 [workspace.dependencies]
 facet-core = { path = "crates/facet-core" }
+facet-win = { path = "crates/facet-win" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
