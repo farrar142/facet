@@ -13,10 +13,13 @@ use facet_core::file_list::{self, Movement};
 use facet_core::{Item, Location, provider_for};
 use slint::{Model, ModelRc, ModelTracker, SharedString};
 
+mod measure;
+
 slint::include_modules!();
 
 fn main() -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
+    measure::install(&ui);
 
     let location = std::env::args_os()
         .nth(1)
@@ -57,12 +60,16 @@ fn open(ui: &AppWindow, location: Location) {
             ui.set_loading(false);
             match result {
                 Ok(items) => {
+                    measure::mark_loaded(items.len());
                     let first = if items.is_empty() { -1 } else { 0 };
                     ui.set_rows(ModelRc::from(Rc::new(Rows(items))));
                     ui.set_selected(first);
                     ui.set_content_y(0.0);
                 }
-                Err(e) => ui.set_error_text(e.to_string().into()),
+                Err(e) => {
+                    ui.set_error_text(e.to_string().into());
+                    measure::mark_loaded(0);
+                }
             }
         });
     });

@@ -159,3 +159,137 @@ fn 상한을_넘으면_넘은_수치를_알린다() {
     assert!(msg.contains("1300"), "{msg}");
     assert!(msg.contains("1000"), "{msg}");
 }
+
+mod screen {
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    use facet_bench::screen::{COLD_START_LIMIT, ScreenResult, SystemSpec};
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    fn result(cold: &[u64], frames: &[u64], hz: Option<f64>) -> ScreenResult {
+        ScreenResult {
+            folder: PathBuf::from(r#"C:\시험 "폴더""#),
+            item_count: 100_000,
+            scroll_rows: 50,
+            cold_starts: cold.iter().map(|n| ms(*n)).collect(),
+            frames: frames.iter().map(|n| ms(*n)).collect(),
+            scroll_runs: 1,
+            spec: SystemSpec {
+                cpu: Some("Test CPU".into()),
+                memory_bytes: Some(16 * 1024 * 1024 * 1024),
+                disk: Some("Test SSD".into()),
+                os: Some("Windows 11 10.0.26100".into()),
+                refresh_hz: hz,
+            },
+            debug_build: false,
+        }
+    }
+
+    #[test]
+    fn 콜드_스타트는_중앙값이_200ms_미만일_때만_통과한다() {
+        assert!(
+            result(&[150, 190, 900], &[16], Some(60.0))
+                .verdict()
+                .cold_pass
+        );
+        assert!(
+            !result(&[150, 250, 260], &[16], Some(60.0))
+                .verdict()
+                .cold_pass
+        );
+        assert!(!result(&[200], &[16], Some(60.0)).verdict().cold_pass);
+        assert_eq!(COLD_START_LIMIT, ms(200));
+    }
+
+    #[test]
+    fn 프레임_최악값은_한_프레임의_두_배_이하일_때_통과한다() {
+        // 60Hz: 한 프레임 16.67ms, 상한 33.3ms
+        assert!(
+            result(&[100], &[16, 17, 33], Some(60.0))
+                .verdict()
+                .frame_pass
+        );
+        assert!(
+            !result(&[100], &[16, 17, 34], Some(60.0))
+                .verdict()
+                .frame_pass
+        );
+        // 144Hz: 상한 13.9ms
+        assert!(result(&[100], &[7, 13], Some(144.0)).verdict().frame_pass);
+        assert!(!result(&[100], &[7, 14], Some(144.0)).verdict().frame_pass);
+    }
+
+    #[test]
+    fn 프레임이_하나도_없으면_통과하지_못한다() {
+        assert!(!result(&[100], &[], Some(60.0)).verdict().frame_pass);
+    }
+
+    #[test]
+    fn 프레임_중앙값과_최악값이_나온다() {
+        let v = result(&[100], &[10, 30, 20], Some(60.0)).verdict();
+        assert_eq!(v.frame_median, ms(20));
+        assert_eq!(v.frame_worst, ms(30));
+    }
+
+    #[test]
+    fn 주사율을_모르면_육십헤르츠로_가정하고_표시한다() {
+        let r = result(&[100], &[16], None);
+        assert!(r.verdict().refresh_assumed);
+        assert!(r.to_table().contains("60"));
+        assert!(r.to_json().contains("\"refresh_hz_assumed\": true"));
+    }
+
+    #[test]
+    fn 표에_사양과_기준과_통과_여부가_나온다() {
+        let t = result(&[150], &[16], Some(144.0)).to_table();
+        for want in [
+            "Test CPU",
+            "16.0 GiB",
+            "Test SSD",
+            "Windows 11",
+            "144Hz",
+            "200ms",
+            "통과",
+        ] {
+            assert!(t.contains(want), "{want}가 없다:\n{t}");
+        }
+        assert!(
+            result(&[250], &[16], Some(60.0))
+                .to_table()
+                .contains("실패")
+        );
+    }
+
+    #[test]
+    fn json에_수치와_사양과_기준이_들어가고_문자열은_이스케이프된다() {
+        let j = result(&[100, 150, 120], &[10, 20], Some(60.0)).to_json();
+        for want in [
+            "\"median_ms\": 120.000",
+            "\"limit_ms\": 200",
+            "\"frame_median_ms\": 20.000",
+            "\"frame_worst_ms\": 20.000",
+            "\"cpu\": \"Test CPU\"",
+            "\"refresh_hz\": 60",
+            "\"pass\": true",
+            r#""folder": "C:\\시험 \"폴더\"""#,
+        ] {
+            assert!(j.contains(want), "{want}가 없다:\n{j}");
+        }
+    }
+
+    #[test]
+    fn 사양_출력을_읽고_빈_값은_모름으로_둔다() {
+        let spec = SystemSpec::parse(
+            "cpu=Some CPU\nmemory_bytes=17179869184\nos=Windows 11 10.0.1\ndisk=\nrefresh_hz=165\n잡음\n",
+        );
+        assert_eq!(spec.cpu.as_deref(), Some("Some CPU"));
+        assert_eq!(spec.memory_bytes, Some(17_179_869_184));
+        assert_eq!(spec.disk, None);
+        assert_eq!(spec.refresh_hz, Some(165.0));
+        assert_eq!(SystemSpec::parse("refresh_hz=0").refresh_hz, None);
+    }
+}

@@ -6,6 +6,7 @@
 pub mod file_list;
 mod file_system;
 mod location;
+pub mod measure;
 mod provider;
 
 pub use file_system::FileSystemProvider;

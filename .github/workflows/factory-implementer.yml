@@ -206,11 +206,33 @@ jobs:
           echo "PR_URL=$url" >> "$GITHUB_ENV"
 
       # No human review (decision 2026-11-15): `cargo xtask ci` above is the brake.
-      # A conflict with a sibling ticket merged meanwhile fails the merge and the run.
+      # A sibling ticket may merge while this run checks. Then rebase onto the new main,
+      # check again and retry. A rebase conflict at this point fails the run; the retry
+      # run (on Opus) starts from today's main.
       - name: Merge
         if: steps.guard.outputs.go == 'true'
         run: |
-          gh pr merge "$PR_URL" --squash
+          base=$(git rev-parse origin/main)
+          merged=false
+          for attempt in 1 2 3 4; do
+            if gh pr merge "$PR_URL" --squash; then merged=true; break; fi
+            sleep 15
+            git fetch origin main
+            if [ "$(git rev-parse origin/main)" = "$base" ]; then
+              echo "::notice::main unchanged; GitHub may still be computing mergeability (attempt $attempt)"
+              continue
+            fi
+            echo "::warning::main moved during the run; rebasing again (attempt $attempt)"
+            if ! git rebase origin/main; then
+              git rebase --abort
+              echo "::error::conflicts with tickets merged meanwhile: $(git diff --name-only origin/main...HEAD | tr '\n' ' ')"
+              exit 1
+            fi
+            base=$(git rev-parse origin/main)
+            cargo xtask ci
+            git push --force origin "$BRANCH"
+          done
+          $merged || { echo "::error::could not merge $PR_URL"; exit 1; }
           git push origin --delete "$BRANCH" || true
           # A GITHUB_TOKEN merge does not reliably close the ticket via `Closes #N`; close it here
           # so its dependents become unblocked before the next step looks for them.
