@@ -22,7 +22,7 @@ Rust는 [rustup](https://rustup.rs)으로 설치한다. 툴체인과 `rustfmt`·
 
 - `crates/facet-core` — 코어. 화면에 의존하지 않는 라이브러리. 동작과 테스트는 여기에 둔다.
 - `crates/facet-app` — 앱 실행 파일(`facet`). 코어를 부르기만 하는 얇은 껍질.
-- `crates/facet-index` — 인덱스: 항목 넣기와 질의 실행(이름 부분 일치 + `Filter` 조건 트리: 와일드카드·정규식·경로·크기·날짜·속성·확장자·그리고/또는/아님), 결과의 이름·경로·크기·날짜 정렬과 결과 수 제한, 전체 개수, 이어 받기 표지(`Index::search`·`Index::resume`, 인덱스가 바뀌면 표지는 `ResumeError::Stale`).  USN 저널 레코드 적용(`Index::apply_usn`: 만들기·지우기·이름바꾸기·이동, 보안 변경 폴더 알림)과 저널 상태 판정(`Index::check_journal`, 저널 ID 변경·넘침은 `Freshness::RebuildNeeded`). 인덱스와 저널 상태의 파일 저장·읽기(`Index::save`·`Index::load`: 머리에 매직·형식 버전·검사 값, 임시 파일에 쓰고 바꿔치기, 버전·검사 값·잘림은 `StoreError`). 화면도 Windows API도 쓰지 않는 순수 크레이트(spec #22의 크레이트 (1)).
+- `crates/facet-index` — 인덱스: 항목 넣기와 질의 실행(이름 부분 일치 + `Filter` 조건 트리: 와일드카드·정규식·경로·크기·날짜·속성·확장자·그리고/또는/아님), 결과의 이름·경로·크기·날짜 정렬과 결과 수 제한, 전체 개수, 이어 받기 표지(`Index::search`·`Index::resume`, 인덱스가 바뀌면 표지는 `ResumeError::Stale`).  USN 저널 레코드 적용(`Index::apply_usn`: 만들기·지우기·이름바꾸기·이동, 보안 변경 폴더 알림)과 저널 상태 판정(`Index::check_journal`, 저널 ID 변경·넘침은 `Freshness::RebuildNeeded`). 인덱스와 저널 상태의 파일 저장·읽기(`Index::save`·`Index::load`: 머리에 매직·형식 버전·검사 값, 임시 파일에 쓰고 바꿔치기, 버전·검사 값·잘림은 `StoreError`). MFT 바이트에서 인덱스 만들기(`MftParser`·`Index::from_mft`: 이름·부모·크기·수정 날짜·속성, 하드 링크는 이름마다 항목, 대체 데이터 스트림·지운 레코드·8.3 짧은 이름·NTFS 메타데이터 파일은 빼고, 확장 레코드는 기본 레코드와 합친다. 서명·고정값·길이가 틀린 레코드는 건너뛰어 `MftReport::skipped`에, 부모를 루트까지 따라갈 수 없는 항목은 `MftReport::orphans`에 센다). 화면도 Windows API도 쓰지 않는 순수 크레이트(spec #22의 크레이트 (1)).
 - `crates/facet-win` — Windows API 안전 래퍼. 앱 프로세스 쪽에서 `unsafe_code`를 허용하는 유일한 크레이트이고 안전한 함수만 드러낸다(ADR-0002). 셸 호출은 COM을 초기화한 전용 일꾼 스레드(`ShellWorker`)에서 한다. Windows 전용 부분은 `cfg(windows)`로 둔다.
 - `crates/facet-bench` — 측정 도구(`facet-bench`): 시험 폴더 생성, 코어 벤치마크, 인덱스 벤치마크.
 - `crates/facet-indexer` — 인덱서 서비스 실행 파일(`facet-indexer`). 지금은 개발용 하위 명령 `dump-mft`만 있다. 서비스 쪽 `unsafe`와 Windows API는 이 크레이트에만 둔다(Windows 전용 코드는 `#[cfg(windows)]`). 작업 공간의 `unsafe_code` 금지를 끈 크레이트는 이것과 `facet-win` 둘이다(ADR-0002).
@@ -34,7 +34,7 @@ Rust는 [rustup](https://rustup.rs)으로 설치한다. 툴체인과 `rustfmt`·
 - 빌드: `cargo build`
 - 테스트: `cargo test --workspace`
 - 앱 실행: `cargo run -p facet-app -- [폴더 경로]` — 그 폴더(빼면 현재 폴더)의 항목 목록을 창에 띄운다. 「도움말 → facet 정보」가 정보 화면(`AboutSlint`)이다. 항목을 고르고 F2를 누르면 그 행에 이름 입력란이 뜬다(Enter 확정, Esc 취소). 지금은 입력값을 상태 줄에 보일 뿐 파일 이름은 바꾸지 않는다.
-- 자동 검사 전체: `cargo xtask ci` — 형식 검사(`cargo fmt --check`) → lint(`cargo clippy --all-targets`, 경고를 오류로) → 빌드 → 테스트 → 실제 볼륨 테스트(관리자일 때만, 아래) → 코어 벤치마크 → 인덱스 벤치마크를 차례로 돌리고, 한 단계라도 실패하면 0이 아닌 코드로 끝난다. PR을 열기 전에 이것을 통과시킨다.
+- 자동 검사 전체: `cargo xtask ci` — 형식 검사(`cargo fmt --check`) → lint(`cargo clippy --all-targets`, 경고를 오류로) → 빌드 → 테스트 → 실제 볼륨 테스트(관리자일 때만, 아래) → 코어 벤치마크 → 인덱스 벤치마크 → MFT 파싱 벤치마크를 차례로 돌리고, 한 단계라도 실패하면 0이 아닌 코드로 끝난다. PR을 열기 전에 이것을 통과시킨다.
 - 형식 고치기: `cargo fmt --all`
 - 배포 산출물 만들기: `cargo xtask dist <label>` — `target/dist/`를 비우고 facet을 release로 빌드해 `facet-<label>-windows-x64.zip`(`facet.exe`, `LICENSE`, `NOTICE.txt`)과 그 `.sha256`을 만든다. `<label>`은 `nightly`나 태그 이름(예: `v0.1.0`). `.github/workflows/release.yml`이 부른다.
 
@@ -47,12 +47,14 @@ Rust는 [rustup](https://rustup.rs)으로 설치한다. 툴체인과 `rustfmt`·
 ## 시험 폴더와 벤치마크
 
 - 시험 폴더 만들기: `cargo xtask test-folder [경로] [--count N]` — N개(기본 100000) 항목이 든 폴더를 만든다. 경로를 빼면 임시 폴더 아래 `facet-test-folders/items-N`(Windows에서는 `%TEMP%\facet-test-folders\items-N`). CI 캐시에 섞이지 않게 `target/` 밑에 두지 않는다. 이름에 한글·이모지·긴 이름이 섞이고 열 개 중 두 개가 폴더다. 같은 명령을 다시 돌리면 빠진 항목만 채워 결과(이름·종류·크기)가 같다. 시험 폴더의 항목이 아닌 것이 들어 있으면 아무것도 지우지 않고 멈춘다.
-- 벤치마크: `cargo xtask bench` — 릴리스 빌드로 두 가지를 잰다. `cargo xtask ci`의 마지막 두 단계이기도 하다.
+- 벤치마크: `cargo xtask bench` — 릴리스 빌드로 세 가지를 잰다. `cargo xtask ci`의 마지막 세 단계이기도 하다.
   - 코어 벤치마크: `facet-test-folders/items-100000`을 만들거나 확인한 뒤 「위치의 항목 목록 읽기」를 한 번 데우고 5회 재어 중앙값·최악값을 출력한다.
   - 인덱스 벤치마크: 시험 폴더와 같은 이름의 합성 인덱스 100만 개를 메모리에 만들어 메모리 사용을 출력하고, 인덱스 파일 저장·읽기 시간(상한 없이 출력만), 부분 일치 질의(결과 100개 제한, 끝쪽 항목 하나만 맞아 인덱스 전체를 훑는 조각)와 정렬 질의(결과 10만 개를 경로 내림으로 정렬해 100개만 받기)를 각각 한 번 데우고 5회 재어 중앙값·최악값을 출력한다.
+  - MFT 파싱 벤치마크: 저장소의 MFT 조각(`testdata/mft/ntfs-basic.mft`)을 되풀이해 레코드 100만 개(1GB)의 MFT 덩어리를 메모리에 만들고, 그것을 인덱스로 만드는 시간(`Index::from_mft`)을 한 번 데우고 5회 재어 중앙값·최악값을 출력한다.
 - 기준과 상한: 로컬 기준은 10만 항목 100ms 미만(`LIST_TARGET`), CI 상한은 그 10배인 1000ms(`LIST_LIMIT`, `crates/facet-bench/src/lib.rs`). 중앙값이 상한을 넘으면 넘은 수치를 출력하고 실패한다. 공유 러너의 편차를 견디면서 알고리즘이 한 단계 나빠지는 실수만 잡으려는 값이다(`docs/roadmap.md`의 「속도는 두 군데서 지킨다」). 미세한 회귀는 잡지 않는다.
 - 인덱스 기준과 상한: 질의 로컬 기준 30ms(`QUERY_TARGET`), CI 상한 300ms(`QUERY_LIMIT`). 두 질의 모두 같은 상한을 지킨다. 메모리는 100만 개에 150MB(10진, `INDEX_MEMORY_LIMIT`) 미만이어야 하고 넘으면 실패한다. 메모리는 인덱스가 할당한 용량(`Index::memory_bytes`)으로 센다.
-- 다른 수나 상한으로 직접 재기: `cargo run --release -p facet-bench -- list <경로> [--count N] [--runs N] [--limit-ms N]`, `cargo run --release -p facet-bench -- index [--count N] [--runs N] [--limit-ms N]`.
+- MFT 파싱 기준과 상한: 레코드 100만 개 로컬 기준 2000ms(`MFT_PARSE_TARGET`), CI 상한 20000ms(`MFT_PARSE_LIMIT`). 「100만 항목 첫 인덱스 10초 미만」에서 1GB MFT를 느린 디스크로 읽는 약 7초와 저장·준비 약 1초를 뺀 몫이다(근거는 상수의 문서 주석).
+- 다른 수나 상한으로 직접 재기: `cargo run --release -p facet-bench -- list <경로> [--count N] [--runs N] [--limit-ms N]`, `cargo run --release -p facet-bench -- index [--count N] [--runs N] [--limit-ms N]`, `cargo run --release -p facet-bench -- mft [--count N] [--runs N] [--limit-ms N]`(N은 레코드 수).
 
 ## 화면 수치 측정
 

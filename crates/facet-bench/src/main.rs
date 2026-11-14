@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 use facet_bench::screen::{self, DEFAULT_SCROLL_ROWS, Plan};
 use facet_bench::{
     BENCH_QUERY, BENCH_RESULT_LIMIT, BENCH_SORT, BENCH_SORTED_QUERY, DEFAULT_COUNT, INDEX_COUNT,
-    INDEX_MEMORY_LIMIT, LIST_LIMIT, LIST_TARGET, Measurement, QUERY_LIMIT, QUERY_TARGET,
-    check_limit, check_memory, check_query_limit, make_test_folder, measure_list, measure_query,
+    INDEX_MEMORY_LIMIT, LIST_LIMIT, LIST_TARGET, MFT_PARSE_LIMIT, MFT_PARSE_TARGET, MFT_RECORDS,
+    Measurement, QUERY_LIMIT, QUERY_TARGET, check_limit, check_memory, check_mft_limit,
+    check_query_limit, make_test_folder, measure_list, measure_mft, measure_query, mft_image,
     synthetic_index,
 };
 
@@ -24,6 +25,9 @@ const USAGE: &str = "\
       부분 일치 질의와 결과 10만 개를 경로로 정렬하는 질의(둘 다 결과 100개 제한)를
       N회(기본 5)씩 재어 중앙값이 상한(기본 300ms)을 넘으면 실패한다.
       인덱스 파일 저장·읽기 시간도 출력한다(상한 없음).
+  facet-bench mft [--count N] [--runs N] [--limit-ms N]
+      저장소의 MFT 조각을 되풀이해 레코드 N개(기본 1000000)의 MFT 덩어리를 만들고, 그것을
+      인덱스로 만드는 시간을 N회(기본 5) 재어 중앙값이 상한(기본 20000ms)을 넘으면 실패한다.
   facet-bench screen <경로> --app <facet 실행 파일> [--count N] [--runs N] [--scroll-runs N]
                      [--scroll-rows N] [--refresh-hz N] [--json <파일>]
       시험 폴더를 만들거나 확인한 뒤 앱을 측정 모드로 띄워 콜드 스타트(--runs회, 기본 5)와
@@ -128,6 +132,7 @@ fn main() -> ExitCode {
         "make-folder" => make_folder(&args),
         "list" => make_folder(&args).and_then(|()| list(&args)),
         "index" => index(&args),
+        "mft" => mft(&args),
         "screen" => make_folder(&args).and_then(|()| screen(&args)),
         other => Err(format!("알 수 없는 명령: {other}\n\n{USAGE}")),
     };
@@ -244,6 +249,41 @@ fn index(args: &Args) -> Result<(), String> {
         m.times.len()
     );
     report_query(&m, limit)
+}
+
+fn mft(args: &Args) -> Result<(), String> {
+    if args.path.is_some() {
+        return Err(format!(
+            "mft 명령은 경로를 받지 않습니다
+
+{USAGE}"
+        ));
+    }
+    warn_debug();
+    let records = args.count.unwrap_or(MFT_RECORDS);
+    let limit = args.limit.unwrap_or(MFT_PARSE_LIMIT);
+    let image = mft_image(records);
+    let m = measure_mft(&image, args.runs)?;
+    let mb = image.len() as f64 / 1e6;
+    println!(
+        "MFT 파싱 (조각을 되풀이한 레코드 {records}개, {mb:.1}MB → 항목 {}개, {}회):",
+        m.item_count,
+        m.times.len()
+    );
+    print_times(&m);
+    let median = m.median();
+    println!(
+        "  중앙값 {:.1}ms ({:.0}MB/s, 레코드 100만 개당 {:.1}ms), 최악 {:.1}ms / 로컬 기준 {}ms, CI 상한 {}ms",
+        ms(median),
+        mb / median.as_secs_f64().max(1e-9),
+        ms(median) * 1e6 / records.max(1) as f64,
+        ms(m.max()),
+        MFT_PARSE_TARGET.as_millis(),
+        limit.as_millis()
+    );
+    check_mft_limit(&m, records, limit)?;
+    println!("  상한 안: 통과");
+    Ok(())
 }
 
 /// 인덱스 저장·읽기 시간을 잰다(재부팅 뒤 바로 검색의 근거). 시간 상한은 두지 않고 출력만 한다.
