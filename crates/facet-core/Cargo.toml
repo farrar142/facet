@@ -1,0 +1,11 @@
+[package]
+name = "facet-core"
+description = "facet의 화면에 의존하지 않는 코어"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
