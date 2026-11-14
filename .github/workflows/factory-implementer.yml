@@ -158,6 +158,9 @@ jobs:
       - name: Dispatch next tickets
         if: steps.guard.outputs.go == 'true'
         run: |
+          # Same reason: the merge's push to main fires nothing, so start main's CI and nightly here.
+          gh workflow run ci.yml --repo "$REPO" --ref main || echo "::warning::could not dispatch ci.yml"
+          gh workflow run release.yml --repo "$REPO" --ref main || echo "::warning::could not dispatch release.yml"
           sleep 15
           for n in $(gh issue list --repo "$REPO" --state open --label ready-for-agent --json number --jq '.[].number'); do
             open=$(gh api "repos/$REPO/issues/$n" --jq '.issue_dependencies_summary.blocked_by // 0')

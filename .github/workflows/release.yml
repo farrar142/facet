@@ -1,0 +1,105 @@
+# Build artifacts and GitHub Releases (docs/adr/0001-software-factory.md, "빌드 산출물").
+#
+# - nightly: a prerelease under the moving `nightly` tag, rebuilt from main.
+#   Started by the Implementer after each merge (a GITHUB_TOKEN merge fires no push
+#   event), by human pushes to main, and once a day to catch anything missed.
+# - v*: a pushed version tag publishes a Release with generated notes.
+#
+# Packaging is `cargo xtask dist <label>`, owned by the product side. It writes
+# target/dist/facet-<label>-windows-x64.zip and a matching .zip.sha256.
+name: release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  schedule:
+    - cron: '0 18 * * *' # 03:00 KST
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Decide what to build
+        id: plan
+        run: |
+          if ! grep -q 'Some("dist")' xtask/src/main.rs; then
+            echo "::notice::cargo xtask dist does not exist yet; nothing to release"
+            echo "go=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "label=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "kind=tag" >> "$GITHUB_OUTPUT"
+            echo "go=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "label=nightly" >> "$GITHUB_OUTPUT"
+          echo "kind=nightly" >> "$GITHUB_OUTPUT"
+          # Skip when the nightly already points at this commit.
+          current=$(gh api "repos/$REPO/git/ref/tags/nightly" --jq .object.sha 2>/dev/null || true)
+          if [ "$current" = "$GITHUB_SHA" ]; then
+            echo "::notice::nightly already built from $GITHUB_SHA"
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - run: rustup show
+        if: steps.plan.outputs.go == 'true'
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.plan.outputs.go == 'true'
+
+      - name: Package
+        if: steps.plan.outputs.go == 'true'
+        run: |
+          cargo xtask dist "${{ steps.plan.outputs.label }}"
+          ls -l target/dist
+
+      - name: Write release notes
+        if: steps.plan.outputs.go == 'true'
+        run: |
+          {
+            if [ "${{ steps.plan.outputs.kind }}" = nightly ]; then
+              echo "**Nightly build. Agents merged these changes without human review.** Use at your own risk."
+              echo
+              echo "- Commit: ${GITHUB_SHA}"
+              echo "- Built: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              echo
+            fi
+            echo "Windows x64, portable zip. The binaries are not code-signed, so Windows SmartScreen will warn on first launch."
+            echo "Verify the download against the \`.sha256\` file."
+            echo
+            echo "[![Made with Slint](https://raw.githubusercontent.com/slint-ui/slint/372cf0ee5577c3dfec309a45e7b778ba4e81b734/logo/MadeWithSlint-logo-whitebg.png)](https://slint.dev)"
+          } > notes.md
+
+      - name: Publish nightly
+        if: steps.plan.outputs.go == 'true' && steps.plan.outputs.kind == 'nightly'
+        run: |
+          gh release delete nightly --repo "$REPO" --cleanup-tag --yes || true
+          gh release create nightly --repo "$REPO" --prerelease --target "$GITHUB_SHA" \
+            --title "Nightly" --notes-file notes.md target/dist/*
+
+      - name: Publish tagged release
+        if: steps.plan.outputs.go == 'true' && steps.plan.outputs.kind == 'tag'
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$REPO" --verify-tag \
+            --title "$GITHUB_REF_NAME" --notes-file notes.md --generate-notes target/dist/*

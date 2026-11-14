@@ -47,6 +47,15 @@ facet은 Windows 파일 탐색기를 대체할 앱이다. 스택은 아직 정�
 
 PR이 쌓이면 Automated review task(그리고 그 짝인 Rework task)를 넣어 브레이크를 추가한다.
 
+### 빌드 산출물 (2026-11-15, facet-e3 세션과 합의, 대표 승인)
+
+- `.github/workflows/release.yml`(공장 쪽)이 `cargo xtask dist <label>`(제품 쪽)을 부른다. 이 명령은 `target/dist/facet-<label>-windows-x64.zip`과 `.zip.sha256`을 만든다. zip에는 `facet.exe`, `LICENSE`, `NOTICE.txt`(Slint 표시)가 들어간다. x64만 만든다.
+- **nightly**: 움직이는 `nightly` 태그의 prerelease다. 자산 이름은 `facet-nightly-windows-x64.zip`으로 고정해 내려받는 주소가 바뀌지 않는다. 본문에는 「에이전트가 사람 리뷰 없이 병합한 빌드」 경고, SHA, 빌드 시각, 미서명 안내, Slint 배지(ADR-0002 표시 의무 (b))를 적는다.
+  - 트리거: Implementer가 병합한 직후의 dispatch(GITHUB_TOKEN 병합은 push 이벤트를 내지 않으므로), 사람의 main push, 하루 한 번(03:00 KST). 예약 실행은 nightly가 이미 main SHA를 가리키면 건너뛴다.
+- **정식 릴리스**: 사람이 `v*` 태그를 push하면 `facet-v0.1.0-windows-x64.zip` 같은 이름으로 Release를 만들고, 릴리스 노트는 자동 생성한다.
+- PR에는 산출물을 올리지 않는다. `contents: write`는 `release.yml`에만 있다.
+- 미룬 것: 코드 서명(그동안 SmartScreen 경고가 뜬다), 설치 프로그램(MSIX/MSI), 자동 업데이트. 인덱서 서비스는 설치와 권한 상승이 필요해 S18(설치 프로그램) 전까지 zip에 넣지 않는다. 그동안 facet은 서비스 없이 강등 동작으로 돈다.
+
 ## 결과
 
 - 슬롯 하나를 제품 하나(GitHub)가 대부분 채우므로, 관리할 서버가 없다.
