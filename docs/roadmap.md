@@ -59,4 +59,4 @@ facet을 spec 19개로 나눠 만든다. 각 spec은 끝났을 때 직접 써 �
 
 ### 라이선스
 
-facet 코드는 MIT다. Slint는 로열티 프리 라이선스로 쓰고, 정보 화면에 Slint 사용을 표시한다.
+facet 코드는 MIT다. Slint는 로열티 프리 라이선스(Slint Royalty-free Desktop, Mobile, and Web Applications License 2.0)로 쓰고, 최상위 메뉴에서 여는 정보 화면에 Slint의 `AboutSlint` 위젯을 보인다. 조건과 근거는 ADR-0002의 「라이선스 확인」 절에 있다.
