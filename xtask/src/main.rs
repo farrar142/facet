@@ -1,13 +1,14 @@
 //! 저장소 작업 명령. `cargo xtask <명령>`으로 부른다.
 //!
-//! - `ci`: 형식 검사 → lint(경고를 오류로) → 빌드 → 테스트 → 코어 벤치마크.
+//! - `ci`: 형식 검사 → lint(경고를 오류로) → 빌드 → 테스트 → 코어 벤치마크 → 인덱스 벤치마크.
 //!   CI와 로컬이 같은 명령을 쓴다.
 //! - `test-folder`: 시험 폴더를 만든다(`facet-bench make-folder`).
-//! - `bench`: 코어 벤치마크만 돌린다(`facet-bench list`, 릴리스 빌드).
+//! - `bench`: 벤치마크만 돌린다(`facet-bench list`·`facet-bench index`, 릴리스 빌드).
 //!
 //! - `dist <label>`: release 빌드한 facet을 portable zip과 체크섬으로 묶는다(`dist` 모듈).
 //!
-//! 벤치마크 상한과 그 근거는 `crates/facet-bench/src/lib.rs`의 `LIST_LIMIT`에 있다.
+//! 벤치마크 상한과 그 근거는 `crates/facet-bench/src/lib.rs`의 `LIST_LIMIT`·`QUERY_LIMIT`·
+//! `INDEX_MEMORY_LIMIT`에 있다.
 
 mod dist;
 
@@ -19,10 +20,12 @@ const USAGE: &str = "\
 사용법: cargo xtask <명령>
 
 명령:
-  ci                             형식 검사, lint(경고를 오류로), 빌드, 테스트, 코어 벤치마크를 차례로 돌린다
+  ci                             형식 검사, lint(경고를 오류로), 빌드, 테스트, 코어 벤치마크,
+                                 인덱스 벤치마크를 차례로 돌린다
   test-folder [경로] [--count N]  N개(기본 100000) 항목이 든 시험 폴더를 만든다.
                                  경로를 빼면 임시 폴더의 facet-test-folders/items-N
-  bench                          10만 항목 시험 폴더를 만들거나 확인하고 코어 목록 읽기를 잰다(릴리스 빌드)
+  bench                          10만 항목 시험 폴더를 만들거나 확인하고 코어 목록 읽기를 잰 뒤,
+                                 합성 인덱스 100만 개의 메모리와 부분 일치 질의를 잰다(릴리스 빌드)
   dist <label>                   facet을 릴리스 빌드해 target/dist/에 facet-<label>-windows-x64.zip과
                                  그 .sha256을 만든다. label은 nightly나 태그 이름(예: v0.1.0)이고
                                  영문자·숫자·`.`·`-`·`_`만 쓸 수 있다";
@@ -34,7 +37,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("ci") => run_steps("ci", &ci_steps()),
-        Some("bench") => run_steps("bench", &[bench_step()]),
+        Some("bench") => run_steps("bench", &bench_steps()),
         Some("test-folder") => match test_folder_step(&args[1..]) {
             Ok(step) => run_steps("test-folder", &[step]),
             Err(e) => {
@@ -93,8 +96,14 @@ fn ci_steps() -> Vec<Step> {
             &["build", "--workspace", "--all-targets", "--locked"],
         ),
         step("테스트", &["test", "--workspace", "--locked"]),
-        bench_step(),
     ]
+    .into_iter()
+    .chain(bench_steps())
+    .collect()
+}
+
+fn bench_steps() -> Vec<Step> {
+    vec![bench_step(), index_bench_step()]
 }
 
 /// 릴리스 빌드한 `facet-bench`를 `cargo run`으로 부르는 인자.
@@ -131,6 +140,14 @@ fn bench_step() -> Step {
     Step {
         name: "코어 벤치마크",
         args,
+    }
+}
+
+/// 합성 인덱스 100만 개의 메모리와 부분 일치 질의를 잰다. 수와 상한은 `facet-bench`의 기본값이다.
+fn index_bench_step() -> Step {
+    Step {
+        name: "인덱스 벤치마크",
+        args: facet_bench("index"),
     }
 }
 

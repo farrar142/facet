@@ -4,6 +4,9 @@
 //!   항목을 정해진 수만큼 만든다. 같은 수로 다시 돌리면 결과가 같다.
 //! - 코어 벤치마크: 「위치의 항목 목록 읽기」([`facet_core::list_location`])를 재고
 //!   상한([`LIST_LIMIT`])과 비교한다. `cargo xtask ci`가 이것을 부른다.
+//! - 인덱스 벤치마크: 시험 폴더와 같은 이름의 합성 인덱스([`synthetic_index`])를 만들어
+//!   메모리([`INDEX_MEMORY_LIMIT`])와 부분 일치 질의 시간([`QUERY_LIMIT`])을 잰다.
+//!   `cargo xtask ci`가 이것도 부른다.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -234,6 +237,124 @@ pub fn check_limit(m: &Measurement, limit: Duration) -> Result<(), String> {
             median.as_millis(),
             limit.as_millis(),
             m.max().as_millis()
+        ))
+    }
+}
+
+/// 합성 인덱스의 기본 항목 수.
+pub const INDEX_COUNT: usize = 1_000_000;
+
+/// 합성 인덱스 100만 개 부분 일치 질의(결과 100개 제한)의 속도 기준(로컬, 릴리스 빌드). spec #22.
+pub const QUERY_TARGET: Duration = Duration::from_millis(30);
+
+/// CI가 실패시키는 질의 시간 상한: 로컬 기준 [`QUERY_TARGET`]의 10배.
+/// [`LIST_LIMIT`]과 같은 까닭으로 넉넉하다(알고리즘이 한 단계 나빠지는 실수만 잡는다).
+pub const QUERY_LIMIT: Duration = Duration::from_millis(300);
+
+/// 합성 인덱스 100만 개가 쓸 수 있는 메모리 상한(spec #22의 「150MB 미만」).
+/// 10진 MB로 센다(150 × 10⁶바이트). MiB보다 작아 더 엄격하다.
+pub const INDEX_MEMORY_LIMIT: usize = 150_000_000;
+
+/// 벤치마크 질의의 찾을 조각. 대문자로 써서 대소문자 접기를 거치게 하고,
+/// 100만 개 중 마지막 쪽 항목 하나(`Quarterly Report 999997 …`)만 맞게 골라
+/// 결과 100개 제한에 일찍 멈추지 않고 인덱스 전체를 훑게 한다(나쁜 쪽의 경우).
+pub const BENCH_QUERY: &str = "REPORT 99999";
+
+/// 벤치마크 질의의 결과 수 제한.
+pub const BENCH_RESULT_LIMIT: usize = 100;
+
+/// 합성 인덱스의 볼륨 루트 경로와 루트 번호(NTFS 루트 폴더의 MFT 레코드 번호).
+pub const SYNTHETIC_ROOT: &str = r"X:\";
+pub const SYNTHETIC_ROOT_NUMBER: u64 = 5;
+
+/// `index`번 항목의 항목 번호. NTFS의 예약 레코드(0..16)를 피한다.
+fn synthetic_number(index: usize) -> u64 {
+    16 + index as u64
+}
+
+/// `index`번 항목이 들어 있는 폴더의 번호.
+///
+/// 열 개씩 한 묶음이고 묶음마다 폴더가 둘(4번째, 9번째)이다. 첫 묶음은 볼륨 루트 아래,
+/// 그 뒤 `k`번 묶음은 `k / 5`번 묶음의 폴더 하나 아래에 둔다. 폴더마다 약 25개 항목이
+/// 들고 100만 개에서 깊이는 9 안팎이다.
+fn synthetic_parent(index: usize) -> u64 {
+    let group = index / 10;
+    if group == 0 {
+        return SYNTHETIC_ROOT_NUMBER;
+    }
+    let slot = if group.is_multiple_of(2) { 4 } else { 9 };
+    synthetic_number(group / 5 * 10 + slot)
+}
+
+/// 항목 `count`개의 합성 인덱스. 이름은 시험 폴더와 같다([`test_folder_entry`]의 0..count번):
+/// 한글·이모지·긴 이름이 섞이고 열 개 중 두 개가 폴더다. 같은 수면 늘 같은 인덱스다.
+pub fn synthetic_index(count: usize) -> facet_index::Index {
+    let mut index = facet_index::Index::new(SYNTHETIC_ROOT, SYNTHETIC_ROOT_NUMBER);
+    for i in 0..count {
+        let entry = test_folder_entry(i);
+        let item = facet_index::NewItem {
+            number: synthetic_number(i),
+            parent: synthetic_parent(i),
+            name: &entry.name,
+            size: entry.size,
+            // 2022년 무렵부터 1초씩 늦어지는 FILETIME.
+            modified: 133_000_000_000_000_000 + i as u64 * 10_000_000,
+            attributes: if entry.is_folder {
+                facet_index::ATTRIBUTE_DIRECTORY
+            } else {
+                0x20 // FILE_ATTRIBUTE_ARCHIVE
+            },
+        };
+        index
+            .insert(item)
+            .expect("시험 폴더의 이름은 인덱스에 넣을 수 있다");
+    }
+    index
+}
+
+/// `index`에 `query`를 `runs`번 재어 돌린다. 재기 전에 한 번 돌려 데운다.
+/// [`Measurement::item_count`]는 결과 수다.
+pub fn measure_query(
+    index: &facet_index::Index,
+    query: &facet_index::Query,
+    runs: usize,
+) -> Measurement {
+    let mut item_count = index.query(query).len();
+    let mut times = Vec::with_capacity(runs);
+    for _ in 0..runs {
+        let start = Instant::now();
+        let hits = index.query(query);
+        times.push(start.elapsed());
+        item_count = hits.len();
+    }
+    Measurement { item_count, times }
+}
+
+/// 질의 중앙값이 `limit`을 넘으면 넘은 수치를 담은 메시지를 돌려준다.
+pub fn check_query_limit(m: &Measurement, limit: Duration) -> Result<(), String> {
+    let median = m.median();
+    if median <= limit {
+        Ok(())
+    } else {
+        Err(format!(
+            "인덱스 질의 상한 초과: 중앙값 {}ms > 상한 {}ms (최악 {}ms, 결과 {}개)",
+            median.as_millis(),
+            limit.as_millis(),
+            m.max().as_millis(),
+            m.item_count
+        ))
+    }
+}
+
+/// 인덱스 메모리가 `limit` 바이트 이상이면 넘은 수치를 담은 메시지를 돌려준다.
+pub fn check_memory(bytes: usize, limit: usize) -> Result<(), String> {
+    if bytes < limit {
+        Ok(())
+    } else {
+        Err(format!(
+            "인덱스 메모리 상한 초과: {:.1}MB ≥ 상한 {:.1}MB",
+            bytes as f64 / 1e6,
+            limit as f64 / 1e6
         ))
     }
 }
