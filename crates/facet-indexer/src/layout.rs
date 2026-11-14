@@ -79,6 +79,31 @@ pub fn apply_fixup(record: &mut [u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// 고정값을 되돌린 레코드에 든 속성 형식을 차례로 낸다(예: `$ATTRIBUTE_LIST`는 0x20).
+///
+/// MFT 조각을 만들 때 의도한 경우(확장 레코드 등)가 실제로 생겼는지 확인하는 데 쓴다.
+pub fn attribute_types(record: &[u8]) -> Result<Vec<u32>, String> {
+    if record.get(0..4) != Some(b"FILE") {
+        return Err("레코드 서명이 FILE이 아님".to_owned());
+    }
+    let used = (u32_at(record, 0x18)? as usize).min(record.len());
+    let mut at = usize::from(u16_at(record, 0x14)?);
+    let mut types = Vec::new();
+    while at + 8 <= used {
+        let kind = u32_at(record, at)?;
+        if kind == ATTRIBUTE_END {
+            return Ok(types);
+        }
+        let len = u32_at(record, at + 4)? as usize;
+        if len < 0x18 || at + len > used {
+            return Err(format!("속성 길이가 틀림: {len}"));
+        }
+        types.push(kind);
+        at += len;
+    }
+    Err("속성 목록이 끝 표지 없이 끝남".to_owned())
+}
+
 /// 고정값을 되돌린 `$MFT` 레코드(레코드 0)에서 MFT 데이터의 위치 목록을 읽는다.
 pub fn mft_extents(record: &[u8]) -> Result<Vec<Extent>, String> {
     if record.get(0..4) != Some(b"FILE") {
@@ -294,6 +319,27 @@ mod tests {
         );
         assert!(plan_reads(&extents, 4096, 0, 4 * 4096 + 1, 4096).is_err());
         assert_eq!(plan_reads(&extents, 4096, 0, 0, 4096), Ok(vec![]));
+    }
+
+    #[test]
+    fn attribute_types_lists_attributes_until_end_marker() {
+        let mut r = vec![0u8; 1024];
+        r[0..4].copy_from_slice(b"FILE");
+        r[0x14..0x16].copy_from_slice(&0x38u16.to_le_bytes());
+        r[0x18..0x1C].copy_from_slice(&0x100u32.to_le_bytes());
+        for (i, kind) in [0x10u32, 0x20, 0x30].iter().enumerate() {
+            let at = 0x38 + i * 0x18;
+            r[at..at + 4].copy_from_slice(&kind.to_le_bytes());
+            r[at + 4..at + 8].copy_from_slice(&0x18u32.to_le_bytes());
+        }
+        r[0x38 + 3 * 0x18..0x38 + 3 * 0x18 + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(attribute_types(&r), Ok(vec![0x10, 0x20, 0x30]));
+
+        // 끝 표지가 없거나 길이가 넘치면 오류.
+        r[0x38 + 3 * 0x18..0x38 + 3 * 0x18 + 4].copy_from_slice(&0u32.to_le_bytes());
+        assert!(attribute_types(&r).is_err());
+        r[0x3C..0x40].copy_from_slice(&0x1000u32.to_le_bytes());
+        assert!(attribute_types(&r).is_err());
     }
 
     #[test]
