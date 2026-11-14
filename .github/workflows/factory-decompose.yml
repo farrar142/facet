@@ -1,0 +1,57 @@
+# Factory task: Decompose (docs/adr/0001-software-factory.md)
+# Splits a spec issue into tracer-bullet tickets with native blocked-by edges.
+# Trigger: the `spec` label, or a manual run with the spec issue number.
+name: factory-decompose
+
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Spec issue number to decompose
+        required: true
+        type: number
+
+concurrency:
+  group: factory-decompose-${{ github.event.issue.number || inputs.issue }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+  id-token: write
+
+jobs:
+  decompose:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'spec'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SPEC: ${{ github.event.issue.number || inputs.issue }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Stop before spending a run if this spec was already decomposed.
+      - name: Skip if the spec already has sub-issues
+        id: guard
+        run: |
+          n=$(gh api "repos/${{ github.repository }}/issues/$SPEC" --jq '.sub_issues_summary.total // 0')
+          echo "sub_issues=$n" >> "$GITHUB_OUTPUT"
+          if [ "$n" -gt 0 ]; then echo "::notice::#$SPEC already has $n sub-issues; skipping."; fi
+
+      - name: Decompose
+        if: steps.guard.outputs.sub_issues == '0'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            You are the Decompose run of this repo's software factory.
+            Spec issue: #${{ env.SPEC }} in ${{ github.repository }}.
+            Read .github/factory/decompose.md and follow it exactly.
+          claude_args: >-
+            --model claude-opus-5-5
+            --max-turns 80
+            --allowedTools "Bash(gh:*),Read,Glob,Grep"

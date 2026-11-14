@@ -32,7 +32,7 @@ facet은 Windows 파일 탐색기를 대체할 앱이다. 스택은 아직 정�
 | Task | Trigger | 하는 일 | 다음 run | 사람이 다시 들어오는 곳 | 중복 방지 |
 | --- | --- | --- | --- | --- | --- |
 | Implementer | `ready-for-agent` 라벨 | 티켓을 구현하고, 자동 검사를 통과시킨 뒤 draft PR을 연다 | 없음. 의존 티켓 연쇄는 PR **병합**이 트리거한다 | PR 리뷰·병합 | concurrency group `issue-<번호>`. 시작 시 `ready-for-agent`를 떼고 `in-progress`를 붙인다 |
-| Decompose | `spec` 라벨 | spec을 티켓으로 나누고 blocked-by(native dependency)를 기록한다 | 시작 가능한 티켓에 `ready-for-agent`를 붙인다 | 연쇄 전에 사람이 티켓을 확인 | spec 번호로 concurrency group. 하위 이슈가 이미 있으면 종료한다 |
+| Decompose | `spec` 라벨, 또는 수동 실행(`workflow_dispatch`, spec 번호) | spec을 하위 이슈(티켓)로 나누고 blocked-by(native dependency)를 기록한다. 지시는 `.github/factory/decompose.md` | 없음. 티켓에 `ready-for-agent`를 붙이지 않는다 | 사람이 분해 결과를 검토하고 티켓에 직접 `ready-for-agent`를 붙인다 | spec 번호로 concurrency group. 하위 이슈가 이미 있으면 에이전트를 부르기 전에 종료한다 |
 | Explore | 이슈 생성 (`needs-triage`) | 코드베이스와 대조해 분류한다 | 쉬운 건은 `ready-for-agent`, 나머지는 `ready-for-human` / `needs-info` / `wontfix` | 라벨 변경 | 이슈 번호로 concurrency group. `needs-triage`가 있을 때만 실행한다 |
 
 같은 티켓에서 실패한 run이 2번 쌓이면 더 돌리지 않고 `ready-for-human`을 붙여 사람에게 넘긴다.
@@ -41,9 +41,8 @@ facet은 Windows 파일 탐색기를 대체할 앱이다. 스택은 아직 정�
 
 브레이크(자동 검사·사람 리뷰)가 신뢰를 얻는 만큼만 트리거를 켠다.
 
-0. **전제 조건**: 스택을 정하고, 빌드·lint·test CI workflow를 만든다. 자동 검사가 없으면 Implementer를 켜지 않는다.
-1. **Implementer**: 사람이 직접 `ready-for-agent`를 붙일 때만 돈다. PR마다 사람이 리뷰한다.
-2. **Decompose**: 로컬 `to-tickets` 스킬과 하는 일이 겹친다. 원격으로도 필요할 때 켠다.
+1. **Decompose (2026-11-15 켬)**: 코드를 빌드하지 않으므로 CI 없이 켠다. 티켓에 `ready-for-agent`를 붙이지 않으므로 다른 run을 트리거하지 않는다. 첫 대상은 S0(#1)이다. S0 티켓은 공장 밖(로컬 implement)에서 구현하므로 라벨 없이 둔다.
+2. **Implementer**: 전제 조건은 자동 검사다. 빌드·lint·test CI workflow를 만든다(S0, #1). 자동 검사 전체는 명령 하나 `cargo xtask ci`로 돈다. `.github/workflows/ci.yml`도 Implementer run도 이 명령을 쓴다. 자동 검사가 없으면 Implementer를 켜지 않는다. 켠 뒤에도 사람이 직접 `ready-for-agent`를 붙일 때만 돌고, PR마다 사람이 리뷰한다. Implementer는 `labeled` 이벤트로만 돌기 때문에, 켜기 전부터 열려 있던 티켓을 저절로 집어 가지 않는다.
 3. **Explore**: 외부 사용자가 이슈를 올리기 시작하면 켠다. 처음에는 일부 이슈에만 적용한다.
 
 PR이 쌓이면 Automated review task(그리고 그 짝인 Rework task)를 넣어 브레이크를 추가한다.
