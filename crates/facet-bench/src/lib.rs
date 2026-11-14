@@ -5,6 +5,8 @@
 //! - 코어 벤치마크: 「위치의 항목 목록 읽기」([`facet_core::list_location`])를 재고
 //!   상한([`LIST_LIMIT`])과 비교한다. `cargo xtask ci`가 이것을 부른다.
 
+pub mod screen;
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, OpenOptions};
