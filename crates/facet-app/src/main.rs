@@ -10,7 +10,7 @@ use std::rc::Rc;
 use std::thread;
 
 use facet_core::file_list::{self, Movement};
-use facet_core::{Item, list_location};
+use facet_core::{Item, Location, provider_for};
 use slint::{Model, ModelRc, ModelTracker, SharedString};
 
 slint::include_modules!();
@@ -23,7 +23,7 @@ fn main() -> Result<(), slint::PlatformError> {
         .map(PathBuf::from)
         .map_or_else(std::env::current_dir, Ok);
     match location {
-        Ok(path) => open(&ui, path),
+        Ok(path) => open(&ui, Location::file_system(path)),
         Err(e) => ui.set_error_text(format!("현재 폴더를 알 수 없습니다: {e}").into()),
     }
 
@@ -43,14 +43,14 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.run()
 }
 
-/// `path`의 목록을 일꾼 스레드에서 읽고, 다 읽으면 UI 스레드에서 창에 넣는다.
-fn open(ui: &AppWindow, path: PathBuf) {
-    ui.set_location(path.display().to_string().into());
+/// `location`의 목록을 일꾼 스레드에서 읽고, 다 읽으면 UI 스레드에서 창에 넣는다.
+fn open(ui: &AppWindow, location: Location) {
+    ui.set_location(location.to_string().into());
     ui.set_loading(true);
     ui.set_error_text(SharedString::new());
     let weak = ui.as_weak();
     thread::spawn(move || {
-        let result = list_location(&path);
+        let result = provider_for(&location).list(&location);
         // 이벤트 루프가 이미 끝났으면(창을 닫았으면) 버린다.
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
