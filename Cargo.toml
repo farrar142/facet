@@ -12,6 +12,7 @@ publish = false
 
 [workspace.dependencies]
 facet-core = { path = "crates/facet-core" }
+facet-index = { path = "crates/facet-index" }
 facet-win = { path = "crates/facet-win" }
 
 [workspace.lints.rust]

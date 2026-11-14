@@ -1,15 +1,17 @@
 //! 저장소 작업 명령. `cargo xtask <명령>`으로 부른다.
 //!
-//! - `ci`: 형식 검사 → lint(경고를 오류로) → 빌드 → 테스트 → 실제 볼륨 테스트 → 코어 벤치마크.
-//!   CI와 로컬이 같은 명령을 쓴다. 실제 볼륨 테스트는 관리자일 때만 시험 VHD를 만들어 돌린다.
+//! - `ci`: 형식 검사 → lint(경고를 오류로) → 빌드 → 테스트 → 실제 볼륨 테스트 → 코어 벤치마크
+//!   → 인덱스 벤치마크. CI와 로컬이 같은 명령을 쓴다. 실제 볼륨 테스트는 관리자일 때만 시험 VHD를
+//!   만들어 돌린다.
 //! - `test-folder`: 시험 폴더를 만든다(`facet-bench make-folder`).
-//! - `bench`: 코어 벤치마크만 돌린다(`facet-bench list`, 릴리스 빌드).
+//! - `bench`: 벤치마크만 돌린다(`facet-bench list`·`facet-bench index`, 릴리스 빌드).
 //!
 //! - `measure [인자]`: 앱과 측정 도구를 릴리스 빌드해 화면 수치(콜드 스타트·스크롤 프레임)를 잰다.
 //! - `mft-fixture`: 시험 VHD에서 MFT 조각과 기대값 목록을 만든다(`mft_fixture` 모듈, 관리자).
 //! - `dist <label>`: release 빌드한 facet을 portable zip과 체크섬으로 묶는다(`dist` 모듈).
 //!
-//! 벤치마크 상한과 그 근거는 `crates/facet-bench/src/lib.rs`의 `LIST_LIMIT`에 있다.
+//! 벤치마크 상한과 그 근거는 `crates/facet-bench/src/lib.rs`의 `LIST_LIMIT`·`QUERY_LIMIT`·
+//! `INDEX_MEMORY_LIMIT`에 있다.
 
 mod dist;
 mod mft_fixture;
@@ -24,11 +26,12 @@ const USAGE: &str = "\
 
 명령:
   ci                             형식 검사, lint(경고를 오류로), 빌드, 테스트, 실제 볼륨 테스트,
-                                 코어 벤치마크를 차례로 돌린다. 실제 볼륨 테스트는 관리자일 때만
-                                 시험 VHD를 만들어 돌리고, 아니면 건너뛴다고 출력한다
+                                 코어 벤치마크, 인덱스 벤치마크를 차례로 돌린다. 실제 볼륨 테스트는
+                                 관리자일 때만 시험 VHD를 만들어 돌리고, 아니면 건너뛴다고 출력한다
   test-folder [경로] [--count N]  N개(기본 100000) 항목이 든 시험 폴더를 만든다.
                                  경로를 빼면 임시 폴더의 facet-test-folders/items-N
-  bench                          10만 항목 시험 폴더를 만들거나 확인하고 코어 목록 읽기를 잰다(릴리스 빌드)
+  bench                          10만 항목 시험 폴더를 만들거나 확인하고 코어 목록 읽기를 잰 뒤,
+                                 합성 인덱스 100만 개의 메모리와 부분 일치 질의를 잰다(릴리스 빌드)
   measure [--count N] [--runs N] [--scroll-runs N] [--scroll-rows N] [--refresh-hz N] [--json 파일] [경로]
                                  앱을 릴리스 빌드하고 시험 폴더(기본 10만 항목)를 열어 콜드 스타트 중앙값과
                                  스크롤 프레임 시간을 잰다. 표와 JSON(기본 target/measure.json)을 내고,
@@ -46,7 +49,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("ci") => run_ci(),
-        Some("bench") => run_steps("bench", &[bench_step()]),
+        Some("bench") => run_steps("bench", &bench_steps()),
         Some("test-folder") => match test_folder_step(&args[1..]) {
             Ok(step) => run_steps("test-folder", &[step]),
             Err(e) => {
@@ -95,13 +98,13 @@ fn step(name: &'static str, args: &[&str]) -> Step {
     }
 }
 
-/// `ci`: 앞 단계들 → 실제 볼륨 테스트 → 코어 벤치마크.
+/// `ci`: 앞 단계들 → 실제 볼륨 테스트 → 코어 벤치마크 → 인덱스 벤치마크.
 fn run_ci() -> ExitCode {
     if run_steps("ci", &ci_steps()) != ExitCode::SUCCESS || real_volume_tests() != ExitCode::SUCCESS
     {
         return ExitCode::FAILURE;
     }
-    run_steps("ci", &[bench_step()])
+    run_steps("ci", &bench_steps())
 }
 
 /// 실제 볼륨 테스트를 고르는 이름 앞부분. 이 테스트들은 `#[ignore]`로 기본 `cargo test`에서 빠진다.
@@ -180,6 +183,10 @@ fn ci_steps() -> Vec<Step> {
     ]
 }
 
+fn bench_steps() -> Vec<Step> {
+    vec![bench_step(), index_bench_step()]
+}
+
 /// 릴리스 빌드한 `facet-bench`를 `cargo run`으로 부르는 인자.
 fn facet_bench(command: &str) -> Vec<String> {
     [
@@ -214,6 +221,15 @@ fn bench_step() -> Step {
     Step {
         name: "코어 벤치마크",
         args,
+        env: Vec::new(),
+    }
+}
+
+/// 합성 인덱스 100만 개의 메모리와 부분 일치 질의를 잰다. 수와 상한은 `facet-bench`의 기본값이다.
+fn index_bench_step() -> Step {
+    Step {
+        name: "인덱스 벤치마크",
+        args: facet_bench("index"),
         env: Vec::new(),
     }
 }

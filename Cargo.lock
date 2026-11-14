@@ -1190,6 +1190,7 @@ name = "facet-bench"
 version = "0.1.0"
 dependencies = [
  "facet-core",
+ "facet-index",
  "tempfile",
 ]
 
@@ -1199,6 +1200,13 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "tempfile",
+]
+
+[[package]]
+name = "facet-index"
+version = "0.1.0"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
