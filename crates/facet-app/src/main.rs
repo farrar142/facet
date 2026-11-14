@@ -12,7 +12,7 @@ use std::thread;
 
 use facet_core::file_list::{self, Movement};
 use facet_core::name_input::NameInput;
-use facet_core::{Item, Location, provider_for};
+use facet_core::{Item, ListError, Location, provider_for};
 use slint::{Model, ModelRc, ModelTracker, SharedString};
 
 mod measure;
@@ -20,15 +20,22 @@ mod measure;
 slint::include_modules!();
 
 fn main() -> Result<(), slint::PlatformError> {
+    // 창 만들기(렌더러 준비)가 콜드 스타트에서 가장 오래 걸리므로, 목록은 그보다 먼저 읽기 시작해 겹친다.
+    let opening = std::env::args_os()
+        .nth(1)
+        .map(PathBuf::from)
+        .map_or_else(std::env::current_dir, Ok)
+        .map(|path| {
+            let location = Location::file_system(path);
+            let reading = start_reading(location.clone());
+            (location, reading)
+        });
+
     let ui = AppWindow::new()?;
     measure::install(&ui);
 
-    let location = std::env::args_os()
-        .nth(1)
-        .map(PathBuf::from)
-        .map_or_else(std::env::current_dir, Ok);
-    match location {
-        Ok(path) => open(&ui, Location::file_system(path)),
+    match opening {
+        Ok((location, reading)) => open(&ui, &location, reading),
         Err(e) => ui.set_error_text(format!("현재 폴더를 알 수 없습니다: {e}").into()),
     }
 
@@ -93,33 +100,56 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.run()
 }
 
-/// `location`의 목록을 일꾼 스레드에서 읽고, 다 읽으면 UI 스레드에서 창에 넣는다.
-fn open(ui: &AppWindow, location: Location) {
+/// 일꾼 스레드에서 읽는 중인 목록.
+type Reading = thread::JoinHandle<Result<Vec<Item>, ListError>>;
+
+/// `location`의 목록을 일꾼 스레드에서 읽기 시작한다. 창이 없어도 된다.
+fn start_reading(location: Location) -> Reading {
+    thread::spawn(move || provider_for(&location).list(&location))
+}
+
+/// `location`을 창에 보이고, `reading`이 끝나면 UI 스레드에서 그 목록을 창에 넣는다.
+/// 이미 끝났으면 바로 넣어 첫 화면부터 목록이 보이게 한다.
+fn open(ui: &AppWindow, location: &Location, reading: Reading) {
     ui.set_location(location.to_string().into());
-    ui.set_loading(true);
     ui.set_error_text(SharedString::new());
+    if reading.is_finished() {
+        show_result(ui, reading.join());
+        return;
+    }
+    ui.set_loading(true);
     let weak = ui.as_weak();
     thread::spawn(move || {
-        let result = provider_for(&location).list(&location);
+        let result = reading.join();
         // 이벤트 루프가 이미 끝났으면(창을 닫았으면) 버린다.
         let _ = slint::invoke_from_event_loop(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            ui.set_loading(false);
-            match result {
-                Ok(items) => {
-                    measure::mark_loaded(items.len());
-                    let first = if items.is_empty() { -1 } else { 0 };
-                    ui.set_rows(ModelRc::from(Rc::new(Rows(items))));
-                    ui.set_selected(first);
-                    ui.set_content_y(0.0);
-                }
-                Err(e) => {
-                    ui.set_error_text(e.to_string().into());
-                    measure::mark_loaded(0);
-                }
+            if let Some(ui) = weak.upgrade() {
+                show_result(&ui, result);
             }
         });
     });
+}
+
+/// 다 읽은 목록(또는 오류)을 창에 넣는다. UI 스레드에서 부른다.
+fn show_result(ui: &AppWindow, result: thread::Result<Result<Vec<Item>, ListError>>) {
+    ui.set_loading(false);
+    match result {
+        Ok(Ok(items)) => {
+            measure::mark_loaded(items.len());
+            let first = if items.is_empty() { -1 } else { 0 };
+            ui.set_rows(ModelRc::from(Rc::new(Rows(items))));
+            ui.set_selected(first);
+            ui.set_content_y(0.0);
+        }
+        Ok(Err(e)) => {
+            ui.set_error_text(e.to_string().into());
+            measure::mark_loaded(0);
+        }
+        Err(_) => {
+            ui.set_error_text("목록을 읽다가 멈췄습니다".into());
+            measure::mark_loaded(0);
+        }
+    }
 }
 
 fn movement(nav: Nav) -> Movement {

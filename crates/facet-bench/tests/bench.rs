@@ -224,6 +224,27 @@ mod screen {
     }
 
     #[test]
+    fn 상한을_넘은_프레임_수를_센다() {
+        // 60Hz 상한 33.3ms: 34와 2835만 넘는다.
+        let r = result(&[100], &[6, 33, 34, 7, 2835], Some(60.0));
+        assert_eq!(r.verdict().frames_over_limit, 2);
+        assert!(r.to_table().contains("상한을 넘은 프레임 2개"));
+        assert!(r.to_json().contains("\"frames_over_limit\": 2"));
+    }
+
+    #[test]
+    fn 디스크는_폴더가_있는_드라이브에서_찾는다() {
+        use facet_bench::screen::{drive_letter, spec_script};
+        use std::path::Path;
+        assert_eq!(drive_letter(Path::new(r"d:\시험\items")), Some('D'));
+        assert_eq!(drive_letter(Path::new(r"\\?\C:\Temp")), Some('C'));
+        assert_eq!(drive_letter(Path::new(r"\\server\share\x")), None);
+        assert_eq!(drive_letter(Path::new("relative")), None);
+        assert!(spec_script(Path::new(r"E:\x")).contains("Get-Partition -DriveLetter E"));
+        assert!(!spec_script(Path::new(r"\\server\share\x")).contains("disk="));
+    }
+
+    #[test]
     fn 프레임이_하나도_없으면_통과하지_못한다() {
         assert!(!result(&[100], &[], Some(60.0)).verdict().frame_pass);
     }

@@ -3,7 +3,7 @@
 //! 환경 변수 [`ENV_OUT`]이 없는 평소 실행에서는 [`install`]이 아무것도 걸지 않고,
 //! [`mark_loaded`]는 원자 변수에 값 하나를 쓸 뿐이다. 그래서 평소 실행 경로의 속도는 달라지지 않는다.
 //!
-//! 측정 모드에서는 목록이 창에 들어간 뒤 처음 그려진 프레임까지의 시간을 재고,
+//! 측정 모드에서는 목록이 창에 들어간 뒤 처음 그려진 프레임이 화면에 나갈 때까지의 시간을 재고,
 //! [`ENV_SCROLL_ROWS`]가 있으면 프레임마다 그 수만큼의 행씩 목록 끝까지 스크롤하며
 //! 프레임 사이의 시간을 모은다. 끝나면 결과를 파일에 쓰고 이벤트 루프를 끝낸다.
 
@@ -34,6 +34,8 @@ struct State {
     scroll_rows: usize,
     report: ScreenReport,
     last_frame: Option<Instant>,
+    /// 목록이 든 첫 프레임을 그렸고, 화면에 내보낸 뒤의 시각을 기다리는 중이다.
+    first_pending: bool,
     /// 목록 맨 끝까지 내렸다: 다음에 그려지는 프레임이 마지막이다.
     at_end: bool,
     finished: bool,
@@ -75,6 +77,7 @@ pub fn install(ui: &AppWindow) {
         scroll_rows: env_number(ENV_SCROLL_ROWS) as usize,
         report: ScreenReport::default(),
         last_frame: None,
+        first_pending: false,
         at_end: false,
         finished: false,
     }));
@@ -89,32 +92,29 @@ pub fn install(ui: &AppWindow) {
                 return;
             }
             let Ok(mut s) = state.lock() else { return };
-            if s.finished {
+            if s.finished || s.first_pending {
+                return;
+            }
+            let weak = weak.clone();
+            let state = Arc::clone(&state);
+            if s.report.first_frame.is_none() {
+                // 그리기 알림은 화면에 내보내기(present) 전에 온다. 첫 화면을 처음 내보낼 때는
+                // 수십 ms 걸리기도 하므로, 내보내고 이벤트 루프로 돌아온 때를 첫 화면 시각으로 삼는다.
+                // 스크롤 프레임도 이때부터 재어, 창이 처음 뜨는 비용이 스크롤에 섞이지 않게 한다.
+                s.first_pending = true;
+                let _ = slint::invoke_from_event_loop(move || first_presented(&weak, &state));
                 return;
             }
             let now = Instant::now();
-            if s.report.first_frame.is_none() {
-                let elapsed_us = now_us().saturating_sub(s.start_us);
-                s.report.first_frame = Some(Duration::from_micros(elapsed_us));
-                s.report.rows = ROWS.load(Ordering::Relaxed);
-                s.last_frame = Some(now);
-                if s.scroll_rows == 0 {
-                    s.finish();
-                    return;
-                }
-            } else {
-                if let Some(last) = s.last_frame {
-                    s.report.frames.push(now - last);
-                }
-                s.last_frame = Some(now);
-                if s.at_end {
-                    s.finish();
-                    return;
-                }
+            if let Some(last) = s.last_frame {
+                s.report.frames.push(now - last);
+            }
+            s.last_frame = Some(now);
+            if s.at_end {
+                s.finish();
+                return;
             }
             // 다음 프레임을 위해 한 걸음 스크롤한다. 그리는 중에는 창을 건드리지 않고 이벤트 루프에 맡긴다.
-            let weak = weak.clone();
-            let state = Arc::clone(&state);
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
                     step(&ui, &state);
@@ -124,6 +124,25 @@ pub fn install(ui: &AppWindow) {
     if let Err(e) = result {
         eprintln!("이 렌더러는 그리기 알림을 지원하지 않아 측정할 수 없습니다: {e}");
         std::process::exit(2);
+    }
+}
+
+/// 목록이 든 첫 프레임을 화면에 내보낸 뒤 한 번: 첫 화면 시각을 적고, 스크롤을 잴 거면 첫 걸음을 내딛는다.
+fn first_presented(weak: &slint::Weak<AppWindow>, state: &Mutex<State>) {
+    {
+        let Ok(mut s) = state.lock() else { return };
+        s.first_pending = false;
+        let elapsed_us = now_us().saturating_sub(s.start_us);
+        s.report.first_frame = Some(Duration::from_micros(elapsed_us));
+        s.report.rows = ROWS.load(Ordering::Relaxed);
+        s.last_frame = Some(Instant::now());
+        if s.scroll_rows == 0 {
+            s.finish();
+            return;
+        }
+    }
+    if let Some(ui) = weak.upgrade() {
+        step(&ui, state);
     }
 }
 
