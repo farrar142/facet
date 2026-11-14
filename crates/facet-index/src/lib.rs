@@ -36,6 +36,13 @@ use memchr::memmem;
 /// 폴더 속성 비트(Windows `FILE_ATTRIBUTE_DIRECTORY`). 이 비트가 있는 항목만 부모가 될 수 있다.
 pub const ATTRIBUTE_DIRECTORY: u32 = 0x10;
 
+/// 읽기 전용 속성 비트(`FILE_ATTRIBUTE_READONLY`).
+pub const ATTRIBUTE_READONLY: u32 = 0x1;
+/// 숨김 속성 비트(`FILE_ATTRIBUTE_HIDDEN`).
+pub const ATTRIBUTE_HIDDEN: u32 = 0x2;
+/// 시스템 속성 비트(`FILE_ATTRIBUTE_SYSTEM`).
+pub const ATTRIBUTE_SYSTEM: u32 = 0x4;
+
 /// 경로 구분자.
 const SEPARATOR: char = '\\';
 
@@ -82,23 +89,182 @@ impl fmt::Display for InsertError {
 
 impl std::error::Error for InsertError {}
 
-/// 인덱스에 보내는 질의.
-///
-/// 지금은 이름 부분 일치 하나와 결과 수 제한만 있다. 대소문자는 무시한다.
+/// 이름 조건의 대소문자 규칙.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Case {
+    /// 대소문자를 무시한다(기본).
+    #[default]
+    Insensitive,
+    /// 대소문자를 구별한다.
+    Sensitive,
+}
+
+/// 조건을 만들 수 없는 까닭.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilterError {
+    /// 정규식이 잘못됐거나 너무 크다. 정규식 라이브러리의 설명을 담는다.
+    InvalidRegex(String),
+}
+
+impl fmt::Display for FilterError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidRegex(why) => write!(f, "잘못된 정규식입니다: {why}"),
+        }
+    }
+}
+
+impl std::error::Error for FilterError {}
+
+/// 항목에 거는 조건 트리. 조건 하나를 만들거나 [`Filter::and`]·[`Filter::or`]·[`Filter::not`]으로 묶는다.
+///
+/// 사람이 치는 질의 문법은 이 위에 따로 얹는다. 여기에는 글자 문법이 없다.
+#[derive(Debug, Clone)]
+pub struct Filter(Node);
+
+#[derive(Debug, Clone)]
+enum Node {
+    /// 이름에 조각이 들어 있다. 대소문자 무시면 `part`는 접은 조각이다.
+    Contains {
+        part: String,
+        case: Case,
+    },
+    /// 이름이 정규식(와일드카드는 정규식으로 바꾼 것)과 맞는다.
+    Pattern(regex::Regex),
+    /// 폴더 아래(하위 폴더 포함)에 있다. 접은 폴더 경로를 `\`로 끝나게 담는다.
+    Under(String),
+    Size(Option<u64>, Option<u64>),
+    Modified(Option<u64>, Option<u64>),
+    /// 주어진 속성 비트를 모두 가진다.
+    Attributes(u32),
+    /// 접은 확장자(점 없이).
+    Extension(String),
+    All(Vec<Filter>),
+    Any(Vec<Filter>),
+    Not(Box<Filter>),
+}
+
+impl Filter {
+    /// 이름에 `part`가 들어 있는 항목. 빈 조각은 모든 항목과 맞는다.
+    pub fn name_contains(part: &str, case: Case) -> Self {
+        let part = match case {
+            Case::Insensitive => fold(part),
+            Case::Sensitive => part.to_owned(),
+        };
+        Self(Node::Contains { part, case })
+    }
+
+    /// 이름 전체가 와일드카드(`*` 0개 이상의 글자, `?` 글자 하나)와 맞는 항목.
+    pub fn name_wildcard(pattern: &str, case: Case) -> Result<Self, FilterError> {
+        let mut re = String::from("^");
+        let mut literal = String::new();
+        for c in pattern.chars() {
+            if matches!(c, '*' | '?') {
+                re.push_str(&regex::escape(&literal));
+                literal.clear();
+                re.push_str(if c == '*' { ".*" } else { "." });
+            } else {
+                literal.push(c);
+            }
+        }
+        re.push_str(&regex::escape(&literal));
+        re.push('$');
+        Self::compile(&re, case)
+    }
+
+    /// 이름의 어딘가가 정규식과 맞는 항목. 잘못된 정규식은 오류 값이다.
+    pub fn name_regex(pattern: &str, case: Case) -> Result<Self, FilterError> {
+        Self::compile(pattern, case)
+    }
+
+    fn compile(pattern: &str, case: Case) -> Result<Self, FilterError> {
+        regex::RegexBuilder::new(pattern)
+            .case_insensitive(case == Case::Insensitive)
+            .dot_matches_new_line(true)
+            .build()
+            .map(|re| Self(Node::Pattern(re)))
+            .map_err(|e| FilterError::InvalidRegex(e.to_string()))
+    }
+
+    /// `folder` 아래(하위 폴더 포함)에 있는 항목. 폴더 자신은 맞지 않는다. 경로의 대소문자는 무시한다.
+    pub fn under(folder: &str) -> Self {
+        let mut path = fold(folder.trim_end_matches(SEPARATOR));
+        path.push(SEPARATOR);
+        Self(Node::Under(path))
+    }
+
+    /// 크기가 `min` 이상 `max` 이하인 항목(`None`은 그쪽 끝이 열려 있다).
+    pub fn size(min: Option<u64>, max: Option<u64>) -> Self {
+        Self(Node::Size(min, max))
+    }
+
+    /// 수정 날짜(`FILETIME`)가 `min` 이상 `max` 이하인 항목.
+    pub fn modified(min: Option<u64>, max: Option<u64>) -> Self {
+        Self(Node::Modified(min, max))
+    }
+
+    /// `mask`의 속성 비트를 모두 가진 항목. 없는 항목은 [`Filter::not`]으로 고른다.
+    pub fn attributes(mask: u32) -> Self {
+        Self(Node::Attributes(mask))
+    }
+
+    /// 확장자가 `extension`인 항목(대소문자 무시, 앞의 점은 있어도 없어도 된다).
+    /// 확장자는 이름의 마지막 `.` 뒤다.
+    pub fn extension(extension: &str) -> Self {
+        let e = extension.strip_prefix('.').unwrap_or(extension);
+        Self(Node::Extension(fold(e)))
+    }
+
+    /// 모두 맞아야 맞는다. 비었으면 모든 항목과 맞는다.
+    pub fn and(filters: impl IntoIterator<Item = Filter>) -> Self {
+        Self(Node::All(filters.into_iter().collect()))
+    }
+
+    /// 하나라도 맞으면 맞는다. 비었으면 아무 항목과도 맞지 않는다.
+    pub fn or(filters: impl IntoIterator<Item = Filter>) -> Self {
+        Self(Node::Any(filters.into_iter().collect()))
+    }
+
+    /// 맞지 않아야 맞는다.
+    #[allow(clippy::should_implement_trait)]
+    pub fn not(filter: Filter) -> Self {
+        Self(Node::Not(Box::new(filter)))
+    }
+}
+
+/// 인덱스에 보내는 질의: 조건 하나(또는 조건 트리)와 결과 수 제한.
+#[derive(Debug, Clone)]
 pub struct Query {
-    /// 대소문자를 접은 찾을 조각.
-    folded: String,
+    plan: Plan,
     limit: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+enum Plan {
+    /// 대소문자를 무시하는 이름 부분 일치. 접은 이름 버퍼를 한 번에 훑는 빠른 길.
+    Contains(String),
+    Filter(Filter),
 }
 
 impl Query {
     /// 이름에 `part`가 들어 있는(대소문자 무시) 항목을 찾는 질의. 빈 조각은 모든 항목과 맞는다.
     pub fn name_contains(part: &str) -> Self {
         Self {
-            folded: fold(part),
+            plan: Plan::Contains(fold(part)),
             limit: None,
         }
+    }
+
+    /// 조건 트리에 맞는 항목을 찾는 질의.
+    pub fn filter(filter: Filter) -> Self {
+        let plan = match filter.0 {
+            Node::Contains {
+                part,
+                case: Case::Insensitive,
+            } => Plan::Contains(part),
+            node => Plan::Filter(Filter(node)),
+        };
+        Self { plan, limit: None }
     }
 
     /// 결과를 많아야 `n`개만 받는다.
@@ -244,11 +410,31 @@ impl Index {
     pub fn query(&self, query: &Query) -> Vec<Hit> {
         let limit = query.limit.unwrap_or(usize::MAX);
         let mut hits = Vec::new();
-        if limit == 0 || query.folded.contains(NAME_END) {
+        if limit == 0 {
+            return hits;
+        }
+        let folded = match &query.plan {
+            Plan::Contains(folded) => folded,
+            Plan::Filter(filter) => {
+                for index in 0..self.records.len() {
+                    let mut item = Item::new(self, index);
+                    if self.matches(filter, &mut item)
+                        && let Some(hit) = item.into_hit()
+                    {
+                        hits.push(hit);
+                        if hits.len() >= limit {
+                            break;
+                        }
+                    }
+                }
+                return hits;
+            }
+        };
+        if folded.contains(NAME_END) {
             return hits;
         }
 
-        if query.folded.is_empty() {
+        if folded.is_empty() {
             for index in 0..self.records.len() {
                 if let Some(hit) = self.hit(index) {
                     hits.push(hit);
@@ -262,7 +448,7 @@ impl Index {
 
         // 접은 이름 버퍼 전체를 한 번에 훑는다. 찾을 조각에 `\0`이 없으므로 이름 경계를 넘는
         // 일치는 생기지 않는다. 한 이름에서 맞으면 그 이름의 나머지는 건너뛴다.
-        let finder = memmem::Finder::new(query.folded.as_bytes());
+        let finder = memmem::Finder::new(folded.as_bytes());
         let haystack = self.folded.as_bytes();
         let mut from = 0;
         while let Some(found) = finder.find(&haystack[from..]) {
@@ -276,6 +462,31 @@ impl Index {
             from = self.folded_name_end(index) + 1;
         }
         hits
+    }
+
+    /// 조건 트리를 항목 하나에 평가한다.
+    fn matches(&self, filter: &Filter, item: &mut Item<'_>) -> bool {
+        let record = self.records[item.index];
+        match &filter.0 {
+            Node::Contains { part, case } => match case {
+                Case::Insensitive => item.folded_name().contains(part.as_str()),
+                Case::Sensitive => self.name(item.index).contains(part.as_str()),
+            },
+            Node::Pattern(re) => re.is_match(self.name(item.index)),
+            Node::Under(prefix) => item
+                .folded_path()
+                .is_some_and(|p| p.len() > prefix.len() && p.starts_with(prefix.as_str())),
+            Node::Size(min, max) => in_range(record.size, *min, *max),
+            Node::Modified(min, max) => in_range(record.modified, *min, *max),
+            Node::Attributes(mask) => record.attributes & mask == *mask,
+            Node::Extension(ext) => {
+                let name = item.folded_name();
+                name.rfind('.').is_some_and(|dot| &name[dot + 1..] == ext)
+            }
+            Node::All(fs) => fs.iter().all(|f| self.matches(f, item)),
+            Node::Any(fs) => fs.iter().any(|f| self.matches(f, item)),
+            Node::Not(f) => !self.matches(f, item),
+        }
     }
 
     /// 접은 이름 버퍼의 `offset`이 속한 레코드 위치.
@@ -312,11 +523,10 @@ impl Index {
         }
     }
 
-    /// `index`번 레코드의 결과. 볼륨 루트까지 부모를 따라갈 수 없으면 `None`.
-    fn hit(&self, index: usize) -> Option<Hit> {
-        let record = self.records[index];
+    /// `index`번 레코드의 전체 경로. 볼륨 루트까지 부모를 따라갈 수 없으면 `None`.
+    fn path(&self, index: usize) -> Option<String> {
         let mut chain = vec![index];
-        let mut parent = record.parent;
+        let mut parent = self.records[index].parent;
         while parent != self.root_number {
             // 폴더 수보다 깊으면 고리다.
             if chain.len() > self.folders.len() {
@@ -334,14 +544,68 @@ impl Index {
             }
             path.push_str(self.name(at));
         }
-        Some(Hit {
+        Some(path)
+    }
+
+    /// `index`번 레코드의 결과. 볼륨 루트까지 부모를 따라갈 수 없으면 `None`.
+    fn hit(&self, index: usize) -> Option<Hit> {
+        self.path(index).map(|path| self.hit_with(index, path))
+    }
+
+    fn hit_with(&self, index: usize, path: String) -> Hit {
+        let record = self.records[index];
+        Hit {
             path,
             name: self.name(index).to_owned(),
             size: record.size,
             modified: record.modified,
             attributes: record.attributes,
-        })
+        }
     }
+}
+
+/// 조건을 평가하는 동안의 항목 하나. 경로는 `Under`가 물을 때만 만든다.
+struct Item<'a> {
+    owner: &'a Index,
+    index: usize,
+    /// 아직 만들지 않았으면 바깥 `None`, 만들었으면 (경로, 접은 경로). 경로를 못 만들면 안쪽 `None`.
+    path: Option<Option<(String, String)>>,
+}
+
+impl<'a> Item<'a> {
+    fn new(owner: &'a Index, index: usize) -> Self {
+        Self {
+            owner,
+            index,
+            path: None,
+        }
+    }
+
+    fn folded_name(&self) -> &'a str {
+        let owner = self.owner;
+        let start = owner.records[self.index].name_start as usize;
+        &owner.folded[start..owner.folded_name_end(self.index)]
+    }
+
+    fn built_path(&mut self) -> &Option<(String, String)> {
+        let (owner, index) = (self.owner, self.index);
+        self.path
+            .get_or_insert_with(|| owner.path(index).map(|p| (p.clone(), fold(&p))))
+    }
+
+    fn folded_path(&mut self) -> Option<&str> {
+        self.built_path().as_ref().map(|(_, f)| f.as_str())
+    }
+
+    fn into_hit(mut self) -> Option<Hit> {
+        self.built_path();
+        let (owner, index) = (self.owner, self.index);
+        self.path.flatten().map(|(p, _)| owner.hit_with(index, p))
+    }
+}
+
+fn in_range(value: u64, min: Option<u64>, max: Option<u64>) -> bool {
+    min.is_none_or(|m| value >= m) && max.is_none_or(|m| value <= m)
 }
 
 /// 대소문자를 접는다. 글자마다 따로 소문자로 바꾸므로 앞뒤 글자에 따라 결과가 달라지지 않는다.
