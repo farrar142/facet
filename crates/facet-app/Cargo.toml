@@ -13,6 +13,15 @@ path = "src/main.rs"
 
 [dependencies]
 facet-core.workspace = true
+slint = "1.18"
 
-[lints]
-workspace = true
+# 작업 공간 lint와 같되 unsafe_code만 forbid 대신 deny다. Slint가 만든 코드(`slint::include_modules!`)는
+# 안에서 `#[allow(unsafe_code)]`를 쓰는데 forbid는 그것을 막는다. deny는 손으로 쓴 unsafe를 여전히 오류로 만든다.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[build-dependencies]
+slint-build = "1.18"

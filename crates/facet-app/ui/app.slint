@@ -1,0 +1,222 @@
+// facet 창. 판단은 하지 않고 Rust 쪽(코어)에 묻는다.
+
+import { ListView, Button, AboutSlint, Palette } from "std-widgets.slint";
+
+// 파일 목록의 한 행에 보일 문자열. 코어가 만든 값을 그대로 그린다.
+export struct Row {
+    name: string,
+    kind: string,
+    size: string,
+    modified: string,
+}
+
+// 선택을 옮기는 키. 코어의 `Movement`에 그대로 대응한다.
+export enum Nav { up, down, page-up, page-down, home, end }
+
+export component AppWindow inherits Window {
+    title: "facet";
+    preferred-width: 900px;
+    preferred-height: 600px;
+    default-font-size: 13px;
+
+    in property <string> location;
+    // 읽는 중이면 참. 읽는 동안에도 창은 응답한다.
+    in property <bool> loading;
+    // 비어 있지 않으면 목록 대신 이 이유를 보인다.
+    in property <string> error-text;
+    in property <[Row]> rows;
+    in property <int> selected: -1;
+    in-out property <bool> show-about;
+    out property <length> row-height: 24px;
+    // 목록의 스크롤 위치. 0 이하이며, 목록 맨 위에서 화면 맨 위까지 내려간 거리의 음수다.
+    in-out property <length> content-y <=> list.content-y;
+    out property <length> view-height: list.visible-height;
+
+    callback navigate(Nav);
+    callback select(int);
+
+    forward-focus: keys;
+
+    MenuBar {
+        Menu {
+            title: "도움말";
+            MenuItem {
+                title: "facet 정보";
+                activated => {
+                    root.show-about = true;
+                }
+            }
+        }
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (root.show-about) {
+                if (event.text == Key.Escape) {
+                    root.show-about = false;
+                            keys.focus();
+                    return accept;
+                }
+                return reject;
+            }
+            if (event.text == Key.UpArrow) {
+                root.navigate(Nav.up);
+                return accept;
+            }
+            if (event.text == Key.DownArrow) {
+                root.navigate(Nav.down);
+                return accept;
+            }
+            if (event.text == Key.PageUp) {
+                root.navigate(Nav.page-up);
+                return accept;
+            }
+            if (event.text == Key.PageDown) {
+                root.navigate(Nav.page-down);
+                return accept;
+            }
+            if (event.text == Key.Home) {
+                root.navigate(Nav.home);
+                return accept;
+            }
+            if (event.text == Key.End) {
+                root.navigate(Nav.end);
+                return accept;
+            }
+            reject
+        }
+
+        VerticalLayout {
+            padding: 8px;
+            spacing: 4px;
+
+            Text {
+                text: root.location;
+                overflow: elide;
+                font-weight: 600;
+            }
+
+            // 열 머리
+            HorizontalLayout {
+                height: root.row-height;
+                spacing: 8px;
+                padding-left: 6px;
+                padding-right: 6px;
+                Text { text: "이름"; horizontal-stretch: 1; vertical-alignment: center; color: Palette.foreground.transparentize(40%); }
+                Text { text: "종류"; width: 48px; vertical-alignment: center; color: Palette.foreground.transparentize(40%); }
+                Text { text: "크기"; width: 90px; horizontal-alignment: right; vertical-alignment: center; color: Palette.foreground.transparentize(40%); }
+                Text { text: "수정한 날짜"; width: 130px; vertical-alignment: center; color: Palette.foreground.transparentize(40%); }
+            }
+
+            Rectangle {
+                vertical-stretch: 1;
+
+                // ListView는 보이는 행만 화면 요소로 만든다.
+                // 높이를 행 높이의 정수배로 맞춘다. ListView는 먼 곳으로 뛸 때 스크롤 위치를 행 경계로
+                // 내림하므로, 그렇지 않으면 End 뒤 마지막 행이 조금 가려진다.
+                list := ListView {
+                    y: 0;
+                    height: floor(parent.height / root.row-height) * root.row-height;
+                    visible: root.error-text == "";
+                    for row[i] in root.rows: Rectangle {
+                        height: root.row-height;
+                        background: i == root.selected ? Palette.selection-background : transparent;
+                        HorizontalLayout {
+                            spacing: 8px;
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            Text {
+                                text: row.name;
+                                horizontal-stretch: 1;
+                                overflow: elide;
+                                vertical-alignment: center;
+                                color: i == root.selected ? Palette.selection-foreground : Palette.foreground;
+                            }
+                            Text {
+                                text: row.kind;
+                                width: 48px;
+                                vertical-alignment: center;
+                                color: i == root.selected ? Palette.selection-foreground : Palette.foreground;
+                            }
+                            Text {
+                                text: row.size;
+                                width: 90px;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                                color: i == root.selected ? Palette.selection-foreground : Palette.foreground;
+                            }
+                            Text {
+                                text: row.modified;
+                                width: 130px;
+                                vertical-alignment: center;
+                                color: i == root.selected ? Palette.selection-foreground : Palette.foreground;
+                            }
+                        }
+                        TouchArea {
+                            clicked => {
+                                root.select(i);
+                                keys.focus();
+                            }
+                        }
+                    }
+                }
+
+                if root.error-text != "": Text {
+                    text: root.error-text;
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    color: #c42b1c;
+                }
+
+                if root.loading: Text {
+                    text: "읽는 중…";
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            Text {
+                text: root.loading ? "" : root.error-text != "" ? "" : root.rows.length + "개 항목";
+                color: Palette.foreground.transparentize(40%);
+            }
+        }
+    }
+
+    // 정보 화면: Slint 로열티 프리 라이선스의 표시 의무(ADR-0002)로 AboutSlint를 보인다.
+    if root.show-about: Rectangle {
+        background: #00000080;
+        TouchArea { }
+        Rectangle {
+            width: 360px;
+            height: 320px;
+            background: Palette.background;
+            border-radius: 8px;
+            VerticalLayout {
+                padding: 16px;
+                spacing: 12px;
+                Text {
+                    text: "facet";
+                    font-size: 18px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: "Windows 파일 탐색기를 대체하는 앱";
+                    horizontal-alignment: center;
+                }
+                AboutSlint { }
+                HorizontalLayout {
+                    alignment: center;
+                    Button {
+                        text: "닫기";
+                        clicked => {
+                            root.show-about = false;
+                            keys.focus();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
