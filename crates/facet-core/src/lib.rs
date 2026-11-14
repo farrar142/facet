@@ -6,6 +6,7 @@
 pub mod file_list;
 mod location;
 pub mod measure;
+pub mod name_input;
 
 pub use location::{Item, ListError, list_location};
 
