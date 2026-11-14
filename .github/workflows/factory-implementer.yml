@@ -36,15 +36,15 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       REPO: ${{ github.repository }}
     steps:
-      - name: Dispatch unblocked approved tickets
+      # Runs are serial (see the implement job), so dispatch only the first one.
+      - name: Dispatch the next unblocked approved ticket
         run: |
-          for n in $(gh issue list --repo "$REPO" --state open --label ready-for-agent --json number --jq '.[].number'); do
+          for n in $(gh issue list --repo "$REPO" --state open --label ready-for-agent --limit 200 --json number --jq 'sort_by(.number) | .[].number'); do
             open=$(gh api "repos/$REPO/issues/$n" --jq '.issue_dependencies_summary.blocked_by // 0')
             if [ "$open" -eq 0 ]; then
               echo "dispatch #$n"
               gh workflow run factory-implementer.yml --repo "$REPO" -f issue="$n"
-            else
-              echo "#$n still has $open open blocker(s)"
+              exit 0
             fi
           done
 
@@ -54,8 +54,13 @@ jobs:
       (github.event.action == 'labeled' && github.event.label.name == 'ready-for-agent')
     runs-on: windows-latest
     timeout-minutes: 180
+    # One ticket at a time across the repo (decision 2026-11-15): parallel runs kept
+    # editing the same files. A group keeps at most one pending run and cancels older
+    # pending ones, so runs are chained instead: every run ends by dispatching the next
+    # unblocked ticket (the "Dispatch next ticket" step). A cancelled run leaves its
+    # ticket labelled `ready-for-agent`, so the chain picks it up later.
     concurrency:
-      group: factory-implementer-${{ github.event.issue.number || inputs.issue }}
+      group: factory-implementer
       cancel-in-progress: false
     defaults:
       run:
@@ -65,6 +70,9 @@ jobs:
       BRANCH: agent/issue-${{ github.event.issue.number || inputs.issue }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       REPO: ${{ github.repository }}
+      # Spec issues in roadmap order (docs/roadmap.md, S2..S18 without S7 which ran with S1).
+      # Each spec's prerequisites come earlier in this list. S19 (#67) is a draft: add it after grilling.
+      SPEC_QUEUE: "17 18 19 20 21 23 24 25 26 27 28 29 30 31 32 33"
     steps:
       - name: Guard and claim
         id: guard
@@ -206,34 +214,48 @@ jobs:
           echo "PR_URL=$url" >> "$GITHUB_ENV"
 
       # No human review (decision 2026-11-15): `cargo xtask ci` above is the brake.
-      # A conflict with a sibling ticket merged meanwhile fails the merge and the run.
+      # A sibling ticket may merge while this run checks. Then rebase onto the new main,
+      # check again and retry. A rebase conflict at this point fails the run; the retry
+      # run (on Opus) starts from today's main.
       - name: Merge
         if: steps.guard.outputs.go == 'true'
         run: |
-          gh pr merge "$PR_URL" --squash
+          base=$(git rev-parse origin/main)
+          merged=false
+          for attempt in 1 2 3 4; do
+            if gh pr merge "$PR_URL" --squash; then merged=true; break; fi
+            sleep 15
+            git fetch origin main
+            if [ "$(git rev-parse origin/main)" = "$base" ]; then
+              echo "::notice::main unchanged; GitHub may still be computing mergeability (attempt $attempt)"
+              continue
+            fi
+            echo "::warning::main moved during the run; rebasing again (attempt $attempt)"
+            if ! git rebase origin/main; then
+              git rebase --abort
+              echo "::error::conflicts with tickets merged meanwhile: $(git diff --name-only origin/main...HEAD | tr '\n' ' ')"
+              exit 1
+            fi
+            base=$(git rev-parse origin/main)
+            cargo xtask ci
+            git push --force origin "$BRANCH"
+          done
+          $merged || { echo "::error::could not merge $PR_URL"; exit 1; }
           git push origin --delete "$BRANCH" || true
           # A GITHUB_TOKEN merge does not reliably close the ticket via `Closes #N`; close it here
           # so its dependents become unblocked before the next step looks for them.
           gh issue close "$N" --repo "$REPO" --reason completed --comment "Merged in $PR_URL" || true
           gh issue edit "$N" --repo "$REPO" --remove-label in-progress || true
 
-      # A merge made with GITHUB_TOKEN closes the ticket without firing `issues: closed`,
-      # so the frontier job would never run. Dispatch the next tickets here instead.
-      - name: Dispatch next tickets
+      # A merge made with GITHUB_TOKEN fires no push event, so start main's CI and nightly here.
+      - name: Build main
         if: steps.guard.outputs.go == 'true'
         run: |
-          # Same reason: the merge's push to main fires nothing, so start main's CI and nightly here.
           gh workflow run ci.yml --repo "$REPO" --ref main || echo "::warning::could not dispatch ci.yml"
           gh workflow run release.yml --repo "$REPO" --ref main || echo "::warning::could not dispatch release.yml"
-          sleep 15
-          for n in $(gh issue list --repo "$REPO" --state open --label ready-for-agent --json number --jq '.[].number'); do
-            open=$(gh api "repos/$REPO/issues/$n" --jq '.issue_dependencies_summary.blocked_by // 0')
-            if [ "$open" -eq 0 ]; then
-              echo "dispatch #$n"
-              gh workflow run factory-implementer.yml --repo "$REPO" -f issue="$n"
-            fi
-          done
 
+      # One failure: put the ticket back in the queue; the retry runs on Opus.
+      # Two failures: leave it to the managing session (`ready-for-human`, ADR-0001).
       - name: Record failure
         if: failure() && steps.guard.outputs.go == 'true'
         run: |
@@ -244,5 +266,52 @@ jobs:
           gh issue edit "$N" --repo "$REPO" --remove-label in-progress
           if [ "$fails" -ge 2 ]; then
             gh issue edit "$N" --repo "$REPO" --add-label ready-for-human
-            gh issue comment "$N" --repo "$REPO" --body "Implementer failed $fails times. Handing this ticket to a human."
+            gh issue comment "$N" --repo "$REPO" --body "Implementer failed $fails times. The managing session takes this ticket out of the factory."
+          else
+            gh issue edit "$N" --repo "$REPO" --add-label ready-for-agent
           fi
+
+      # Keep the chain going whatever happened above, including skipped (blocked) runs:
+      # the merge closes the ticket without firing `issues: closed`, so the frontier job
+      # would not run. Lowest-numbered unblocked approved ticket first.
+      - name: Dispatch next ticket
+        if: always()
+        run: |
+          sleep 10
+          for n in $(gh issue list --repo "$REPO" --state open --label ready-for-agent --limit 200 --json number --jq 'sort_by(.number) | .[].number'); do
+            open=$(gh api "repos/$REPO/issues/$n" --jq '.issue_dependencies_summary.blocked_by // 0')
+            if [ "$open" -eq 0 ]; then
+              echo "dispatch #$n"
+              gh workflow run factory-implementer.yml --repo "$REPO" -f issue="$n"
+              exit 0
+            fi
+          done
+          echo "::notice::no unblocked approved ticket left"
+
+          # Queue empty: move on to the next spec (decision 2026-11-15, roadmap order).
+          # Wait while anything is still running, queued or being decomposed.
+          busy=$(gh issue list --repo "$REPO" --state open --label in-progress --json number --jq length)
+          queued=$(gh issue list --repo "$REPO" --state open --label ready-for-agent --json number --jq length)
+          if [ "$busy" -gt 0 ] || [ "$queued" -gt 0 ]; then
+            echo "::notice::$busy in progress, $queued waiting on blockers; not moving to the next spec yet"
+            exit 0
+          fi
+          for s in $(gh issue list --repo "$REPO" --state open --label spec --json number --jq '.[].number'); do
+            read -r total done < <(gh api "repos/$REPO/issues/$s" --jq '"\(.sub_issues_summary.total // 0) \(.sub_issues_summary.completed // 0)"')
+            if [ "$total" -eq 0 ]; then
+              echo "::notice::spec #$s is still being decomposed"; exit 0
+            fi
+            if [ "$total" -eq "$done" ]; then
+              gh issue close "$s" --repo "$REPO" --reason completed --comment "All $total tickets merged."
+            fi
+          done
+          for s in $SPEC_QUEUE; do
+            read -r state labels < <(gh issue view "$s" --repo "$REPO" --json state,labels --jq '[.state, ([.labels[].name] | join(","))] | @tsv')
+            [ "$state" = OPEN ] || continue
+            case ",$labels," in *,spec,*) continue;; esac
+            echo "next spec: #$s"
+            gh issue edit "$s" --repo "$REPO" --add-label spec
+            gh workflow run factory-decompose.yml --repo "$REPO" -f issue="$s"
+            exit 0
+          done
+          echo "::notice::every spec in the queue is labelled; the factory is idle"

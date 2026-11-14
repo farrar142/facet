@@ -10,6 +10,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# MFT 조각을 만든 뒤 레코드를 확인하는 데 쓴다(`mft-fixture`).
+facet-indexer = { path = "../crates/facet-indexer" }
 sha2 = "0.11.1"
 zip = { version = "9.5.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 

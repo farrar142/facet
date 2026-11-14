@@ -1,15 +1,19 @@
 //! 저장소 작업 명령. `cargo xtask <명령>`으로 부른다.
 //!
-//! - `ci`: 형식 검사 → lint(경고를 오류로) → 빌드 → 테스트 → 코어 벤치마크.
-//!   CI와 로컬이 같은 명령을 쓴다.
+//! - `ci`: 형식 검사 → lint(경고를 오류로) → 빌드 → 테스트 → 실제 볼륨 테스트 → 코어 벤치마크.
+//!   CI와 로컬이 같은 명령을 쓴다. 실제 볼륨 테스트는 관리자일 때만 시험 VHD를 만들어 돌린다.
 //! - `test-folder`: 시험 폴더를 만든다(`facet-bench make-folder`).
 //! - `bench`: 코어 벤치마크만 돌린다(`facet-bench list`, 릴리스 빌드).
 //!
+//! - `measure [인자]`: 앱과 측정 도구를 릴리스 빌드해 화면 수치(콜드 스타트·스크롤 프레임)를 잰다.
+//! - `mft-fixture`: 시험 VHD에서 MFT 조각과 기대값 목록을 만든다(`mft_fixture` 모듈, 관리자).
 //! - `dist <label>`: release 빌드한 facet을 portable zip과 체크섬으로 묶는다(`dist` 모듈).
 //!
 //! 벤치마크 상한과 그 근거는 `crates/facet-bench/src/lib.rs`의 `LIST_LIMIT`에 있다.
 
 mod dist;
+mod mft_fixture;
+mod vhd;
 
 use std::env;
 use std::path::PathBuf;
@@ -19,10 +23,18 @@ const USAGE: &str = "\
 사용법: cargo xtask <명령>
 
 명령:
-  ci                             형식 검사, lint(경고를 오류로), 빌드, 테스트, 코어 벤치마크를 차례로 돌린다
+  ci                             형식 검사, lint(경고를 오류로), 빌드, 테스트, 실제 볼륨 테스트,
+                                 코어 벤치마크를 차례로 돌린다. 실제 볼륨 테스트는 관리자일 때만
+                                 시험 VHD를 만들어 돌리고, 아니면 건너뛴다고 출력한다
   test-folder [경로] [--count N]  N개(기본 100000) 항목이 든 시험 폴더를 만든다.
                                  경로를 빼면 임시 폴더의 facet-test-folders/items-N
   bench                          10만 항목 시험 폴더를 만들거나 확인하고 코어 목록 읽기를 잰다(릴리스 빌드)
+  measure [--count N] [--runs N] [--scroll-runs N] [--scroll-rows N] [--refresh-hz N] [--json 파일] [경로]
+                                 앱을 릴리스 빌드하고 시험 폴더(기본 10만 항목)를 열어 콜드 스타트 중앙값과
+                                 스크롤 프레임 시간을 잰다. 표와 JSON(기본 target/measure.json)을 내고,
+                                 통과 기준을 못 맞추면 실패한다. CI는 부르지 않는다(사람이 잰다)
+  mft-fixture                    (관리자) 시험 VHD에 정해진 항목을 만들고 MFT를 떠서
+                                 testdata/mft/에 조각과 기대값 목록을 쓴다
   dist <label>                   facet을 릴리스 빌드해 target/dist/에 facet-<label>-windows-x64.zip과
                                  그 .sha256을 만든다. label은 nightly나 태그 이름(예: v0.1.0)이고
                                  영문자·숫자·`.`·`-`·`_`만 쓸 수 있다";
@@ -33,12 +45,20 @@ const BENCH_COUNT: &str = "100000";
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("ci") => run_steps("ci", &ci_steps()),
+        Some("ci") => run_ci(),
         Some("bench") => run_steps("bench", &[bench_step()]),
         Some("test-folder") => match test_folder_step(&args[1..]) {
             Ok(step) => run_steps("test-folder", &[step]),
             Err(e) => {
                 eprintln!("{e}\n\n{USAGE}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("measure") => run_measure(&args[1..]),
+        Some("mft-fixture") => match mft_fixture::run(&workspace_root()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("xtask mft-fixture: {e}");
                 ExitCode::FAILURE
             }
         },
@@ -60,17 +80,81 @@ fn main() -> ExitCode {
     }
 }
 
-/// 한 단계: 이름과 `cargo`에 넘길 인자.
+/// 한 단계: 이름과 `cargo`에 넘길 인자, 더할 환경 변수.
 struct Step {
     name: &'static str,
     args: Vec<String>,
+    env: Vec<(&'static str, String)>,
 }
 
 fn step(name: &'static str, args: &[&str]) -> Step {
     Step {
         name,
         args: args.iter().map(|s| (*s).to_owned()).collect(),
+        env: Vec::new(),
     }
+}
+
+/// `ci`: 앞 단계들 → 실제 볼륨 테스트 → 코어 벤치마크.
+fn run_ci() -> ExitCode {
+    if run_steps("ci", &ci_steps()) != ExitCode::SUCCESS || real_volume_tests() != ExitCode::SUCCESS
+    {
+        return ExitCode::FAILURE;
+    }
+    run_steps("ci", &[bench_step()])
+}
+
+/// 실제 볼륨 테스트를 고르는 이름 앞부분. 이 테스트들은 `#[ignore]`로 기본 `cargo test`에서 빠진다.
+const REAL_VOLUME_PREFIX: &str = "real_volume_";
+/// 실제 볼륨 테스트에 시험 볼륨의 드라이브 문자를 넘기는 환경 변수.
+const REAL_VOLUME_VAR: &str = "FACET_TEST_VOLUME";
+
+/// 관리자면 시험 VHD를 만들어 붙이고 실제 볼륨 테스트(`real_volume_`로 시작하는 `#[ignore]` 테스트)만
+/// 돌린 뒤 뗀다. 관리자가 아니거나 Windows가 아니면 건너뛴다고 출력한다.
+fn real_volume_tests() -> ExitCode {
+    const NAME: &str = "실제 볼륨 테스트";
+    if !cfg!(windows) {
+        println!(
+            "
+=== xtask ci: {NAME}: Windows가 아니므로 건너뜀 ==="
+        );
+        return ExitCode::SUCCESS;
+    }
+    if !vhd::is_admin() {
+        println!(
+            "
+=== xtask ci: {NAME}: 관리자 권한이 아니므로 건너뜀 ==="
+        );
+        return ExitCode::SUCCESS;
+    }
+    println!(
+        "
+=== xtask ci: {NAME}: 시험 VHD 만들기 ==="
+    );
+    let vhd = match vhd::TestVhd::create() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!(
+                "
+xtask ci: 시험 VHD를 만들지 못함: {e}"
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut test = step(
+        NAME,
+        &[
+            "test",
+            "--workspace",
+            "--locked",
+            "--",
+            "--ignored",
+            REAL_VOLUME_PREFIX,
+        ],
+    );
+    test.env.push((REAL_VOLUME_VAR, format!("{}:", vhd.letter)));
+    // vhd는 이 함수가 끝날 때 떼어진다.
+    run_steps("ci", &[test])
 }
 
 fn ci_steps() -> Vec<Step> {
@@ -93,7 +177,6 @@ fn ci_steps() -> Vec<Step> {
             &["build", "--workspace", "--all-targets", "--locked"],
         ),
         step("테스트", &["test", "--workspace", "--locked"]),
-        bench_step(),
     ]
 }
 
@@ -131,6 +214,7 @@ fn bench_step() -> Step {
     Step {
         name: "코어 벤치마크",
         args,
+        env: Vec::new(),
     }
 }
 
@@ -162,6 +246,7 @@ fn test_folder_step(rest: &[String]) -> Result<Step, String> {
     Ok(Step {
         name: "시험 폴더 생성",
         args,
+        env: Vec::new(),
     })
 }
 
@@ -237,6 +322,7 @@ fn run_steps(task: &str, steps: &[Step]) -> ExitCode {
         );
         let status = Command::new(&cargo)
             .args(&step.args)
+            .envs(step.env.iter().map(|(k, v)| (k, v)))
             .current_dir(&root)
             .status();
         match status {
@@ -263,6 +349,95 @@ fn workspace_root() -> PathBuf {
         .parent()
         .map(PathBuf::from)
         .unwrap_or(manifest_dir)
+}
+
+/// 앱과 측정 도구를 릴리스 빌드하고 `facet-bench screen`을 돌린다.
+///
+/// 받은 인자는 그대로 넘기되, 경로·`--count`·`--json`을 비우면 기본값(10만 항목 시험 폴더,
+/// `target/measure.json`)을 채운다. 상대 경로는 명령을 부른 폴더 기준이다.
+fn run_measure(rest: &[String]) -> ExitCode {
+    let root = workspace_root();
+    let build = step(
+        "release 빌드",
+        &[
+            "build",
+            "--release",
+            "--locked",
+            "-p",
+            "facet-app",
+            "-p",
+            "facet-bench",
+        ],
+    );
+    if run_steps("measure", &[build]) != ExitCode::SUCCESS {
+        return ExitCode::FAILURE;
+    }
+    let args = match measure_args(rest, &root) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!(
+                "{e}
+
+{USAGE}"
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let target_dir = env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .map(|p| if p.is_relative() { root.join(p) } else { p })
+        .unwrap_or_else(|| root.join("target"));
+    let release = target_dir.join("release");
+    let status = Command::new(release.join("facet-bench.exe"))
+        .arg("screen")
+        .args(&args)
+        .arg("--app")
+        .arg(release.join("facet.exe"))
+        .status();
+    match status {
+        Ok(s) if s.success() => ExitCode::SUCCESS,
+        Ok(_) => ExitCode::FAILURE,
+        Err(e) => {
+            eprintln!("xtask measure: facet-bench를 실행하지 못함: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `measure`의 인자에 빠진 기본값(경로, `--count`, `--json`)을 채운다.
+fn measure_args(rest: &[String], root: &std::path::Path) -> Result<Vec<String>, String> {
+    let cwd = env::current_dir().map_err(|e| e.to_string())?;
+    let absolute = |p: &str| {
+        let p = PathBuf::from(p);
+        if p.is_relative() { cwd.join(p) } else { p }
+    };
+    let mut path = None;
+    let mut count = BENCH_COUNT.to_owned();
+    let mut json = None;
+    let mut passthrough = Vec::new();
+    let mut it = rest.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--count" | "--json" | "--runs" | "--scroll-runs" | "--scroll-rows"
+            | "--refresh-hz" => {
+                let v = it.next().ok_or(format!("{arg} 뒤에 값이 없습니다"))?;
+                match arg.as_str() {
+                    "--count" => count = v.clone(),
+                    "--json" => json = Some(absolute(v)),
+                    _ => passthrough.extend([arg.clone(), v.clone()]),
+                }
+            }
+            _ if path.is_none() && !arg.starts_with("--") => path = Some(absolute(arg)),
+            _ => return Err(format!("알 수 없는 인자: {arg}")),
+        }
+    }
+    let path = path.unwrap_or_else(|| default_folder(&count));
+    let json = json.unwrap_or_else(|| root.join("target").join("measure.json"));
+    let mut args = vec![path.display().to_string()];
+    args.extend(["--count".to_owned(), count]);
+    args.extend(["--json".to_owned(), json.display().to_string()]);
+    args.extend(passthrough);
+    Ok(args)
 }
 
 #[cfg(test)]

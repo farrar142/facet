@@ -7,8 +7,9 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# 작업 공간에서 이 크레이트만 unsafe_code를 허용한다(ADR-0002: 셸 호출의 unsafe를 래퍼 하나에 가둔다).
-# 그 대신 unsafe 블록마다 SAFETY 주석을 요구한다. 다른 크레이트는 계속 작업 공간 lint(forbid)를 따른다.
+# 이 크레이트는 unsafe_code를 허용한다(ADR-0002: 앱 프로세스의 셸 호출 unsafe를 래퍼 하나에 가둔다).
+# 그 대신 unsafe 블록마다 SAFETY 주석을 요구한다. 허용하는 크레이트는 이것과 인덱서 서비스(facet-indexer)
+# 둘뿐이고, 다른 크레이트는 계속 작업 공간 lint(forbid)를 따른다.
 [lints.rust]
 unsafe_code = "allow"
 unsafe_op_in_unsafe_fn = "deny"
