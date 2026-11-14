@@ -59,8 +59,10 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use memchr::memmem;
 
+mod mft;
 mod store;
 mod usn;
+pub use mft::{MFT_ROOT_RECORD, MftError, MftParser, MftReport};
 pub use store::{FORMAT_VERSION, StoreError};
 pub use usn::{
     Freshness, JournalInfo, JournalState, RebuildReason, SecurityChange, USN_REASON_FILE_CREATE,
