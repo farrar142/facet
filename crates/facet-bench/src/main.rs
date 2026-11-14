@@ -6,9 +6,10 @@ use std::time::{Duration, Instant};
 
 use facet_bench::screen::{self, DEFAULT_SCROLL_ROWS, Plan};
 use facet_bench::{
-    BENCH_QUERY, BENCH_RESULT_LIMIT, DEFAULT_COUNT, INDEX_COUNT, INDEX_MEMORY_LIMIT, LIST_LIMIT,
-    LIST_TARGET, Measurement, QUERY_LIMIT, QUERY_TARGET, check_limit, check_memory,
-    check_query_limit, make_test_folder, measure_list, measure_query, synthetic_index,
+    BENCH_QUERY, BENCH_RESULT_LIMIT, BENCH_SORT, BENCH_SORTED_QUERY, DEFAULT_COUNT, INDEX_COUNT,
+    INDEX_MEMORY_LIMIT, LIST_LIMIT, LIST_TARGET, Measurement, QUERY_LIMIT, QUERY_TARGET,
+    check_limit, check_memory, check_query_limit, make_test_folder, measure_list, measure_query,
+    synthetic_index,
 };
 
 const USAGE: &str = "\
@@ -20,8 +21,8 @@ const USAGE: &str = "\
       중앙값이 상한(기본 1000ms)을 넘으면 실패한다.
   facet-bench index [--count N] [--runs N] [--limit-ms N]
       항목 N개(기본 1000000)의 합성 인덱스를 만들어 메모리를 재고(150MB 이상이면 실패),
-      부분 일치 질의(결과 100개 제한)를 N회(기본 5) 재어 중앙값이 상한(기본 300ms)을
-      넘으면 실패한다.
+      부분 일치 질의와 결과 10만 개를 경로로 정렬하는 질의(둘 다 결과 100개 제한)를
+      N회(기본 5)씩 재어 중앙값이 상한(기본 300ms)을 넘으면 실패한다.
   facet-bench screen <경로> --app <facet 실행 파일> [--count N] [--runs N] [--scroll-runs N]
                      [--scroll-rows N] [--refresh-hz N] [--json <파일>]
       시험 폴더를 만들거나 확인한 뒤 앱을 측정 모드로 띄워 콜드 스타트(--runs회, 기본 5)와
@@ -226,7 +227,26 @@ fn index(args: &Args) -> Result<(), String> {
         m.item_count,
         m.times.len()
     );
-    print_times(&m);
+    report_query(&m, limit)?;
+
+    let (key, order) = BENCH_SORT;
+    let query = facet_index::Query::name_contains(BENCH_SORTED_QUERY)
+        .sort(key, order)
+        .limit(BENCH_RESULT_LIMIT);
+    let total = index.search(&query).total;
+    let m = measure_query(&index, &query, args.runs);
+    println!(
+        "인덱스 정렬 질의 (\"{BENCH_SORTED_QUERY}\", {key:?} {order:?}, 결과 {}개 제한, 전체 {total}개 중 {}개 나옴, {}회):",
+        BENCH_RESULT_LIMIT,
+        m.item_count,
+        m.times.len()
+    );
+    report_query(&m, limit)
+}
+
+/// 질의 측정값을 출력하고 중앙값이 `limit`을 넘으면 실패한다.
+fn report_query(m: &Measurement, limit: Duration) -> Result<(), String> {
+    print_times(m);
     println!(
         "  중앙값 {:.1}ms, 최악 {:.1}ms / 로컬 기준 {}ms, CI 상한 {}ms",
         ms(m.median()),
@@ -234,7 +254,7 @@ fn index(args: &Args) -> Result<(), String> {
         QUERY_TARGET.as_millis(),
         limit.as_millis()
     );
-    check_query_limit(&m, limit)?;
+    check_query_limit(m, limit)?;
     println!("  상한 안: 통과");
     Ok(())
 }

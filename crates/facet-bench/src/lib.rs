@@ -270,6 +270,14 @@ pub const BENCH_QUERY: &str = "REPORT 99999";
 /// 벤치마크 질의의 결과 수 제한.
 pub const BENCH_RESULT_LIMIT: usize = 100;
 
+/// 정렬 벤치마크 질의의 찾을 조각. 열 개 중 하나(`Quarterly Report …`)가 맞아 100만 개에서
+/// 결과가 10만 개다. 결과 100개 제한 질의가 결과 전체를 매번 다 정렬하면 상한을 넘게 한다.
+pub const BENCH_SORTED_QUERY: &str = "REPORT";
+
+/// 정렬 벤치마크 질의의 정렬 기준. 비교가 가장 비싼 경로 정렬(내림)이다.
+pub const BENCH_SORT: (facet_index::SortKey, facet_index::Order) =
+    (facet_index::SortKey::Path, facet_index::Order::Descending);
+
 /// 합성 인덱스의 볼륨 루트 경로와 루트 번호(NTFS 루트 폴더의 MFT 레코드 번호).
 pub const SYNTHETIC_ROOT: &str = r"X:\";
 pub const SYNTHETIC_ROOT_NUMBER: u64 = 5;
