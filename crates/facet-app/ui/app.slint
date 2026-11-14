@@ -13,6 +13,9 @@ export struct Row {
 // 선택을 옮기는 키. 코어의 `Movement`에 그대로 대응한다.
 export enum Nav { up, down, page-up, page-down, home, end }
 
+// 상태 줄의 이름 입력란 알림. 문장은 화면이 `@tr()`로 만든다(ADR-0007).
+export enum Notice { none, entered, cancelled }
+
 export component AppWindow inherits Window {
     title: "facet";
     preferred-width: 900px;
@@ -27,6 +30,15 @@ export component AppWindow inherits Window {
     in property <[Row]> rows;
     in property <int> selected: -1;
     in-out property <bool> show-about;
+    // 이름 입력란이 열린 행. 없으면 -1.
+    in property <int> editing: -1;
+    // 이름 입력란의 글자. 열 때 Rust가 현재 이름을 채운다.
+    in-out property <string> edit-text;
+    // 상태 줄에 보일 이름 입력란 알림의 종류.
+    in property <Notice> notice: Notice.none;
+    // 확정한 입력값과 입력란을 열 때의 이름. `notice`가 `entered`일 때만 쓴다.
+    in property <string> notice-entered;
+    in property <string> notice-original;
     out property <length> row-height: 24px;
     // 목록의 스크롤 위치. 0 이하이며, 목록 맨 위에서 화면 맨 위까지 내려간 거리의 음수다.
     in-out property <length> content-y <=> list.content-y;
@@ -34,6 +46,12 @@ export component AppWindow inherits Window {
 
     callback navigate(Nav);
     callback select(int);
+    // F2: 선택한 항목의 이름 입력란을 연다.
+    callback begin-rename();
+    // Enter: 입력을 확정한다. 파일 이름은 바꾸지 않는다.
+    callback confirm-rename(string);
+    // Esc: 입력을 취소한다.
+    callback cancel-rename();
 
     forward-focus: keys;
 
@@ -58,6 +76,20 @@ export component AppWindow inherits Window {
                     return accept;
                 }
                 return reject;
+            }
+            // 이름 입력란이 열린 동안에는 목록을 움직이지 않는다. 이동 키는 입력란이 먼저 받고,
+            // 입력란이 넘긴 키도 여기서 삼킨다.
+            if (root.editing >= 0) {
+                if (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.PageUp
+                    || event.text == Key.PageDown || event.text == Key.Home || event.text == Key.End
+                    || event.text == Key.F2) {
+                    return accept;
+                }
+                return reject;
+            }
+            if (event.text == Key.F2) {
+                root.begin-rename();
+                return accept;
             }
             if (event.text == Key.UpArrow) {
                 root.navigate(Nav.up);
@@ -121,16 +153,62 @@ export component AppWindow inherits Window {
                     for row[i] in root.rows: Rectangle {
                         height: root.row-height;
                         background: i == root.selected ? Palette.selection-background : transparent;
+                        // 입력란보다 아래에 둔다. 그래야 입력란 안을 누르면 입력란이 받는다.
+                        TouchArea {
+                            clicked => {
+                                if (i == root.editing) {
+                                    return;
+                                }
+                                // 다른 행을 누르면 탐색기처럼 입력을 확정하고 그 행을 고른다.
+                                if (root.editing >= 0) {
+                                    root.confirm-rename(root.edit-text);
+                                }
+                                root.select(i);
+                                keys.focus();
+                            }
+                        }
                         HorizontalLayout {
                             spacing: 8px;
                             padding-left: 6px;
                             padding-right: 6px;
-                            Text {
+                            if i != root.editing: Text {
                                 text: row.name;
                                 horizontal-stretch: 1;
                                 overflow: elide;
                                 vertical-alignment: center;
                                 color: i == root.selected ? Palette.selection-foreground : Palette.foreground;
+                            }
+                            // 이름 입력란. 한글 IME의 조합 글자와 후보 창은 TextInput이 처리한다.
+                            if i == root.editing: Rectangle {
+                                horizontal-stretch: 1;
+                                background: Palette.background;
+                                border-width: 1px;
+                                border-color: Palette.accent-background;
+                                clip: true;
+                                name-input := TextInput {
+                                    x: 3px;
+                                    width: parent.width - 6px;
+                                    single-line: true;
+                                    vertical-alignment: center;
+                                    color: Palette.foreground;
+                                    text <=> root.edit-text;
+                                    init => {
+                                        self.focus();
+                                        self.select-all();
+                                    }
+                                    accepted => {
+                                        root.confirm-rename(self.text);
+                                        keys.focus();
+                                    }
+                                    key-pressed(event) => {
+                                        if (event.text == Key.Escape) {
+                                            root.cancel-rename();
+                                            keys.focus();
+                                            return accept;
+                                        }
+                                        reject
+                                    }
+                                }
                             }
                             Text {
                                 text: row.kind;
@@ -152,12 +230,6 @@ export component AppWindow inherits Window {
                                 color: i == root.selected ? Palette.selection-foreground : Palette.foreground;
                             }
                         }
-                        TouchArea {
-                            clicked => {
-                                root.select(i);
-                                keys.focus();
-                            }
-                        }
                     }
                 }
 
@@ -176,9 +248,20 @@ export component AppWindow inherits Window {
                 }
             }
 
-            Text {
-                text: root.loading ? "" : root.error-text != "" ? "" : root.rows.length + "개 항목";
-                color: Palette.foreground.transparentize(40%);
+            HorizontalLayout {
+                spacing: 16px;
+                Text {
+                    text: root.loading ? "" : root.error-text != "" ? "" : @tr("{n}개 항목" | "{n}개 항목" % root.rows.length);
+                    color: Palette.foreground.transparentize(40%);
+                }
+                Text {
+                    text: root.notice == Notice.entered
+                        ? @tr("입력한 이름: 「{}」 (원래 이름 「{}」, 실제 파일 이름은 바꾸지 않았습니다)", root.notice-entered, root.notice-original)
+                        : root.notice == Notice.cancelled ? @tr("이름 입력을 취소했습니다") : "";
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                    color: Palette.foreground.transparentize(40%);
+                }
             }
         }
     }

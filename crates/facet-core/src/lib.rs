@@ -7,6 +7,7 @@ pub mod file_list;
 mod file_system;
 mod location;
 pub mod measure;
+pub mod name_input;
 mod provider;
 
 pub use file_system::FileSystemProvider;

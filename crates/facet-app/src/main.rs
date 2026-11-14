@@ -5,11 +5,13 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::thread;
 
 use facet_core::file_list::{self, Movement};
+use facet_core::name_input::NameInput;
 use facet_core::{Item, Location, provider_for};
 use slint::{Model, ModelRc, ModelTracker, SharedString};
 
@@ -40,6 +42,51 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_select(move |index| {
         if let Some(ui) = weak.upgrade() {
             ui.set_selected(index);
+        }
+    });
+
+    // 열려 있는 이름 입력란. 화면의 `editing`과 함께 바뀐다.
+    let name_input: Rc<RefCell<Option<NameInput>>> = Rc::default();
+    let weak = ui.as_weak();
+    let state = name_input.clone();
+    ui.on_begin_rename(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let rows = ui.get_rows();
+        let Some(Rows(items)) = rows.as_any().downcast_ref::<Rows>() else {
+            return;
+        };
+        let selected = usize::try_from(ui.get_selected()).ok();
+        let Some(input) = NameInput::open(items, selected) else {
+            return;
+        };
+        let index = input.index();
+        // 입력란이 화면 밖 행에 열리지 않게 먼저 그 행을 보인다.
+        show_row(&ui, index);
+        ui.set_edit_text(input.original().into());
+        ui.set_notice(Notice::None);
+        ui.set_editing(i32::try_from(index).unwrap_or(i32::MAX));
+        *state.borrow_mut() = Some(input);
+    });
+    let weak = ui.as_weak();
+    let state = name_input.clone();
+    ui.on_confirm_rename(move |text| {
+        let Some(ui) = weak.upgrade() else { return };
+        ui.set_editing(-1);
+        if let Some(input) = state.borrow_mut().take() {
+            let entered = input.confirm(&text);
+            ui.set_notice_entered(entered.entered.into());
+            ui.set_notice_original(entered.original.into());
+            ui.set_notice(Notice::Entered);
+        }
+    });
+    let weak = ui.as_weak();
+    let state = name_input;
+    ui.on_cancel_rename(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        ui.set_editing(-1);
+        if let Some(input) = state.borrow_mut().take() {
+            input.cancel();
+            ui.set_notice(Notice::Cancelled);
         }
     });
 
@@ -101,7 +148,17 @@ fn navigate(ui: &AppWindow, movement: Movement) {
         return;
     };
     ui.set_selected(i32::try_from(next).unwrap_or(i32::MAX));
-    let offset = file_list::scroll_to_show(next, row_height, -ui.get_content_y(), view_height);
+    show_row(ui, next);
+}
+
+/// `index`번 행이 화면 밖이면 그 행이 보이게 스크롤한다.
+fn show_row(ui: &AppWindow, index: usize) {
+    let offset = file_list::scroll_to_show(
+        index,
+        ui.get_row_height(),
+        -ui.get_content_y(),
+        ui.get_view_height(),
+    );
     ui.set_content_y(-offset);
 }
 
@@ -128,5 +185,10 @@ impl Model for Rows {
     fn model_tracker(&self) -> &dyn ModelTracker {
         // 한 번 넣은 목록은 바뀌지 않는다.
         &()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        // 이름 입력란이 화면 문자열이 아니라 원래 항목을 보도록.
+        self
     }
 }
