@@ -89,13 +89,16 @@ impl Source for Fake {
     }
 }
 
+/// 인덱스 만들기 한 번의 결과.
+type Build = Result<Index, String>;
+
 /// 서비스처럼 볼륨 목록을 받아 맞추는 쪽과, 가짜 볼륨마다 인덱스 결과를 보낼 통로.
 struct Harness {
     volumes: Arc<Volumes>,
     mounts: Option<Mounts>,
     stop: Stop,
     /// 볼륨 이름 → 그 볼륨을 마지막으로 연 가짜 볼륨에 인덱스 결과를 보낼 통로.
-    builds: Arc<Mutex<BTreeMap<String, Sender<Result<Index, String>>>>>,
+    builds: Arc<Mutex<BTreeMap<String, Sender<Build>>>>,
     /// 볼륨 이름 → 그 볼륨의 가짜 볼륨들이 빠졌는가.
     gone: BTreeMap<String, Arc<Mutex<bool>>>,
     /// 연 볼륨 이름들.

@@ -21,6 +21,7 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -33,8 +34,8 @@ use facet_indexer::session::Cancel;
 use facet_indexer::volume::local_volumes;
 use facet_indexer::volumes::{Plan, Volumes};
 use facet_protocol::{
-    Case, Condition, PIPE_CLIENT_ACCESS, PIPE_NAME, PROTOCOL_VERSION, QueryMessage, Request,
-    Response, VolumeState, read_message, write_message,
+    Case, Condition, NoIndexReason, PIPE_CLIENT_ACCESS, PIPE_NAME, PROTOCOL_VERSION, QueryMessage,
+    Request, Response, VolumeState, VolumeStatus, read_message, write_message,
 };
 
 const VOLUME_VAR: &str = "FACET_TEST_VOLUME";
@@ -523,6 +524,217 @@ fn real_volume_index_dir_is_locked_down_even_if_someone_made_it_first() {
     index_dir::remove(&dir).unwrap();
 }
 
+/// 서비스 파이프로 상태 질의를 한 번 한다.
+fn status_via_pipe() -> Vec<VolumeStatus> {
+    let mut pipe = OpenOptions::new()
+        .access_mode(PIPE_CLIENT_ACCESS)
+        .open(PIPE_NAME)
+        .expect("서비스 파이프에 붙지 못함");
+    assert!(matches!(
+        ask(
+            &mut pipe,
+            &Request::Hello {
+                version: PROTOCOL_VERSION
+            }
+        ),
+        Response::HelloAccepted { .. }
+    ));
+    let Response::Status(status) = ask(&mut pipe, &Request::Status) else {
+        panic!("상태 응답이 아님")
+    };
+    status.volumes
+}
+
+fn state_via_pipe(volume: &str) -> Option<VolumeState> {
+    status_via_pipe()
+        .into_iter()
+        .find(|v| v.volume == volume)
+        .map(|v| v.state)
+}
+
+/// 서비스가 도는 동안 시험 VHD를 붙였다 뗀다(spec #22, #55). NTFS 볼륨은 인덱스가 만들어져 질의
+/// 결과에 나오고, NTFS가 아닌 볼륨은 「인덱스 없음(NTFS가 아님)」으로 보이고, 떼면 둘 다 상태 질의와
+/// 질의 결과에서 빠지고 서비스는 계속 답한다.
+fn attach_and_detach_volumes_while_the_service_runs(query: &Path, test_volume: &str) {
+    let ntfs = Vhd::create("ntfs");
+    let fat = Vhd::create("fat32");
+    let attached = format!("{}:", ntfs.letter);
+    let fat_volume = format!("{}:", fat.letter);
+    let unique = format!("붙인 볼륨 {}.txt", std::process::id());
+    let path = format!(r"{attached}\{unique}");
+    fs::write(&path, b"usb").unwrap();
+
+    // 붙으면 상태 질의에 나오고, NTFS면 인덱스를 만들어 질의 결과에 나온다.
+    wait_until(
+        "붙인 NTFS 볼륨 준비됨",
+        Duration::from_secs(60),
+        || matches!(state_via_pipe(&attached), Some(VolumeState::Ready { .. })),
+    );
+    wait_until(
+        "붙인 볼륨의 파일 검색",
+        Duration::from_secs(10),
+        || search_output(query, &unique).contains(&path),
+    );
+    wait_until(
+        "붙인 FAT32 볼륨 보임",
+        Duration::from_secs(30),
+        || state_via_pipe(&fat_volume).is_some(),
+    );
+    assert_eq!(
+        state_via_pipe(&fat_volume),
+        Some(VolumeState::NotIndexed(NoIndexReason::NotNtfs {
+            filesystem: "FAT32".into()
+        }))
+    );
+    let out = Command::new(query).arg("status").output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains(&attached), "{stdout}");
+    assert!(stdout.contains(&fat_volume), "{stdout}");
+
+    // 떼면 상태 질의와 질의 결과에서 빠지고 서비스는 계속 돈다.
+    ntfs.detach();
+    fat.detach();
+    wait_until(
+        "뗀 볼륨이 상태에서 빠짐",
+        Duration::from_secs(30),
+        || {
+            let status = status_via_pipe();
+            !status
+                .iter()
+                .any(|v| v.volume == attached || v.volume == fat_volume)
+        },
+    );
+    assert!(
+        !search_output(query, &unique).contains(&path),
+        "뗀 볼륨의 파일이 검색됨"
+    );
+    assert_eq!(sc_state().as_deref(), Some("RUNNING"));
+    assert!(
+        matches!(state_via_pipe(test_volume), Some(VolumeState::Ready { .. })),
+        "남은 시험 볼륨이 준비됨이 아님"
+    );
+}
+
+/// 이 테스트가 붙였다 떼는 작은 VHD(64MB). 버릴 때 아직 붙어 있으면 떼고, 파일을 지운다.
+struct Vhd {
+    file: PathBuf,
+    letter: char,
+    attached: bool,
+}
+
+impl Vhd {
+    /// VHD를 만들어 `fs`(`ntfs`, `fat32` 등)로 빠르게 포맷하고 빈 드라이브 문자에 붙인다.
+    fn create(fs_name: &str) -> Self {
+        let dir = env::temp_dir().join("facet-test-vhd");
+        fs::create_dir_all(&dir).unwrap();
+        // diskpart는 붙일 때와 뗄 때 같은 표기의 경로를 써야 한다(8.3 짧은 이름을 푼다).
+        let dir = fs::canonicalize(&dir).unwrap();
+        let dir = dir
+            .display()
+            .to_string()
+            .trim_start_matches(r"\\?\")
+            .to_owned();
+        let file = PathBuf::from(dir).join(format!("attach-{fs_name}-{}.vhdx", std::process::id()));
+        let _ = fs::remove_file(&file);
+        let mut vhd = Self {
+            file,
+            letter: '?',
+            attached: true,
+        };
+        diskpart(&format!(
+            "create vdisk file=\"{f}\" maximum=64 type=expandable
+             select vdisk file=\"{f}\"
+             attach vdisk
+             create partition primary
+             format fs={fs_name} quick label=facet-{fs_name}
+",
+            f = vhd.file.display()
+        ))
+        .unwrap();
+        let mut refused = Vec::new();
+        for letter in ('G'..='Y')
+            .rev()
+            .filter(|c| !Path::new(&format!("{c}:\\")).exists())
+        {
+            let assign = format!(
+                "select vdisk file=\"{f}\"
+select partition 1
+assign letter={letter}
+",
+                f = vhd.file.display()
+            );
+            match diskpart(&assign) {
+                Ok(()) => {
+                    vhd.letter = letter;
+                    wait_until("붙인 VHD가 보임", Duration::from_secs(30), || {
+                        Path::new(&format!("{letter}:\\")).exists()
+                    });
+                    return vhd;
+                }
+                Err(e) => refused.push(format!("{letter}: {e}")),
+            }
+        }
+        panic!(
+            "VHD에 드라이브 문자를 붙이지 못함:
+{}",
+            refused.join(
+                "
+"
+            )
+        );
+    }
+
+    fn detach(mut self) {
+        let result = self.try_detach();
+        self.attached = false;
+        result.unwrap();
+    }
+
+    fn try_detach(&self) -> Result<(), String> {
+        diskpart(&format!(
+            "select vdisk file=\"{f}\"
+detach vdisk
+",
+            f = self.file.display()
+        ))
+    }
+}
+
+impl Drop for Vhd {
+    fn drop(&mut self) {
+        if self.attached {
+            let _ = self.try_detach();
+        }
+        let _ = fs::remove_file(&self.file);
+    }
+}
+
+/// `diskpart /s`로 스크립트를 돌린다. 실패하면 출력을 담은 오류.
+fn diskpart(script: &str) -> Result<(), String> {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let path = env::temp_dir().join(format!(
+        "facet-attach-diskpart-{}-{n}.txt",
+        std::process::id()
+    ));
+    fs::write(&path, script).unwrap();
+    let output = Command::new("diskpart").arg("/s").arg(&path).output();
+    let _ = fs::remove_file(&path);
+    let output = output.map_err(|e| format!("diskpart를 실행하지 못함: {e}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "diskpart 실패({}):
+{}
+--- 스크립트 ---
+{script}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout)
+        ))
+    }
+}
+
 fn ask(pipe: &mut fs::File, request: &Request) -> Response {
     write_message(pipe, request).unwrap();
     read_message(pipe).unwrap()
@@ -710,6 +922,8 @@ fn real_volume_service_install_index_query_uninstall() {
         stopped_bytes,
         "다시 뜬 서비스가 저장한 인덱스를 쓰지 않고 다시 만듦"
     );
+
+    attach_and_detach_volumes_while_the_service_runs(&query, &volume);
 
     let removed = Command::new(env!("CARGO_BIN_EXE_facet-indexer"))
         .arg("uninstall")
