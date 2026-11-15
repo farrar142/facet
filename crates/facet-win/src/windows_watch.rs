@@ -5,7 +5,7 @@
 
 use std::io;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 
 use windows::Win32::Foundation::{
@@ -141,8 +141,11 @@ impl Drop for Watch {
     }
 }
 
-/// `path` 폴더의 감시를 건다. 첫 읽기까지 이 스레드에서 걸어 보아, 감시를 받지 않는 파일 시스템이면
+/// `path` 폴더의 감시를 건다. 감시 스레드가 첫 읽기를 걸 때까지 기다려, 감시를 받지 않는 파일 시스템이면
 /// 여기서 오류로 돌려준다.
+///
+/// 읽기는 모두 감시 스레드에서 건다. Windows는 스레드가 끝나면 그 스레드가 건 입출력을 취소하므로,
+/// 부른 스레드(잠깐 도는 일꾼일 수 있다)에서 걸면 그 스레드가 끝날 때 감시도 끝난다.
 pub(crate) fn watch(path: &Path, sink: Sink) -> io::Result<Watch> {
     let wide = crate::windows_impl::to_wide(path.as_os_str());
     if wide[..wide.len() - 1].contains(&0) {
@@ -178,11 +181,25 @@ pub(crate) fn watch(path: &Path, sink: Sink) -> io::Result<Watch> {
         io_event,
         directory,
     });
-    state.issue()?;
     let thread_stop = Arc::clone(&stop);
+    let (ready_sender, ready) = mpsc::channel();
     let thread = thread::Builder::new()
         .name("facet-watch-io".into())
-        .spawn(move || run(state, &thread_stop, sink))?;
+        .spawn(move || {
+            let first = state.issue();
+            let started = first.is_ok();
+            let _ = ready_sender.send(first);
+            if started {
+                run(state, &thread_stop, sink);
+            }
+        })?;
+    let first = ready
+        .recv()
+        .unwrap_or_else(|_| Err(io::Error::other("감시 스레드가 시작하다 끝났습니다")));
+    if let Err(error) = first {
+        let _ = thread.join();
+        return Err(error);
+    }
     Ok(Watch {
         stop,
         thread: Some(thread),

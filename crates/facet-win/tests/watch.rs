@@ -111,3 +111,14 @@ fn 없는_폴더는_감시할_수_없다() {
     let result = DirectoryWatcher::watch(&dir.path().join("없음"), |_| {});
     assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
 }
+
+#[test]
+fn 감시를_건_스레드가_끝나도_감시는_계속된다() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().to_path_buf();
+    // 잠깐 도는 일꾼 스레드에서 감시를 걸고 그 스레드는 끝낸다.
+    let (watcher, receiver) = std::thread::spawn(move || watch(&path)).join().unwrap();
+    fs::write(dir.path().join("나중 파일"), b"x").unwrap();
+    expect_names(&receiver, &["나중 파일"]);
+    drop(watcher);
+}
