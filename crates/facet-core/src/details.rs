@@ -10,6 +10,8 @@
 //! 같은 글자는 앱이 만든다. 크기와 날짜는 수와 단위만이라 여기서 글자로 만든다.
 
 use std::cmp::Ordering;
+use std::collections::HashSet;
+use std::ffi::OsString;
 
 use crate::Item;
 use crate::file_list::format_modified_local;
@@ -287,6 +289,27 @@ impl DetailsList {
     /// 정렬 기준을 바꾸고 다시 정렬한다.
     pub fn set_sort(&mut self, sort: Sort) {
         self.sort = sort;
+        self.resort();
+    }
+
+    /// 바뀐 항목만 반영한다: 이름이 같은 항목을 빼고, 다시 읽은 항목(`Some`)을 넣은 뒤 다시 정렬한다.
+    /// `None`은 그 이름의 항목이 사라졌다는 뜻이다. 다른 항목은 다시 읽지 않는다.
+    pub fn apply_changes(&mut self, changes: impl IntoIterator<Item = (OsString, Option<Item>)>) {
+        let mut names = HashSet::new();
+        let mut added = Vec::new();
+        for (name, item) in changes {
+            added.retain(|entry: &Entry| entry.item.name != name);
+            if let Some(item) = item {
+                added.push(Entry::new(item));
+            }
+            names.insert(name);
+        }
+        if names.is_empty() {
+            return;
+        }
+        self.entries
+            .retain(|entry| !names.contains(&entry.item.name));
+        self.entries.extend(added);
         self.resort();
     }
 
