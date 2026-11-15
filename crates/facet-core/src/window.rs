@@ -1,7 +1,13 @@
 //! 화면 상태: 앱 > 창 > 패널 > 탭.
 //!
-//! 창은 패널 목록을, 패널은 탭 목록을 갖고, 앱은 창 목록을 갖는다. 지금은 창이 하나이고 패널은 하나나 둘(좌우),
-//! 패널마다 탭이 여럿이다. 창 여러 개는 목록에 더하고 활성 번호를 옮기는 것으로 늘린다.
+//! 창은 패널 목록을, 패널은 탭 목록을 갖고, 앱은 창 목록을 갖는다. 창은 여럿이고 패널은 하나나 둘(좌우),
+//! 패널마다 탭이 여럿이다. 모든 창은 UI 프로세스 하나가 띄운다.
+//!
+//! 창 연산: 만들기([`App::open_window`], 「새 창」 명령은 활성 탭의 위치로), 닫기([`App::close_window`]: 그 창의
+//! 탭들이 닫은 탭 목록에 들어간다), 활성 창 바꾸기([`App::activate_window`]). 창은 바뀌지 않는 번호
+//! ([`WindowId`])로 가리킨다. 명령은 활성 창의 활성 패널의 활성 탭에 듣는다. 창마다 패널의 보이는 탭이 보이므로,
+//! 활성 창을 바꿔도 다른 창의 탭은 숨지 않는다. 창이 하나도 남지 않으면 앱이 끝난다([`App::is_finished`]: 프로세스를
+//! 끝낼지 정하는 한 곳).
 //!
 //! 패널 연산: 나누기([`App::split_panel`]: 새 오른쪽 패널이 활성 탭과 같은 위치의 탭 하나로 시작해 활성이 된다),
 //! 합치기([`App::merge_panels`]: 오른쪽 패널의 탭이 왼쪽 패널 탭 끝에 순서대로 붙는다), 활성 패널 바꾸기
@@ -63,6 +69,10 @@ pub const SPLIT_RATIO_MIN: f32 = 0.2;
 
 /// 분할 비율의 상한. 오른쪽 패널이 창 너비의 `1 - SPLIT_RATIO_MAX`보다 좁아지지 않는다.
 pub const SPLIT_RATIO_MAX: f32 = 0.8;
+
+/// 앱 안의 창 하나를 가리키는 번호. 창이 닫혀도 다른 창에 다시 쓰지 않는다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WindowId(u64);
 
 /// 앱 안의 탭 하나를 가리키는 번호. 탭을 다른 패널·창으로 옮겨도 바뀌지 않는다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -167,6 +177,7 @@ pub struct Closed {
 /// facet의 최상위 화면 하나. 패널을 하나 또는 둘(좌우) 갖는다.
 #[derive(Debug)]
 pub struct Window {
+    id: WindowId,
     panels: Vec<Panel>,
     active: usize,
     /// 분할 비율: 패널이 둘일 때 왼쪽 패널이 차지하는 몫(0..1). 합쳐도 남아 다시 나누면 그대로 쓴다.
@@ -174,12 +185,18 @@ pub struct Window {
 }
 
 impl Window {
-    fn new(panel: Panel) -> Self {
+    fn new(id: WindowId, panel: Panel) -> Self {
         Window {
+            id,
             panels: vec![panel],
             active: 0,
             split_ratio: SPLIT_RATIO_DEFAULT,
         }
+    }
+
+    /// 창의 번호.
+    pub fn id(&self) -> WindowId {
+        self.id
     }
 
     /// 패널들을 차례로(왼쪽부터).
@@ -313,6 +330,7 @@ pub struct App {
     active: usize,
     show_hidden: bool,
     next_tab: u64,
+    next_window: u64,
     /// 닫은 탭 목록. 가장 최근에 닫은 탭이 끝이다. [`CLOSED_TABS_LIMIT`]개까지.
     closed: VecDeque<ClosedTab>,
     /// 셸 일꾼 스레드. 콜드 스타트를 늦추지 않도록 처음 파일을 열 때 띄운다.
@@ -344,6 +362,7 @@ impl App {
             active: 0,
             show_hidden: false,
             next_tab: 0,
+            next_window: 0,
             closed: VecDeque::new(),
             shell: None,
             outbox: Outbox {
@@ -352,12 +371,91 @@ impl App {
             },
             receiver,
         };
-        let id = app.new_tab_id();
-        let location = start.unwrap_or_else(home_location);
-        let tab = Tab::new(location, Sort::default(), app.show_hidden);
-        app.windows.push(Window::new(Panel::new(id, tab)));
-        app.navigate(Navigation::Refresh);
+        app.push_window(start.unwrap_or_else(home_location), Sort::default());
         app
+    }
+
+    /// `location`을 보일 탭 하나로 새 창을 열어 활성 창으로 하고, 그 위치를 일꾼 스레드에서 읽는다. 정렬은 활성
+    /// 탭을 따르고(창이 없으면 기본 정렬) 기록은 비어 있다. 다른 창의 보이는 탭은 그대로 보인다.
+    pub fn open_window(&mut self, location: Location) -> WindowId {
+        let sort = if self.is_finished() {
+            Sort::default()
+        } else {
+            self.active_tab().sort()
+        };
+        self.push_window(location, sort)
+    }
+
+    fn push_window(&mut self, location: Location, sort: Sort) -> WindowId {
+        let id = WindowId(self.next_window);
+        self.next_window += 1;
+        let tab_id = self.new_tab_id();
+        let tab = Tab::new(location, sort, self.show_hidden);
+        self.windows.push(Window::new(id, Panel::new(tab_id, tab)));
+        self.active = self.windows.len() - 1;
+        self.navigate(Navigation::Refresh);
+        id
+    }
+
+    /// 창 `id`를 닫는다(제목 줄의 닫기 단추). 그 창의 탭들을 닫은 탭 목록에 넣는다: 창에 보이던 차례(왼쪽 패널부터,
+    /// 패널 안에서는 탭 차례)로 넣되 창의 활성 탭(활성 패널의 보이는 탭)은 마지막에 넣어 가장 먼저 되살아난다.
+    /// 닫은 탭의 감시는 풀리고 늦게 온 결과는 버린다. 활성 창을 닫으면 그 앞 창(첫 창이었으면 새로 첫 창)이 활성이
+    /// 된다. 창이 하나도 남지 않으면 앱이 끝난다([`App::is_finished`]). 없는 창이면 `false`다.
+    pub fn close_window(&mut self, id: WindowId) -> bool {
+        let Some(w) = self.windows.iter().position(|window| window.id == id) else {
+            return false;
+        };
+        let window = self.remove_window(w);
+        let active = (window.active, window.panels[window.active].active);
+        let mut last = None;
+        let mut tabs = Vec::new();
+        for (p, panel) in window.panels.into_iter().enumerate() {
+            for (t, (_, tab)) in panel.tabs.into_iter().enumerate() {
+                if (p, t) == active {
+                    last = Some(tab);
+                } else {
+                    tabs.push(tab);
+                }
+            }
+        }
+        tabs.extend(last);
+        self.remember_closed_tabs(tabs);
+        true
+    }
+
+    /// `w`번째 창을 목록에서 빼고 활성 창 번호를 맞춘다.
+    fn remove_window(&mut self, w: usize) -> Window {
+        let window = self.windows.remove(w);
+        if self.active > w || (self.active == w && self.active > 0) {
+            self.active -= 1;
+        }
+        window
+    }
+
+    /// 창 `id`를 활성 창으로 한다(사용자가 그 창을 눌렀다). 창의 보이는 탭들은 그대로다. 없는 창이면 `false`다.
+    pub fn activate_window(&mut self, id: WindowId) -> bool {
+        match self.windows.iter().position(|window| window.id == id) {
+            Some(w) => {
+                self.active = w;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 창 `id`. 닫혔으면 `None`이다.
+    pub fn window(&self, id: WindowId) -> Option<&Window> {
+        self.windows.iter().find(|window| window.id == id)
+    }
+
+    /// 창 `id`. 닫혔으면 `None`이다.
+    pub fn window_mut(&mut self, id: WindowId) -> Option<&mut Window> {
+        self.windows.iter_mut().find(|window| window.id == id)
+    }
+
+    /// 활성 창의 번호.
+    pub fn active_window_id(&self) -> WindowId {
+        self.active_window().id
     }
 
     /// 일꾼 스레드가 결과(읽기 결과, 묶은 변경, 열기 결과)를 보낼 때마다 부를 깨우기를 정한다. 화면은 여기서 자기
@@ -376,12 +474,14 @@ impl App {
         id
     }
 
-    /// 창들을 차례로. 지금은 하나뿐이고, 마지막 창이 닫히면 비어 있다.
+    /// 창들을 차례로(연 차례). 마지막 창이 닫히면 비어 있다.
     pub fn windows(&self) -> &[Window] {
         &self.windows
     }
 
-    /// 창이 하나도 남지 않아 앱이 끝났는가. 끝난 앱에서는 활성 창·탭을 묻지 않는다(창이 없다).
+    /// 앱이 끝났는가: 프로세스를 끝낼지 정하는 한 곳이다. 지금은 창이 하나도 남지 않으면 끝난다. 작업 대기열이
+    /// 생기면 작업이 남아 있는 동안은 창이 없어도 끝나지 않게 여기서 함께 본다. 끝난 앱에서는 활성 창·탭을 묻지
+    /// 않는다(창이 없다). 「새 창」 명령은 끝난 앱에서도 실행할 수 있다.
     pub fn is_finished(&self) -> bool {
         self.windows.is_empty()
     }
@@ -515,10 +615,7 @@ impl App {
             window.panels.remove(p);
             let window_closed = window.panels.is_empty();
             if window_closed {
-                self.windows.remove(w);
-                if self.active >= w && self.active > 0 {
-                    self.active -= 1;
-                }
+                self.remove_window(w);
             } else if window.active >= p && window.active > 0 {
                 window.active -= 1;
             }
@@ -801,6 +898,9 @@ impl App {
     /// 명령을 활성 창·패널·탭에서 지금 실행할 수 있는가([`CommandId::is_enabled_in_window`]). 앱이 끝났으면 아무 명령도
     /// 실행할 수 없다.
     pub fn can_execute(&self, command: CommandId) -> bool {
+        if command == CommandId::NewWindow {
+            return true;
+        }
         if self.is_finished() {
             return false;
         }
@@ -893,6 +993,15 @@ impl App {
                 } else {
                     self.split_panel();
                 }
+                return Execution::Done;
+            }
+            CommandId::NewWindow => {
+                let location = if self.is_finished() {
+                    home_location()
+                } else {
+                    self.active_tab().location().clone()
+                };
+                self.open_window(location);
                 return Execution::Done;
             }
             CommandId::SwitchPanel => {
