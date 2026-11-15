@@ -22,9 +22,11 @@
 //! 잡은 작업과 나란히). 답을 기다리는 작업도 취소할 수 있다. **항목별 오류**([`JobEvent::ItemError`],
 //! [`JobQueue::answer_error`])도 같은 규칙을 따른다.
 //!
-//! 지금 있는 작업은 **복사**([`JobQueue::copy`])다. 진행·이름 충돌·오류 처리의 자세한 규칙은 그 문서에 있다.
+//! 지금 있는 작업은 **복사**([`JobQueue::copy`])와 **이동**([`JobQueue::move_items`])이다. 진행·이름 충돌·오류
+//! 처리의 자세한 규칙은 그 문서에 있다.
 
 mod copy;
+mod moving;
 
 use std::collections::{HashMap, VecDeque};
 use std::panic::{self, AssertUnwindSafe};
@@ -134,8 +136,11 @@ pub struct Summary {
     /// 이름 충돌에 건너뛰기(또는 더 새것만 덮어쓰기에서 원본이 새것이 아님)로 답해 건너뛴 항목 수(폴더면 그 폴더
     /// 하나로 센다).
     pub conflicts_skipped: u64,
-    /// 이름 충돌에 덮어쓰기로 답해 덮어쓴 파일 수([`Summary::files_copied`]에도 든다).
+    /// 이름 충돌에 덮어쓰기로 답해 덮어쓴 파일 수(복사로 덮어썼으면 [`Summary::files_copied`]에도, 이동의 이름
+    /// 바꾸기로 덮어썼으면 [`Summary::items_renamed`]에도 든다).
     pub files_overwritten: u64,
+    /// 이동 작업이 이름 바꾸기 한 번으로 옮긴 항목 수(폴더면 그 폴더 하나로 센다). 복사 작업은 늘 0이다.
+    pub items_renamed: u64,
     /// 대상에 같은 이름의 폴더가 있어 묻지 않고 합친 폴더 수([`Summary::folders_copied`]에는 들지 않는다).
     pub folders_merged: u64,
     /// 따라 들어가지 않고 건너뛴 심볼릭 링크·정션 수(파일 링크 포함). 링크 자체를 복사하는 것은 뒤 티켓이다.
@@ -330,6 +335,7 @@ pub enum CopyRejection {
 /// 일꾼에게 넘기는 작업.
 enum Job {
     Copy(copy::CopyJob),
+    Move(moving::MoveJob),
 }
 
 impl Job {
@@ -337,6 +343,7 @@ impl Job {
     fn root_count(&self) -> u64 {
         match self {
             Job::Copy(job) => job.root_count(),
+            Job::Move(job) => job.root_count(),
         }
     }
 
@@ -344,6 +351,7 @@ impl Job {
     fn run(self, context: &Context<'_>) -> (Summary, bool) {
         match self {
             Job::Copy(job) => job.run(context),
+            Job::Move(job) => job.run(context),
         }
     }
 }
@@ -692,6 +700,33 @@ impl JobQueue {
     pub fn copy(&mut self, sources: Vec<PathBuf>, target: PathBuf) -> Result<JobId, CopyRejection> {
         let job = copy::CopyJob::prepare(sources, target)?;
         Ok(self.enqueue(Job::Copy(job)))
+    }
+
+    /// 원본 항목들(파일·폴더)을 `target` 폴더 안으로 옮기는(**이동**) 작업을 넣는다. 사건·상태·일시정지·취소·이름
+    /// 충돌·항목별 오류 질문은 복사([`JobQueue::copy`])와 같고, 시작 전에 막는 경우([`CopyRejection`])도 같다.
+    ///
+    /// 항목마다 먼저 이름 바꾸기를 한다. **같은 볼륨 안 이동은 이름 바꾸기 한 번**이라 큰 폴더도 곧바로 끝나고
+    /// 파일 ID·보안 설명자가 그대로 남는다([`Summary::items_renamed`]). 다른 볼륨이라 이름을 바꿀 수 없으면 그
+    /// 항목을 **복사한 뒤 원본을 지운다**: 파일은 복사를 마친 뒤 지우고, 폴더는 안의 항목이 모두 옮겨진 뒤 빈
+    /// 폴더일 때만 지운다. 그래서 실패·건너뛰기·취소한 항목의 원본과 그 상위 폴더는 남는다. 복사를 마친 원본을 지우지
+    /// 못하면 항목별 오류로 묻는다(건너뛰면 원본과 복사본이 둘 다 남는다).
+    ///
+    /// 진행은 이름 바꾸기도 항목 수로 세고, 바이트는 복사로 바뀐 항목만 센다. 항목 수는 합치거나 복사로 바꾼 폴더를
+    /// 훑으며 늘어나므로 작업이 끝날 때까지 다 셌다고 하지 않는다(남은 시간은 「계산 중」).
+    ///
+    /// 같은 볼륨이어도 대상에 같은 이름이 있으면 **이름 충돌**로 묻는다. 같은 이름의 폴더끼리는 묻지 않고 합친다:
+    /// 안의 항목을 하나씩 옮기고(안의 충돌은 다시 묻는다) 빈 원본 폴더를 지운다. 덮어쓰기는 원본을 대상 폴더 안
+    /// 임시 이름으로 옮긴(다른 볼륨이면 복사한) 뒤 바꿔치기한다.
+    ///
+    /// **같은 폴더로 이동**(원본이 이미 대상 폴더 바로 안에 있음)은 아무것도 하지 않는다: 그 항목은 처리한 것으로만
+    /// 세고, 원본이 모두 그렇다면 작업은 곧바로 [`JobState::Finished`]로 끝난다.
+    pub fn move_items(
+        &mut self,
+        sources: Vec<PathBuf>,
+        target: PathBuf,
+    ) -> Result<JobId, CopyRejection> {
+        let job = moving::MoveJob::prepare(sources, target)?;
+        Ok(self.enqueue(Job::Move(job)))
     }
 
     fn enqueue(&mut self, job: Job) -> JobId {
