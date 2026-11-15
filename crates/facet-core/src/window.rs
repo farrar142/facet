@@ -14,6 +14,7 @@
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -107,6 +108,29 @@ enum Message {
     Opened { tab: TabId, result: OpenResult },
 }
 
+/// 앱이 정한 깨우기([`App::set_waker`]).
+type Waker = Arc<dyn Fn() + Send + Sync>;
+
+/// 일꾼 스레드가 결과를 보내는 곳. 보낸 뒤 깨우기가 있으면 부른다.
+#[derive(Clone)]
+struct Outbox {
+    sender: Sender<Message>,
+    waker: Arc<Mutex<Option<Waker>>>,
+}
+
+impl Outbox {
+    fn send(&self, message: Message) {
+        // 앱이 이미 없어졌으면 결과를 받을 곳이 없다.
+        if self.sender.send(message).is_err() {
+            return;
+        }
+        let waker = self.waker.lock().ok().and_then(|w| w.clone());
+        if let Some(waker) = waker {
+            waker();
+        }
+    }
+}
+
 /// 탭에 넘긴 결과 하나.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Update {
@@ -139,7 +163,7 @@ pub struct App {
     next_tab: u64,
     /// 셸 일꾼 스레드. 콜드 스타트를 늦추지 않도록 처음 파일을 열 때 띄운다.
     shell: Option<ShellWorker>,
-    sender: Sender<Message>,
+    outbox: Outbox,
     receiver: Receiver<Message>,
 }
 
@@ -167,7 +191,10 @@ impl App {
             show_hidden: false,
             next_tab: 0,
             shell: None,
-            sender,
+            outbox: Outbox {
+                sender,
+                waker: Arc::default(),
+            },
             receiver,
         };
         let id = app.new_tab_id();
@@ -176,6 +203,16 @@ impl App {
         app.windows.push(Window::new(Panel::new(id, tab)));
         app.navigate(Navigation::Refresh);
         app
+    }
+
+    /// 일꾼 스레드가 결과(읽기 결과, 묶은 변경, 열기 결과)를 보낼 때마다 부를 깨우기를 정한다. 화면은 여기서 자기
+    /// 이벤트 루프를 깨워 [`App::poll`]을 부른다. 깨우기는 일꾼 스레드에서 불리므로 막지 말아야 한다.
+    ///
+    /// 정하기 전에 이미 온 결과로는 깨우지 않으므로, 정한 뒤 [`App::poll`]을 한 번 부른다.
+    pub fn set_waker(&mut self, waker: impl Fn() + Send + Sync + 'static) {
+        if let Ok(mut slot) = self.outbox.waker.lock() {
+            *slot = Some(Arc::new(waker));
+        }
     }
 
     fn new_tab_id(&mut self) -> TabId {
@@ -238,14 +275,13 @@ impl App {
     /// 요청 하나를 새 일꾼 스레드에서 읽는다. 느린 위치(네트워크 등) 하나가 다른 이동을 막지 않도록
     /// 요청마다 스레드를 따로 둔다. 읽기 전에 위치의 변경 감시를 건다.
     fn spawn_read(&self, tab: TabId, request: ReadRequest) {
-        let sender = self.sender.clone();
-        let changes = self.sender.clone();
+        let outbox = self.outbox.clone();
+        let changes = self.outbox.clone();
         let read = move || {
             let result = request.run_watched(move |batch| {
-                let _ = changes.send(Message::Changes { tab, batch });
+                changes.send(Message::Changes { tab, batch });
             });
-            // 앱이 이미 없어졌으면 결과를 받을 곳이 없다.
-            let _ = sender.send(Message::Read { tab, result });
+            outbox.send(Message::Read { tab, result });
         };
         thread::Builder::new()
             .name("facet-read".into())
@@ -423,10 +459,10 @@ impl App {
             return Execution::Done;
         };
         let reply = shell.open_with_default_program(path);
-        let sender = self.sender.clone();
+        let outbox = self.outbox.clone();
         let forward = move || {
             if let Ok(result) = reply.recv() {
-                let _ = sender.send(Message::Opened { tab: id, result });
+                outbox.send(Message::Opened { tab: id, result });
             }
         };
         thread::Builder::new()

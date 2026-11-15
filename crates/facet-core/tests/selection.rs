@@ -444,3 +444,97 @@ fn 큰_목록에서도_모두_선택과_정렬_뒤_유지가_빠르다() {
     assert_eq!(status.item_count, COUNT);
     assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
 }
+
+// --- 수식 키에 따른 선택(앱이 클릭·키 입력을 그대로 넘긴다) ---
+
+use facet_core::selection::Pick;
+
+#[test]
+fn 클릭의_수식_키() {
+    assert_eq!(Pick::for_click(false, false), Pick::Only);
+    assert_eq!(Pick::for_click(true, false), Pick::Toggle);
+    assert_eq!(Pick::for_click(false, true), Pick::Range);
+    // Shift가 Ctrl보다 앞선다.
+    assert_eq!(Pick::for_click(true, true), Pick::Range);
+}
+
+#[test]
+fn 커서_키의_수식_키() {
+    assert_eq!(Pick::for_cursor_key(false, false), Pick::Only);
+    assert_eq!(Pick::for_cursor_key(true, false), Pick::CursorOnly);
+    assert_eq!(Pick::for_cursor_key(false, true), Pick::Range);
+    assert_eq!(Pick::for_cursor_key(true, true), Pick::Range);
+}
+
+#[test]
+fn 클릭은_수식_키대로_고른다() {
+    let dir = basic();
+    let mut tab = tab_at(dir.path());
+    tab.pick(1, Pick::for_click(false, false));
+    tab.pick(3, Pick::for_click(false, true));
+    assert_eq!(selected(&tab), ["a.txt", "b.txt", "c.txt"]);
+    tab.pick(2, Pick::for_click(true, false));
+    assert_eq!(selected(&tab), ["a.txt", "c.txt"]);
+    assert_eq!(tab.cursor(), Some(2));
+    tab.pick(0, Pick::CursorOnly);
+    assert_eq!(selected(&tab), ["a.txt", "c.txt"]);
+    assert_eq!(tab.cursor(), Some(0));
+    // 범위 밖은 아무것도 하지 않는다.
+    tab.pick(99, Pick::Only);
+    assert_eq!(selected(&tab), ["a.txt", "c.txt"]);
+}
+
+#[test]
+fn 화살표는_커서를_옮기며_고른다() {
+    let dir = basic();
+    let mut tab = tab_at(dir.path());
+    assert_eq!(
+        tab.move_cursor_picking(CursorMove::Down, Pick::Only),
+        Some(0)
+    );
+    assert_eq!(selected(&tab), ["d"]);
+    assert_eq!(
+        tab.move_cursor_picking(CursorMove::Down, Pick::Only),
+        Some(1)
+    );
+    assert_eq!(selected(&tab), ["a.txt"]);
+    // Ctrl: 선택은 그대로 두고 커서만.
+    assert_eq!(
+        tab.move_cursor_picking(CursorMove::Down, Pick::CursorOnly),
+        Some(2)
+    );
+    assert_eq!(selected(&tab), ["a.txt"]);
+    // Shift: 기준(a.txt)부터 범위.
+    assert_eq!(
+        tab.move_cursor_picking(CursorMove::Down, Pick::Range),
+        Some(3)
+    );
+    assert_eq!(selected(&tab), ["a.txt", "b.txt", "c.txt"]);
+    assert_eq!(
+        tab.move_cursor_picking(CursorMove::Last, Pick::Only),
+        Some(4)
+    );
+    assert_eq!(selected(&tab), ["e.txt"]);
+}
+
+#[test]
+fn 빈_목록에서_화살표는_아무것도_하지_않는다() {
+    let dir = folder_with(&[], &[]);
+    let mut tab = tab_at(dir.path());
+    assert_eq!(tab.move_cursor_picking(CursorMove::Down, Pick::Only), None);
+    assert_eq!(tab.selected_count(), 0);
+}
+
+#[test]
+fn 글자로_이동하면_그_항목을_고른다() {
+    let dir = folder_with(&[("가나.txt", 1), ("나비.txt", 1), ("다리.txt", 1)], &[]);
+    let mut tab = tab_at(dir.path());
+    let now = Instant::now();
+    assert_eq!(tab.type_to_select('나', now), Some(1));
+    assert_eq!(selected(&tab), ["나비.txt"]);
+    // 맞는 항목이 없으면 선택도 커서도 그대로다.
+    let later = now + TYPE_AHEAD_TIMEOUT + Duration::from_millis(1);
+    assert_eq!(tab.type_to_select('z', later), None);
+    assert_eq!(selected(&tab), ["나비.txt"]);
+    assert_eq!(tab.cursor(), Some(1));
+}

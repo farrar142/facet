@@ -27,6 +27,41 @@ pub enum CursorMove {
     Last,
 }
 
+/// 항목을 가리킬 때(클릭, 커서 키) 선택을 어떻게 바꾸는가. 앱은 수식 키를 [`Pick::for_click`]·
+/// [`Pick::for_cursor_key`]로 바꿔 [`crate::tab::Tab::pick`]·[`crate::tab::Tab::move_cursor_picking`]에 넘긴다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pick {
+    /// 그 항목만 선택한다(단일 선택).
+    Only,
+    /// 범위 기준부터 그 항목까지 선택한다(Shift 범위).
+    Range,
+    /// 그 항목의 선택을 뒤집는다(Ctrl 토글).
+    Toggle,
+    /// 선택은 그대로 두고 커서만 옮긴다.
+    CursorOnly,
+}
+
+impl Pick {
+    /// 클릭: Shift면 범위, Ctrl이면 토글, 아니면 단일 선택. 둘 다면 Shift가 앞선다(탐색기와 같다).
+    pub const fn for_click(ctrl: bool, shift: bool) -> Pick {
+        match (ctrl, shift) {
+            (_, true) => Pick::Range,
+            (true, false) => Pick::Toggle,
+            (false, false) => Pick::Only,
+        }
+    }
+
+    /// 커서 키(화살표·Page Up/Down·Home/End): Shift면 범위, Ctrl이면 커서만(선택은 Ctrl+Space로 토글),
+    /// 아니면 옮긴 항목만 선택한다(탐색기와 같다).
+    pub const fn for_cursor_key(ctrl: bool, shift: bool) -> Pick {
+        match (ctrl, shift) {
+            (_, true) => Pick::Range,
+            (true, false) => Pick::CursorOnly,
+            (false, false) => Pick::Only,
+        }
+    }
+}
+
 /// 상태 표시줄 수치.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StatusSummary {
