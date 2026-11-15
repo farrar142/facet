@@ -9,6 +9,7 @@
 //! rows 100000        # 앱이 읽은 항목 수
 //! first_frame_us 123 # 측정 도구가 앱을 띄운 때부터 목록이 든 첫 프레임이 창에 나올 때까지(마이크로초)
 //! open_frame_us 45   # [`ENV_OPEN`]의 폴더로 이동을 시작한 때부터 그 목록이 든 첫 프레임이 나올 때까지
+//! windows 2          # [`ENV_WINDOWS`]를 줬을 때, 첫 프레임이 나온 창 수
 //! frame_us 16700     # 스크롤 중 프레임 하나의 시간(마이크로초). 프레임마다 한 줄
 //! ```
 
@@ -21,6 +22,10 @@ pub const ENV_START_US: &str = "FACET_MEASURE_START_US";
 /// 설정하면 첫 화면이 나온 뒤 이미 떠 있는 창에서 이 경로의 폴더로 이동하고, 그 목록이 든 첫 프레임이
 /// 나올 때까지를 잰다(폴더 열기부터 첫 화면까지). 이때 `rows`는 이동한 폴더의 항목 수이고 스크롤은 하지 않는다.
 pub const ENV_OPEN: &str = "FACET_MEASURE_OPEN";
+/// 2 이상이면 창이 이만큼 뜰 때까지를 첫 화면으로 잰다(세션 복원 콜드 스타트). 창마다 목록이 든 첫 프레임이
+/// 나온 뒤, 마지막 창의 첫 프레임까지의 시간이 `first_frame`이다. `rows`는 마지막 창이 읽은 항목 수이고 스크롤과
+/// 폴더 열기는 하지 않는다.
+pub const ENV_WINDOWS: &str = "FACET_MEASURE_WINDOWS";
 /// 0보다 크면 첫 화면 뒤에 프레임마다 이만큼의 행씩 목록 끝까지 자동으로 스크롤한다.
 pub const ENV_SCROLL_ROWS: &str = "FACET_MEASURE_SCROLL_ROWS";
 
@@ -29,6 +34,8 @@ pub const ENV_SCROLL_ROWS: &str = "FACET_MEASURE_SCROLL_ROWS";
 pub struct ScreenReport {
     /// 앱이 읽은 항목 수.
     pub rows: usize,
+    /// 첫 프레임을 낸 창 수. [`ENV_WINDOWS`]를 줬을 때만 적는다(아니면 0).
+    pub windows: usize,
     /// 실행부터 목록이 든 첫 프레임이 창에 나올 때까지.
     pub first_frame: Option<Duration>,
     /// 이미 떠 있는 창에서 폴더로 이동을 시작한 때부터 그 목록이 든 첫 프레임이 창에 나올 때까지.
@@ -41,6 +48,13 @@ impl ScreenReport {
     /// 파일에 적을 문자열.
     pub fn to_text(&self) -> String {
         let mut out = format!("rows {}\n", self.rows);
+        if self.windows > 0 {
+            out.push_str(&format!(
+                "windows {}
+",
+                self.windows
+            ));
+        }
         if let Some(d) = self.first_frame {
             out.push_str(&format!("first_frame_us {}\n", d.as_micros()));
         }
@@ -70,6 +84,7 @@ impl ScreenReport {
                 .map_err(|_| format!("값이 수가 아닌 줄: {line}"))?;
             match key {
                 "rows" => report.rows = number as usize,
+                "windows" => report.windows = number as usize,
                 "first_frame_us" => report.first_frame = Some(Duration::from_micros(number)),
                 "open_frame_us" => report.open_frame = Some(Duration::from_micros(number)),
                 "frame_us" => report.frames.push(Duration::from_micros(number)),
@@ -88,6 +103,7 @@ mod tests {
     fn 쓴_결과를_그대로_읽는다() {
         let report = ScreenReport {
             rows: 100_000,
+            windows: 2,
             first_frame: Some(Duration::from_micros(123_456)),
             open_frame: Some(Duration::from_micros(45_678)),
             frames: vec![Duration::from_micros(16_700), Duration::from_micros(33_000)],

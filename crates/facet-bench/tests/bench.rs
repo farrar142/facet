@@ -296,6 +296,7 @@ mod screen {
             item_count: 100_000,
             scroll_rows: 50,
             cold_starts: cold.iter().map(|n| ms(*n)).collect(),
+            session_starts: vec![ms(120)],
             opens: vec![ms(100)],
             frames: frames.iter().map(|n| ms(*n)).collect(),
             scroll_runs: 1,
@@ -340,6 +341,69 @@ mod screen {
         assert!(!with_opens(base(), &[]).verdict().open_pass);
         assert!(!with_opens(base(), &[160]).verdict().pass());
         assert_eq!(OPEN_LIMIT, ms(150));
+    }
+
+    fn with_sessions(mut r: ScreenResult, sessions: &[u64]) -> ScreenResult {
+        r.session_starts = sessions.iter().map(|n| ms(*n)).collect();
+        r
+    }
+
+    #[test]
+    fn 세션_복원_콜드_스타트는_중앙값이_200ms_미만일_때만_통과한다() {
+        use facet_bench::screen::SESSION_RESTORE_LIMIT;
+        let base = || result(&[100], &[16], Some(60.0));
+        assert!(
+            with_sessions(base(), &[150, 190, 900])
+                .verdict()
+                .session_pass
+        );
+        assert!(
+            !with_sessions(base(), &[150, 250, 260])
+                .verdict()
+                .session_pass
+        );
+        assert!(!with_sessions(base(), &[200]).verdict().session_pass);
+        assert!(!with_sessions(base(), &[]).verdict().session_pass);
+        assert!(!with_sessions(base(), &[250]).verdict().pass());
+        assert_eq!(SESSION_RESTORE_LIMIT, ms(200));
+        let r = with_sessions(base(), &[120, 100, 180]);
+        let v = r.verdict();
+        assert_eq!((v.session_median, v.session_worst), (ms(120), ms(180)));
+        let t = r.to_table();
+        assert!(t.contains("세션 복원 콜드 스타트 중앙값"), "{t}");
+        assert!(t.contains("세션 복원 콜드 스타트 최악값"), "{t}");
+        let j = r.to_json();
+        for want in [
+            "\"session_restore_cold_start\": {",
+            "\"runs_ms\": [120.000, 100.000, 180.000]",
+            "\"windows\": 2",
+            "\"tabs_per_window\": 10",
+        ] {
+            assert!(
+                j.contains(want),
+                "{want}가 없다:
+{j}"
+            );
+        }
+    }
+
+    #[test]
+    fn 세션_복원_측정_세션은_탭_10개짜리_창_둘이고_폴더가_있다() {
+        use facet_bench::screen::write_session_fixture;
+        use facet_core::session::{self, Loaded};
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_session_fixture(dir.path()).unwrap();
+        let Loaded::Restored(s) = session::load(&path) else {
+            panic!("세션을 읽지 못함");
+        };
+        assert_eq!(s.windows.len(), 2);
+        for w in &s.windows {
+            assert_eq!(w.panels.len(), 2);
+            assert_eq!(w.panels.iter().map(|p| p.tabs.len()).sum::<usize>(), 10);
+            for tab in w.panels.iter().flat_map(|p| &p.tabs) {
+                assert!(tab.location.file_system_path().unwrap().is_dir());
+            }
+        }
     }
 
     #[test]
@@ -502,5 +566,52 @@ mod screen {
         assert_eq!(spec.disk, None);
         assert_eq!(spec.refresh_hz, Some(165.0));
         assert_eq!(SystemSpec::parse("refresh_hz=0").refresh_hz, None);
+    }
+}
+
+mod session_bench {
+    use std::time::Duration;
+
+    use facet_bench::{
+        Measurement, SESSION_TABS, check_session_limit, measure_session, session_fixture,
+    };
+    use facet_core::Location;
+
+    #[test]
+    fn 탭_100개_세션을_읽고_해석해_횟수만큼_잰다() {
+        let m = measure_session(3).unwrap();
+        assert_eq!(m.item_count, SESSION_TABS);
+        assert_eq!(m.times.len(), 3);
+    }
+
+    #[test]
+    fn 세션_모양은_창과_패널과_탭_수대로다() {
+        let s = session_fixture(3, 4, |w, p, t| {
+            Location::file_system(format!(r"C:\{w}\{p}\{t}"))
+        });
+        assert_eq!(s.windows.len(), 3);
+        for w in &s.windows {
+            assert_eq!(w.panels.len(), 2);
+            assert!(
+                w.panels
+                    .iter()
+                    .all(|p| p.tabs.len() == 4 && p.active_tab == 3)
+            );
+        }
+    }
+
+    #[test]
+    fn 중앙값이_상한을_넘으면_실패한다() {
+        let slow = Measurement {
+            item_count: 100,
+            times: vec![Duration::from_millis(60); 3],
+        };
+        let err = check_session_limit(&slow, Duration::from_millis(50)).unwrap_err();
+        assert!(err.contains("상한 초과"), "{err}");
+        let fast = Measurement {
+            item_count: 100,
+            times: vec![Duration::from_millis(1); 3],
+        };
+        assert!(check_session_limit(&fast, Duration::from_millis(50)).is_ok());
     }
 }

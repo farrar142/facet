@@ -11,6 +11,8 @@
 //!   견준다([`measure_filtered_query`]). `cargo xtask ci`가 이것도 부른다.
 //! - MFT 파싱 벤치마크: 저장소의 MFT 조각을 되풀이한 덩어리([`mft_image`])를 인덱스로 만드는
 //!   시간([`MFT_PARSE_LIMIT`])을 잰다. `cargo xtask ci`가 이것도 부른다.
+//! - 세션 벤치마크: 탭 100개 세션 파일을 읽고 해석하는 시간([`SESSION_PARSE_LIMIT`])을 잰다
+//!   ([`measure_session`]). `cargo xtask ci`가 이것도 부른다.
 
 pub mod screen;
 
@@ -620,6 +622,124 @@ pub fn check_mft_limit(m: &Measurement, records: usize, limit: Duration) -> Resu
             median.as_millis(),
             limit.as_millis(),
             m.max().as_millis()
+        ))
+    }
+}
+
+/// 세션 벤치마크의 탭 수: 창 다섯 개 × 패널 둘 × 패널마다 탭 열 개.
+pub const SESSION_TABS: usize = 100;
+
+/// 탭 100개 세션 파일을 읽고 해석하는 시간의 기준(로컬, 릴리스 빌드).
+///
+/// 세션 복원은 콜드 스타트(200ms 미만)에 끼어드는 일이라 파일 읽기와 JSON 해석이 한 자릿수 ms를
+/// 넘으면 안 된다. 탭 100개 세션 파일은 수십 KB라 5ms면 넉넉하다.
+pub const SESSION_PARSE_TARGET: Duration = Duration::from_millis(5);
+
+/// CI가 실패시키는 세션 읽기·해석 시간 상한: 로컬 기준 [`SESSION_PARSE_TARGET`]의 10배.
+/// [`LIST_LIMIT`]과 같은 까닭으로 넉넉하다(알고리즘이 한 단계 나빠지는 실수만 잡는다).
+pub const SESSION_PARSE_LIMIT: Duration = Duration::from_millis(50);
+
+/// 창 `windows`개, 창마다 패널 둘, 패널마다 탭 `tabs_per_panel`개인 세션. 탭의 위치는 `location(창, 패널, 탭)`이
+/// 정하고, 정렬은 열과 방향을 돌려 가며 섞는다. 창마다 활성 패널·활성 탭은 오른쪽·마지막 탭이다.
+pub fn session_fixture(
+    windows: usize,
+    tabs_per_panel: usize,
+    mut location: impl FnMut(usize, usize, usize) -> facet_core::Location,
+) -> facet_core::session::Session {
+    use facet_core::session::{PanelSession, Session, TabSession, WindowSession};
+    let columns = [Column::Name, Column::Modified, Column::Type, Column::Size];
+    let windows = (0..windows)
+        .map(|w| WindowSession {
+            panels: (0..2)
+                .map(|p| PanelSession {
+                    tabs: (0..tabs_per_panel)
+                        .map(|t| TabSession {
+                            location: location(w, p, t),
+                            sort: Sort {
+                                column: columns[(w + p + t) % columns.len()],
+                                direction: if t % 2 == 0 {
+                                    Direction::Ascending
+                                } else {
+                                    Direction::Descending
+                                },
+                            },
+                        })
+                        .collect(),
+                    active_tab: tabs_per_panel.saturating_sub(1),
+                })
+                .collect(),
+            active_panel: 1,
+            split_ratio: 0.5,
+            placement: None,
+        })
+        .collect();
+    Session {
+        windows,
+        active_window: 0,
+    }
+}
+
+/// 벤치마크 세션의 탭 위치: 긴 경로와 한글 경로를 섞는다.
+fn session_bench_location(w: usize, p: usize, t: usize) -> facet_core::Location {
+    let path = match (w + p + t) % 3 {
+        0 => format!(r"C:\사용자\홍길동\문서\프로젝트 {w}\보고서 {p}\분기별 회의록 {t}"),
+        1 => format!(
+            r"D:\{}\항목 {w}-{p}-{t}",
+            "아주 긴 이름을 가진 폴더 ".repeat(8)
+        ),
+        _ => format!(r"E:\work\src\crate-{w}\module-{p}\tests\case-{t:03}"),
+    };
+    facet_core::Location::file_system(path)
+}
+
+/// 탭 [`SESSION_TABS`]개 세션 파일을 `runs`번 읽고 해석하는 시간을 잰다(`session::load`: 파일 읽기와 JSON 해석).
+/// 재기 전에 한 번 읽어 데운다. 읽은 세션이 쓴 것과 다르면 실패한다.
+/// [`Measurement::item_count`]는 읽은 탭 수다.
+pub fn measure_session(runs: usize) -> Result<Measurement, String> {
+    let session = session_fixture(5, SESSION_TABS / 10, session_bench_location);
+    let dir = std::env::temp_dir().join(format!("facet-bench-session-{}", std::process::id()));
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join("session.json");
+    let result = (|| {
+        facet_core::session::save(&path, &session).map_err(|e| e.to_string())?;
+        let read = || match facet_core::session::load(&path) {
+            facet_core::session::Loaded::Restored(read) => Ok(read),
+            other => Err(format!("세션을 읽지 못했습니다: {other:?}")),
+        };
+        if read()? != session {
+            return Err("읽은 세션이 쓴 세션과 다릅니다".to_owned());
+        }
+        let mut times = Vec::with_capacity(runs);
+        let mut item_count = 0;
+        for _ in 0..runs {
+            let start = Instant::now();
+            let read = read()?;
+            times.push(start.elapsed());
+            item_count = read
+                .windows
+                .iter()
+                .flat_map(|w| &w.panels)
+                .map(|p| p.tabs.len())
+                .sum();
+        }
+        Ok(Measurement { item_count, times })
+    })();
+    let _ = fs::remove_dir_all(&dir);
+    result
+}
+
+/// 세션 읽기·해석 중앙값이 `limit`을 넘으면 넘은 수치를 담은 메시지를 돌려준다.
+pub fn check_session_limit(m: &Measurement, limit: Duration) -> Result<(), String> {
+    let median = m.median();
+    if median <= limit {
+        Ok(())
+    } else {
+        Err(format!(
+            "세션 읽기·해석 상한 초과: 탭 {}개 중앙값 {:.1}ms > 상한 {}ms (최악 {:.1}ms)",
+            m.item_count,
+            median.as_secs_f64() * 1000.0,
+            limit.as_millis(),
+            m.max().as_secs_f64() * 1000.0
         ))
     }
 }

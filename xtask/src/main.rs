@@ -4,15 +4,15 @@
 //!   → 인덱스 벤치마크 → MFT 파싱 벤치마크. CI와 로컬이 같은 명령을 쓴다. 실제 볼륨 테스트는 관리자일 때만 시험 VHD를
 //!   만들어 돌린다.
 //! - `test-folder`: 시험 폴더를 만든다(`facet-bench make-folder`).
-//! - `bench`: 벤치마크만 돌린다(`facet-bench list`·`facet-bench index`·`facet-bench mft`, 릴리스 빌드).
+//! - `bench`: 벤치마크만 돌린다(`facet-bench list`·`facet-bench index`·`facet-bench mft`·`facet-bench session`, 릴리스 빌드).
 //!
-//! - `measure [인자]`: 앱과 측정 도구를 릴리스 빌드해 화면 수치(콜드 스타트·폴더 열기 첫 화면·스크롤 프레임)를 잰다.
+//! - `measure [인자]`: 앱과 측정 도구를 릴리스 빌드해 화면 수치(콜드 스타트·세션 복원 콜드 스타트·폴더 열기 첫 화면·스크롤 프레임)를 잰다.
 //! - `mft-fixture`: 시험 VHD에서 MFT 조각과 기대값 목록을 만든다(`mft_fixture` 모듈, 관리자).
 //! - `dist <label>`: release 빌드한 facet을 portable zip과 체크섬으로 묶는다(`dist` 모듈).
 //! - `indexer <install|uninstall>`: 인덱서 서비스를 release로 빌드해 개발 기계에 설치하거나 지운다(관리자).
 //!
 //! 벤치마크 상한과 그 근거는 `crates/facet-bench/src/lib.rs`의 `LIST_LIMIT`·`QUERY_LIMIT`·
-//! `INDEX_MEMORY_LIMIT`·`MFT_PARSE_LIMIT`에 있다.
+//! `INDEX_MEMORY_LIMIT`·`MFT_PARSE_LIMIT`·`SESSION_PARSE_LIMIT`에 있다.
 
 mod dist;
 mod mft_fixture;
@@ -27,16 +27,16 @@ const USAGE: &str = "\
 
 명령:
   ci                             형식 검사, lint(경고를 오류로), 빌드, 테스트, 실제 볼륨 테스트,
-                                 코어 벤치마크, 인덱스 벤치마크, MFT 파싱 벤치마크를 차례로 돌린다. 실제 볼륨 테스트는
+                                 코어 벤치마크, 인덱스 벤치마크, MFT 파싱 벤치마크, 세션 읽기·해석 벤치마크를 차례로 돌린다. 실제 볼륨 테스트는
                                  관리자일 때만 시험 VHD를 만들어 돌리고, 아니면 건너뛴다고 출력한다
   test-folder [경로] [--count N]  N개(기본 100000) 항목이 든 시험 폴더를 만든다.
                                  경로를 빼면 임시 폴더의 facet-test-folders/items-N
   bench                          10만 항목 시험 폴더를 만들거나 확인하고 코어 목록 읽기·읽기+정렬·정렬 바꾸기를 잰 뒤,
                                  합성 인덱스 100만 개의 메모리와 부분 일치 질의를 재고, MFT 조각을
-                                 되풀이한 레코드 100만 개를 인덱스로 만드는 시간을 잰다(릴리스 빌드)
+                                 되풀이한 레코드 100만 개를 인덱스로 만드는 시간을 재고, 탭 100개 세션 파일을 읽고 해석하는 시간을 잰다(릴리스 빌드)
   measure [--count N] [--runs N] [--scroll-runs N] [--scroll-rows N] [--refresh-hz N] [--json 파일] [경로]
                                  앱을 릴리스 빌드하고 시험 폴더(기본 10만 항목)를 열어 콜드 스타트, 떠 있는 창에서
-                                 그 폴더로 이동한 폴더 열기 첫 화면(중앙값·최악값), 스크롤 프레임 시간을 잰다. 표와 JSON(기본 target/measure.json)을 내고,
+                                 그 폴더로 이동한 폴더 열기 첫 화면, 탭 10개짜리 창 둘의 세션 복원 콜드 스타트(모두 중앙값·최악값), 스크롤 프레임 시간을 잰다. 표와 JSON(기본 target/measure.json)을 내고,
                                  통과 기준을 못 맞추면 실패한다. CI는 부르지 않는다(사람이 잰다)
   mft-fixture                    (관리자) 시험 VHD에 정해진 항목을 만들고 MFT를 떠서
                                  testdata/mft/에 조각과 기대값 목록을 쓴다
@@ -197,7 +197,12 @@ fn ci_steps() -> Vec<Step> {
 }
 
 fn bench_steps() -> Vec<Step> {
-    vec![bench_step(), index_bench_step(), mft_bench_step()]
+    vec![
+        bench_step(),
+        index_bench_step(),
+        mft_bench_step(),
+        session_bench_step(),
+    ]
 }
 
 /// 릴리스 빌드한 `facet-bench`를 `cargo run`으로 부르는 인자.
@@ -252,6 +257,15 @@ fn mft_bench_step() -> Step {
     Step {
         name: "MFT 파싱 벤치마크",
         args: facet_bench("mft"),
+        env: Vec::new(),
+    }
+}
+
+/// 탭 100개 세션 파일을 읽고 해석하는 시간을 잰다. 상한은 `facet-bench`의 기본값이다.
+fn session_bench_step() -> Step {
+    Step {
+        name: "세션 읽기·해석 벤치마크",
+        args: facet_bench("session"),
         env: Vec::new(),
     }
 }
