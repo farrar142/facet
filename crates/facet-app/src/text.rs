@@ -3,17 +3,10 @@
 //! 코어는 문장을 만들지 않고 종류와 값을 돌려준다. 그것을 화면 글자로 바꾸는 일은 여기서 한다.
 //! 번역 방식이 정해지면 이 모듈을 바꾼다.
 
-use facet_core::command::CommandId;
+use facet_core::command::{CommandId, Key, Shortcut};
 use facet_core::details::FileType;
 
 /// 명령 이름: 명령 팔레트에 보이고, 팔레트 검색은 이 이름에서 찾는다(코어는 ID만 갖는다).
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "명령 팔레트를 화면에 그리는 티켓(#60)이 부른다. 그때 이 expect를 지운다"
-    )
-)]
 pub fn command_name(command: CommandId) -> &'static str {
     match command {
         CommandId::Open => "열기",
@@ -31,6 +24,41 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::SortByType => "유형으로 정렬",
         CommandId::SortBySize => "크기로 정렬",
     }
+}
+
+/// 단축키의 글자: `Ctrl+Shift+P`, `Alt+←`. 키 이름은 번역하지 않는다.
+pub fn shortcut_text(shortcut: &Shortcut) -> String {
+    let key = match shortcut.key {
+        Key::Letter(c) => c.to_string(),
+        Key::Digit(d) => d.to_string(),
+        Key::Function(n) => format!("F{n}"),
+        Key::Enter => "Enter".to_owned(),
+        Key::Backspace => "Backspace".to_owned(),
+        Key::Space => "Space".to_owned(),
+        Key::Tab => "Tab".to_owned(),
+        Key::Escape => "Esc".to_owned(),
+        Key::Delete => "Delete".to_owned(),
+        Key::Insert => "Insert".to_owned(),
+        Key::Left => "←".to_owned(),
+        Key::Right => "→".to_owned(),
+        Key::Up => "↑".to_owned(),
+        Key::Down => "↓".to_owned(),
+        Key::Home => "Home".to_owned(),
+        Key::End => "End".to_owned(),
+        Key::PageUp => "PageUp".to_owned(),
+        Key::PageDown => "PageDown".to_owned(),
+    };
+    let mut text = String::new();
+    for (on, name) in [
+        (shortcut.ctrl, "Ctrl+"),
+        (shortcut.alt, "Alt+"),
+        (shortcut.shift, "Shift+"),
+    ] {
+        if on {
+            text.push_str(name);
+        }
+    }
+    text + &key
 }
 
 /// 자세히 보기 유형 열의 글자: 폴더 「파일 폴더」, 파일 「TXT 파일」, 확장자가 없으면 「파일」.
@@ -73,6 +101,16 @@ mod tests {
         let found = facet_core::command::search("숨김", command_name, &tab);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].command, CommandId::ToggleHidden);
+    }
+
+    #[test]
+    fn 단축키_글자() {
+        assert_eq!(
+            shortcut_text(&Shortcut::new(Key::Letter('P')).ctrl().shift()),
+            "Ctrl+Shift+P"
+        );
+        assert_eq!(shortcut_text(&Shortcut::new(Key::Left).alt()), "Alt+←");
+        assert_eq!(shortcut_text(&Shortcut::new(Key::Function(5))), "F5");
     }
 
     #[test]

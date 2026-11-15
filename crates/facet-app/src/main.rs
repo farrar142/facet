@@ -31,10 +31,12 @@ use slint::{
 };
 
 use crate::address::AddressEdit;
+use crate::palette::Palette;
 
 mod address;
 mod keys;
 mod measure;
+mod palette;
 mod text;
 
 slint::include_modules!();
@@ -131,6 +133,14 @@ fn connect(ui: &AppWindow) {
     });
     ui.on_candidate_pressed(|index| with_view(|view| view.candidate_pressed(index)));
     ui.on_cancel_address_edit(|| with_view(View::close_address_edit));
+    ui.on_palette_edited(|text| with_view(|view| view.palette_edited(&text)));
+    ui.on_palette_step(|step| with_view(|view| view.palette_step(step >= 0)));
+    ui.on_palette_run(|index| {
+        let mut ran = false;
+        with_view(|view| ran = view.palette_run(index));
+        ran
+    });
+    ui.on_palette_close(|| with_view(View::close_palette));
 }
 
 /// UI 스레드의 화면 상태: 코어의 앱과 창.
@@ -146,6 +156,10 @@ struct View {
     address: RefCell<Option<AddressEdit>>,
     /// 자동 완성 후보의 이름.
     candidates: Rc<VecModel<SharedString>>,
+    /// 명령 팔레트가 열려 있으면 그 검색 결과와 고른 줄.
+    palette: RefCell<Option<Palette>>,
+    /// 명령 팔레트의 검색 결과 줄.
+    palette_rows: Rc<VecModel<PaletteRow>>,
     /// 「읽는 중」을 드러낼 때 다시 그리는 타이머.
     reading_timer: Timer,
     /// 첫 목록(또는 읽기 오류)이 창에 들어갔는가. 측정 모드가 쓴다.
@@ -164,6 +178,8 @@ impl View {
         ui.set_segments(ModelRc::from(Rc::clone(&segments)));
         let candidates = Rc::new(VecModel::default());
         ui.set_candidates(ModelRc::from(Rc::clone(&candidates)));
+        let palette_rows = Rc::new(VecModel::default());
+        ui.set_palette_rows(ModelRc::from(Rc::clone(&palette_rows)));
         Rc::new(View {
             ui: ui.as_weak(),
             app,
@@ -172,6 +188,8 @@ impl View {
             segments,
             address: RefCell::default(),
             candidates,
+            palette: RefCell::default(),
+            palette_rows,
             reading_timer: Timer::default(),
             loaded: Cell::new(false),
         })
@@ -332,9 +350,82 @@ impl View {
         self.render();
         match execution {
             Execution::EditAddress => self.begin_address_edit(),
-            // 명령 팔레트(#60)는 아직 화면이 없다.
-            Execution::ShowCommandPalette | Execution::Done | Execution::Disabled => {}
+            Execution::ShowCommandPalette => self.open_palette(),
+            Execution::Done | Execution::Disabled => {}
         }
+    }
+
+    /// 명령 팔레트를 연다. 모든 명령이 보이고 첫 줄이 골라진다.
+    fn open_palette(&self) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        self.close_rename();
+        self.close_address_edit();
+        *self.palette.borrow_mut() = Some(Palette::default());
+        self.palette_edited("");
+        ui.set_palette_text(SharedString::new());
+        ui.set_palette_open(true);
+    }
+
+    fn close_palette(&self) {
+        self.palette.borrow_mut().take();
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_palette_open(false);
+        }
+    }
+
+    /// 검색어가 바뀌었다: 코어의 명령 팔레트 검색으로 다시 찾는다. 앱은 찾지 않는다.
+    fn palette_edited(&self, query: &str) {
+        let entries = self.app.borrow().search_commands(query, text::command_name);
+        let rows: Vec<PaletteRow> = entries
+            .iter()
+            .map(|entry| PaletteRow {
+                name: text::command_name(entry.command).into(),
+                shortcut: entry
+                    .shortcuts
+                    .first()
+                    .map(text::shortcut_text)
+                    .unwrap_or_default()
+                    .into(),
+                enabled: entry.enabled,
+            })
+            .collect();
+        let highlight = if entries.is_empty() { None } else { Some(0) };
+        self.palette_rows.set_vec(rows);
+        if let Some(palette) = self.palette.borrow_mut().as_mut() {
+            palette.set(entries, highlight);
+        }
+        self.show_palette_highlight();
+    }
+
+    fn palette_step(&self, forward: bool) {
+        if let Some(palette) = self.palette.borrow_mut().as_mut() {
+            palette.step(forward);
+        }
+        self.show_palette_highlight();
+    }
+
+    fn show_palette_highlight(&self) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        let highlight = self.palette.borrow().as_ref().and_then(Palette::highlight);
+        ui.set_palette_highlight(highlight.map_or(-1, count));
+    }
+
+    /// `index`번 줄(음수면 고른 줄)의 명령을 실행한다. 실행할 수 없는 명령이면 팔레트를 그대로 두고 `false`다.
+    fn palette_run(&self, index: i32) -> bool {
+        let command = {
+            let palette = self.palette.borrow();
+            let Some(palette) = palette.as_ref() else {
+                return false;
+            };
+            let index = usize::try_from(index).ok().or(palette.highlight());
+            index.and_then(|index| palette.command_at(index))
+        };
+        let Some(command) = command else {
+            return false;
+        };
+        self.close_palette();
+        self.execute(command);
+        true
     }
 
     /// 활성 탭을 `location`으로 옮기기 시작한다.
