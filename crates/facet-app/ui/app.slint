@@ -419,6 +419,9 @@ component PanelView inherits Rectangle {
                     alignment: start;
                     for segment[i] in root.segments: HorizontalLayout {
                         Segment {
+                            // 현재 폴더(마지막 조각)는 온전히 보인다. 자리가 모자라면 앞쪽(상위) 조각이 줄어든다.
+                            min-width: i == root.segments.length - 1 ? min(self.preferred-width, address-bar.width - 8px) : 0px;
+                            horizontal-stretch: i == root.segments.length - 1 ? 1 : 0;
                             text: segment;
                             pressed => {
                                 root.activate();
@@ -781,7 +784,9 @@ component PanelView inherits Rectangle {
 }
 
 export component AppWindow inherits Window {
-    title: "facet";
+    // 활성 탭의 폴더 이름. 창 제목에 붙여 지금 어디에 있는지 보이게 한다.
+    in property <string> folder-title;
+    title: root.folder-title == "" ? "facet" : root.folder-title + " - facet";
     preferred-width: 900px;
     preferred-height: 600px;
     default-font-size: 13px;
