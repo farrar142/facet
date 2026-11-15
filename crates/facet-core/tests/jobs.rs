@@ -1,0 +1,586 @@
+//! 작업 대기열과 복사 작업을 임시 폴더의 실제 파일로 확인한다.
+//!
+//! 파일 하나의 복사는 facet-win(`CopyFile2`)에 맡기므로 실제 복사를 보는 테스트는 Windows 전용이다. Windows가
+//! 아니면 시작 전 거부만 확인한다.
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use facet_core::job::{CopyRejection, JobEvent, JobId, JobQueue, JobState, Remaining, Summary};
+use tempfile::TempDir;
+
+/// 작업 하나가 끝날 때까지 기다리는 넉넉한 한도.
+const JOB_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// `jobs`가 모두 끝날 때까지 사건을 모은다.
+fn collect_until_finished(queue: &mut JobQueue, jobs: &[JobId]) -> Vec<JobEvent> {
+    let mut events = Vec::new();
+    let mut remaining: Vec<JobId> = jobs.to_vec();
+    let deadline = std::time::Instant::now() + JOB_TIMEOUT;
+    while !remaining.is_empty() {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let event = queue
+            .wait_event(left)
+            .unwrap_or_else(|| panic!("작업이 끝나지 않았다: {events:?}"));
+        if let JobEvent::Finished { job, .. } = &event {
+            remaining.retain(|id| id != job);
+        }
+        events.push(event);
+    }
+    events
+}
+
+fn summary_of(events: &[JobEvent], id: JobId) -> Summary {
+    events
+        .iter()
+        .find_map(|event| match event {
+            JobEvent::Finished { job, summary } if *job == id => Some(summary.clone()),
+            _ => None,
+        })
+        .expect("끝남 사건")
+}
+
+fn copy_and_wait(queue: &mut JobQueue, sources: Vec<PathBuf>, target: &Path) -> Vec<JobEvent> {
+    let id = queue.copy(sources, target.to_path_buf()).unwrap();
+    collect_until_finished(queue, &[id])
+}
+
+#[test]
+fn 없는_대상_위치는_작업을_만들지_않는다() {
+    let dir = TempDir::new().unwrap();
+    let source = dir.path().join("원본.txt");
+    std::fs::write(&source, "x").unwrap();
+    let mut queue = JobQueue::new();
+    let missing = dir.path().join("없는 폴더");
+    assert_eq!(
+        queue.copy(vec![source.clone()], missing),
+        Err(CopyRejection::TargetMissing)
+    );
+    assert_eq!(
+        queue.copy(vec![source.clone()], source.clone()),
+        Err(CopyRejection::TargetNotFolder)
+    );
+    assert_eq!(
+        queue.copy(Vec::new(), dir.path().to_path_buf()),
+        Err(CopyRejection::NoSources)
+    );
+    assert!(queue.poll().is_empty(), "거부된 작업은 사건이 없다");
+    assert!(!queue.has_unfinished());
+}
+
+#[test]
+fn 폴더를_자기_자신이나_하위로_복사하면_거부한다() {
+    let dir = TempDir::new().unwrap();
+    let folder = dir.path().join("폴더");
+    let inner = folder.join("안").join("더 안");
+    std::fs::create_dir_all(&inner).unwrap();
+    let mut queue = JobQueue::new();
+    assert_eq!(
+        queue.copy(vec![folder.clone()], folder.clone()),
+        Err(CopyRejection::IntoItself(folder.clone()))
+    );
+    assert_eq!(
+        queue.copy(vec![folder.clone()], inner.clone()),
+        Err(CopyRejection::TargetInsideSource(folder.clone()))
+    );
+    // 대소문자만 다른 경로도 같은 폴더다(Windows).
+    #[cfg(windows)]
+    {
+        let upper = PathBuf::from(inner.to_string_lossy().to_uppercase());
+        assert_eq!(
+            queue.copy(vec![folder.clone()], upper),
+            Err(CopyRejection::TargetInsideSource(folder.clone()))
+        );
+    }
+    assert!(queue.poll().is_empty());
+}
+
+#[cfg(windows)]
+mod windows {
+    use super::*;
+
+    use std::fs::{self, FileTimes, OpenOptions};
+    use std::os::windows::fs::{FileTimesExt, MetadataExt, OpenOptionsExt};
+    use std::process::Command;
+    use std::time::SystemTime;
+
+    const READONLY: u32 = 0x1;
+    const HIDDEN: u32 = 0x2;
+
+    fn attrib(path: &Path, flags: &[&str]) {
+        let status = Command::new("attrib")
+            .args(flags)
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "attrib {flags:?} {}", path.display());
+    }
+
+    fn attributes(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().file_attributes()
+    }
+
+    fn set_old_times(path: &Path, folder: bool, offset: u64) {
+        let created = SystemTime::UNIX_EPOCH + Duration::from_secs(1_500_000_000 + offset);
+        let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_000 + offset);
+        let mut options = OpenOptions::new();
+        options.access_mode(0x100); // FILE_WRITE_ATTRIBUTES
+        if folder {
+            options.custom_flags(0x0200_0000); // FILE_FLAG_BACKUP_SEMANTICS
+        }
+        let file = options.open(path).unwrap();
+        file.set_times(FileTimes::new().set_created(created).set_modified(modified))
+            .unwrap();
+    }
+
+    fn times(path: &Path) -> (SystemTime, SystemTime) {
+        let metadata = fs::metadata(path).unwrap();
+        (metadata.created().unwrap(), metadata.modified().unwrap())
+    }
+
+    fn ads(path: &Path, stream: &str) -> PathBuf {
+        let mut text = path.as_os_str().to_owned();
+        text.push(":");
+        text.push(stream);
+        PathBuf::from(text)
+    }
+
+    fn pattern(len: usize, seed: usize) -> Vec<u8> {
+        (0..len).map(|i| (i * 31 + seed) as u8).collect()
+    }
+
+    /// 원본과 대상 트리가 이름·내용·시각·속성까지 같은지 본다.
+    fn assert_same_tree(source: &Path, target: &Path) {
+        let source_meta = fs::symlink_metadata(source).unwrap();
+        let target_meta = fs::symlink_metadata(target).unwrap();
+        assert_eq!(source_meta.is_dir(), target_meta.is_dir(), "{target:?}");
+        assert_eq!(times(source), times(target), "시각 {target:?}");
+        assert_eq!(attributes(source), attributes(target), "속성 {target:?}");
+        if source_meta.is_dir() {
+            let mut names: Vec<_> = fs::read_dir(source)
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            let mut target_names: Vec<_> = fs::read_dir(target)
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            names.sort();
+            target_names.sort();
+            assert_eq!(names, target_names, "{target:?}");
+            for name in names {
+                assert_same_tree(&source.join(&name), &target.join(&name));
+            }
+        } else {
+            assert_eq!(fs::read(source).unwrap(), fs::read(target).unwrap());
+        }
+    }
+
+    /// 읽기 전용을 풀어 임시 폴더를 지울 수 있게 한다.
+    fn clear_readonly(path: &Path) {
+        let status = Command::new("attrib")
+            .args(["-r", "-h", "/s", "/d"])
+            .arg(path.join("*"))
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn 파일_폴더_중첩_폴더를_복사하면_내용_시각_속성_대체_데이터_스트림이_같다() {
+        let dir = TempDir::new().unwrap();
+        let source_dir = dir.path().join("원본");
+        let target_dir = dir.path().join("대상");
+        fs::create_dir_all(&target_dir).unwrap();
+
+        let file = source_dir.join("파일 하나.txt");
+        let folder = source_dir.join("폴더");
+        let nested = folder.join("중첩").join("더 깊이");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(&file, pattern(2 * 1024 * 1024 + 5, 1)).unwrap();
+        fs::write(
+            ads(&file, "Zone.Identifier"),
+            "[ZoneTransfer]\r\nZoneId=3\r\n",
+        )
+        .unwrap();
+        fs::write(folder.join("a.bin"), pattern(1000, 2)).unwrap();
+        fs::write(folder.join("중첩").join("빈 파일"), "").unwrap();
+        let deep = nested.join("깊은 파일 😀.txt");
+        fs::write(&deep, pattern(70_000, 3)).unwrap();
+        fs::write(ads(&deep, "메모"), "다른 스트림").unwrap();
+        set_old_times(&file, false, 1);
+        set_old_times(&deep, false, 2);
+        set_old_times(&nested, true, 3);
+        set_old_times(&folder.join("중첩"), true, 4);
+        set_old_times(&folder, true, 5);
+        attrib(&file, &["+r", "+h"]);
+        attrib(&nested, &["+h"]);
+
+        let mut queue = JobQueue::new();
+        let events = copy_and_wait(&mut queue, vec![file.clone(), folder.clone()], &target_dir);
+        let id = events
+            .iter()
+            .find_map(|e| match e {
+                JobEvent::Finished { job, .. } => Some(*job),
+                _ => None,
+            })
+            .unwrap();
+        let summary = summary_of(&events, id);
+        assert_eq!(summary.files_copied, 4, "{summary:?}");
+        assert_eq!(summary.folders_copied, 3, "{summary:?}");
+        assert!(summary.failures.is_empty(), "{summary:?}");
+        assert_eq!(summary.conflicts_skipped, 0);
+        assert!(
+            events.contains(&JobEvent::StateChanged {
+                job: id,
+                state: JobState::Finished
+            }),
+            "{events:?}"
+        );
+
+        assert_same_tree(&file, &target_dir.join("파일 하나.txt"));
+        assert_same_tree(&folder, &target_dir.join("폴더"));
+        assert_eq!(
+            attributes(&target_dir.join("파일 하나.txt")) & (READONLY | HIDDEN),
+            READONLY | HIDDEN
+        );
+        assert_eq!(
+            fs::read(ads(&target_dir.join("파일 하나.txt"), "Zone.Identifier")).unwrap(),
+            b"[ZoneTransfer]\r\nZoneId=3\r\n"
+        );
+        assert_eq!(
+            fs::read_to_string(ads(
+                &target_dir
+                    .join("폴더")
+                    .join("중첩")
+                    .join("더 깊이")
+                    .join("깊은 파일 😀.txt"),
+                "메모"
+            ))
+            .unwrap(),
+            "다른 스트림"
+        );
+        assert!(!queue.has_unfinished());
+        clear_readonly(dir.path());
+    }
+
+    #[test]
+    fn 작업_두_개는_앞_작업이_끝난_뒤_뒤_작업이_시작한다() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("원본");
+        fs::create_dir_all(&source).unwrap();
+        for i in 0..20 {
+            fs::write(source.join(format!("{i}.bin")), pattern(200_000, i)).unwrap();
+        }
+        let first_target = dir.path().join("첫째");
+        let second_target = dir.path().join("둘째");
+        fs::create_dir_all(&first_target).unwrap();
+        fs::create_dir_all(&second_target).unwrap();
+
+        let mut queue = JobQueue::new();
+        let first = queue
+            .copy(vec![source.clone()], first_target.clone())
+            .unwrap();
+        let second = queue
+            .copy(vec![source.clone()], second_target.clone())
+            .unwrap();
+        assert_ne!(first, second);
+        assert!(queue.has_unfinished());
+        let events = collect_until_finished(&mut queue, &[first, second]);
+
+        let position = |wanted: &JobEvent| {
+            events
+                .iter()
+                .position(|e| e == wanted)
+                .unwrap_or_else(|| panic!("{wanted:?} 없음: {events:?}"))
+        };
+        let queued_second = position(&JobEvent::StateChanged {
+            job: second,
+            state: JobState::Queued,
+        });
+        let running_first = position(&JobEvent::StateChanged {
+            job: first,
+            state: JobState::Running,
+        });
+        let finished_first = position(&JobEvent::StateChanged {
+            job: first,
+            state: JobState::Finished,
+        });
+        let running_second = position(&JobEvent::StateChanged {
+            job: second,
+            state: JobState::Running,
+        });
+        assert!(running_first < finished_first);
+        assert!(queued_second < running_second);
+        assert!(
+            finished_first < running_second,
+            "뒤 작업은 앞 작업이 끝난 뒤 시작한다: {events:?}"
+        );
+        // 앞 작업이 끝나기 전에는 뒤 작업의 진행 사건이 없다.
+        assert!(events[..finished_first].iter().all(|e| match e {
+            JobEvent::Progress { job, .. } => *job == first,
+            _ => true,
+        }));
+        assert_same_tree(&source, &first_target.join("원본"));
+        assert_same_tree(&source, &second_target.join("원본"));
+        assert!(!queue.has_unfinished());
+    }
+
+    #[test]
+    fn 진행_사건은_초당_10번_이하이고_마지막은_원본_전체와_같다() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("원본");
+        let mut expected_items = 1; // 원본 폴더
+        let mut expected_bytes = 0;
+        for folder in 0..10 {
+            let sub = source.join(format!("폴더 {folder}"));
+            fs::create_dir_all(&sub).unwrap();
+            expected_items += 1;
+            for i in 0..40 {
+                let len = 30_000 + i * 7;
+                fs::write(sub.join(format!("{i}.bin")), pattern(len, i)).unwrap();
+                expected_items += 1;
+                expected_bytes += len as u64;
+            }
+        }
+        // 큰 파일 하나로 파일 안 진행(콜백)도 지나게 한다.
+        let big = 48 * 1024 * 1024;
+        fs::write(source.join("큰 파일.bin"), pattern(big, 9)).unwrap();
+        expected_items += 1;
+        expected_bytes += big as u64;
+        let target = dir.path().join("대상");
+        fs::create_dir_all(&target).unwrap();
+
+        let mut queue = JobQueue::new();
+        let events = copy_and_wait(&mut queue, vec![source.clone()], &target);
+        let progress: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                JobEvent::Progress { progress, .. } => Some(progress.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(!progress.is_empty());
+        for pair in progress.windows(2) {
+            let gap = pair[1].elapsed - pair[0].elapsed;
+            assert!(
+                gap >= Duration::from_millis(100),
+                "진행 사건 사이가 100ms보다 짧다: {gap:?}"
+            );
+            assert!(pair[1].bytes_done >= pair[0].bytes_done);
+            assert!(pair[1].items_done >= pair[0].items_done);
+        }
+        for p in &progress {
+            if !p.counted {
+                assert_eq!(p.remaining, Remaining::Calculating, "{p:?}");
+            }
+            assert!(p.items_done <= p.items_total, "{p:?}");
+            assert!(p.bytes_done <= p.bytes_total, "{p:?}");
+        }
+        let last = progress.last().unwrap();
+        assert!(last.counted);
+        assert_eq!(last.items_total, expected_items);
+        assert_eq!(last.items_done, expected_items);
+        assert_eq!(last.bytes_total, expected_bytes);
+        assert_eq!(last.bytes_done, expected_bytes);
+        assert_eq!(last.remaining, Remaining::Known(Duration::ZERO));
+        assert_same_tree(&source, &target.join("원본"));
+    }
+
+    #[test]
+    fn 훑기가_끝나기_전에_복사가_시작된다() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("원본");
+        // 폴더가 많으면 훑기(폴더마다 목록 읽기)가 오래 걸린다. 첫 파일은 앞쪽 폴더에 있다.
+        for folder in 0..1500 {
+            let sub = source.join(format!("{folder:04}"));
+            fs::create_dir_all(&sub).unwrap();
+            fs::write(sub.join("a.txt"), "내용").unwrap();
+        }
+        let target = dir.path().join("대상");
+        fs::create_dir_all(&target).unwrap();
+
+        let mut queue = JobQueue::new();
+        let events = copy_and_wait(&mut queue, vec![source.clone()], &target);
+        let early = events.iter().any(|e| match e {
+            JobEvent::Progress { progress, .. } => !progress.counted && progress.bytes_done > 0,
+            _ => false,
+        });
+        assert!(early, "다 세기 전에 복사한 진행 사건이 없다: {events:?}");
+        assert_same_tree(&source, &target.join("원본"));
+    }
+
+    #[test]
+    fn 같은_폴더로_복사하면_복사본_이름을_만든다() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("보고서.txt");
+        let folder = dir.path().join("사진.2024");
+        let plain = dir.path().join("Makefile");
+        fs::write(&file, "본문").unwrap();
+        fs::create_dir_all(folder.join("안")).unwrap();
+        fs::write(folder.join("안").join("x.jpg"), "jpg").unwrap();
+        fs::write(&plain, "all:").unwrap();
+
+        let mut queue = JobQueue::new();
+        let sources = vec![file.clone(), folder.clone(), plain.clone()];
+        copy_and_wait(&mut queue, sources.clone(), dir.path());
+        assert_eq!(
+            fs::read_to_string(dir.path().join("보고서 - 복사본.txt")).unwrap(),
+            "본문"
+        );
+        assert_same_tree(&folder, &dir.path().join("사진.2024 - 복사본"));
+        assert!(dir.path().join("Makefile - 복사본").is_file());
+
+        copy_and_wait(&mut queue, sources, dir.path());
+        assert!(dir.path().join("보고서 - 복사본 (2).txt").is_file());
+        assert_same_tree(&folder, &dir.path().join("사진.2024 - 복사본 (2)"));
+        assert!(dir.path().join("Makefile - 복사본 (2)").is_file());
+
+        // 같은 이름의 두 원본을 한 작업에서 같은 폴더로 복사해도 서로 다른 이름이 된다.
+        copy_and_wait(&mut queue, vec![file.clone(), file.clone()], dir.path());
+        assert!(dir.path().join("보고서 - 복사본 (3).txt").is_file());
+        assert!(dir.path().join("보고서 - 복사본 (4).txt").is_file());
+    }
+
+    #[test]
+    fn 이름_충돌은_덮어쓰지_않고_건너뛰어_센다() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("원본");
+        fs::create_dir_all(source.join("폴더")).unwrap();
+        fs::write(source.join("a.txt"), "새 내용").unwrap();
+        fs::write(source.join("b.txt"), "b").unwrap();
+        fs::write(source.join("폴더").join("c.txt"), "c").unwrap();
+        let target = dir.path().join("대상");
+        fs::create_dir_all(target.join("폴더")).unwrap();
+        fs::write(target.join("a.txt"), "원래 내용").unwrap();
+
+        let mut queue = JobQueue::new();
+        let sources = vec![
+            source.join("a.txt"),
+            source.join("b.txt"),
+            source.join("폴더"),
+        ];
+        let events = copy_and_wait(&mut queue, sources, &target);
+        let id = match events.last().unwrap() {
+            JobEvent::Finished { job, .. } => *job,
+            other => panic!("{other:?}"),
+        };
+        let summary = summary_of(&events, id);
+        assert_eq!(summary.conflicts_skipped, 2, "{summary:?}");
+        assert_eq!(summary.files_copied, 1, "{summary:?}");
+        assert_eq!(
+            fs::read_to_string(target.join("a.txt")).unwrap(),
+            "원래 내용"
+        );
+        assert_eq!(fs::read_to_string(target.join("b.txt")).unwrap(), "b");
+        assert!(!target.join("폴더").join("c.txt").exists());
+        // 건너뛴 것은 실패가 아니다.
+        assert!(events.contains(&JobEvent::StateChanged {
+            job: id,
+            state: JobState::Finished
+        }));
+    }
+
+    #[test]
+    fn 없는_원본은_항목_오류로_세고_작업은_실패로_끝난다() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("대상");
+        fs::create_dir_all(&target).unwrap();
+        let present = dir.path().join("있음.txt");
+        fs::write(&present, "x").unwrap();
+        let missing = dir.path().join("없음.txt");
+
+        let mut queue = JobQueue::new();
+        let events = copy_and_wait(&mut queue, vec![missing.clone(), present.clone()], &target);
+        let id = match events.last().unwrap() {
+            JobEvent::Finished { job, .. } => *job,
+            other => panic!("{other:?}"),
+        };
+        let summary = summary_of(&events, id);
+        assert_eq!(summary.files_copied, 1);
+        assert_eq!(summary.failures.len(), 1, "{summary:?}");
+        assert_eq!(summary.failures[0].source, missing);
+        assert!(target.join("있음.txt").is_file());
+        assert!(events.contains(&JobEvent::StateChanged {
+            job: id,
+            state: JobState::Failed
+        }));
+    }
+
+    #[test]
+    fn 긴_경로와_한글_이모지_이름을_복사한다() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("원본 🌏");
+        let mut deep = source.clone();
+        for i in 0..6 {
+            deep.push(format!(
+                "아주 긴 폴더 이름 {i} 📁 가나다라마바사아자차카타파하 abcdefghij"
+            ));
+        }
+        fs::create_dir_all(&deep).unwrap();
+        let file = deep.join("원본 🎉 파일.txt");
+        fs::write(&file, "긴 경로 내용 ✨").unwrap();
+        assert!(file.as_os_str().len() > 260);
+        let target = dir.path().join("대상 🚀");
+        fs::create_dir_all(&target).unwrap();
+
+        let mut queue = JobQueue::new();
+        let events = copy_and_wait(&mut queue, vec![source.clone()], &target);
+        let id = match events.last().unwrap() {
+            JobEvent::Finished { job, .. } => *job,
+            other => panic!("{other:?}"),
+        };
+        let summary = summary_of(&events, id);
+        assert!(summary.failures.is_empty(), "{summary:?}");
+        let copied = target.join(file.strip_prefix(dir.path()).unwrap());
+        assert!(copied.as_os_str().len() > 260);
+        assert_eq!(fs::read_to_string(&copied).unwrap(), "긴 경로 내용 ✨");
+        assert_same_tree(&source, &target.join("원본 🌏"));
+    }
+
+    #[test]
+    fn 폴더_정션은_따라_들어가지_않는다() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("원본");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("a.txt"), "a").unwrap();
+        // 원본 자신을 가리키는 정션: 따라 들어가면 끝나지 않는다.
+        let junction = source.join("고리");
+        let status = Command::new("cmd")
+            .arg("/c")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&junction)
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(status.success(), "mklink /J");
+        let target = dir.path().join("대상");
+        fs::create_dir_all(&target).unwrap();
+
+        let mut queue = JobQueue::new();
+        let events = copy_and_wait(&mut queue, vec![source.clone()], &target);
+        let id = match events.last().unwrap() {
+            JobEvent::Finished { job, .. } => *job,
+            other => panic!("{other:?}"),
+        };
+        let summary = summary_of(&events, id);
+        assert_eq!(summary.links_skipped, 1, "{summary:?}");
+        assert_eq!(summary.files_copied, 1, "{summary:?}");
+        assert_eq!(
+            fs::read_to_string(target.join("원본").join("a.txt")).unwrap(),
+            "a"
+        );
+        assert!(!target.join("원본").join("고리").exists());
+
+        // 정션 자체를 원본으로 넘겨도 따라 들어가지 않는다.
+        let events = copy_and_wait(&mut queue, vec![junction.clone()], &target);
+        let id = match events.last().unwrap() {
+            JobEvent::Finished { job, .. } => *job,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(summary_of(&events, id).links_skipped, 1);
+        assert!(!target.join("고리").exists());
+        fs::remove_dir(&junction).unwrap();
+    }
+}
