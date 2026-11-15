@@ -2,8 +2,9 @@
 //!
 //! - 시험 폴더 생성: 실제 폴더와 비슷한 모양(한글·이모지·긴 이름, 폴더와 파일이 섞임)의
 //!   항목을 정해진 수만큼 만든다. 같은 수로 다시 돌리면 결과가 같다.
-//! - 코어 벤치마크: 「위치의 항목 목록 읽기」(파일 시스템 공급자의 [`Provider::list`])를 재고
-//!   상한([`LIST_LIMIT`])과 비교한다. `cargo xtask ci`가 이것을 부른다.
+//! - 코어 벤치마크: 「위치의 항목 목록 읽기」(파일 시스템 공급자의 [`Provider::list`]), 「읽기+정렬」,
+//!   「정렬 바꾸기」([`DetailsList::set_sort`])를 재고 각각 상한([`LIST_LIMIT`]·[`LIST_SORT_LIMIT`]·
+//!   [`RESORT_LIMIT`])과 비교한다. `cargo xtask ci`가 이것을 부른다.
 //! - 인덱스 벤치마크: 시험 폴더와 같은 이름의 합성 인덱스([`synthetic_index`])를 만들어
 //!   메모리([`INDEX_MEMORY_LIMIT`])와 부분 일치 질의 시간([`QUERY_LIMIT`])을 잰다.
 //!   `cargo xtask ci`가 이것도 부른다.
@@ -19,6 +20,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use facet_core::details::{Column, DetailsList, Direction, Sort};
 use facet_core::{FileSystemProvider, ListError, Location, Provider};
 
 /// 파일 시스템 공급자로 실제 폴더 `path`의 항목 목록을 읽는다.
@@ -234,14 +236,97 @@ pub fn measure_list(path: &Path, runs: usize) -> Result<Measurement, ListError> 
     Ok(Measurement { item_count, times })
 }
 
-/// 중앙값이 `limit`을 넘으면 넘은 수치를 담은 메시지를 돌려준다.
+/// 10만 항목 「읽기+정렬」(목록을 읽어 기본 정렬인 이름 오름차순으로 늘어놓기)의 속도 기준(로컬, 릴리스 빌드).
+///
+/// spec #16의 「10만 항목 폴더 열기부터 첫 화면까지 150ms 미만」에서 코어가 맡는 몫이다. 화면을 그리는 시간은
+/// 측정 명령(`cargo xtask measure`)이 따로 잰다.
+pub const LIST_SORT_TARGET: Duration = Duration::from_millis(150);
+
+/// CI가 실패시키는 「읽기+정렬」 상한: 로컬 기준 [`LIST_SORT_TARGET`]의 10배.
+/// [`LIST_LIMIT`]과 같은 까닭으로 넉넉하다(알고리즘이 한 단계 나빠지는 실수만 잡는다).
+pub const LIST_SORT_LIMIT: Duration = Duration::from_millis(1500);
+
+/// 10만 항목 「정렬 바꾸기」(이미 읽은 목록을 다른 열·방향으로 다시 정렬)의 속도 기준(로컬, 릴리스 빌드). spec #16.
+pub const RESORT_TARGET: Duration = Duration::from_millis(50);
+
+/// CI가 실패시키는 「정렬 바꾸기」 상한: 로컬 기준 [`RESORT_TARGET`]의 10배.
+pub const RESORT_LIMIT: Duration = Duration::from_millis(500);
+
+/// 정렬 바꾸기 벤치마크가 회차마다 차례로 바꾸는 정렬. 이웃한 두 정렬이 늘 다르다.
+///
+/// 이름 오름 → 내림처럼 순서를 뒤집기만 하는 바꾸기는 정렬 알고리즘이 거꾸로 된 덩어리를 알아보고
+/// 거의 공짜로 끝내므로, 열을 바꾸는 쪽을 섞어 실제 비교가 일어나게 한다.
+pub const RESORT_CYCLE: [Sort; 5] = [
+    Sort {
+        column: Column::Size,
+        direction: Direction::Descending,
+    },
+    Sort {
+        column: Column::Type,
+        direction: Direction::Ascending,
+    },
+    Sort {
+        column: Column::Modified,
+        direction: Direction::Descending,
+    },
+    Sort {
+        column: Column::Name,
+        direction: Direction::Descending,
+    },
+    Sort {
+        column: Column::Size,
+        direction: Direction::Ascending,
+    },
+];
+
+/// `path`의 「읽기+정렬」(목록 읽기와 기본 정렬)을 `runs`번 잰다. 재기 전에 한 번 해서 캐시를 데운다.
+pub fn measure_list_sorted(path: &Path, runs: usize) -> Result<Measurement, ListError> {
+    let read_sorted = || -> Result<DetailsList, ListError> {
+        Ok(DetailsList::new(list_folder(path)?, Sort::default()))
+    };
+    let mut item_count = read_sorted()?.len();
+    let mut times = Vec::with_capacity(runs);
+    for _ in 0..runs {
+        let start = Instant::now();
+        let list = read_sorted()?;
+        times.push(start.elapsed());
+        item_count = list.len();
+    }
+    Ok(Measurement { item_count, times })
+}
+
+/// `path`의 목록을 한 번 읽어 두고 「정렬 바꾸기」를 `runs`번 잰다. 회차마다 [`RESORT_CYCLE`]의 다음
+/// 정렬로 바꾸며, 재기 전에 그 순환을 한 바퀴 돌려 데운다. 파일 시스템은 다시 읽지 않는다.
+pub fn measure_resort(path: &Path, runs: usize) -> Result<Measurement, ListError> {
+    let mut list = DetailsList::new(list_folder(path)?, Sort::default());
+    for sort in RESORT_CYCLE {
+        list.set_sort(sort);
+    }
+    let mut times = Vec::with_capacity(runs);
+    for sort in RESORT_CYCLE.iter().cycle().take(runs) {
+        let start = Instant::now();
+        list.set_sort(*sort);
+        times.push(start.elapsed());
+    }
+    Ok(Measurement {
+        item_count: list.len(),
+        times,
+    })
+}
+
+/// 목록 읽기 중앙값이 `limit`을 넘으면 넘은 수치를 담은 메시지를 돌려준다.
 pub fn check_limit(m: &Measurement, limit: Duration) -> Result<(), String> {
+    check_median("목록 읽기", m, limit)
+}
+
+/// `what`의 중앙값이 `limit`을 넘으면 무엇이 얼마나 넘었는지 담은 메시지를 돌려준다.
+pub fn check_median(what: &str, m: &Measurement, limit: Duration) -> Result<(), String> {
     let median = m.median();
     if median <= limit {
         Ok(())
     } else {
         Err(format!(
-            "목록 읽기 상한 초과: {}항목 중앙값 {}ms > 상한 {}ms (최악 {}ms)",
+            "{what} 상한 초과: {}항목 중앙값 {}ms > 상한 {}ms (최악 {}ms)",
             m.item_count,
             median.as_millis(),
             limit.as_millis(),

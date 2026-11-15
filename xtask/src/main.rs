@@ -30,7 +30,7 @@ const USAGE: &str = "\
                                  관리자일 때만 시험 VHD를 만들어 돌리고, 아니면 건너뛴다고 출력한다
   test-folder [경로] [--count N]  N개(기본 100000) 항목이 든 시험 폴더를 만든다.
                                  경로를 빼면 임시 폴더의 facet-test-folders/items-N
-  bench                          10만 항목 시험 폴더를 만들거나 확인하고 코어 목록 읽기를 잰 뒤,
+  bench                          10만 항목 시험 폴더를 만들거나 확인하고 코어 목록 읽기·읽기+정렬·정렬 바꾸기를 잰 뒤,
                                  합성 인덱스 100만 개의 메모리와 부분 일치 질의를 재고, MFT 조각을
                                  되풀이한 레코드 100만 개를 인덱스로 만드는 시간을 잰다(릴리스 빌드)
   measure [--count N] [--runs N] [--scroll-runs N] [--scroll-rows N] [--refresh-hz N] [--json 파일] [경로]
