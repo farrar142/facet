@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 facet-core.workspace = true
+facet-win.workspace = true
 # 렌더러는 software 하나만 넣는다(#75). femtovg(OpenGL)는 창을 만들 때 준비에 140ms 넘게 걸려 콜드 스타트
 # 기준(200ms)을 못 넘고, skia(D3D)는 그보다 느린 데다 실행 파일을 키우고 미리 빌드된 skia를 내려받는다.
 # 다른 렌더러를 재 보려면 그 feature(`renderer-femtovg`, `renderer-skia`)를 더하고 `SLINT_BACKEND`로 고른다.

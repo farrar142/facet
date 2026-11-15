@@ -8,8 +8,11 @@
 //! - 행 문자열은 화면에 보이는 행만 그때그때 만든다([`TabRows`]).
 //! - 실행 인자로 받은 폴더(없으면 사용자 홈 폴더)를 연다.
 //! - 패널 위에 탭 줄을 그린다. 탭 연산(열기·닫기·오가기·옮기기)은 코어가 하고, 앱은 탭을 누름·휠 클릭·끌기를
-//!   넘긴다. 탭을 끌면(끌기 시작 문턱과 놓일 자리는 [`tab_drag`]) 같은 패널 안 순서를 바꾸거나 반대편 패널로 옮긴다
-//!   ([`App::move_tab`]).
+//!   넘긴다. 탭을 끌면(끌기 시작 문턱과 놓일 자리는 [`tab_drag`]) 같은 패널 안 순서를 바꾸거나 반대편 패널·다른 창의
+//!   탭 줄로 옮기고, facet의 어느 창 위도 아닌 곳에 놓으면 그 탭으로 새 창을 놓은 자리에 띄운다([`App::move_tab`]).
+//!   창 사이 끌기는 facet이 직접 한다(OLE 드래그 앤 드롭을 쓰지 않는다): 누른 창이 마우스를 붙잡고 있어 창 밖의
+//!   점도 그 창 기준으로 오고, 이를 화면 점으로 바꿔 그 점 아래 창을 Windows에게 묻는다
+//!   (`facet_win::top_level_window_at`).
 //! - 창이 나뉘었으면 두 패널을 나란히 그린다. 패널마다 탭 줄·주소창·자세히 보기·상태 표시줄을 갖고, 패널을 누르면
 //!   활성 패널이 바뀐다. 키 입력과 명령은 활성 패널의 활성 탭으로 간다. 패널 나누기·합치기·분할 비율은 코어가 한다.
 //! - 코어의 창마다 Slint 창을 하나씩 그린다(한 프로세스, 한 이벤트 루프). 창에서 일어난 입력은 먼저 그 창을 코어의
@@ -39,13 +42,13 @@ use facet_core::{ListError, Location, OpenError, ResolveError, provider_for};
 use slint::winit_030::winit::event::WindowEvent;
 use slint::winit_030::{EventResult, WinitWindowAccessor};
 use slint::{
-    CloseRequestResponse, ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString,
-    Timer, TimerMode, VecModel,
+    CloseRequestResponse, ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker,
+    PhysicalPosition, PhysicalSize, SharedString, Timer, TimerMode, VecModel,
 };
 
 use crate::address::AddressEdit;
 use crate::palette::Palette;
-use crate::tab_drag::{Point, Strip, TabDrag};
+use crate::tab_drag::{Frame, Hover, Point, ScreenPoint, Strip, TabDrag, Target};
 
 mod address;
 mod ime;
@@ -96,6 +99,15 @@ thread_local! {
     static APP: RefCell<Option<Rc<RefCell<App>>>> = const { RefCell::new(None) };
     /// UI 스레드의 화면 상태: 코어의 창마다 하나, 연 차례로.
     static VIEWS: RefCell<Vec<Rc<View>>> = const { RefCell::new(Vec::new()) };
+    /// 탭을 창 밖에 놓아 생긴, 아직 띄우지 않은 창의 자리와 크기. `sync_windows`가 띄울 때 쓰고 지운다.
+    static PLACEMENTS: RefCell<Vec<(WindowId, Placement)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// 새 창을 띄울 자리(바깥 테두리 왼쪽 위의 화면 점)와 크기(물리 픽셀).
+#[derive(Debug, Clone, Copy)]
+struct Placement {
+    origin: ScreenPoint,
+    size: PhysicalSize,
 }
 
 /// 열린 창의 화면 상태들. 부르는 동안 목록을 빌려 두지 않도록 복사해 준다.
@@ -211,6 +223,19 @@ fn sync_windows() {
         }
         match open_view(&app, window, false) {
             Ok(view) => {
+                let placement = PLACEMENTS.with(|slot| {
+                    let mut pending = slot.borrow_mut();
+                    let at = pending.iter().position(|(id, _)| *id == window)?;
+                    Some(pending.remove(at).1)
+                });
+                if let Some(placement) = placement {
+                    let window = view.ui.window();
+                    window.set_size(placement.size);
+                    window.set_position(PhysicalPosition::new(
+                        placement.origin.x.round() as i32,
+                        placement.origin.y.round() as i32,
+                    ));
+                }
                 let _ = view.ui.show();
             }
             Err(error) => eprintln!("창을 만들지 못함: {error}"),
@@ -218,6 +243,47 @@ fn sync_windows() {
     }
     if app.borrow().is_finished() {
         let _ = slint::quit_event_loop();
+    }
+}
+
+/// 화면 점 `at` 아래 보이는 facet 창. 다른 프로그램의 창이 위에 있거나 창이 없으면 `None`이다. Windows에게 그 점의
+/// 맨 위 창을 묻고(`facet_win::top_level_window_at`, 겹친 창의 앞뒤를 안다) 그 창을 그리는 화면 상태를 찾는다.
+#[cfg(windows)]
+fn view_under(at: ScreenPoint) -> Option<Rc<View>> {
+    let hit = facet_win::top_level_window_at(at.x.floor() as i32, at.y.floor() as i32)?;
+    views().into_iter().find(|view| view.handle() == Some(hit))
+}
+
+/// 화면 점 `at`을 품은 facet 창(먼저 연 창부터). Windows가 아니면 창의 앞뒤를 모르므로 자리만 본다.
+#[cfg(not(windows))]
+fn view_under(at: ScreenPoint) -> Option<Rc<View>> {
+    views().into_iter().find(|view| {
+        let Some(frame) = view.frame() else {
+            return false;
+        };
+        let size = view.ui.window().size();
+        let inside = frame.to_window(at);
+        let scale = frame.scale.max(f32::EPSILON);
+        inside.x >= 0.0
+            && inside.y >= 0.0
+            && inside.x < size.width as f32 / scale
+            && inside.y < size.height as f32 / scale
+    })
+}
+
+/// 모든 창에 끄는 탭(흐리게, 누른 창의 그 패널)과 놓일 자리(세로 선, 목적지 창의 그 패널)를 넣는다. `None`이면
+/// 지운다.
+fn show_tab_drag(drag: Option<&TabDrag<WindowId>>) {
+    for view in views() {
+        for panel in 0..MAX_PANELS {
+            let dragged = drag
+                .filter(|drag| drag.window == view.window && drag.panel == panel)
+                .map_or(-1, |drag| count(drag.index));
+            let slot = drag
+                .and_then(|drag| drag.slot_in(view.window, panel))
+                .map_or(-1, count);
+            PanelUi::of(&view.ui, panel).set_tab_drag(dragged, slot);
+        }
     }
 }
 
@@ -344,7 +410,7 @@ struct View {
     /// 「읽는 중」을 드러낼 때 다시 그리는 타이머.
     reading_timer: Timer,
     /// 누른 탭의 끌기 상태. 탭을 누르면 생기고 놓거나 끊기면 없어진다.
-    tab_drag: RefCell<Option<TabDrag>>,
+    tab_drag: RefCell<Option<TabDrag<WindowId>>>,
 }
 
 /// 패널 하나의 화면 모델: 보이는 탭의 행, 탭 줄, 주소창 경로 조각. 탭 줄과 경로 조각은 바뀔 때만 고쳐 화면 요소를
@@ -749,59 +815,53 @@ impl View {
         let (Ok(panel), Ok(index)) = (usize::try_from(panel), usize::try_from(index)) else {
             return;
         };
-        *self.tab_drag.borrow_mut() = Some(TabDrag::new(panel, index, at));
+        // 누른 점이 탭의 왼쪽 위에서 떨어진 거리: 창 밖에 놓아 새 창을 띄울 때 탭이 손 아래 오게 한다.
+        let grab = self.tab_strips()[..].get(panel).copied().flatten().map_or(
+            Point { x: 0.0, y: 0.0 },
+            |strip| {
+                let origin = strip.tab_origin(index);
+                Point {
+                    x: at.x - origin.x,
+                    y: at.y - origin.y,
+                }
+            },
+        );
+        *self.tab_drag.borrow_mut() = Some(TabDrag::new(self.window, panel, index, at, grab));
     }
 
-    /// 누른 탭을 끌고 있다: 끌기 시작 문턱을 넘었으면 끄는 탭을 흐리게 하고 놓일 자리를 보인다.
+    /// 누른 탭을 끌고 있다: 끌기 시작 문턱을 넘었으면 끄는 탭을 흐리게 하고 놓일 자리(이 창이든 다른 창이든)를
+    /// 보인다. 창 밖으로 끌어도 창이 마우스를 붙잡고 있어 이 창 기준 점(음수나 창보다 큰 값)으로 온다.
     fn tab_drag_move(&self, at: Point) {
-        let strips = self.tab_strips();
         let shown = {
             let mut drag = self.tab_drag.borrow_mut();
             let Some(drag) = drag.as_mut() else { return };
-            drag.moved(at, &strips);
+            drag.moved(at, || self.hover(at));
             drag.is_dragging().then(|| drag.clone())
         };
         if let Some(drag) = shown {
-            self.show_tab_drag(Some(&drag));
+            show_tab_drag(Some(&drag));
         }
     }
 
-    /// 누른 탭을 놓았다. 끌기 시작 문턱을 넘지 않았으면 누르기라 참이다(화면이 그 탭으로 간다). 끌었으면 놓인 탭 줄
-    /// 자리로 탭을 옮기고(탭 줄 밖이면 그대로 둔다) 거짓이다.
+    /// 누른 탭을 놓았다. 끌기 시작 문턱을 넘지 않았으면 누르기라 참이다(화면이 그 탭으로 간다). 끌었으면 놓인 곳으로
+    /// 탭을 옮기고(탭 줄이면 그 자리, facet의 어느 창 위도 아니면 새 창, 창 위의 탭 줄 밖이면 그대로) 거짓이다.
     fn tab_drag_end(&self, at: Point) -> bool {
-        let strips = self.tab_strips();
         let Some(mut drag) = self.tab_drag.borrow_mut().take() else {
             return true;
         };
-        drag.moved(at, &strips);
-        self.show_tab_drag(None);
+        drag.moved(at, || self.hover(at));
+        show_tab_drag(None);
         if !drag.is_dragging() {
             return true;
         }
-        if let Some((panel, slot)) = drag.target() {
-            self.move_tab(drag.panel, drag.index, panel, slot);
-        }
+        self.drop_tab(&drag);
         false
     }
 
     /// 끌기가 끊겼다(창이 마우스를 놓침 등): 아무것도 옮기지 않는다.
     fn tab_drag_cancel(&self) {
         if self.tab_drag.borrow_mut().take().is_some() {
-            self.show_tab_drag(None);
-        }
-    }
-
-    /// 끄는 탭(흐리게)과 놓일 자리(세로 선)를 화면에 넣는다. `None`이면 지운다.
-    fn show_tab_drag(&self, drag: Option<&TabDrag>) {
-        for panel in 0..MAX_PANELS {
-            let dragged = drag
-                .filter(|drag| drag.panel == panel)
-                .map_or(-1, |drag| count(drag.index));
-            let slot = drag
-                .and_then(TabDrag::target)
-                .filter(|(target, _)| *target == panel)
-                .map_or(-1, |(_, slot)| count(slot));
-            PanelUi::of(&self.ui, panel).set_tab_drag(dragged, slot);
+            show_tab_drag(None);
         }
     }
 
@@ -815,24 +875,134 @@ impl View {
         })
     }
 
-    /// 패널 `from`의 `index`번째 탭을 패널 `to`의 `slot` 자리로 옮긴다(코어의 탭 옮기기). 옮긴 탭이 그 패널의 활성
-    /// 탭, 그 패널이 활성 패널이 된다. 보이던 탭은 다시 읽지 않고 갖고 있던 목록을 그대로 보인다.
-    fn move_tab(&self, from: usize, index: usize, to: usize, slot: usize) {
+    /// 이 창의 Windows 창 핸들 값. 아직 화면에 없으면 `None`이다.
+    #[cfg(windows)]
+    fn handle(&self) -> Option<std::num::NonZeroIsize> {
+        use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        self.ui
+            .window()
+            .with_winit_window(|winit| match winit.window_handle().ok()?.as_raw() {
+                RawWindowHandle::Win32(handle) => Some(handle.hwnd),
+                _ => None,
+            })
+            .flatten()
+    }
+
+    /// 이 창의 화면 자리와 배율. 아직 화면에 없으면 `None`이다.
+    fn frame(&self) -> Option<Frame> {
+        let window = self.ui.window();
+        let scale = window.scale_factor();
+        window
+            .with_winit_window(|winit| {
+                let client = winit.inner_position().ok()?;
+                let outer = winit.outer_position().ok()?;
+                Some(Frame {
+                    client: ScreenPoint {
+                        x: f64::from(client.x),
+                        y: f64::from(client.y),
+                    },
+                    outer: ScreenPoint {
+                        x: f64::from(outer.x),
+                        y: f64::from(outer.y),
+                    },
+                    scale,
+                })
+            })
+            .flatten()
+    }
+
+    /// 이 창 기준 점 `at` 아래: facet의 어느 창(그 창 기준 점과 탭 줄)인가, 아니면 facet 창 밖인가. 창 자리를 모르면
+    /// 이 창 안으로 본다.
+    fn hover(&self, at: Point) -> Hover<WindowId> {
+        let here = || Hover::Window {
+            window: self.window,
+            at,
+            strips: self.tab_strips().to_vec(),
+        };
+        let Some(frame) = self.frame() else {
+            return here();
+        };
+        let screen = frame.to_screen(at);
+        let Some(view) = view_under(screen) else {
+            return Hover::Outside(screen);
+        };
+        if view.window == self.window {
+            return here();
+        }
+        let Some(other) = view.frame() else {
+            return Hover::Outside(screen);
+        };
+        Hover::Window {
+            window: view.window,
+            at: other.to_window(screen),
+            strips: view.tab_strips().to_vec(),
+        }
+    }
+
+    /// 끈 탭을 놓은 곳으로 옮긴다(코어의 탭 옮기기). 옮긴 탭이 목적지 패널의 활성 탭, 그 패널이 활성 패널, 그 창이
+    /// 활성 창이 된다. 보이던 탭은 다시 읽지 않고 갖고 있던 목록을 그대로 보인다. 다른 창으로 옮겼으면 그 창을 앞으로
+    /// 가져오고, facet 창 밖이면 놓은 자리에 이 창 크기로 새 창을 띄운다(`sync_windows`가 띄울 때 놓는다).
+    fn drop_tab(&self, drag: &TabDrag<WindowId>) {
+        let Some(target) = drag.target() else { return };
         let id = {
             let app = self.app.borrow();
             app.window(self.window)
-                .and_then(|window| window.panels().get(from))
-                .and_then(|panel| panel.tabs().nth(index))
+                .and_then(|window| window.panels().get(drag.panel))
+                .and_then(|panel| panel.tabs().nth(drag.index))
                 .map(|(id, _)| id)
         };
         let Some(id) = id else { return };
         self.remember_scroll();
-        let destination = TabDestination::Panel {
-            window: self.window,
-            panel: to,
-            slot,
-        };
-        if self.app.borrow_mut().move_tab(id, destination).is_some() {
+        match target {
+            Target::Strip {
+                window,
+                panel,
+                slot,
+            } => {
+                let other = (window != self.window).then(|| view_of(window)).flatten();
+                if let Some(other) = &other {
+                    other.remember_scroll();
+                }
+                let destination = TabDestination::Panel {
+                    window,
+                    panel,
+                    slot,
+                };
+                if self.app.borrow_mut().move_tab(id, destination).is_none() {
+                    return;
+                }
+                if let Some(other) = other {
+                    other.tab_switched();
+                    other
+                        .ui
+                        .window()
+                        .with_winit_window(|winit| winit.focus_window());
+                }
+            }
+            Target::NewWindow(at) => {
+                let first_tab =
+                    self.tab_strips()[0].map_or(Point { x: 0.0, y: 0.0 }, |strip| Point {
+                        x: strip.left,
+                        y: strip.top,
+                    });
+                let placement = self.frame().map(|frame| Placement {
+                    origin: drag.new_window_origin(at, &frame, first_tab),
+                    size: self.ui.window().size(),
+                });
+                let Some(moved) = self
+                    .app
+                    .borrow_mut()
+                    .move_tab(id, TabDestination::NewWindow)
+                else {
+                    return;
+                };
+                if let Some(placement) = placement {
+                    PLACEMENTS.with(|slot| slot.borrow_mut().push((moved.window, placement)));
+                }
+            }
+        }
+        if self.app.borrow().window(self.window).is_some() {
+            // 떠난 창이 남아 있다(탭이 남음): 이웃 탭이 보인다.
             self.tab_switched();
         }
     }
