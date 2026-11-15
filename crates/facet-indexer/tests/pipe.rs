@@ -15,8 +15,8 @@ use facet_indexer::pipe::{
     CLIENT_ACCESS, FILE_ALL_ACCESS, FILE_CREATE_PIPE_INSTANCE, INTERACTIVE_SID, NETWORK_SID,
     PipeServer, current_user_sid,
 };
-use facet_indexer::sample::{SAMPLE_VOLUME, sample_index};
-use facet_indexer::session::{Backend, Cancel, Cursor, Page};
+use facet_indexer::sample::{SAMPLE_VOLUME, SampleBackend, sample_index};
+use facet_indexer::session::{Backend, Caller, Cancel, Cursor, Page};
 use facet_indexer::volumes::Volumes;
 use facet_protocol::{
     Case, Condition, ErrorKind, ErrorMessage, MAX_FRAME_LEN, MAX_SUPPORTED_VERSION,
@@ -38,11 +38,7 @@ fn unique_name() -> String {
 }
 
 fn sample_server(name: &str) -> PipeServer {
-    PipeServer::start(
-        name,
-        Arc::new(Volumes::with_index(SAMPLE_VOLUME, sample_index(REPORTS))),
-    )
-    .unwrap()
+    PipeServer::start(name, Arc::new(SampleBackend::new(REPORTS))).unwrap()
 }
 
 /// 일반 클라이언트처럼(읽기와 데이터 쓰기 권한만 청해) 붙는다. 인스턴스가 모두 바쁘면 잠시 다시 한다.
@@ -210,7 +206,12 @@ struct SlowBackend {
 }
 
 impl Backend for SlowBackend {
-    fn search(&self, query: &QueryMessage, cancel: &Cancel) -> Result<Page, ErrorMessage> {
+    fn search(
+        &self,
+        query: &QueryMessage,
+        _: &dyn Caller,
+        cancel: &Cancel,
+    ) -> Result<Page, ErrorMessage> {
         if matches!(&query.condition, Condition::NameContains { part, .. } if part == "느린") {
             self.entered.lock().unwrap().send(()).unwrap();
             let deadline = Instant::now() + Duration::from_secs(10);
@@ -222,7 +223,7 @@ impl Backend for SlowBackend {
         self.inner.search(query, cancel)
     }
 
-    fn resume(&self, cursor: Cursor, limit: usize) -> Result<Page, ErrorMessage> {
+    fn resume(&self, cursor: Cursor, limit: usize, _: &dyn Caller) -> Result<Page, ErrorMessage> {
         self.inner.resume(cursor, limit)
     }
 
@@ -341,10 +342,7 @@ fn invalid_query_is_an_error_and_the_connection_stays_open() {
 fn second_server_with_the_same_name_is_refused() {
     let name = unique_name();
     let _first = sample_server(&name);
-    let second = PipeServer::start(
-        &name,
-        Arc::new(Volumes::with_index(SAMPLE_VOLUME, sample_index(1))),
-    );
+    let second = PipeServer::start(&name, Arc::new(SampleBackend::new(1)));
     let err = second.err().expect("같은 이름의 둘째 서버가 시작됨");
     assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
 }

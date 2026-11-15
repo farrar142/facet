@@ -13,6 +13,13 @@
 //! 질의는 인덱스가 있는 볼륨마다 실행해 결과를 합친다. 정렬을 주었으면 볼륨마다 정렬된 결과를
 //! 정렬 순서대로 섞고, 경로 정렬과 정렬 없음은 볼륨 이름 순서(`C:`, `D:`, ...)로 잇는다. 결과
 //! 수 제한은 합친 결과에 건다.
+//!
+//! 파이프로 받은 질의([`Backend`])는 질의한 사용자([`Caller`])가 목록을 읽을 수 없는 폴더 아래
+//! 결과를 내보내지 않는다([`crate::access`]). 정렬·제한 뒤 내보낼 결과만 검사하고, 걸러진 만큼 뒤
+//! 결과를 더 꺼내 채운다. 전체 개수는 거르기 전에 센 값이라 「걸러지기 전 상한」이다
+//! ([`Page::total_is_upper_bound`]). 검사 결과는 사용자마다 기억해 두고(볼륨 목록 하나에 하나),
+//! USN 변경으로 폴더 보안이 바뀌거나 경로에 다른 폴더가 놓이면 그 아래 기억을 버린다
+//! ([`Volumes::forget_access`]).
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, VecDeque};
@@ -20,13 +27,18 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use facet_index::{
-    self as index, Freshness, Hit, Index, JournalInfo, JournalState, Order, SortKey,
+    self as index, Freshness, Hit, Index, JournalInfo, JournalState, Order, SortKey, UsnOutcome,
 };
 use facet_protocol::{
     ErrorKind, ErrorMessage, NoIndexReason, QueryMessage, StatusMessage, VolumeState, VolumeStatus,
 };
 
+use crate::access::{AccessCache, Caller};
 use crate::session::{Backend, Cancel};
+
+/// 걸러진 결과를 채우려고 한 번에 더 꺼내는 결과 수의 상한. 꺼낼 수를 두 배씩 늘리다가 여기서
+/// 멈춘다(많이 걸러지는 질의가 결과 몇 개씩 꺼내느라 느려지지 않게).
+const MAX_REFILL_BATCH: usize = 1 << 16;
 
 /// [`GetDriveTypeW`](https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-getdrivetypew)의
 /// 값 가운데 여기서 가르는 것.
@@ -124,14 +136,19 @@ impl Slot {
 pub struct Volumes {
     /// 볼륨 이름(예: `C:`) → 상태. 이름 순서다.
     slots: RwLock<BTreeMap<String, Slot>>,
+    /// 사용자마다의 폴더 권한 검사 결과.
+    access: AccessCache,
 }
 
 /// 질의나 이어 받기의 응답: 결과 조각, 전체 개수, 이어 받기 표지, 만드는 중인 볼륨.
 #[derive(Debug)]
 pub struct Page {
     pub hits: Vec<Hit>,
-    /// 모든 볼륨에서 질의에 맞는 결과 전체의 개수. 이어 받아도 처음 질의의 값이다.
+    /// 모든 볼륨에서 질의에 맞는 결과 전체의 개수. 이어 받아도 처음 질의의 값이다. 권한으로
+    /// 걸렀으면 거르기 전의 개수다.
     pub total: usize,
+    /// `total`이 「걸러지기 전 상한」인가(권한으로 걸러 내보낸 결과인가).
+    pub total_is_upper_bound: bool,
     /// 남은 결과가 있으면 그것을 받을 표지.
     pub next: Option<Cursor>,
     /// 인덱스를 만드는 중이어서 앞선 인덱스로(또는 결과 없이) 답한 볼륨들.
@@ -146,8 +163,12 @@ pub struct Page {
 pub struct Cursor {
     sort: Option<(SortKey, Order)>,
     total: usize,
+    /// 권한으로 걸러 내보내는가.
+    filtered: bool,
     /// 볼륨 이름 순서.
     parts: Vec<Part>,
+    /// 볼륨들에서 합쳐 꺼내고 권한 검사도 마쳤지만 아직 내보내지 않은 결과(정렬 순서).
+    pending: VecDeque<Hit>,
 }
 
 /// 이어 받기 표지에서 볼륨 하나의 몫.
@@ -243,6 +264,46 @@ impl Cursor {
         self.parts.retain(|p| !p.is_done());
         Ok(hits)
     }
+
+    /// 다음 결과 가운데 `keep`을 지나는 것을 많아야 `limit`개 꺼낸다. 걸러진 만큼 뒤 결과를 더
+    /// 꺼내 채우고, 더 꺼냈지만 내보내지 않은 것은 다음 조각을 위해 남긴다.
+    fn take_kept(
+        &mut self,
+        limit: usize,
+        keep: impl Fn(&Hit) -> bool,
+        cancel: Option<&Cancel>,
+    ) -> Result<Vec<Hit>, ErrorMessage> {
+        let mut hits = Vec::new();
+        let mut batch = 0usize;
+        while hits.len() < limit {
+            if let Some(hit) = self.pending.pop_front() {
+                hits.push(hit);
+                continue;
+            }
+            if self.parts.is_empty() {
+                break;
+            }
+            if cancel.is_some_and(Cancel::is_cancelled) {
+                return Err(cancelled());
+            }
+            let need = limit - hits.len();
+            batch = need.max(batch.saturating_mul(2).min(MAX_REFILL_BATCH));
+            let taken = self.take(batch)?;
+            self.pending.extend(taken.into_iter().filter(|h| keep(h)));
+        }
+        Ok(hits)
+    }
+
+    fn is_done(&self) -> bool {
+        self.parts.is_empty() && self.pending.is_empty()
+    }
+}
+
+fn cancelled() -> ErrorMessage {
+    ErrorMessage {
+        kind: ErrorKind::Cancelled,
+        message: "질의가 취소됐습니다".to_owned(),
+    }
 }
 
 impl Volumes {
@@ -295,6 +356,28 @@ impl Volumes {
         }
     }
 
+    /// 폴더 권한 검사 결과의 기억. 시험과 측정이 기억의 크기를 보는 데 쓴다.
+    pub fn access(&self) -> &AccessCache {
+        &self.access
+    }
+
+    /// USN 변경을 적용한 결과(`outcome`)에 따라 폴더 권한 검사의 기억을 버린다. 보안이 바뀐 폴더와
+    /// 새 자리에 놓인 폴더(그 경로에 앞서 있던 폴더의 기억은 틀렸다) 아래를 버리고, 볼륨 루트까지
+    /// 닿지 않아 경로를 모르는 보안 변경이 있으면 모두 버린다.
+    pub fn forget_access(&self, outcome: &UsnOutcome) {
+        if outcome.security_changes.iter().any(|c| c.path.is_none()) {
+            self.access.clear();
+            return;
+        }
+        self.access.forget_all_under(
+            outcome
+                .security_changes
+                .iter()
+                .filter_map(|c| c.path.as_deref())
+                .chain(outcome.placed_folders.iter().map(String::as_str)),
+        );
+    }
+
     /// `volume`의 인덱스를 (다시) 만들기 시작한다. 앞선 인덱스가 있으면 다 만들 때까지 그것으로
     /// 답한다. 떨어진 볼륨이면 바꾸지 않고 `false`.
     pub fn set_building(&self, volume: &str) -> bool {
@@ -325,8 +408,10 @@ impl Volumes {
     }
 
     /// `volume`의 인덱스를 다 만들었다. 앞선 인덱스를 바꿔 끼운다(그 인덱스의 이어 받기 표지는
-    /// 무효가 된다). 떨어진 볼륨이면 바꾸지 않고 `false`.
+    /// 무효가 된다). 그동안의 폴더 보안 변경은 알 수 없으므로 권한 검사의 기억을 모두 버린다.
+    /// 떨어진 볼륨이면 바꾸지 않고 `false`.
     pub fn set_ready(&self, volume: &str, index: Index) -> bool {
+        self.access.clear();
         Self::put(
             &mut self.slots_mut(),
             volume,
@@ -413,8 +498,29 @@ impl Volumes {
         StatusMessage { volumes }
     }
 
-    /// 질의를 인덱스가 있는 모든 볼륨에 실행한다.
+    /// 질의를 인덱스가 있는 모든 볼륨에 실행한다. 권한으로 거르지 않는다(서비스 안과 시험이 쓴다.
+    /// 파이프로 받은 질의는 [`Volumes::search_as`]).
     pub fn search(&self, query: &QueryMessage, cancel: &Cancel) -> Result<Page, ErrorMessage> {
+        self.run_search(query, None, cancel)
+    }
+
+    /// 질의를 `caller`로 실행한다: `caller`가 목록을 읽을 수 없는 폴더 아래 결과는 빼고, 걸러진
+    /// 만큼 뒤 결과로 결과 수 제한을 채운다. 전체 개수는 거르기 전의 개수다.
+    pub fn search_as(
+        &self,
+        query: &QueryMessage,
+        caller: &dyn Caller,
+        cancel: &Cancel,
+    ) -> Result<Page, ErrorMessage> {
+        self.run_search(query, Some(caller), cancel)
+    }
+
+    fn run_search(
+        &self,
+        query: &QueryMessage,
+        caller: Option<&dyn Caller>,
+        cancel: &Cancel,
+    ) -> Result<Page, ErrorMessage> {
         let q = query.to_query()?;
         let limit = query.limit.map_or(usize::MAX, |n| n as usize);
         let (snapshot, building) = {
@@ -429,10 +535,7 @@ impl Volumes {
         let mut total = 0;
         for (volume, index) in snapshot {
             if cancel.is_cancelled() {
-                return Err(ErrorMessage {
-                    kind: ErrorKind::Cancelled,
-                    message: "질의가 취소됐습니다".to_owned(),
-                });
+                return Err(cancelled());
             }
             let (page, generation) = {
                 let guard = index.read();
@@ -451,15 +554,59 @@ impl Volumes {
         let mut cursor = Cursor {
             sort: query.sort.map(|(k, o)| (k.into(), o.into())),
             total,
+            filtered: caller.is_some(),
             parts,
+            pending: VecDeque::new(),
         };
-        let hits = cursor.take(limit)?;
+        let hits = self.take(&mut cursor, limit, caller, Some(cancel))?;
         Ok(Self::page(cursor, hits, building))
     }
 
+    /// 표지에서 다음 결과를 꺼낸다. `caller`가 있으면 권한으로 거른다.
+    fn take(
+        &self,
+        cursor: &mut Cursor,
+        limit: usize,
+        caller: Option<&dyn Caller>,
+        cancel: Option<&Cancel>,
+    ) -> Result<Vec<Hit>, ErrorMessage> {
+        match caller {
+            None => cursor.take_kept(limit, |_| true, cancel),
+            Some(caller) => {
+                cursor.take_kept(limit, |h| self.access.visible(caller, &h.path), cancel)
+            }
+        }
+    }
+
     /// 이어 받기 표지로 다음 결과를 많아야 `limit`개 받는다. 표지를 만든 뒤 어느 볼륨의 인덱스가
-    /// 바뀌었으면 [`ErrorKind::StaleCursor`]다.
-    pub fn resume(&self, mut cursor: Cursor, limit: usize) -> Result<Page, ErrorMessage> {
+    /// 바뀌었으면 [`ErrorKind::StaleCursor`]다. 권한으로 거른 질의([`Volumes::search_as`])의 표지는
+    /// [`Volumes::resume_as`]로만 이어 받는다.
+    pub fn resume(&self, cursor: Cursor, limit: usize) -> Result<Page, ErrorMessage> {
+        self.run_resume(cursor, limit, None)
+    }
+
+    /// 이어 받기 표지로 다음 결과를 `caller`로 걸러 많아야 `limit`개 받는다.
+    pub fn resume_as(
+        &self,
+        cursor: Cursor,
+        limit: usize,
+        caller: &dyn Caller,
+    ) -> Result<Page, ErrorMessage> {
+        self.run_resume(cursor, limit, Some(caller))
+    }
+
+    fn run_resume(
+        &self,
+        mut cursor: Cursor,
+        limit: usize,
+        caller: Option<&dyn Caller>,
+    ) -> Result<Page, ErrorMessage> {
+        if cursor.filtered != caller.is_some() {
+            return Err(ErrorMessage {
+                kind: ErrorKind::StaleCursor,
+                message: "권한 거르기가 다른 이어 받기 표지입니다. 다시 질의하십시오".to_owned(),
+            });
+        }
         let building = {
             let slots = self.slots();
             let fresh = cursor.parts.iter().all(|p| {
@@ -473,7 +620,7 @@ impl Volumes {
             }
             Self::building(&slots)
         };
-        let hits = cursor.take(limit)?;
+        let hits = self.take(&mut cursor, limit, caller, None)?;
         Ok(Self::page(cursor, hits, building))
     }
 
@@ -481,19 +628,31 @@ impl Volumes {
         Page {
             hits,
             total: cursor.total,
-            next: (!cursor.parts.is_empty()).then_some(cursor),
+            total_is_upper_bound: cursor.filtered,
+            next: (!cursor.is_done()).then_some(cursor),
             building,
         }
     }
 }
 
+/// 파이프로 받은 질의는 늘 질의한 사용자로 거른다.
 impl Backend for Volumes {
-    fn search(&self, query: &QueryMessage, cancel: &Cancel) -> Result<Page, ErrorMessage> {
-        Volumes::search(self, query, cancel)
+    fn search(
+        &self,
+        query: &QueryMessage,
+        caller: &dyn Caller,
+        cancel: &Cancel,
+    ) -> Result<Page, ErrorMessage> {
+        Volumes::search_as(self, query, caller, cancel)
     }
 
-    fn resume(&self, cursor: Cursor, limit: usize) -> Result<Page, ErrorMessage> {
-        Volumes::resume(self, cursor, limit)
+    fn resume(
+        &self,
+        cursor: Cursor,
+        limit: usize,
+        caller: &dyn Caller,
+    ) -> Result<Page, ErrorMessage> {
+        Volumes::resume_as(self, cursor, limit, caller)
     }
 
     fn status(&self) -> StatusMessage {

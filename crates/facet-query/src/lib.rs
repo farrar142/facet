@@ -348,6 +348,7 @@ fn run_search<S: Read + Write>(
     });
     let mut page = page_of(ask(stream, &query)?)?;
     let total = page.total;
+    let upper_bound = page.total_is_upper_bound;
     let mut building = Vec::new();
     let mut received = 0u64;
     let mut pages = 1u32;
@@ -374,12 +375,29 @@ fn run_search<S: Read + Write>(
         )?)?;
         pages += 1;
     }
-    writeln!(out, "결과 {received}개 / 전체 {total}개")?;
-    if received < total {
+    if upper_bound {
+        // 서비스가 읽을 수 없는 폴더 아래 결과를 걸렀다. 전체 개수는 거르기 전에 센 값이다.
         writeln!(
             out,
-            "남은 결과 {}개는 --pages N이나 --all로 이어 받습니다",
-            total - received
+            "결과 {received}개 / 전체 많아야 {total}개(권한으로 거르기 전 개수)"
+        )?;
+    } else {
+        writeln!(out, "결과 {received}개 / 전체 {total}개")?;
+    }
+    let more = if upper_bound {
+        page.next.is_some()
+    } else {
+        received < total
+    };
+    if more {
+        writeln!(
+            out,
+            "남은 결과{}는 --pages N이나 --all로 이어 받습니다",
+            if upper_bound {
+                format!(" 많아야 {}개", total.saturating_sub(received))
+            } else {
+                format!(" {}개", total - received)
+            }
         )?;
     }
     if !building.is_empty() {

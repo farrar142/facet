@@ -191,6 +191,7 @@ fn corrupted_bodies_are_errors_not_panics() {
             attributes: 3,
         }],
         total: 1,
+        total_is_upper_bound: true,
         next: Some(4),
         building: vec!["C:".into()],
     }));

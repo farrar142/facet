@@ -19,10 +19,15 @@
 //! - 개발용 하위 명령 `dump-mft`. 관리자 권한으로 NTFS 볼륨을 열어 MFT의 원시 레코드를
 //!   덩어리째 읽어 파일로 떠 낸다. MFT 파서 테스트에 쓰는 「MFT 조각」을 만드는 데
 //!   쓴다(`testdata/mft/README.md`).
-//! - 질의 파이프 서버([`pipe::PipeServer`])와 연결 하나의 대화([`session`]). 개발용 하위 명령
+//! - 질의 파이프 서버([`pipe::PipeServer`])와 연결 하나의 대화([`session`]). 질의 결과는 질의한
+//!   사용자가 목록을 읽을 수 없는 폴더 아래 항목을 빼고 내보낸다([`access`], 토큰 검사는
+//!   `caller`). 개발용 하위 명령
 //!   `serve-sample`이 견본 인덱스로 서버를 띄운다.
 
+pub mod access;
 pub mod build;
+#[cfg(windows)]
+pub mod caller;
 pub mod cli;
 pub mod dump;
 pub mod follow;
