@@ -1,8 +1,9 @@
 //! Windows 서비스(Windows 전용): 서비스 관리자가 띄우는 본체, 개발용 설치·제거.
 //!
 //! - 본체([`run_service`]): 서비스 관리자에 붙어 질의 파이프 서버를 띄우고, 드라이브 문자가 있는
-//!   로컬 NTFS 볼륨마다 첫 인덱스를 만든 뒤 USN 저널을 따라간다([`index_volumes`]). 멈추라는
-//!   제어가 오면 따라가기에 멈추라고 알리고 파이프 서버를 닫고 끝난다.
+//!   로컬 NTFS 볼륨마다 첫 인덱스를 만든 뒤 USN 저널을 따라간다([`follow_volumes`]). 도는 동안
+//!   볼륨이 붙거나 떨어지면 더하고 뺀다([`Mounts`]). 멈추라는 제어가 오면 따라가기에 멈추라고
+//!   알리고 파이프 서버를 닫고 끝난다.
 //! - 설치([`install`]): 이 실행 파일을 LocalSystem 계정의 자동 시작 서비스로 등록하고 시작한다.
 //! - 제거([`uninstall`]): 서비스를 멈추고 지우고, 인덱스 폴더도 지운다.
 //!
@@ -18,7 +19,6 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use facet_protocol::NoIndexReason;
 use windows_sys::Win32::Foundation::{
     ERROR_CALL_NOT_IMPLEMENTED, ERROR_FAILED_SERVICE_CONTROLLER_CONNECT,
     ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_EXISTS, ERROR_SERVICE_MARKED_FOR_DELETE,
@@ -35,8 +35,9 @@ use windows_sys::Win32::System::Services::{
     SetServiceStatus, StartServiceCtrlDispatcherW, StartServiceW,
 };
 
-use crate::follow::{self, IndexFile, Stop};
+use crate::follow::{self, Stop};
 use crate::index_dir;
+use crate::mounts::{self, Mounts};
 use crate::pipe::PipeServer;
 use crate::volume::{self, NEED_ADMIN, is_elevated};
 use crate::volumes::{Plan, Volumes};
@@ -262,50 +263,39 @@ fn remove_service() -> Result<Uninstalled, String> {
 /// [`follow::SAVE_POLICY`]다.
 ///
 /// 볼륨마다 스레드를 따로 두는 것은, 큰 볼륨(C:)을 읽는 동안 작은 볼륨이 기다리지 않게 하려는 것이다.
+/// 볼륨이 붙거나 떨어지는 것까지 따라가려면 [`Mounts`]를 쓴다.
 pub fn index_volumes(
     volumes: &Arc<Volumes>,
     targets: Vec<(String, Plan)>,
     stop: &Stop,
     index_dir: Option<&Path>,
 ) -> Vec<JoinHandle<()>> {
-    let mut threads = Vec::new();
-    for (name, plan) in targets {
-        match plan {
-            Plan::NotIndexed(reason) => volumes.set_not_indexed(&name, reason),
-            Plan::Index => {
-                volumes.set_building(&name);
-                let Some(drive) = name.chars().next() else {
-                    continue;
-                };
-                let shared = Arc::clone(volumes);
-                let stop = stop.clone();
-                let file = index_dir.map(|dir| IndexFile::in_dir(dir, &name, follow::SAVE_POLICY));
-                let spawned = thread::Builder::new()
-                    .name(format!("facet-index-{drive}"))
-                    .spawn(move || {
-                        let mut source = volume::NtfsSource::new(drive);
-                        follow::run(
-                            &shared,
-                            &name,
-                            &mut source,
-                            &stop,
-                            follow::POLL,
-                            file.as_ref(),
-                        );
-                    });
-                match spawned {
-                    Ok(t) => threads.push(t),
-                    Err(e) => volumes.set_not_indexed(
-                        &format!("{drive}:"),
-                        NoIndexReason::Failed {
-                            message: format!("인덱스를 만들 스레드를 띄우지 못함: {e}"),
-                        },
-                    ),
-                }
-            }
+    let mut mounts = Mounts::new(Arc::clone(volumes), stop.clone(), index_dir, follow::POLL);
+    mounts.sync(&targets, ntfs_source);
+    mounts.into_threads()
+}
+
+/// 볼륨 이름(`C:`)의 NTFS 볼륨을 읽는 쪽.
+fn ntfs_source(name: &str) -> volume::NtfsSource {
+    volume::NtfsSource::new(name.chars().next().unwrap_or('?'))
+}
+
+/// 볼륨들의 인덱스를 만들고 최신으로 유지하며, `stop`이 설 때까지 [`mounts::POLL`]마다 볼륨 목록을
+/// 다시 읽어 붙거나 떨어진 볼륨을 더하고 뺀다([`Mounts::sync`]). 아직 끝나지 않았을 수 있는 볼륨
+/// 스레드들을 돌려준다. 나머지는 [`index_volumes`]와 같다.
+pub fn follow_volumes(
+    volumes: &Arc<Volumes>,
+    stop: &Stop,
+    index_dir: Option<&Path>,
+) -> Vec<JoinHandle<()>> {
+    let mut mounts = Mounts::new(Arc::clone(volumes), stop.clone(), index_dir, follow::POLL);
+    loop {
+        mounts.sync(&volume::local_volumes(), ntfs_source);
+        if stop.wait(mounts::POLL) {
+            break;
         }
     }
-    threads
+    mounts.into_threads()
 }
 
 /// 서비스 관리자가 띄운 프로세스에서 서비스 본체를 돌린다. 서비스가 멈추면 돌아온다.
@@ -416,13 +406,25 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut windows_sys::core
     let dir = index_dir::prepare(&dir).ok().map(|()| dir);
     // 인덱스는 뒤에서 만들거나 저장한 파일에서 읽고 따라간다. 그동안 상태 질의는 「만드는 중」을
     // 돌려준다.
+    //
+    // 볼륨 목록은 따로 스레드 하나가 되풀이해 읽어, 서비스가 도는 동안 붙거나 떨어진 볼륨(USB
+    // 드라이브 등)을 더하고 뺀다. 첫 목록은 바로 읽는다.
     let followers = Stop::new();
-    let threads = index_volumes(
-        &volumes,
-        volume::local_volumes(),
-        &followers,
-        dir.as_deref(),
-    );
+    let watcher = {
+        let volumes = Arc::clone(&volumes);
+        let stop = followers.clone();
+        thread::Builder::new()
+            .name("facet-mounts".to_owned())
+            .spawn(move || follow_volumes(&volumes, &stop, dir.as_deref()))
+    };
+    let watcher = match watcher {
+        Ok(t) => t,
+        Err(e) => {
+            drop(server);
+            report(SERVICE_STOPPED, e.raw_os_error().map_or(1, |c| c as u32));
+            return;
+        }
+    };
     report(SERVICE_RUNNING, NO_ERROR);
 
     let (lock, wake) = &STOP;
@@ -433,6 +435,8 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut windows_sys::core
     drop(stop);
     followers.stop();
     drop(server);
+    // 볼륨 목록을 읽던 스레드는 곧 끝나고 볼륨 스레드들을 넘겨준다.
+    let threads = watcher.join().unwrap_or_default();
     // 따라가던 스레드는 멈추며 인덱스를 저장하므로 [`STOP_WAIT`]까지 기다린다. 인덱스를 처음 만드는
     // 중인 스레드는 기다리지 않는다(오래 걸린다). 멈춤을 알리면 프로세스가 끝나며 함께 끝난다.
     let deadline = Instant::now() + STOP_WAIT;

@@ -13,7 +13,8 @@
 //!   볼륨 여럿의 인덱스와 상태는 [`volumes::Volumes`]가 들고 질의에 답한다. NTFS가 아닌 볼륨은
 //!   상태 질의에 「인덱스 없음(까닭)」으로 보인다. 인덱스는 볼륨마다 `%ProgramData%\facet\index\`
 //!   ([`index_dir`], SYSTEM과 Administrators만 쓴다)에 저장해 다시 뜬 뒤 읽고 꺼져 있던 동안의
-//!   변경을 따라잡는다([`follow::IndexFile`]).
+//!   변경을 따라잡는다([`follow::IndexFile`]). 서비스가 도는 동안 볼륨이 붙거나 떨어지면(USB
+//!   드라이브 등) 대상 볼륨을 더하거나 뺀다([`mounts`]).
 //! - 개발용 설치·제거(하위 명령 `install`·`uninstall`, 관리자 권한). 제거는 인덱스 폴더도 지운다.
 //! - 개발용 하위 명령 `dump-mft`. 관리자 권한으로 NTFS 볼륨을 열어 MFT의 원시 레코드를
 //!   덩어리째 읽어 파일로 떠 낸다. MFT 파서 테스트에 쓰는 「MFT 조각」을 만드는 데
@@ -28,6 +29,7 @@ pub mod follow;
 #[cfg(windows)]
 pub mod index_dir;
 pub mod layout;
+pub mod mounts;
 #[cfg(windows)]
 pub mod pipe;
 pub mod sample;

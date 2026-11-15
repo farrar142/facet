@@ -6,6 +6,9 @@
 //!   `building`에 그 볼륨을 적는다.
 //! - **준비됨**: 인덱스가 있다. USN 저널의 변경은 [`Volumes::update`]로 그 자리에서 적용한다.
 //! - **인덱스 없음**: NTFS가 아니거나, 네트워크 볼륨이거나, 만들지 못했다. 까닭을 담는다.
+//! - **떨어짐**: 볼륨이 떨어졌다([`Volumes::detach`]). 상태 질의와 질의 결과에 나오지 않는다. 그
+//!   볼륨을 따라가던 스레드가 뒤늦게 상태를 바꾸려 해도 바꾸지 않는다(떨어진 볼륨을 되살리지
+//!   않는다). 다시 붙으면([`Volumes::attach`]) 새로 시작한다.
 //!
 //! 질의는 인덱스가 있는 볼륨마다 실행해 결과를 합친다. 정렬을 주었으면 볼륨마다 정렬된 결과를
 //! 정렬 순서대로 섞고, 경로 정렬과 정렬 없음은 볼륨 이름 순서(`C:`, `D:`, ...)로 잇는다. 결과
@@ -101,6 +104,8 @@ enum Slot {
     Building(Option<Arc<Shared>>),
     Ready(Arc<Shared>),
     NotIndexed(NoIndexReason),
+    /// 떨어졌다. 상태 질의와 질의에 나오지 않고, [`Volumes::attach`] 말고는 바꾸지 않는다.
+    Detached,
 }
 
 impl Slot {
@@ -109,7 +114,7 @@ impl Slot {
         match self {
             Self::Building(old) => old.as_ref(),
             Self::Ready(index) => Some(index),
-            Self::NotIndexed(_) => None,
+            Self::NotIndexed(_) | Self::Detached => None,
         }
     }
 }
@@ -262,21 +267,50 @@ impl Volumes {
         self.slots.read().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// `volume`의 상태를 `slot`으로 바꾼다. 떨어진 볼륨이면 바꾸지 않고 `false`.
+    fn put(slots: &mut BTreeMap<String, Slot>, volume: &str, slot: Slot) -> bool {
+        if matches!(slots.get(volume), Some(Slot::Detached)) {
+            return false;
+        }
+        slots.insert(volume.to_owned(), slot);
+        true
+    }
+
+    /// 볼륨 `volume`이 (다시) 붙었다. `plan`이 [`Plan::Index`]면 앞선 인덱스 없이 「만드는 중」,
+    /// 아니면 「인덱스 없음(까닭)」으로 둔다. 떨어진 볼륨이어도 바꾼다.
+    pub fn attach(&self, volume: &str, plan: &Plan) {
+        let slot = match plan {
+            Plan::Index => Slot::Building(None),
+            Plan::NotIndexed(reason) => Slot::NotIndexed(reason.clone()),
+        };
+        self.slots_mut().insert(volume.to_owned(), slot);
+    }
+
+    /// 볼륨 `volume`이 떨어졌다. 상태 질의와 질의 결과에서 빠지고, 인덱스를 버리고, 그 볼륨의 결과를
+    /// 든 이어 받기 표지는 무효가 된다. 그 볼륨을 따라가던 스레드가 상태를 바꾸려 해도
+    /// [`Volumes::attach`] 전까지는 바꾸지 않는다. 모르는 볼륨이면 아무것도 하지 않는다.
+    pub fn detach(&self, volume: &str) {
+        if let Some(slot) = self.slots_mut().get_mut(volume) {
+            *slot = Slot::Detached;
+        }
+    }
+
     /// `volume`의 인덱스를 (다시) 만들기 시작한다. 앞선 인덱스가 있으면 다 만들 때까지 그것으로
-    /// 답한다.
-    pub fn set_building(&self, volume: &str) {
+    /// 답한다. 떨어진 볼륨이면 바꾸지 않고 `false`.
+    pub fn set_building(&self, volume: &str) -> bool {
         let mut slots = self.slots_mut();
         let old = slots.get(volume).and_then(Slot::index).cloned();
-        slots.insert(volume.to_owned(), Slot::Building(old));
+        Self::put(&mut slots, volume, Slot::Building(old))
     }
 
     /// `volume`의 인덱스를 다시 만들기 시작한다. 다 만들 때까지 `previous`(예: 디스크에서 읽은
-    /// 앞선 인덱스)로 답한다.
-    pub fn set_building_from(&self, volume: &str, previous: Index) {
-        self.slots_mut().insert(
-            volume.to_owned(),
+    /// 앞선 인덱스)로 답한다. 떨어진 볼륨이면 바꾸지 않고 `false`.
+    pub fn set_building_from(&self, volume: &str, previous: Index) -> bool {
+        Self::put(
+            &mut self.slots_mut(),
+            volume,
             Slot::Building(Some(Arc::new(Shared::new(previous)))),
-        );
+        )
     }
 
     /// 준비된 볼륨 `volume`의 인덱스를 읽기 잠금을 쥐고 `read`에 넘긴다(예: 파일로 저장). 그동안
@@ -291,10 +325,13 @@ impl Volumes {
     }
 
     /// `volume`의 인덱스를 다 만들었다. 앞선 인덱스를 바꿔 끼운다(그 인덱스의 이어 받기 표지는
-    /// 무효가 된다).
-    pub fn set_ready(&self, volume: &str, index: Index) {
-        self.slots_mut()
-            .insert(volume.to_owned(), Slot::Ready(Arc::new(Shared::new(index))));
+    /// 무효가 된다). 떨어진 볼륨이면 바꾸지 않고 `false`.
+    pub fn set_ready(&self, volume: &str, index: Index) -> bool {
+        Self::put(
+            &mut self.slots_mut(),
+            volume,
+            Slot::Ready(Arc::new(Shared::new(index))),
+        )
     }
 
     /// 준비된 볼륨 `volume`의 인덱스를 `change`로 바꾼다(USN 저널의 변경 적용). 그 볼륨의 결과를
@@ -337,10 +374,10 @@ impl Volumes {
         true
     }
 
-    /// `volume`에는 인덱스가 없다. 앞선 인덱스가 있었으면 버린다.
-    pub fn set_not_indexed(&self, volume: &str, reason: NoIndexReason) {
-        self.slots_mut()
-            .insert(volume.to_owned(), Slot::NotIndexed(reason));
+    /// `volume`에는 인덱스가 없다. 앞선 인덱스가 있었으면 버린다. 떨어진 볼륨이면 바꾸지 않고
+    /// `false`.
+    pub fn set_not_indexed(&self, volume: &str, reason: NoIndexReason) -> bool {
+        Self::put(&mut self.slots_mut(), volume, Slot::NotIndexed(reason))
     }
 
     fn building(slots: &BTreeMap<String, Slot>) -> Vec<String> {
@@ -356,9 +393,8 @@ impl Volumes {
         let volumes = self
             .slots()
             .iter()
-            .map(|(volume, slot)| VolumeStatus {
-                volume: volume.clone(),
-                state: match slot {
+            .filter_map(|(volume, slot)| {
+                let state = match slot {
                     Slot::Building(old) => VolumeState::Building {
                         items: old.as_ref().map(|i| i.read().len() as u64),
                     },
@@ -366,7 +402,12 @@ impl Volumes {
                         items: index.read().len() as u64,
                     },
                     Slot::NotIndexed(reason) => VolumeState::NotIndexed(reason.clone()),
-                },
+                    Slot::Detached => return None,
+                };
+                Some(VolumeStatus {
+                    volume: volume.clone(),
+                    state,
+                })
             })
             .collect();
         StatusMessage { volumes }
