@@ -7,6 +7,9 @@
 //! 훑기는 폴더마다 「폴더 시작」을 넣고 그 안의 항목을 넣은 뒤 「폴더 끝」을 넣는다. 복사는 폴더 시작에서 폴더를
 //! 만들고, 폴더 끝에서(안의 항목을 다 쓴 뒤) 폴더 시각·속성을 원본과 맞춘다.
 //!
+//! 심볼릭 링크(파일·폴더)와 정션은 따라 들어가지 않고 링크 자체를 대상에 만든다(같은 종류, 같은 곳을 가리킴).
+//! 그래서 자기 상위를 가리키는 링크가 있어도 복사가 끝난다. 링크는 항목 하나(바이트 0)로 센다.
+//!
 //! 통로는 크기 제한이 없다: 훑기가 복사보다 앞서 나가야 전체를 셀 수 있기 때문이다. 항목 하나가 경로 둘만큼의
 //! 메모리를 쓴다.
 
@@ -21,7 +24,7 @@ use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use facet_win::file_ops::{self, CopyStep, FileOpErrorKind};
+use facet_win::file_ops::{self, CopyStep, FileOpErrorKind, Link};
 
 use super::{
     Conflict, ConflictItem, Context, Control, CopyRejection, ErrorAnswer, ItemFailure, ItemKind,
@@ -255,8 +258,11 @@ enum Entry {
         source: PathBuf,
         target: PathBuf,
     },
-    /// 따라 들어가지 않는 링크.
-    Link,
+    /// 따라 들어가지 않고 링크 자체를 만들 링크(파일·폴더 심볼릭 링크, 정션).
+    Link {
+        source: PathBuf,
+        target: PathBuf,
+    },
     /// 훑지 못한 항목. 다시 시도하면 `target`이 있을 때 그 항목을 다시 훑는다(없으면 다시 훑을 수 없어 다시 묻는다).
     Failed {
         source: PathBuf,
@@ -321,7 +327,7 @@ fn scan_one(
             target: Some(target),
             kind: error_kind(&error),
         }),
-        Ok(metadata) if metadata.file_type().is_symlink() => send(Entry::Link),
+        Ok(metadata) if metadata.file_type().is_symlink() => send(Entry::Link { source, target }),
         Ok(metadata) if metadata.is_dir() => return walk(source, target, send, control),
         Ok(metadata) => send(Entry::File {
             source,
@@ -366,7 +372,10 @@ fn walk(source: PathBuf, target: PathBuf, send: &dyn Fn(Entry), control: &Contro
                         target: Some(child_target),
                         kind: error_kind(&error),
                     }),
-                    Ok(kind) if is_link(&kind) => send(Entry::Link),
+                    Ok(kind) if is_link(&kind) => send(Entry::Link {
+                        source: child_source,
+                        target: child_target,
+                    }),
                     Ok(kind) if kind.is_dir() => {
                         open_folder(child_source, child_target, &mut stack, send)
                     }
@@ -408,7 +417,7 @@ fn open_folder(source: PathBuf, target: PathBuf, stack: &mut Vec<Listing>, send:
     }
 }
 
-/// 심볼릭 링크·정션(Windows는 이름 대리 재분석 지점)인지. 따라 들어가지 않는다.
+/// 심볼릭 링크·정션(Windows는 이름 대리 재분석 지점)인지. 따라 들어가지 않고 링크 자체를 복사한다.
 fn is_link(kind: &FileType) -> bool {
     kind.is_symlink()
 }
@@ -605,9 +614,11 @@ impl<'a> Copier<'a> {
                     let _ = file_ops::remove_empty_folder(&source);
                 }
             }
-            Entry::Link => {
-                self.summary.links_skipped += 1;
-                self.reporter.items_done += 1;
+            Entry::Link { source, target } => {
+                let target = self.actual_target(&target);
+                if self.copy_link(&source, &target) {
+                    self.reporter.items_done += 1;
+                }
             }
             Entry::Failed {
                 source,
@@ -847,7 +858,7 @@ impl<'a> Copier<'a> {
                 self.reporter.items_done += 1;
                 self.reporter.bytes_done += size;
             }
-            Entry::Link | Entry::Failed { .. } => self.reporter.items_done += 1,
+            Entry::Link { .. } | Entry::Failed { .. } => self.reporter.items_done += 1,
         }
     }
 
@@ -869,7 +880,7 @@ impl<'a> Copier<'a> {
                     if overwritten {
                         self.summary.files_overwritten += 1;
                     }
-                    if self.moving && !self.remove_source(source) {
+                    if self.moving && !self.remove_source(source, file_ops::remove_file) {
                         return false;
                     }
                     break;
@@ -897,15 +908,103 @@ impl<'a> Copier<'a> {
 
     /// 다 복사한 원본 파일을 지운다. 실패하면 묻고(다시 시도면 지우기만 다시 한다), 건너뛰면 원본과 복사본이 둘 다
     /// 남는다. 취소로 그만뒀으면 `false`.
-    fn remove_source(&mut self, source: &Path) -> bool {
+    fn remove_source(
+        &mut self,
+        source: &Path,
+        remove: fn(&Path) -> file_ops::FileOpResult<()>,
+    ) -> bool {
         loop {
-            let Err(error) = file_ops::remove_file(source) else {
+            let Err(error) = remove(source) else {
                 return true;
             };
             match self.on_error(source, error.kind()) {
                 ErrorStep::Retry => {}
                 ErrorStep::Skip => return true,
                 ErrorStep::Cancel => return false,
+            }
+        }
+    }
+
+    /// 링크 하나를 링크 자체로 복사한다(대상이 있으면 묻고 답대로). 링크를 읽지 못하거나 만들지 못하면(심볼릭
+    /// 링크를 만들 권한이 없으면 접근 거부) 항목별 오류로 묻는다. 취소로 그만뒀으면 `false`.
+    ///
+    /// 이동 작업의 복사면 링크를 만든 뒤 원본 링크를 지운다(가리키는 곳은 건드리지 않는다).
+    fn copy_link(&mut self, source: &Path, target: &Path) -> bool {
+        self.reporter.current = Some(source.to_path_buf());
+        loop {
+            let kind = match self.attempt_link(source, target) {
+                FileOutcome::Copied { overwritten } => {
+                    self.summary.links_copied += 1;
+                    if overwritten {
+                        self.summary.files_overwritten += 1;
+                    }
+                    return !self.moving || self.remove_source(source, file_ops::remove_link);
+                }
+                FileOutcome::Skipped => {
+                    self.summary.conflicts_skipped += 1;
+                    return true;
+                }
+                FileOutcome::Cancelled => {
+                    self.cancelled = true;
+                    return false;
+                }
+                FileOutcome::Exists => FileOpErrorKind::TargetExists,
+                FileOutcome::Failed(kind) => kind,
+            };
+            match self.on_error(source, kind) {
+                ErrorStep::Retry => {}
+                ErrorStep::Skip => return true,
+                ErrorStep::Cancel => return false,
+            }
+        }
+    }
+
+    /// 링크 하나를 한 번 해 본다. 대상이 만드는 사이에 밖에서 생기면 [`MAX_ATTEMPTS`]까지 다시 확인한다.
+    fn attempt_link(&mut self, source: &Path, target: &Path) -> FileOutcome {
+        let link = match file_ops::read_link(source) {
+            Ok(link) => link,
+            Err(error) => return FileOutcome::Failed(error.kind()),
+        };
+        let mut outcome = FileOutcome::Exists;
+        for _ in 0..MAX_ATTEMPTS {
+            outcome = match fs::symlink_metadata(target) {
+                Err(_) => write_link(&link, target),
+                Ok(_) => self.resolve_link(source, &link, target),
+            };
+            if !matches!(outcome, FileOutcome::Exists) {
+                break;
+            }
+        }
+        outcome
+    }
+
+    /// 대상에 같은 이름이 있는 링크: 묻고 답대로 한다. 폴더 링크·정션은 폴더처럼 덮어쓸 수 없고, 파일 링크는
+    /// 대상이 폴더가 아니면 덮어쓸 수 있다(임시 이름에 링크를 만든 뒤 바꿔치기).
+    fn resolve_link(&mut self, source: &Path, link: &Link, target: &Path) -> FileOutcome {
+        let target_is_folder = fs::metadata(target).is_ok_and(|m| m.is_dir())
+            || fs::symlink_metadata(target).is_ok_and(|m| m.is_dir());
+        let can_overwrite = !link.kind.is_folder() && !target_is_folder;
+        let Some(resolution) = self.resolve(source, target, can_overwrite) else {
+            return FileOutcome::Cancelled;
+        };
+        match resolution {
+            Resolution::Skip => FileOutcome::Skipped,
+            Resolution::Overwrite => overwrite_link(link, target),
+            Resolution::OverwriteIfNewer => {
+                let modified = |path: &Path| fs::metadata(path).and_then(|m| m.modified()).ok();
+                match (modified(source), modified(target)) {
+                    (Some(source_time), Some(target_time)) if source_time > target_time => {
+                        overwrite_link(link, target)
+                    }
+                    _ => FileOutcome::Skipped,
+                }
+            }
+            Resolution::KeepBoth => {
+                let renamed = free_numbered(target, !link.kind.is_folder());
+                match write_link(link, &renamed) {
+                    FileOutcome::Exists => FileOutcome::Failed(FileOpErrorKind::TargetExists),
+                    outcome => outcome,
+                }
             }
         }
     }
@@ -996,6 +1095,32 @@ impl<'a> Copier<'a> {
                 kind => FileOutcome::Failed(kind),
             },
         }
+    }
+}
+
+/// 링크를 `target`(없는 이름)에 만든다.
+fn write_link(link: &Link, target: &Path) -> FileOutcome {
+    match file_ops::create_link(target, link) {
+        Ok(()) => FileOutcome::Copied { overwritten: false },
+        Err(error) if error.kind() == FileOpErrorKind::TargetExists => FileOutcome::Exists,
+        Err(error) => FileOutcome::Failed(error.kind()),
+    }
+}
+
+/// 파일 링크로 덮어쓰기: 대상 폴더 안 임시 이름에 링크를 만든 뒤 바꿔치기한다. 실패하면 임시 링크를 지우고 원래
+/// 파일은 그대로다.
+fn overwrite_link(link: &Link, target: &Path) -> FileOutcome {
+    let temp = temp_path(target);
+    match write_link(link, &temp) {
+        FileOutcome::Copied { .. } => match file_ops::replace(&temp, target) {
+            Ok(()) => FileOutcome::Copied { overwritten: true },
+            Err(error) => {
+                let _ = file_ops::remove_link(&temp);
+                FileOutcome::Failed(error.kind())
+            }
+        },
+        FileOutcome::Exists => FileOutcome::Failed(FileOpErrorKind::TargetExists),
+        outcome => outcome,
     }
 }
 

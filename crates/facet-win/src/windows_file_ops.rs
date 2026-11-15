@@ -17,21 +17,31 @@ use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Storage::FileSystem::{
     COPY_FILE_FAIL_IF_EXISTS, COPY_FILE_NO_BUFFERING, COPYFILE2_CALLBACK_CHUNK_FINISHED,
     COPYFILE2_EXTENDED_PARAMETERS, COPYFILE2_MESSAGE, COPYFILE2_MESSAGE_ACTION,
-    COPYFILE2_PROGRESS_CANCEL, COPYFILE2_PROGRESS_CONTINUE, CopyFile2, FILE_ATTRIBUTE_NORMAL,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAGS_AND_ATTRIBUTES, FILE_ID_INFO, FILE_WRITE_ATTRIBUTES,
-    FileIdInfo, GetFileInformationByHandleEx, MOVE_FILE_FLAGS, MOVEFILE_REPLACE_EXISTING,
-    MoveFileExW, SetFileAttributesW,
+    COPYFILE2_PROGRESS_CANCEL, COPYFILE2_PROGRESS_CONTINUE, CopyFile2, CreateSymbolicLinkW,
+    FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_FLAGS_AND_ATTRIBUTES, FILE_ID_INFO, FILE_WRITE_ATTRIBUTES, FileIdInfo,
+    GetFileInformationByHandleEx, MOVE_FILE_FLAGS, MOVEFILE_REPLACE_EXISTING, MoveFileExW,
+    SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE, SYMBOLIC_LINK_FLAG_DIRECTORY,
+    SYMBOLIC_LINK_FLAGS, SetFileAttributesW,
 };
+use windows::Win32::System::IO::DeviceIoControl;
 use windows::core::PCWSTR;
 
 use crate::file_ops::{
-    CopyProgress, CopyStep, FileId, FileOpError, FileOpErrorKind, FileOpResult,
-    UNBUFFERED_COPY_THRESHOLD, win32_from_hresult,
+    CopyProgress, CopyStep, FileId, FileOpError, FileOpErrorKind, FileOpResult, Link, LinkKind,
+    MAX_REPARSE_BUFFER, UNBUFFERED_COPY_THRESHOLD, junction_buffer, nt_from_win32, parse_reparse,
+    win32_from_hresult,
 };
+
+/// 재분석 지점 읽기(`FSCTL_GET_REPARSE_POINT`).
+const FSCTL_GET_REPARSE_POINT: u32 = 0x0009_00A8;
+/// 재분석 지점 걸기(`FSCTL_SET_REPARSE_POINT`).
+const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
 
 const FILE_ATTRIBUTE_READONLY: u32 = 0x1;
 const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
 const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
+const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 const FILE_ATTRIBUTE_ARCHIVE: u32 = 0x20;
 const FILE_ATTRIBUTE_NOT_CONTENT_INDEXED: u32 = 0x2000;
 
@@ -279,7 +289,8 @@ pub(crate) fn rename(source: &Path, target: &Path) -> FileOpResult<()> {
 }
 
 pub(crate) fn replace(replacement: &Path, target: &Path) -> FileOpResult<()> {
-    source_metadata(replacement)?;
+    // 링크 자체도 바꿔 넣으므로 따라가지 않고 있는지만 본다(가리키는 곳이 없는 링크도).
+    fs::symlink_metadata(replacement).map_err(from_io)?;
     let readonly = fs::symlink_metadata(target)
         .ok()
         .map(|metadata| metadata.file_attributes())
@@ -345,6 +356,149 @@ pub(crate) fn file_id(path: &Path) -> FileOpResult<FileId> {
         volume_serial: info.VolumeSerialNumber,
         file_id: info.FileId.Identifier,
     })
+}
+
+/// 재분석 지점 자체를 여는 옵션(따라가지 않는다, 폴더도 연다).
+fn reparse_point_options() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    options.custom_flags((FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT).0);
+    options
+}
+
+pub(crate) fn read_link(path: &Path) -> FileOpResult<Link> {
+    let metadata = fs::symlink_metadata(path).map_err(from_io)?;
+    let file = reparse_point_options()
+        .access_mode(0)
+        .open(path)
+        .map_err(from_io)?;
+    let mut buffer = vec![0u8; MAX_REPARSE_BUFFER];
+    let mut returned = 0u32;
+    // SAFETY: 핸들은 살아 있는 `file`의 것이고, 출력 버퍼는 넘긴 길이만큼 쓸 수 있는 지역 Vec이다. 겹친 입출력이
+    // 아니므로 받은 바이트 수를 받을 `returned`를 넘기고, 호출이 끝나면 버퍼를 더 쓰지 않는다.
+    unsafe {
+        DeviceIoControl(
+            HANDLE(file.as_raw_handle()),
+            FSCTL_GET_REPARSE_POINT,
+            None,
+            0,
+            Some(buffer.as_mut_ptr() as *mut c_void),
+            buffer.len() as u32,
+            Some(&mut returned),
+            None,
+        )
+    }
+    .map_err(|error| from_windows(&error))?;
+    buffer.truncate(returned as usize);
+    // std의 `is_dir`은 링크면 거짓이라 디렉터리 속성을 직접 본다.
+    let is_folder = metadata.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0;
+    parse_reparse(&buffer, is_folder).ok_or_else(|| FileOpError::new(FileOpErrorKind::Other, None))
+}
+
+pub(crate) fn create_link(path: &Path, link: &Link) -> FileOpResult<()> {
+    match link.kind {
+        LinkKind::Junction => create_junction(path, &link.target),
+        LinkKind::FileSymlink => create_symlink(path, link, false),
+        LinkKind::FolderSymlink => create_symlink(path, link, true),
+    }
+}
+
+/// 만들 링크의 「찾을 수 없음」은 부모 폴더가 없다는 뜻이다(원본이 아니다).
+fn creation_error(error: FileOpError) -> FileOpError {
+    if error.kind() == FileOpErrorKind::SourceMissing {
+        FileOpError::new(FileOpErrorKind::Other, error.code())
+    } else {
+        error
+    }
+}
+
+/// `ERROR_INVALID_PARAMETER`: 개발자 모드 플래그를 모르는 옛 Windows.
+const ERROR_INVALID_PARAMETER: i32 = 87;
+
+fn create_symlink(path: &Path, link: &Link, folder: bool) -> FileOpResult<()> {
+    let path_wide = extended(path)?;
+    // 상대 경로는 적힌 그대로 둔다. 절대 경로는 260자를 넘을 때만 확장 길이 경로로 넘긴다(아니면 탐색기가 보이는
+    // 표시 이름에 `\\?\`가 붙는다).
+    let target_wide: Vec<u16> =
+        if link.relative || link.target.as_os_str().encode_wide().count() < 260 {
+            link.target
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect()
+        } else {
+            extended(&link.target)?
+        };
+    let base = if folder {
+        SYMBOLIC_LINK_FLAG_DIRECTORY
+    } else {
+        SYMBOLIC_LINK_FLAGS(0)
+    };
+    let create = |flags: SYMBOLIC_LINK_FLAGS| {
+        // SAFETY: 두 경로는 NUL로 끝나는 UTF-16이고 호출 동안 살아 있다. 실패 코드는 곧바로 같은 스레드에서 읽는다.
+        let created = unsafe {
+            CreateSymbolicLinkW(
+                PCWSTR(path_wide.as_ptr()),
+                PCWSTR(target_wide.as_ptr()),
+                flags,
+            )
+        };
+        if created {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    };
+    // 개발자 모드면 관리자가 아니어도 만들 수 있게 청한다. 그 플래그를 모르는 Windows는 빼고 다시 한다.
+    let result = match create(base | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) {
+        Err(error) if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER) => create(base),
+        result => result,
+    };
+    result.map_err(|error| creation_error(from_io(error)))
+}
+
+/// 정션은 만드는 API가 없어 빈 폴더를 만든 뒤 마운트 지점 재분석 데이터를 건다. 실패하면 그 폴더를 지운다.
+fn create_junction(path: &Path, target: &Path) -> FileOpResult<()> {
+    let invalid = || FileOpError::new(FileOpErrorKind::Other, None);
+    let print = target.to_str().ok_or_else(invalid)?;
+    let substitute = nt_from_win32(print).ok_or_else(invalid)?;
+    let buffer = junction_buffer(&substitute, print).ok_or_else(invalid)?;
+    fs::create_dir(path).map_err(|error| creation_error(from_io(error)))?;
+    let result = (|| {
+        let file = reparse_point_options()
+            .write(true)
+            .open(path)
+            .map_err(from_io)?;
+        let mut returned = 0u32;
+        // SAFETY: 핸들은 살아 있는 `file`의 것이고, 입력 버퍼는 넘긴 길이만큼 읽을 수 있는 지역 Vec이다. 겹친
+        // 입출력이 아니므로 받은 바이트 수를 받을 `returned`를 넘긴다.
+        unsafe {
+            DeviceIoControl(
+                HANDLE(file.as_raw_handle()),
+                FSCTL_SET_REPARSE_POINT,
+                Some(buffer.as_ptr() as *const c_void),
+                buffer.len() as u32,
+                None,
+                0,
+                Some(&mut returned),
+                None,
+            )
+        }
+        .map_err(|error| from_windows(&error))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir(path);
+    }
+    result
+}
+
+pub(crate) fn remove_link(path: &Path) -> FileOpResult<()> {
+    let metadata = fs::symlink_metadata(path).map_err(from_io)?;
+    // 폴더 링크·정션은 디렉터리 항목이라 폴더로 지운다(가리키는 폴더의 내용은 건드리지 않는다).
+    if metadata.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        remove_with(path, |path| fs::remove_dir(path))
+    } else {
+        remove_with(path, |path| fs::remove_file(path))
+    }
 }
 
 #[cfg(test)]

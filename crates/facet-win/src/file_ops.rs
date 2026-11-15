@@ -9,13 +9,15 @@
 //! - [`replace`]: 덮어쓰기용 바꿔치기(임시 이름 파일 → 기존 이름, 읽기 전용 대상 포함).
 //! - [`remove_file`], [`remove_empty_folder`]: 파일·빈 폴더 지우기(읽기 전용도).
 //! - [`file_id`]: 파일·폴더의 파일 ID(볼륨 일련 번호 포함).
+//! - [`read_link`], [`create_link`], [`remove_link`]: 심볼릭 링크(파일·폴더)와 정션 자체를 읽고 만들고 지운다
+//!   (따라 들어가지 않는 복사가 링크 자체를 복사할 때).
 //!
 //! 경로는 260자를 넘어도 된다. 안에서 확장 길이 경로 접두사(`\\?\`)를 붙인다. 실패는 [`FileOpError`]이고 종류
 //! [`FileOpErrorKind`]로 이유를 나눈다. 화면 문장은 담지 않는다(ADR-0007). Windows가 아니면 모든 연산이
 //! [`FileOpErrorKind::Unsupported`]다.
 
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// 진행 콜백이 받는 값: 지금까지 복사한 바이트와 전체 바이트(대체 데이터 스트림 포함).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,13 +125,15 @@ pub(crate) const ERROR_HANDLE_DISK_FULL: u32 = 39;
 pub(crate) const ERROR_FILE_EXISTS: u32 = 80;
 pub(crate) const ERROR_DISK_FULL: u32 = 112;
 pub(crate) const ERROR_ALREADY_EXISTS: u32 = 183;
+pub(crate) const ERROR_PRIVILEGE_NOT_HELD: u32 = 1314;
 
 /// Win32 오류 코드의 종류. 「찾을 수 없음」은 여기서 [`FileOpErrorKind::SourceMissing`]으로 두고, 원본이 실제로
 /// 있으면 부르는 쪽이 [`FileOpErrorKind::Other`]로 바꾼다(대상 폴더가 없을 때).
 pub(crate) fn classify_win32(code: u32) -> FileOpErrorKind {
     match code {
         ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION => FileOpErrorKind::Locked,
-        ERROR_ACCESS_DENIED => FileOpErrorKind::AccessDenied,
+        // 심볼릭 링크를 만들 권한이 없다(관리자도 개발자 모드도 아님): 사용자에게는 접근 거부다.
+        ERROR_ACCESS_DENIED | ERROR_PRIVILEGE_NOT_HELD => FileOpErrorKind::AccessDenied,
         ERROR_DISK_FULL | ERROR_HANDLE_DISK_FULL => FileOpErrorKind::DiskFull,
         ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => FileOpErrorKind::SourceMissing,
         ERROR_FILE_EXISTS | ERROR_ALREADY_EXISTS => FileOpErrorKind::TargetExists,
@@ -304,6 +308,250 @@ pub fn file_id(path: &Path) -> FileOpResult<FileId> {
     }
 }
 
+/// 링크의 종류.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LinkKind {
+    /// 파일 심볼릭 링크.
+    FileSymlink,
+    /// 폴더 심볼릭 링크.
+    FolderSymlink,
+    /// 정션(디렉터리 마운트 지점). 늘 절대 경로를 가리킨다.
+    Junction,
+}
+
+impl LinkKind {
+    /// 폴더처럼 보이는 링크인지(폴더 심볼릭 링크·정션). 링크 자체가 디렉터리 항목이라 지울 때도 폴더로 지운다.
+    pub fn is_folder(self) -> bool {
+        !matches!(self, LinkKind::FileSymlink)
+    }
+}
+
+/// 링크 하나: 종류와 가리키는 곳.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Link {
+    /// 종류.
+    pub kind: LinkKind,
+    /// 가리키는 곳. 절대 경로면 Win32 경로(`C:\...`, `\\server\share\...`, 드라이브 문자가 없는 볼륨은
+    /// `\\?\Volume{...}\...`)이고, 상대 심볼릭 링크면 적힌 그대로의 상대 경로다(링크가 있는 폴더 기준).
+    pub target: PathBuf,
+    /// 상대 경로 심볼릭 링크인지. 복사하면 상대 경로 그대로 만든다(복사본 자리 기준으로 가리킨다).
+    pub relative: bool,
+}
+
+/// `path`의 링크 자체(따라가지 않는다)를 읽는다: 심볼릭 링크(파일·폴더)와 정션.
+///
+/// 링크가 아니거나 다른 종류의 재분석 지점이면 [`FileOpErrorKind::Other`]다.
+pub fn read_link(path: &Path) -> FileOpResult<Link> {
+    #[cfg(windows)]
+    {
+        crate::windows_file_ops::read_link(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err(FileOpError::unsupported())
+    }
+}
+
+/// `path`(없는 이름)에 `link`와 같은 종류·가리키는 곳의 링크를 만든다. 가리키는 곳은 없어도 된다.
+///
+/// 이미 있으면 [`FileOpErrorKind::TargetExists`]다. 심볼릭 링크를 만들 권한이 없으면(관리자도 개발자 모드도
+/// 아님, `ERROR_PRIVILEGE_NOT_HELD`) [`FileOpErrorKind::AccessDenied`]다. 정션은 권한 없이 만들 수 있고, 만들다
+/// 실패하면 만든 빈 폴더를 지운다. 링크의 시각·속성은 원본 링크를 따르지 않는다(만든 때).
+pub fn create_link(path: &Path, link: &Link) -> FileOpResult<()> {
+    if let Some(error) = fault::link_creation_error(path) {
+        return Err(error);
+    }
+    #[cfg(windows)]
+    {
+        crate::windows_file_ops::create_link(path, link)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (path, link);
+        Err(FileOpError::unsupported())
+    }
+}
+
+/// 링크 자체를 지운다(가리키는 곳은 건드리지 않는다). 폴더 링크·정션도, 읽기 전용이어도 지운다.
+pub fn remove_link(path: &Path) -> FileOpResult<()> {
+    #[cfg(windows)]
+    {
+        crate::windows_file_ops::remove_link(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err(FileOpError::unsupported())
+    }
+}
+
+/// 시험용 오류 주입: 링크를 만들 권한이 없는 환경을 흉내 낸다.
+///
+/// CI 러너처럼 관리자(심볼릭 링크 권한, 쓰기 권한 검사를 건너뛰는 복원 권한)로 도는 곳에서는 링크 만들기를 실제로
+/// 실패하게 할 방법이 없다. 그래서 테스트가 폴더 하나를 정하면 그 아래에 [`create_link`]를 부를 때 운영체제가
+/// 권한이 없을 때 돌려주는 코드(`ERROR_PRIVILEGE_NOT_HELD`)로 실패한다. 폴더로 범위를 정하므로 나란히 도는 다른
+/// 테스트에 번지지 않는다. 앱은 부르지 않는다.
+#[doc(hidden)]
+pub mod fault {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    use super::{ERROR_PRIVILEGE_NOT_HELD, FileOpError};
+
+    static NO_LINK_PRIVILEGE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+    /// 돌려준 값이 살아 있는 동안 `folder` 아래에 링크를 만들면 권한 없음으로 실패한다.
+    #[must_use = "버리면 곧바로 주입이 풀린다"]
+    pub fn deny_link_creation_under(folder: &Path) -> LinkCreationDenied {
+        let folder = folder.to_path_buf();
+        lock().push(folder.clone());
+        LinkCreationDenied(folder)
+    }
+
+    /// [`deny_link_creation_under`]의 주입. 버리면 풀린다.
+    pub struct LinkCreationDenied(PathBuf);
+
+    impl Drop for LinkCreationDenied {
+        fn drop(&mut self) {
+            let mut folders = lock();
+            if let Some(index) = folders.iter().position(|f| *f == self.0) {
+                folders.remove(index);
+            }
+        }
+    }
+
+    fn lock() -> std::sync::MutexGuard<'static, Vec<PathBuf>> {
+        NO_LINK_PRIVILEGE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(super) fn link_creation_error(path: &Path) -> Option<FileOpError> {
+        lock()
+            .iter()
+            .any(|folder| path.starts_with(folder))
+            .then(|| FileOpError::from_win32(ERROR_PRIVILEGE_NOT_HELD))
+    }
+}
+
+/// 재분석 지점 태그: 심볼릭 링크.
+pub(crate) const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
+/// 재분석 지점 태그: 정션(마운트 지점).
+pub(crate) const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+/// 심볼릭 링크 재분석 데이터의 「상대 경로」 표시.
+const SYMLINK_FLAG_RELATIVE: u32 = 1;
+/// 재분석 데이터 버퍼의 최대 크기(`MAXIMUM_REPARSE_DATA_BUFFER_SIZE`).
+pub(crate) const MAX_REPARSE_BUFFER: usize = 16 * 1024;
+
+/// 재분석 데이터 버퍼(`REPARSE_DATA_BUFFER`)에서 읽은 링크. 버퍼는 Windows가 준 바이트 그대로이고, 종류(파일·
+/// 폴더 심볼릭 링크)는 버퍼에 없어 부르는 쪽이 디렉터리 속성으로 정한다.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn parse_reparse(buffer: &[u8], is_folder: bool) -> Option<Link> {
+    let u16_at = |at: usize| -> Option<u16> {
+        Some(u16::from_le_bytes(buffer.get(at..at + 2)?.try_into().ok()?))
+    };
+    let u32_at = |at: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(buffer.get(at..at + 4)?.try_into().ok()?))
+    };
+    let tag = u32_at(0)?;
+    let (kind, path_start, flags) = match tag {
+        IO_REPARSE_TAG_SYMLINK => {
+            let kind = if is_folder {
+                LinkKind::FolderSymlink
+            } else {
+                LinkKind::FileSymlink
+            };
+            (kind, 20, u32_at(16)?)
+        }
+        IO_REPARSE_TAG_MOUNT_POINT => (LinkKind::Junction, 16, 0),
+        _ => return None,
+    };
+    let offset = usize::from(u16_at(8)?);
+    let length = usize::from(u16_at(10)?);
+    let bytes = buffer.get(path_start + offset..path_start + offset + length)?;
+    let units: Vec<u16> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
+        .collect();
+    let substitute = String::from_utf16(&units).ok()?;
+    let relative = kind != LinkKind::Junction && flags & SYMLINK_FLAG_RELATIVE != 0;
+    let target = if relative {
+        PathBuf::from(substitute)
+    } else {
+        PathBuf::from(win32_from_nt(&substitute))
+    };
+    Some(Link {
+        kind,
+        target,
+        relative,
+    })
+}
+
+/// NT 경로(`\??\C:\a`, `\??\UNC\s\h`)를 Win32 경로(`C:\a`, `\\s\h`)로. 드라이브 문자도 UNC도 아니면 `\\?\`를
+/// 붙여 그대로 둔다(`\??\Volume{...}\` 등). `\??\`로 시작하지 않으면 그대로.
+fn win32_from_nt(path: &str) -> String {
+    let Some(rest) = path.strip_prefix(r"\??\") else {
+        return path.to_owned();
+    };
+    let bytes = rest.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        rest.to_owned()
+    } else if let Some(unc) = rest.strip_prefix(r"UNC\") {
+        format!(r"\\{unc}")
+    } else {
+        format!(r"\\?\{rest}")
+    }
+}
+
+/// Win32 절대 경로를 정션의 대체 이름(NT 경로)으로: `C:\a` → `\??\C:\a`, `\\s\h` → `\??\UNC\s\h`,
+/// `\\?\X` → `\??\X`. 절대 경로가 아니면 `None`(정션은 상대 경로를 가리킬 수 없다).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn nt_from_win32(path: &str) -> Option<String> {
+    if let Some(rest) = path
+        .strip_prefix(r"\\?\")
+        .or_else(|| path.strip_prefix(r"\??\"))
+    {
+        return Some(format!(r"\??\{rest}"));
+    }
+    if let Some(unc) = path.strip_prefix(r"\\") {
+        return Some(format!(r"\??\UNC\{unc}"));
+    }
+    let bytes = path.as_bytes();
+    (bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\')
+        .then(|| format!(r"\??\{path}"))
+}
+
+/// 정션의 재분석 데이터 버퍼(`REPARSE_DATA_BUFFER`의 마운트 지점)를 만든다: 대체 이름 `substitute`(NT 경로)와
+/// 표시 이름 `print`. 너무 길면 `None`.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn junction_buffer(substitute: &str, print: &str) -> Option<Vec<u8>> {
+    let substitute: Vec<u16> = substitute.encode_utf16().collect();
+    let print: Vec<u16> = print.encode_utf16().collect();
+    // 두 이름 모두 NUL로 끝낸다(탐색기·mklink가 만드는 것과 같다). 길이에는 NUL을 넣지 않는다.
+    let substitute_len = substitute.len() * 2;
+    let print_len = print.len() * 2;
+    let path_bytes = substitute_len + 2 + print_len + 2;
+    let data_len = 8 + path_bytes;
+    if 8 + data_len > MAX_REPARSE_BUFFER {
+        return None;
+    }
+    let mut buffer = Vec::with_capacity(8 + data_len);
+    buffer.extend_from_slice(&IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
+    buffer.extend_from_slice(&(data_len as u16).to_le_bytes());
+    buffer.extend_from_slice(&0u16.to_le_bytes());
+    buffer.extend_from_slice(&0u16.to_le_bytes());
+    buffer.extend_from_slice(&(substitute_len as u16).to_le_bytes());
+    buffer.extend_from_slice(&((substitute_len + 2) as u16).to_le_bytes());
+    buffer.extend_from_slice(&(print_len as u16).to_le_bytes());
+    for unit in substitute.iter().chain(&[0]).chain(&print).chain(&[0]) {
+        buffer.extend_from_slice(&unit.to_le_bytes());
+    }
+    Some(buffer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,6 +562,7 @@ mod tests {
             (ERROR_SHARING_VIOLATION, FileOpErrorKind::Locked),
             (ERROR_LOCK_VIOLATION, FileOpErrorKind::Locked),
             (ERROR_ACCESS_DENIED, FileOpErrorKind::AccessDenied),
+            (ERROR_PRIVILEGE_NOT_HELD, FileOpErrorKind::AccessDenied),
             (ERROR_DISK_FULL, FileOpErrorKind::DiskFull),
             (ERROR_HANDLE_DISK_FULL, FileOpErrorKind::DiskFull),
             (ERROR_FILE_NOT_FOUND, FileOpErrorKind::SourceMissing),
@@ -328,6 +577,78 @@ mod tests {
             assert_eq!(error.kind(), kind, "{code}");
             assert_eq!(error.code(), Some(code as i32));
         }
+    }
+
+    #[test]
+    fn 정션_버퍼를_만들고_다시_읽는다() {
+        let buffer = junction_buffer(r"\??\C:\가 나\다", r"C:\가 나\다").unwrap();
+        let link = parse_reparse(&buffer, true).unwrap();
+        assert_eq!(
+            link,
+            Link {
+                kind: LinkKind::Junction,
+                target: PathBuf::from(r"C:\가 나\다"),
+                relative: false,
+            }
+        );
+        // 머리의 데이터 길이는 머리 8바이트를 뺀 길이다.
+        let data_len = u16::from_le_bytes([buffer[4], buffer[5]]) as usize;
+        assert_eq!(data_len + 8, buffer.len());
+    }
+
+    /// 심볼릭 링크 재분석 버퍼(시험용).
+    fn symlink_buffer(substitute: &str, flags: u32) -> Vec<u8> {
+        let name: Vec<u8> = substitute
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&IO_REPARSE_TAG_SYMLINK.to_le_bytes());
+        buffer.extend_from_slice(&((12 + name.len()) as u16).to_le_bytes());
+        buffer.extend_from_slice(&0u16.to_le_bytes());
+        buffer.extend_from_slice(&0u16.to_le_bytes());
+        buffer.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        buffer.extend_from_slice(&0u16.to_le_bytes());
+        buffer.extend_from_slice(&0u16.to_le_bytes());
+        buffer.extend_from_slice(&flags.to_le_bytes());
+        buffer.extend_from_slice(&name);
+        buffer
+    }
+
+    #[test]
+    fn 심볼릭_링크_버퍼를_읽는다() {
+        let absolute = parse_reparse(&symlink_buffer(r"\??\UNC\서버\공유", 0), false).unwrap();
+        assert_eq!(absolute.kind, LinkKind::FileSymlink);
+        assert_eq!(absolute.target, PathBuf::from(r"\\서버\공유"));
+        assert!(!absolute.relative);
+
+        let relative =
+            parse_reparse(&symlink_buffer(r"..\옆", SYMLINK_FLAG_RELATIVE), true).unwrap();
+        assert_eq!(relative.kind, LinkKind::FolderSymlink);
+        assert_eq!(relative.target, PathBuf::from(r"..\옆"));
+        assert!(relative.relative);
+
+        // 다른 태그나 잘린 버퍼는 링크가 아니다.
+        let mut other = symlink_buffer("x", 0);
+        other[0] = 0x1B;
+        assert_eq!(parse_reparse(&other, false), None);
+        let full = symlink_buffer(r"\??\C:\a", 0);
+        assert_eq!(parse_reparse(&full[..full.len() - 2], false), None);
+    }
+
+    #[test]
+    fn nt_경로와_win32_경로를_오간다() {
+        for (win32, nt) in [
+            (r"C:\a\b", r"\??\C:\a\b"),
+            (r"\\서버\공유\a", r"\??\UNC\서버\공유\a"),
+            (r"\\?\Volume{1234}\a", r"\??\Volume{1234}\a"),
+        ] {
+            assert_eq!(nt_from_win32(win32).as_deref(), Some(nt));
+            assert_eq!(win32_from_nt(nt), win32);
+        }
+        assert_eq!(nt_from_win32(r"\\?\C:\a").as_deref(), Some(r"\??\C:\a"));
+        assert_eq!(nt_from_win32(r"..\a"), None);
+        assert_eq!(nt_from_win32(r"C:a"), None);
     }
 
     #[test]
