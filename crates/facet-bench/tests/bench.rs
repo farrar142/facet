@@ -76,6 +76,84 @@ fn 다시_돌려도_결과가_같다() {
     assert_eq!(snapshot(&target), first);
 }
 
+/// 항목 경로가 MAX_PATH(260)를 넘는 깊은 폴더. 8.3 짧은 이름이 있으면 그 표기(`LONGFO~1`)로 돌려준다.
+fn deep_folder(dir: &TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
+    let long = dir
+        .path()
+        .join("long folder name for short path")
+        .join("깊은 폴더 이름으로 경로를 길게 만든다 - 그리고 조금 더 길게 이어 붙인 이름 (MAX_PATH 넘기기용)");
+    fs::create_dir_all(&long).unwrap();
+    let short = dir
+        .path()
+        .join("LONGFO~1")
+        .join("깊은 폴더 이름으로 경로를 길게 만든다 - 그리고 조금 더 길게 이어 붙인 이름 (MAX_PATH 넘기기용)");
+    let base = if short.exists() { short } else { long.clone() };
+    (base.join("items"), long.join("items"))
+}
+
+#[test]
+fn 짧은_이름과_max_path를_넘는_경로에서도_다시_돌리면_결과가_같다() {
+    let dir = TempDir::new().unwrap();
+    let (target, long_target) = deep_folder(&dir);
+    let longest = (0..30)
+        .map(test_folder_entry)
+        .map(|e| long_target.join(e.name).as_os_str().encode_wide_len())
+        .max()
+        .unwrap();
+    assert!(
+        longest > 260,
+        "항목 경로가 MAX_PATH를 넘어야 한다: {longest}"
+    );
+
+    let report = make_test_folder(&target, 30).unwrap();
+    assert_eq!(report.created, 30);
+    let first = snapshot(&target);
+
+    let report = make_test_folder(&target, 30).unwrap();
+    assert_eq!((report.created, report.kept), (0, 30));
+    assert_eq!(snapshot(&target), first);
+
+    // 같은 폴더를 긴 표기로 불러도 같다.
+    let report = make_test_folder(&long_target, 30).unwrap();
+    assert_eq!((report.created, report.kept), (0, 30));
+    assert_eq!(snapshot(&long_target), first);
+}
+
+#[test]
+fn 같은_폴더를_동시에_만들어도_둘_다_성공하고_결과가_같다() {
+    let dir = TempDir::new().unwrap();
+    let (target, _) = deep_folder(&dir);
+    let count = 3000;
+
+    let reports: Vec<_> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..2)
+            .map(|_| s.spawn(|| make_test_folder(&target, count)))
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    for report in reports {
+        let report = report.unwrap();
+        assert_eq!(report.created + report.kept, count);
+    }
+
+    let want: BTreeMap<String, (bool, u64)> = (0..count)
+        .map(test_folder_entry)
+        .map(|e| (e.name, (e.is_folder, e.size)))
+        .collect();
+    assert_eq!(snapshot(&target), want);
+}
+
+/// 경로의 UTF-16 길이(Windows가 MAX_PATH를 세는 단위).
+trait EncodeWideLen {
+    fn encode_wide_len(&self) -> usize;
+}
+
+impl EncodeWideLen for std::ffi::OsStr {
+    fn encode_wide_len(&self) -> usize {
+        self.to_string_lossy().encode_utf16().count()
+    }
+}
+
 #[test]
 fn 일부만_남은_폴더는_채우고_크기가_틀린_파일은_고친다() {
     let dir = TempDir::new().unwrap();
