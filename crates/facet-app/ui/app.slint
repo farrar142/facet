@@ -47,6 +47,13 @@ export enum Problem {
     address-io,
 }
 
+// 탭 줄의 탭 하나: 제목(폴더 이름), 툴팁(전체 경로), 활성 탭인가. 이름과 경로라 번역하지 않는다.
+export struct TabItem {
+    title: string,
+    path: string,
+    active: bool,
+}
+
 // 상태 줄의 이름 입력란 알림. 문장은 화면이 `@tr()`로 만든다(ADR-0007).
 export enum Notice { none, entered, cancelled }
 
@@ -175,6 +182,15 @@ export component AppWindow inherits Window {
     preferred-height: 600px;
     default-font-size: 13px;
 
+    // 탭 줄: 활성 패널의 탭들. 탭이 많아 줄에 다 들어가지 않으면 넘겨 본다(`tab-strip-x`, Rust가 활성 탭을 보이게 맞춘다).
+    in property <[TabItem]> tabs;
+    out property <length> tab-width: clamp(tab-strip.width / max(1, root.tabs.length), 90px, 200px);
+    in-out property <length> tab-strip-x <=> tab-flick.content-x;
+    out property <length> tab-strip-width: tab-strip.width;
+    // 툴팁을 보일 탭(마우스가 올라간 탭, 없으면 -1)과 그 탭의 왼쪽 끝, 툴팁을 보이는가.
+    property <int> tip-tab: -1;
+    property <length> tip-x;
+    property <bool> tip-shown;
     // 주소창: 경로 조각(맨 위부터 지금 위치까지)의 이름.
     in property <[string]> segments;
     // 글자로 고쳐 쓰는 모드인가. 아니면 경로 조각 모드다.
@@ -248,6 +264,10 @@ export component AppWindow inherits Window {
     callback row-pressed(int, bool, bool);
     // 행을 두 번 눌렀다: 열기.
     callback row-opened(int);
+    // 행을 휠 클릭했다: 폴더면 새 탭에서 연다.
+    callback row-middle-pressed(int);
+    // 탭 줄의 탭을 눌렀다: 그 탭으로 간다.
+    callback tab-pressed(int);
     // 열 머리글을 눌렀다: 열 번호.
     callback sort-by(int);
     // 마우스 뒤로(거짓)·앞로(참) 버튼.
@@ -366,6 +386,69 @@ export component AppWindow inherits Window {
     VerticalLayout {
         padding: 8px;
         spacing: 4px;
+
+        // 탭 줄: 패널의 탭들. 활성 탭은 배경과 아래 선으로 보인다. 누르면 그 탭으로 간다.
+        tab-strip := Rectangle {
+            height: 30px;
+            border-width: 1px;
+            border-color: Palette.border;
+            clip: true;
+            tab-flick := Flickable {
+                content-width: max(self.width, root.tabs.length * root.tab-width);
+                content-height: self.height;
+                for tab[i] in root.tabs: Rectangle {
+                    x: i * root.tab-width;
+                    width: root.tab-width;
+                    height: tab-strip.height;
+                    background: tab.active ? Palette.background
+                        : tab-touch.has-hover ? Palette.alternate-background : Palette.control-background;
+                    tab-touch := TouchArea {
+                        clicked => {
+                            root.tab-pressed(i);
+                            root.focus-list();
+                        }
+                        changed has-hover => {
+                            if (self.has-hover) {
+                                root.tip-tab = i;
+                                root.tip-x = self.absolute-position.x;
+                            } else if (root.tip-tab == i) {
+                                root.tip-tab = -1;
+                                root.tip-shown = false;
+                            }
+                        }
+                    }
+                    // 탭 사이 경계.
+                    Rectangle {
+                        x: parent.width - 1px;
+                        width: 1px;
+                        background: Palette.border;
+                    }
+                    if tab.active: Rectangle {
+                        y: parent.height - 2px;
+                        height: 2px;
+                        background: Palette.accent-background;
+                    }
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 6px;
+                        VerticalLayout {
+                            alignment: center;
+                            ItemIcon {
+                                folder: true;
+                            }
+                        }
+                        Text {
+                            text: tab.title;
+                            overflow: elide;
+                            vertical-alignment: center;
+                            font-weight: tab.active ? 700 : 400;
+                            color: Palette.foreground.transparentize(tab.active ? 0% : 25%);
+                        }
+                    }
+                }
+            }
+        }
 
         // 주소창. 평소에는 경로 조각을 누르는 모드이고, 빈 곳을 누르거나 주소창 고쳐 쓰기 명령(Alt+D·Ctrl+L·F4)이면
         // 글자로 고쳐 쓰는 모드가 된다.
@@ -557,6 +640,11 @@ export component AppWindow inherits Window {
                     TouchArea {
                         pointer-event(event) => {
                             root.history-button(event);
+                            // 휠 클릭: 폴더를 새 탭에서 연다. 선택과 커서는 그대로다.
+                            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.middle) {
+                                root.row-middle-pressed(i);
+                                return;
+                            }
                             if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
                                 if (i == root.editing) {
                                     return;
@@ -753,6 +841,35 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // 탭 툴팁: 마우스를 탭에 잠시 올려 두면 탭 줄 아래에 그 탭의 전체 경로를 보인다.
+    Timer {
+        interval: 500ms;
+        running: root.tip-tab >= 0 && !root.tip-shown;
+        triggered => {
+            root.tip-shown = true;
+        }
+    }
+    Rectangle {
+        if root.tip-shown && root.tip-tab >= 0 && root.tip-tab < root.tabs.length: Rectangle {
+            x: max(0px, min(root.tip-x - parent.absolute-position.x, parent.width - self.width));
+            y: tab-strip.absolute-position.y - parent.absolute-position.y + tab-strip.height + 2px;
+            width: min(tip-text.preferred-width + 12px, parent.width);
+            height: 22px;
+            background: Palette.background;
+            border-width: 1px;
+            border-color: Palette.border;
+            drop-shadow-blur: 4px;
+            drop-shadow-color: #00000040;
+            tip-text := Text {
+                x: 6px;
+                width: parent.width - 12px;
+                text: root.tabs[root.tip-tab].path;
+                overflow: elide;
+                vertical-alignment: center;
             }
         }
     }

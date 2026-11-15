@@ -13,6 +13,10 @@
 //! 알림을 잃었거나 위치가 사라졌으면 [`Tab::reload`]로 다시 읽고, 위치가 사라졌으면 가장 가까운 남은 상위
 //! 위치(없으면 사용자 홈 폴더)로 옮긴다([`Tab::relocation`]).
 //!
+//! 탭은 보이거나 숨는다. 패널에서 활성이 아닌 탭은 숨어서 감시를 놓는다([`Tab::hide`]). 목록은 그대로 갖고
+//! 있다가, 다시 보이면([`Tab::show`]) 그 목록을 먼저 보이며 다시 읽고 감시를 다시 건다. 숨은 동안 끝난 읽기의
+//! 감시는 버린다.
+//!
 //! 요청마다 번호를 붙인다. 탭이 기다리는 것은 마지막 요청 하나뿐이고, 그보다 앞선 요청의 결과는
 //! 늦게 오면 버린다([`ReadOutcome::Stale`]).
 //!
@@ -331,6 +335,8 @@ pub struct Tab {
     relocation: Option<Relocation>,
     /// 마지막으로 파일을 기본 프로그램으로 열지 못한 까닭.
     open_error: Option<OpenError>,
+    /// 보이는 탭인가. 숨은 탭은 감시를 갖지 않는다.
+    shown: bool,
 }
 
 impl Tab {
@@ -362,7 +368,44 @@ impl Tab {
             watch_error: None,
             relocation: None,
             open_error: None,
+            shown: true,
         }
+    }
+
+    /// 탭 제목: 위치의 폴더 이름. 드라이브 루트는 드라이브 이름(`C:`)이다. 화면 문장이 아니라 이름이다.
+    pub fn title(&self) -> String {
+        provider_for(&self.location)
+            .segments(&self.location)
+            .pop()
+            .map(|segment| segment.label)
+            .unwrap_or_else(|| self.location.to_string())
+    }
+
+    /// 보이는 탭인가. 새로 만든 탭은 보인다.
+    pub fn is_shown(&self) -> bool {
+        self.shown
+    }
+
+    /// 탭을 숨긴다: 감시를 놓는다(버려서 푼다). 목록·선택·커서·스크롤·기록·정렬은 그대로 갖는다. 숨은 동안 끝난
+    /// 읽기도 감시를 남기지 않는다.
+    pub fn hide(&mut self) {
+        self.shown = false;
+        self.watching = None;
+        self.watch_error = None;
+    }
+
+    /// 숨은 탭을 다시 보인다. 갖고 있던 목록은 그대로 두고, 지금 위치를 다시 읽을 요청을 돌려준다. 그 요청을
+    /// 감시와 함께 읽어([`ReadRequest::run_watched`]) [`Tab::finish`]에 넘기면 새 목록으로 바뀌고 감시가 다시
+    /// 걸린다. 선택·커서·스크롤은 이름으로 남는다. 숨은 동안 위치가 사라졌으면 [`Tab::reload`]처럼 가장 가까운
+    /// 남은 상위로 옮긴다.
+    ///
+    /// 이미 보이면 아무것도 하지 않고 `None`이다. 기다리는 읽기가 있어도 `None`이다(그 읽기가 감시를 건다).
+    pub fn show(&mut self) -> Option<ReadRequest> {
+        if self.shown {
+            return None;
+        }
+        self.shown = true;
+        self.reload()
     }
 
     /// 지금 위치. 이동은 읽기가 성공해야 바뀐다.
@@ -681,6 +724,11 @@ impl Tab {
             Kind::New | Kind::Refresh | Kind::Reload => {}
         }
         match watch {
+            // 숨은 탭은 감시를 갖지 않는다: 숨은 동안 끝난 읽기의 감시는 버린다.
+            Some(_) if !self.shown => {
+                self.watching = None;
+                self.watch_error = None;
+            }
             Some(Ok(watch)) => {
                 self.watching = Some((id, watch));
                 self.watch_error = None;

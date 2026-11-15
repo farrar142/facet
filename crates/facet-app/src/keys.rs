@@ -3,7 +3,7 @@
 //! Slint는 Enter·화살표·기능 키 같은 글자 없는 키를 유니코드 사용자 영역의 글자 하나로 준다
 //! ([`slint::platform::Key`]). 글자 있는 키(영문자, 숫자, 공백, 두벌식 자모)는 [`Key::from_char`]가 바꾼다.
 
-use facet_core::command::Key;
+use facet_core::command::{Key, Shortcut};
 use slint::platform::Key as SlintKey;
 
 /// 글자 없는 키와 코어 키의 짝.
@@ -52,6 +52,19 @@ const FUNCTION: [SlintKey; 24] = [
     SlintKey::F23,
     SlintKey::F24,
 ];
+
+/// 키 이벤트(글자와 수식 키)를 코어의 키 조합으로. Shift+Tab은 Slint가 따로 「Backtab」 글자로 주므로
+/// Tab 키에 Shift를 더한 것으로 바꾼다. 코어가 모르는 키면 `None`이다.
+pub fn shortcut_of(text: &str, ctrl: bool, alt: bool, shift: bool) -> Option<Shortcut> {
+    let backtab = text.chars().eq([char::from(SlintKey::Backtab)]);
+    let key = if backtab { Key::Tab } else { key_of(text)? };
+    Some(Shortcut {
+        key,
+        ctrl,
+        alt,
+        shift: shift || backtab,
+    })
+}
 
 /// 키 이벤트의 글자(`event.text`)를 키로. 글자가 하나가 아니거나 코어가 모르는 키면 `None`이다.
 pub fn key_of(text: &str) -> Option<Key> {
@@ -136,5 +149,36 @@ mod tests {
             Some(CommandId::Refresh)
         );
         assert_eq!(shortcut("a", false, false, false), None);
+    }
+
+    #[test]
+    fn 탭_명령_키() {
+        let command = |text: &str, ctrl, shift| {
+            shortcut_of(text, ctrl, false, shift).and_then(find_by_shortcut)
+        };
+        assert_eq!(command("t", true, false), Some(CommandId::NewTab));
+        assert_eq!(command("ㅅ", true, false), Some(CommandId::NewTab));
+        assert_eq!(command("ㅈ", true, false), Some(CommandId::CloseTab));
+        assert_eq!(
+            command(&text(SlintKey::Tab), true, false),
+            Some(CommandId::NextTab)
+        );
+        // Shift+Tab은 Tab 글자로 오기도 하고 Backtab 글자로 오기도 한다.
+        assert_eq!(
+            command(&text(SlintKey::Tab), true, true),
+            Some(CommandId::PreviousTab)
+        );
+        assert_eq!(
+            command(&text(SlintKey::Backtab), true, true),
+            Some(CommandId::PreviousTab)
+        );
+        assert_eq!(
+            command(&text(SlintKey::Backtab), true, false),
+            Some(CommandId::PreviousTab)
+        );
+        assert_eq!(command("1", true, false), Some(CommandId::GoToTab(1)));
+        assert_eq!(command("8", true, false), Some(CommandId::GoToTab(8)));
+        assert_eq!(command("9", true, false), Some(CommandId::LastTab));
+        assert_eq!(command(&text(SlintKey::Tab), false, false), None);
     }
 }

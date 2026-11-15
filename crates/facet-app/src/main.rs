@@ -7,6 +7,7 @@
 //!   이벤트 루프에서 [`App::poll`]로 받아 다시 그린다.
 //! - 행 문자열은 화면에 보이는 행만 그때그때 만든다([`TabRows`]).
 //! - 실행 인자로 받은 폴더(없으면 사용자 홈 폴더)를 연다.
+//! - 패널 위에 탭 줄을 그린다. 탭 연산(열기·닫기·오가기)은 코어가 하고, 앱은 탭을 누름·휠 클릭을 넘긴다.
 //! - 주소창은 코어의 경로 조각([`facet_core::Provider::segments`]), 글자 해석([`App::go_to_text`]), 자동 완성
 //!   ([`App::complete_address`], 일꾼 스레드)을 그리기만 한다.
 
@@ -17,7 +18,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Instant;
 
-use facet_core::command::{self, CommandId, Key, Shortcut};
+use facet_core::command::{self, CommandId, Key};
 use facet_core::details::{self, Column, Direction};
 use facet_core::file_list;
 use facet_core::name_input::NameInput;
@@ -99,6 +100,8 @@ fn connect(ui: &AppWindow) {
         with_view(|view| view.row_pressed(row, Pick::for_click(ctrl, shift)));
     });
     ui.on_row_opened(|row| with_view(|view| view.row_opened(row)));
+    ui.on_row_middle_pressed(|row| with_view(|view| view.row_middle_pressed(row)));
+    ui.on_tab_pressed(|index| with_view(|view| view.tab_pressed(index)));
     ui.on_sort_by(|column| {
         let column = match column {
             1 => Column::Modified,
@@ -166,6 +169,8 @@ struct View {
     palette_rows: Rc<VecModel<PaletteRow>>,
     /// 「읽는 중」을 드러낼 때 다시 그리는 타이머.
     reading_timer: Timer,
+    /// 활성 패널의 탭 줄.
+    tabs: Rc<VecModel<TabItem>>,
 }
 
 impl View {
@@ -182,7 +187,10 @@ impl View {
         ui.set_candidates(ModelRc::from(Rc::clone(&candidates)));
         let palette_rows = Rc::new(VecModel::default());
         ui.set_palette_rows(ModelRc::from(Rc::clone(&palette_rows)));
+        let tabs = Rc::new(VecModel::default());
+        ui.set_tabs(ModelRc::from(Rc::clone(&tabs)));
         Rc::new(View {
+            tabs,
             ui: ui.as_weak(),
             app,
             rows,
@@ -200,6 +208,9 @@ impl View {
     fn poll(&self) {
         // 지금 스크롤 위치를 탭에 알린다: 이동이 확정되면 떠나는 위치의 기록에 남는다.
         self.remember_scroll();
+        if self.app.borrow().is_finished() {
+            return;
+        }
         let (updates, active) = {
             let mut app = self.app.borrow_mut();
             let updates = app.poll();
@@ -239,6 +250,10 @@ impl View {
     /// 활성 탭의 상태를 창에 넣는다.
     fn render(&self) {
         let Some(ui) = self.ui.upgrade() else { return };
+        if self.app.borrow().is_finished() {
+            return;
+        }
+        self.render_tabs(&ui);
         {
             let app = self.app.borrow();
             let tab = app.active_tab();
@@ -313,17 +328,42 @@ impl View {
         self.rows.notify.reset();
     }
 
+    /// 활성 패널의 탭 줄: 제목(폴더 이름), 툴팁(전체 경로), 활성 탭. 바뀔 때만 고쳐 화면 요소를 다시 만들지 않고,
+    /// 활성 탭이 줄 밖이면 보이게 넘긴다.
+    fn render_tabs(&self, ui: &AppWindow) {
+        let (items, active) = {
+            let app = self.app.borrow();
+            let panel = app.active_window().active_panel();
+            let active = panel.active_index();
+            let items: Vec<TabItem> = panel
+                .tabs()
+                .enumerate()
+                .map(|(i, (_, tab))| TabItem {
+                    title: tab.title().into(),
+                    path: tab.location().to_string().into(),
+                    active: i == active,
+                })
+                .collect();
+            (items, active)
+        };
+        if !self.tabs.iter().eq(items.iter().cloned()) {
+            self.tabs.set_vec(items);
+        }
+        let offset = file_list::scroll_to_show(
+            active,
+            ui.get_tab_width(),
+            -ui.get_tab_strip_x(),
+            ui.get_tab_strip_width(),
+        );
+        ui.set_tab_strip_x(-offset);
+    }
+
     /// 키 입력 하나. 명령이나 커서 이동으로 처리했으면 `true`, 글자 입력이면 `false`다.
     fn key(&self, text: &str, ctrl: bool, alt: bool, shift: bool) -> bool {
-        let Some(key) = keys::key_of(text) else {
+        let Some(shortcut) = keys::shortcut_of(text, ctrl, alt, shift) else {
             return false;
         };
-        let shortcut = Shortcut {
-            key,
-            ctrl,
-            alt,
-            shift,
-        };
+        let key = shortcut.key;
         if let Some(command) = command::find_by_shortcut(shortcut) {
             self.execute(command);
             return true;
@@ -355,12 +395,60 @@ impl View {
     /// 명령을 활성 탭에서 실행한다.
     fn execute(&self, command: CommandId) {
         self.remember_scroll();
+        let before = self.app.borrow().active_tab_id();
         let execution = self.app.borrow_mut().execute(command);
-        self.render();
+        if self.app.borrow().is_finished() {
+            // 마지막 탭을 닫아 창이 남지 않았다: 앱을 끝낸다.
+            let _ = slint::quit_event_loop();
+            return;
+        }
+        if self.app.borrow().active_tab_id() != before {
+            self.tab_switched();
+        } else {
+            self.render();
+        }
         match execution {
             Execution::EditAddress => self.begin_address_edit(),
             Execution::ShowCommandPalette => self.open_palette(),
-            Execution::Done | Execution::Disabled => {}
+            Execution::Done | Execution::Disabled | Execution::WindowClosed => {}
+        }
+    }
+
+    /// 활성 탭이 바뀌었다: 이름 입력란·주소창 고쳐 쓰기를 닫고, 그 탭이 갖고 있던 목록과 스크롤 위치를 바로 그린다.
+    /// 다시 읽은 결과는 나중에 와서 바꾼다.
+    fn tab_switched(&self) {
+        self.close_rename();
+        self.close_address_edit();
+        self.render();
+        self.restore_scroll();
+    }
+
+    /// 탭 줄의 `index`번째 탭을 눌렀다: 그 탭으로 간다.
+    fn tab_pressed(&self, index: i32) {
+        let id = {
+            let app = self.app.borrow();
+            let panel = app.active_window().active_panel();
+            usize::try_from(index)
+                .ok()
+                .and_then(|index| panel.tabs().nth(index))
+                .map(|(id, _)| id)
+        };
+        let Some(id) = id else { return };
+        if id == self.app.borrow().active_tab_id() {
+            return;
+        }
+        self.remember_scroll();
+        self.app.borrow_mut().activate_tab(id);
+        self.tab_switched();
+    }
+
+    /// 행을 휠 클릭했다: 폴더면 새 탭에서 연다. 지금 탭은 그대로다.
+    fn row_middle_pressed(&self, row: i32) {
+        let Ok(index) = usize::try_from(row) else {
+            return;
+        };
+        if self.app.borrow_mut().open_in_new_tab(index).is_some() {
+            self.render();
         }
     }
 
@@ -794,13 +882,20 @@ impl Model for TabRows {
     type Data = Row;
 
     fn row_count(&self) -> usize {
-        self.app
-            .try_borrow()
-            .map_or(0, |app| app.active_tab().len())
+        self.app.try_borrow().map_or(0, |app| {
+            if app.is_finished() {
+                0
+            } else {
+                app.active_tab().len()
+            }
+        })
     }
 
     fn row_data(&self, row: usize) -> Option<Row> {
         let app = self.app.try_borrow().ok()?;
+        if app.is_finished() {
+            return None;
+        }
         let tab = app.active_tab();
         let item = tab.get(row)?;
         Some(Row {
