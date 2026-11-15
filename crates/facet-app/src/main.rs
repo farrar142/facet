@@ -1610,6 +1610,12 @@ impl View {
             Execution::ShowCommandPalette => self.open_palette(),
             Execution::ConfirmTransfer(kind) => self.open_transfer(kind),
             Execution::ChooseTransferTarget(kind) => self.open_target(kind),
+            Execution::Rename => self.begin_rename(),
+            Execution::NewFolder => {
+                // 만든 폴더는 결과를 받을 때 목록에 들어가 선택·커서가 된다. 이름 입력란을 곧바로 여는 것과 실패
+                // 까닭을 보이는 것은 #156이 한다.
+                let _ = self.app.borrow_mut().new_folder(text::NEW_FOLDER_BASE);
+            }
             Execution::Done | Execution::Disabled | Execution::WindowClosed => {}
         }
     }

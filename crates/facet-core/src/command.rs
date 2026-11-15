@@ -84,11 +84,17 @@ pub enum CommandId {
     CopyTo,
     /// 이동 위치…: 복사 위치와 같고 이동 작업을 넣는다.
     MoveTo,
+    /// 이름 바꾸기: 커서 항목의 이름 입력란을 연다([`crate::window::Execution::Rename`]). 확정하면
+    /// [`crate::window::App::rename`]이 바꾼다. 커서 항목이 있고 위치가 실제 폴더일 때 켜진다.
+    Rename,
+    /// 새 폴더: 활성 탭 위치에 폴더를 만든다([`crate::window::Execution::NewFolder`] →
+    /// [`crate::window::App::new_folder`]). 위치가 실제 폴더일 때 켜진다.
+    NewFolder,
 }
 
 impl CommandId {
     /// 모든 명령. 명령 팔레트는 검색어가 없으면 이 순서로 보인다.
-    pub const ALL: [CommandId; 36] = [
+    pub const ALL: [CommandId; 38] = [
         CommandId::Open,
         CommandId::Back,
         CommandId::Forward,
@@ -125,6 +131,8 @@ impl CommandId {
         CommandId::MoveToOtherPanel,
         CommandId::CopyTo,
         CommandId::MoveTo,
+        CommandId::Rename,
+        CommandId::NewFolder,
     ];
 
     /// 바뀌지 않는 ID 글자. 화면 문장이 아니다.
@@ -168,6 +176,8 @@ impl CommandId {
             CommandId::MoveToOtherPanel => "move-to-other-panel",
             CommandId::CopyTo => "copy-to",
             CommandId::MoveTo => "move-to",
+            CommandId::Rename => "rename",
+            CommandId::NewFolder => "new-folder",
         }
     }
 
@@ -259,6 +269,8 @@ impl CommandId {
             CommandId::CopyToOtherPanel => const { &[key(Key::Function(7))] },
             CommandId::MoveToOtherPanel => const { &[key(Key::Function(8))] },
             CommandId::CopyTo | CommandId::MoveTo => &[],
+            CommandId::Rename => const { &[key(Key::Function(2))] },
+            CommandId::NewFolder => const { &[key(letter('N')).ctrl().shift()] },
         }
     }
 
@@ -268,6 +280,7 @@ impl CommandId {
     /// - 뒤로·앞으로: 그쪽 기록이 있을 때. 위로: 상위 위치가 있을 때(드라이브 루트에서 꺼진다).
     /// - 모두 선택: 보이는 항목이 있을 때.
     /// - 새 탭에서 열기: 커서 항목이 폴더일 때.
+    /// - 이름 바꾸기: 커서 항목이 있고 탭 위치가 실제 폴더일 때. 새 폴더: 탭 위치가 실제 폴더일 때.
     /// - 반대편 패널로 복사·이동: 원본(선택, 없으면 커서 항목)이 있고 탭 위치가 실제 폴더일 때. 반대편 패널은
     ///   [`CommandId::is_enabled_in_window`]가 본다.
     /// - 나머지는 늘 켜져 있다. 다음·이전·n번째 탭은 탭 하나만 보아서는 모르므로 켜져 있다고 하고, 패널의 탭
@@ -286,6 +299,10 @@ impl CommandId {
             | CommandId::MoveToOtherPanel
             | CommandId::CopyTo
             | CommandId::MoveTo => has_sources(tab),
+            CommandId::Rename => {
+                tab.location().file_system_path().is_some() && tab.cursor_item().is_some()
+            }
+            CommandId::NewFolder => tab.location().file_system_path().is_some(),
             CommandId::Refresh
             | CommandId::EditAddress
             | CommandId::ToggleHidden

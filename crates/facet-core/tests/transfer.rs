@@ -597,6 +597,8 @@ fn 복사_위치_이동_위치는_팔레트에_있고_기본_단축키가_없다
     let found = app.search_commands("위치", |c| match c {
         CommandId::CopyTo => "복사 위치…",
         CommandId::MoveTo => "이동 위치…",
+        CommandId::Rename => "이름 바꾸기",
+        CommandId::NewFolder => "새 폴더",
         _ => "다른 명령",
     });
     let commands: Vec<_> = found.iter().map(|e| e.command).collect();

@@ -47,8 +47,13 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::MoveToOtherPanel => "반대편 패널로 이동",
         CommandId::CopyTo => "복사 위치…",
         CommandId::MoveTo => "이동 위치…",
+        CommandId::Rename => "이름 바꾸기",
+        CommandId::NewFolder => "새 폴더",
     }
 }
+
+/// 새 폴더의 처음 이름(바탕 이름). 있으면 코어가 「새 폴더 (2)」처럼 번호를 붙인다.
+pub const NEW_FOLDER_BASE: &str = "새 폴더";
 
 /// 단축키의 글자: `Ctrl+Shift+P`, `Alt+←`. 키 이름은 번역하지 않는다.
 pub fn shortcut_text(shortcut: &Shortcut) -> String {
