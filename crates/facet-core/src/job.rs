@@ -188,8 +188,9 @@ pub struct Summary {
     /// 건너뛴 항목과 그 까닭. 아무것도 덮어쓰거나 지우지 않았다. 하나라도 있으면 작업은 [`JobState::Failed`]로
     /// 끝난다. 복사·이동은 늘 비어 있다.
     pub not_reverted: Vec<crate::history::NotReverted>,
-    /// 복사의 실행취소가 휴지통으로 보낸 항목(원래 경로·휴지통 안 경로). 폴더를 통째로 보냈으면 그 폴더 하나다. 다른
-    /// 작업은 늘 비어 있다.
+    /// 휴지통으로 보낸 항목(원래 경로·휴지통 안 경로): 복사·이동의 덮어쓰기가 덮어쓰기 전에 보낸 원래 대상 파일,
+    /// 복사(덮어쓰기 포함)의 실행취소가 보낸 복사본(폴더를 통째로 보냈으면 그 폴더 하나), 덮어쓰기의 다시 실행이 다시
+    /// 보낸 옛 파일. 휴지통을 거치지 않은 덮어쓰기는 들지 않는다.
     pub recycled: Vec<facet_win::recycle::RecycledItem>,
 }
 
@@ -296,7 +297,9 @@ pub struct Conflict {
     pub target: ConflictItem,
     /// 덮어쓰기·더 새것만 덮어쓰기를 고를 수 있는지. 파일과 폴더가 부딪히면 `false`이고 그 답은 거부된다.
     pub can_overwrite: bool,
-    /// 덮어쓰면 대상 파일을 되살릴 수 없는지(영구 삭제). 이 spec의 덮어쓰기는 덮어쓸 수 있으면 늘 `true`다. 화면이
+    /// 덮어쓰면 대상 파일을 되살릴 수 없는지(영구 삭제). 덮어쓸 수 있고 대상 위치에 휴지통이 없으면
+    /// ([`facet_win::recycle::has_recycle_bin`]) `true`다. 휴지통이 있으면 덮어쓰기 전에 대상 파일을 휴지통으로 보내
+    /// 실행취소로 되살릴 수 있으므로 `false`다(그래도 셸이 휴지통에 넣지 않으려 하는 큰 파일은 영구 덮어쓴다). 화면이
     /// 덮어쓰기 선택지에 그 사실을 보이는 데 쓴다(문장은 화면 몫).
     pub overwrite_is_permanent: bool,
 }
@@ -304,7 +307,8 @@ pub struct Conflict {
 /// 이름 충돌에 대한 답의 종류.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Resolution {
-    /// 대상 파일을 원본으로 덮어쓴다(대상 폴더 안 임시 이름에 다 쓴 뒤 바꿔치기, 읽기 전용 대상도).
+    /// 대상 파일을 원본으로 덮어쓴다(대상 폴더 안 임시 이름에 다 쓴 뒤, 대상 파일을 휴지통으로 보내고 제 이름으로
+    /// 놓기. 휴지통이 없는 위치·휴지통에 들어가지 않는 파일은 바꿔치기로 영구 덮어쓰기. 읽기 전용 대상도).
     Overwrite,
     /// 이 항목(폴더면 그 아래 전부)을 하지 않는다.
     Skip,
@@ -425,7 +429,8 @@ impl Job {
 pub(crate) struct Journal {
     /// 항목별 결과.
     pub(crate) steps: Vec<crate::history::Step>,
-    /// 이름 충돌에서 대상을 덮어썼다(그 작업은 되돌릴 수 없다).
+    /// 이름 충돌에서 대상을 휴지통을 거치지 않고 영구 덮어썼다(그 작업은 되돌릴 수 없다). 휴지통으로 보내고
+    /// 덮어쓴 것은 항목별 결과의 [`crate::history::Step::Overwrote`]로 남고 되돌릴 수 있다.
     pub(crate) overwrote: bool,
 }
 

@@ -5,7 +5,9 @@
 //! - 같은 볼륨 이동을 실행취소하면 같은 파일 ID로 원래 자리에 돌아오고, 다시 실행하면 다시 옮겨진다. 볼륨을 넘는
 //!   이동은 두 번째 볼륨의 폴더(`FACET_TEST_OTHER_VOLUME_DIR`)가 있을 때만 돈다.
 //! - 밖의 변경(고친 사본, 원래 자리의 같은 이름)은 그 항목만 건너뛰고 까닭을 보고하며 아무것도 덮어쓰지 않는다.
-//! - 폴더 합치기 복사의 실행취소는 합친 폴더와 원래 있던 항목을 남기고, 덮어쓰기가 든 작업은 되돌릴 수 없다.
+//! - 폴더 합치기 복사의 실행취소는 합친 폴더와 원래 있던 항목을 남긴다.
+//! - 덮어쓰기(옛 파일을 먼저 휴지통으로)의 실행취소는 옛 파일을 되살리고 새 파일을 치우며(복사면 휴지통으로, 이동이면
+//!   원래 자리로), 다시 실행은 다시 덮어쓴다. 휴지통에 넣을 수 없어 영구 덮어쓴 작업은 되돌릴 수 없다.
 //!
 //! 러너 계정이 휴지통을 쓸 수 없으면(볼륨에 휴지통이 없거나 셸이 휴지통에 넣지 않음) 건너뛰었다고 출력한다.
 //! 테스트가 휴지통에 넣은 항목은 테스트가 끝날 때(실패해도) 휴지통에서 지운다.
@@ -438,22 +440,290 @@ fn 폴더_합치기_복사를_실행취소하면_합친_폴더와_원래_있던_
     );
 }
 
+/// 다른 시각: 덮어쓸 옛 파일의 수정 시각(원본의 [`old_time`]과 달라야 되돌린 뒤 옛 파일인지 본다).
+fn older_time() -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_secs(1_500_000_000)
+}
+
+fn write_old_file(path: &Path, content: &str) {
+    fs::write(path, content).unwrap();
+    let file = fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.set_modified(older_time()).unwrap();
+}
+
+/// 이름 충돌에 덮어쓰기로 답하는 복사·이동 하나를 끝까지 하고 결과를 돌려준다.
+fn overwrite(app: &mut App, kind: JobKind, source: &Path, target: &Path) -> Summary {
+    let plan = TransferPlan {
+        kind,
+        sources: vec![source.to_path_buf()],
+        target: target.to_path_buf(),
+    };
+    let job = app.start_transfer(&plan).unwrap();
+    answer_conflict(app, job, Resolution::Overwrite);
+    let (state, summary) = wait_job(app, job);
+    assert_eq!(state, JobState::Finished, "{summary:?}");
+    assert_eq!(summary.files_overwritten, 1, "{summary:?}");
+    summary
+}
+
+const READONLY: u32 = 0x1;
+
+fn attributes(path: &Path) -> u32 {
+    use std::os::windows::fs::MetadataExt;
+    fs::metadata(path).unwrap().file_attributes()
+}
+
+fn set_readonly(path: &Path) {
+    let mut permissions = fs::metadata(path).unwrap().permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(path, permissions).unwrap();
+}
+
+/// 덮어쓴 파일이 휴지통 항목(원래 경로가 `path`)으로 휴지통에 있고 내용이 `content`다.
+fn in_bin<'a>(summary: &'a Summary, path: &Path, content: &str) -> &'a RecycledItem {
+    let item = summary
+        .recycled
+        .iter()
+        .find(|item| item.original() == path)
+        .unwrap_or_else(|| panic!("{} 이 휴지통에 가야 한다: {summary:?}", path.display()));
+    assert_eq!(fs::read_to_string(item.recycled()).unwrap(), content);
+    item
+}
+
 #[test]
-fn 덮어쓰기가_든_복사_이동은_되돌릴_수_없다고_기록된다() {
+fn 덮어쓰기_복사를_실행취소하면_옛_파일이_돌아오고_새_파일은_휴지통에_있으며_다시_실행하면_작업_뒤와_같다()
+ {
+    let dir = tree();
+    if !recycle_bin_usable(dir.path(), "덮어쓰기 복사 실행취소") {
+        return;
+    }
+    let mut bin = Bin::default();
+    let src = dir.path().join("src");
+    let dst = dir.path().join("dst");
+    let target = dst.join("보고서.txt");
+    write_old_file(&target, "원래 있던 것");
+    let before = snapshot(&dst);
+    let mut app = app_at(dir.path());
+
+    let summary = overwrite(&mut app, JobKind::Copy, &src.join("보고서.txt"), &dst);
+    bin.keep(&summary);
+    // 덮어쓰기 전에 옛 파일이 휴지통으로 갔다.
+    in_bin(&summary, &target, "원래 있던 것");
+    let after = snapshot(&dst);
+    assert_eq!(fs::read_to_string(&target).unwrap(), "보고서");
+    assert_eq!(after.len(), 1, "임시 파일이 남지 않는다: {after:?}");
+    let record = app.history().undo_target().expect("복사가 기록된다");
+    assert_eq!(record.kind(), OperationKind::Copy);
+    assert!(
+        record.is_undoable(),
+        "휴지통에 간 덮어쓰기는 되돌릴 수 있다"
+    );
+    assert_eq!(record.not_undoable_reason(), None);
+    assert!(
+        matches!(record.steps(), [Step::Overwrote { moved: false, .. }]),
+        "{:?}",
+        record.steps()
+    );
+
+    let (state, summary) = undo(&mut app);
+    bin.keep(&summary);
+    if bin_refused(&summary, "덮어쓰기 복사 실행취소") {
+        return;
+    }
+    assert_eq!(state, JobState::Finished, "{summary:?}");
+    assert_eq!(
+        snapshot(&dst),
+        before,
+        "옛 파일이 내용·수정 시각까지 돌아온다"
+    );
+    in_bin(&summary, &target, "보고서");
+
+    let (state, summary) = redo(&mut app);
+    bin.keep(&summary);
+    assert_eq!(state, JobState::Finished, "{summary:?}");
+    assert_eq!(snapshot(&dst), after, "작업 뒤와 같다");
+    in_bin(&summary, &target, "원래 있던 것");
+    assert_eq!(app.history().records().len(), 1);
+    assert!(app.history().undo_target().unwrap().is_undoable());
+
+    // 다시 실행한 것도 다시 되돌린다.
+    let (state, summary) = undo(&mut app);
+    bin.keep(&summary);
+    assert_eq!(state, JobState::Finished, "{summary:?}");
+    assert_eq!(snapshot(&dst), before);
+}
+
+#[test]
+fn 덮어쓰기_이동을_실행취소하면_원본_자리에_옮긴_파일이_대상_자리에_옛_파일이_돌아온다() {
+    let dir = tree();
+    if !recycle_bin_usable(dir.path(), "덮어쓰기 이동 실행취소") {
+        return;
+    }
+    let mut bin = Bin::default();
+    let src = dir.path().join("src");
+    let dst = dir.path().join("dst");
+    let source = src.join("보고서.txt");
+    let target = dst.join("보고서.txt");
+    write_old_file(&target, "원래 있던 것");
+    let src_before = snapshot(&src);
+    let dst_before = snapshot(&dst);
+    let file_id = file_ops::file_id(&source).unwrap();
+    let mut app = app_at(dir.path());
+
+    let summary = overwrite(&mut app, JobKind::Move, &source, &dst);
+    bin.keep(&summary);
+    in_bin(&summary, &target, "원래 있던 것");
+    assert!(!source.exists());
+    assert_eq!(fs::read_to_string(&target).unwrap(), "보고서");
+    let src_after = snapshot(&src);
+    let dst_after = snapshot(&dst);
+    let record = app.history().undo_target().unwrap();
+    assert_eq!(record.kind(), OperationKind::Move);
+    assert!(record.is_undoable());
+    assert!(matches!(
+        record.steps(),
+        [Step::Overwrote { moved: true, .. }]
+    ));
+
+    let (state, summary) = undo(&mut app);
+    bin.keep(&summary);
+    if bin_refused(&summary, "덮어쓰기 이동 실행취소") {
+        return;
+    }
+    assert_eq!(state, JobState::Finished, "{summary:?}");
+    assert_eq!(snapshot(&src), src_before, "옮긴 파일이 원본 자리로");
+    assert_eq!(snapshot(&dst), dst_before, "옛 파일이 대상 자리로");
+    assert_eq!(
+        file_ops::file_id(&source).unwrap(),
+        file_id,
+        "같은 파일이 되옮겨진다"
+    );
+
+    let (state, summary) = redo(&mut app);
+    bin.keep(&summary);
+    assert_eq!(state, JobState::Finished, "{summary:?}");
+    assert_eq!(snapshot(&src), src_after);
+    assert_eq!(snapshot(&dst), dst_after);
+    assert_eq!(file_ops::file_id(&target).unwrap(), file_id);
+    in_bin(&summary, &target, "원래 있던 것");
+}
+
+#[test]
+fn 읽기_전용_대상을_덮어쓴_복사도_실행취소로_되돌아온다() {
+    let dir = tree();
+    if !recycle_bin_usable(dir.path(), "읽기 전용 덮어쓰기") {
+        return;
+    }
+    let mut bin = Bin::default();
+    let src = dir.path().join("src");
+    let dst = dir.path().join("dst");
+    let target = dst.join("보고서.txt");
+    write_old_file(&target, "읽기 전용");
+    set_readonly(&target);
+    let before = snapshot(&dst);
+    let mut app = app_at(dir.path());
+
+    let summary = overwrite(&mut app, JobKind::Copy, &src.join("보고서.txt"), &dst);
+    bin.keep(&summary);
+    assert_eq!(fs::read_to_string(&target).unwrap(), "보고서");
+    assert_eq!(attributes(&target) & READONLY, 0, "결과 속성은 원본 것");
+    assert!(app.history().undo_target().unwrap().is_undoable());
+
+    let (state, summary) = undo(&mut app);
+    bin.keep(&summary);
+    if bin_refused(&summary, "읽기 전용 덮어쓰기") {
+        return;
+    }
+    assert_eq!(state, JobState::Finished, "{summary:?}");
+    assert_eq!(snapshot(&dst), before);
+    assert_ne!(attributes(&target) & READONLY, 0, "읽기 전용도 돌아온다");
+    let mut permissions = fs::metadata(&target).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    fs::set_permissions(&target, permissions).unwrap();
+}
+
+#[test]
+fn 덮어쓴_뒤_새_파일을_고치면_실행취소가_그_항목을_건너뛰고_보고하며_아무것도_덮어쓰지_않는다() {
+    let dir = tree();
+    if !recycle_bin_usable(dir.path(), "고친 새 파일") {
+        return;
+    }
+    let mut bin = Bin::default();
+    let src = dir.path().join("src");
+    let dst = dir.path().join("dst");
+    let target = dst.join("보고서.txt");
+    write_old_file(&target, "원래 있던 것");
+    let mut app = app_at(dir.path());
+    let summary = overwrite(&mut app, JobKind::Copy, &src.join("보고서.txt"), &dst);
+    bin.keep(&summary);
+    let old = in_bin(&summary, &target, "원래 있던 것").clone();
+
+    fs::write(&target, "그 뒤 고친 내용").unwrap();
+    let (state, summary) = undo(&mut app);
+    bin.keep(&summary);
+    assert_eq!(state, JobState::Failed, "{summary:?}");
+    assert_eq!(summary.not_reverted.len(), 1, "{summary:?}");
+    assert_eq!(summary.not_reverted[0].path, target);
+    assert_eq!(summary.not_reverted[0].reason, RevertSkip::Changed);
+    assert!(
+        summary.recycled.is_empty(),
+        "아무것도 휴지통에 보내지 않는다"
+    );
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "그 뒤 고친 내용",
+        "고친 파일은 그대로"
+    );
+    assert_eq!(
+        fs::read_to_string(old.recycled()).unwrap(),
+        "원래 있던 것",
+        "옛 파일은 휴지통에 그대로"
+    );
+    // 되돌리지 못한 항목은 기록에 남는다.
+    assert!(app.history().undo_target().is_some());
+    assert!(app.history().redo_target().is_none());
+}
+
+#[test]
+fn 덮어쓴_옛_파일의_휴지통_항목이_없으면_실행취소가_건너뛰고_새_파일을_남긴다() {
+    let dir = tree();
+    if !recycle_bin_usable(dir.path(), "비운 휴지통") {
+        return;
+    }
+    let mut bin = Bin::default();
+    let src = dir.path().join("src");
+    let dst = dir.path().join("dst");
+    let target = dst.join("보고서.txt");
+    write_old_file(&target, "원래 있던 것");
+    let mut app = app_at(dir.path());
+    let summary = overwrite(&mut app, JobKind::Copy, &src.join("보고서.txt"), &dst);
+    // 휴지통을 비운 것처럼 옛 파일의 휴지통 항목을 지운다.
+    bin.keep(&summary);
+    drop(bin);
+    let mut bin = Bin::default();
+
+    let (state, summary) = undo(&mut app);
+    bin.keep(&summary);
+    assert_eq!(state, JobState::Failed, "{summary:?}");
+    assert_eq!(summary.not_reverted.len(), 1, "{summary:?}");
+    assert_eq!(summary.not_reverted[0].reason, RevertSkip::RecycledMissing);
+    assert_eq!(fs::read_to_string(&target).unwrap(), "보고서");
+    assert!(summary.recycled.is_empty());
+}
+
+#[test]
+fn 휴지통에_넣을_수_없는_덮어쓰기는_영구_덮어쓰기이고_되돌릴_수_없다고_기록된다() {
     let dir = tree();
     let src = dir.path().join("src");
     let dst = dir.path().join("dst");
     write_file(&dst.join("보고서.txt"), "원래 있던 것");
+    // 셸이 휴지통 대신 영구 삭제하려는 것으로 본다(휴지통보다 큰 파일, 휴지통을 끈 볼륨).
+    let _refuse = recycle::fault::refuse_recycle_under(&dst);
     let mut app = app_at(dir.path());
-    let plan = TransferPlan {
-        kind: JobKind::Copy,
-        sources: vec![src.join("보고서.txt")],
-        target: dst.clone(),
-    };
-    let job = app.start_transfer(&plan).unwrap();
-    answer_conflict(&mut app, job, Resolution::Overwrite);
-    let (state, _) = wait_job(&mut app, job);
-    assert_eq!(state, JobState::Finished);
+    let summary = overwrite(&mut app, JobKind::Copy, &src.join("보고서.txt"), &dst);
+    assert!(summary.recycled.is_empty(), "{summary:?}");
+    assert_eq!(names(&dst), ["보고서.txt"], "임시 파일이 남지 않는다");
     let record = app.history().undo_target().unwrap();
     assert_eq!(record.kind(), OperationKind::Copy);
     assert_eq!(record.not_undoable_reason(), Some(NotUndoable::Overwritten));
@@ -469,18 +739,20 @@ fn 덮어쓰기가_든_복사_이동은_되돌릴_수_없다고_기록된다() {
     // 이동도 같다.
     write_file(&src.join("옮길.txt"), "옮길 것");
     write_file(&dst.join("옮길.txt"), "원래 있던 것");
-    let plan = TransferPlan {
-        kind: JobKind::Move,
-        sources: vec![src.join("옮길.txt")],
-        target: dst.clone(),
-    };
-    let job = app.start_transfer(&plan).unwrap();
-    answer_conflict(&mut app, job, Resolution::Overwrite);
-    wait_job(&mut app, job);
+    overwrite(&mut app, JobKind::Move, &src.join("옮길.txt"), &dst);
     let record = app.history().undo_target().unwrap();
     assert_eq!(record.kind(), OperationKind::Move);
     assert_eq!(record.not_undoable_reason(), Some(NotUndoable::Overwritten));
     assert_eq!(app.history().records().len(), 2);
+}
+
+fn names(folder: &Path) -> Vec<String> {
+    let mut names: Vec<_> = fs::read_dir(folder)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
 }
 
 #[test]

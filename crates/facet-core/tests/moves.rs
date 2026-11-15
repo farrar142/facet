@@ -8,6 +8,10 @@
 use facet_core::job::{CopyRejection, JobQueue};
 use tempfile::TempDir;
 
+#[cfg(windows)]
+#[path = "common/bin.rs"]
+mod bin;
+
 #[test]
 fn 폴더를_자기_자신이나_하위로_이동하면_거부한다() {
     let dir = TempDir::new().unwrap();
@@ -93,7 +97,11 @@ mod windows {
             "묻지 않아야 한다: {events:?}"
         );
         match events.last().unwrap() {
-            JobEvent::Finished { summary, .. } => summary.clone(),
+            JobEvent::Finished { summary, .. } => {
+                // 덮어쓰기가 휴지통으로 보낸 원래 대상은 휴지통에 쌓이지 않게 지운다.
+                super::bin::purge(&summary.recycled);
+                summary.clone()
+            }
             _ => unreachable!(),
         }
     }

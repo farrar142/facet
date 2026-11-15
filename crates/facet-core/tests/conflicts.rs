@@ -14,7 +14,11 @@ use facet_core::job::{
     AnswerError, Conflict, ConflictAnswer, ErrorAnswer, ItemKind, JobEvent, JobId, JobQueue,
     JobState, Resolution, Summary,
 };
+use facet_win::recycle;
 use tempfile::TempDir;
+
+#[path = "common/bin.rs"]
+mod bin;
 
 /// 사건을 기다리는 넉넉한 한도.
 const TIMEOUT: Duration = Duration::from_secs(120);
@@ -65,7 +69,11 @@ fn wait_finished(queue: &mut JobQueue, events: &mut Vec<JobEvent>, job: JobId) -
         "더 묻지 않아야 한다: {events:?}"
     );
     match events.last().unwrap() {
-        JobEvent::Finished { summary, .. } => summary.clone(),
+        JobEvent::Finished { summary, .. } => {
+            // 덮어쓰기가 휴지통으로 보낸 원래 대상은 휴지통에 쌓이지 않게 지운다.
+            bin::purge(&summary.recycled);
+            summary.clone()
+        }
         _ => unreachable!(),
     }
 }
@@ -168,7 +176,12 @@ fn 충돌_질문에는_두_항목의_이름_크기_수정_시각_종류가_있�
         Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_000))
     );
     assert!(conflict.can_overwrite);
-    assert!(conflict.overwrite_is_permanent, "덮어쓰기는 되살릴 수 없다");
+    // 휴지통이 있는 위치면 대상을 휴지통으로 보낸 뒤 덮어쓰므로 되살릴 수 있다.
+    if recycle::has_recycle_bin(&target_dir) {
+        assert!(!conflict.overwrite_is_permanent);
+    } else {
+        println!("건너뜀(되돌릴 수 없음 표시): 임시 폴더의 볼륨에 휴지통이 없습니다");
+    }
 
     // 일시정지·지금 시작은 답 기다림 중에 하지 않는다.
     assert!(!queue.pause(id));
@@ -198,6 +211,14 @@ fn 덮어쓰기는_대상을_원본으로_바꾼다() {
     assert_eq!(summary.files_copied, 1, "{summary:?}");
     assert_eq!(summary.files_overwritten, 1, "{summary:?}");
     assert!(summary.failures.is_empty());
+    if recycle::has_recycle_bin(&target_dir) {
+        assert_eq!(
+            summary.recycled.len(),
+            1,
+            "원래 대상은 휴지통으로: {summary:?}"
+        );
+        assert_eq!(summary.recycled[0].original(), target_dir.join("a.txt"));
+    }
 }
 
 #[test]
@@ -571,6 +592,46 @@ fn 덮어쓰기_복사가_실패하면_원래_파일이_그대로이고_임시_�
     assert_eq!(summary.failures[0].source, source);
     assert!(events.contains(&state_changed(id, JobState::Failed)));
     assert_eq!(read(&target_dir.join("a.txt")), "원래");
+    assert_eq!(names(&target_dir), ["a.txt"], "임시 파일이 남았다");
+}
+
+#[test]
+fn 덮어쓸_파일을_휴지통으로_보내지_못하면_항목별_오류로_묻고_원래_파일이_그대로다() {
+    let dir = TempDir::new().unwrap();
+    let (source, target_dir) = conflicting_file(dir.path(), 1_700_000_000, 1_600_000_000);
+    if !recycle::has_recycle_bin(&target_dir) {
+        println!("건너뜀(휴지통 보내기 실패): 임시 폴더의 볼륨에 휴지통이 없습니다");
+        return;
+    }
+    let target = target_dir.join("a.txt");
+    let mut queue = JobQueue::new();
+    let id = queue
+        .copy(vec![source.clone()], target_dir.clone())
+        .unwrap();
+    let mut events = Vec::new();
+    wait_conflict(&mut queue, &mut events, id);
+    // 덮어쓸 대상을 공유 없이 열어 둔다: 휴지통으로 옮기지 못한다(읽기·복사는 원본이라 된다).
+    let lock = OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&target)
+        .unwrap();
+    queue
+        .answer_conflict(id, ConflictAnswer::once(Resolution::Overwrite))
+        .unwrap();
+    wait_for(
+        &mut queue,
+        &mut events,
+        |e| matches!(e, JobEvent::ItemError { job, .. } if *job == id),
+    );
+    drop(lock);
+    assert_eq!(read(&target), "원래");
+    assert_eq!(names(&target_dir), ["a.txt"], "임시 파일이 남았다");
+    queue.answer_error(id, ErrorAnswer::Skip).unwrap();
+    let summary = wait_finished(&mut queue, &mut events, id);
+    assert_eq!(summary.failures.len(), 1, "{summary:?}");
+    assert!(summary.recycled.is_empty(), "{summary:?}");
+    assert_eq!(read(&target), "원래");
     assert_eq!(names(&target_dir), ["a.txt"], "임시 파일이 남았다");
 }
 

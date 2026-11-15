@@ -4,7 +4,8 @@
 //! 않는다). 끝난 작업만 들어가며 최근 [`HISTORY_LIMIT`]개까지 남고, 넘치면 가장 오래된 기록이 빠진다. 기록
 //! ([`Record`])마다 작업 종류([`OperationKind`]), 항목별 결과(되돌릴 단위 [`Step`]: 원래 경로·새 경로·만든 항목과
 //! 그때의 크기·수정 시각 [`Stamp`]), 되돌릴 수 없으면 그 까닭([`NotUndoable`])을 갖는다. 이름바꾸기·새 폴더와
-//! 복사·이동(폴더 안의 항목도 하나씩, [`Step::Copied`]·[`Step::Moved`]·[`Step::MovedFolder`])이 기록된다.
+//! 복사·이동(폴더 안의 항목도 하나씩, [`Step::Copied`]·[`Step::Moved`]·[`Step::MovedFolder`], 원래 대상을 휴지통으로
+//! 보내고 덮어쓴 파일은 그 휴지통 항목과 함께 [`Step::Overwrote`])이 기록된다.
 //!
 //! - **실행취소 대상**은 끝난 작업 가운데 마지막 기록이다([`History::undo_target`]). 그것이 되돌릴 수 없는 작업이면
 //!   실행취소는 까닭을 돌려주고 그 앞 기록으로 넘어가지 않는다.
@@ -21,6 +22,8 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
+
+use facet_win::recycle::RecycledItem;
 
 use crate::edit::{EditKind, Edited};
 use crate::job::JobId;
@@ -57,8 +60,9 @@ pub enum OperationKind {
 pub enum NotUndoable {
     /// 영구 삭제(휴지통을 거치지 않음, 덮어쓰기 포함): 되살릴 것이 남지 않는다.
     PermanentDelete,
-    /// 복사·이동이 이름 충돌에서 대상 파일을 덮어썼다: 덮어쓴 파일은 되살릴 수 없으므로 그 작업 전체를 되돌릴 수
-    /// 없다고 둔다(되돌릴 수 있다고 표시한 작업은 반드시 되돌아가야 하므로).
+    /// 복사·이동이 이름 충돌에서 대상 파일을 휴지통을 거치지 않고 덮어썼다(휴지통이 없는 위치, 휴지통에 들어가지
+    /// 않는 파일): 덮어쓴 파일은 되살릴 수 없으므로 그 작업 전체를 되돌릴 수 없다고 둔다(되돌릴 수 있다고 표시한
+    /// 작업은 반드시 되돌아가야 하므로). 휴지통으로 보내고 덮어쓴 것은 [`Step::Overwrote`]로 되돌릴 수 있다.
     Overwritten,
 }
 
@@ -134,6 +138,23 @@ pub enum Step {
         created: bool,
         stamp: Stamp,
     },
+    /// 복사·이동이 이름 충돌에서 `path`의 파일(파일 링크)을 덮어썼다: 덮어쓰기 전에 원래 파일을 휴지통으로 보냈고
+    /// (`replaced`, 그때의 모습 `replaced_stamp`) 그 자리에 `source`의 파일을 놓았다(`moved`면 옮겼다, 아니면
+    /// 복사했다). `stamp`는 놓은 새 파일의 모습이다.
+    ///
+    /// 되돌리기는 새 파일을 치우고(복사면 휴지통으로, 이동이면 `source`로 되옮김) 옛 파일을 휴지통에서 복원하기다.
+    /// 다시 하기는 다시 덮어쓰기다(옛 파일을 다시 휴지통으로 보내고 같은 원본을 다시 놓음). 휴지통이 없는 위치나
+    /// 휴지통에 들어가지 않는 파일을 영구 덮어쓴 것은 이것이 아니라 [`NotUndoable::Overwritten`]으로 기록한다.
+    ///
+    /// 실행취소한 뒤의 이 항목(다시 실행 목록)에서 `replaced`는 이미 복원한 휴지통 항목이라 쓰지 않는다.
+    Overwrote {
+        source: PathBuf,
+        path: PathBuf,
+        moved: bool,
+        stamp: Stamp,
+        replaced: RecycledItem,
+        replaced_stamp: Stamp,
+    },
 }
 
 impl Step {
@@ -141,7 +162,9 @@ impl Step {
     pub fn path(&self) -> &Path {
         match self {
             Step::Renamed { to, .. } => to,
-            Step::CreatedFolder { path, .. } | Step::Copied { path, .. } => path,
+            Step::CreatedFolder { path, .. }
+            | Step::Copied { path, .. }
+            | Step::Overwrote { path, .. } => path,
             Step::Moved { to, .. } | Step::MovedFolder { to, .. } => to,
         }
     }
@@ -152,14 +175,24 @@ impl Step {
             Step::Renamed { from, .. }
             | Step::Moved { from, .. }
             | Step::MovedFolder { from, .. } => Some(from),
-            Step::CreatedFolder { .. } | Step::Copied { .. } => None,
+            Step::Overwrote {
+                source,
+                moved: true,
+                ..
+            } => Some(source),
+            Step::CreatedFolder { .. } | Step::Copied { .. } | Step::Overwrote { .. } => None,
         }
     }
 
     /// 복사한 항목의 원본 경로. 복사가 아니면 `None`.
     pub fn source(&self) -> Option<&Path> {
         match self {
-            Step::Copied { source, .. } => Some(source),
+            Step::Copied { source, .. }
+            | Step::Overwrote {
+                source,
+                moved: false,
+                ..
+            } => Some(source),
             _ => None,
         }
     }
@@ -317,6 +350,9 @@ pub enum RevertSkip {
     NotEmpty,
     /// 휴지통에 넣을 수 없어(휴지통보다 큼, 휴지통이 없는·끈 볼륨) 지우지 않았다. 실행취소는 영구 삭제하지 않는다.
     NotRecyclable,
+    /// 덮어쓴 옛 파일의 휴지통 항목이 없다(휴지통을 비웠거나 휴지통에서 지웠다): 되살릴 것이 없어 새 파일도 그대로
+    /// 둔다.
+    RecycledMissing,
 }
 
 /// 밖의 변경으로 건너뛴 항목: 그 경로와 까닭.

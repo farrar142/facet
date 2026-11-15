@@ -10,6 +10,10 @@
 //! 심볼릭 링크(파일·폴더)와 정션은 따라 들어가지 않고 링크 자체를 대상에 만든다(같은 종류, 같은 곳을 가리킴).
 //! 그래서 자기 상위를 가리키는 링크가 있어도 복사가 끝난다. 링크는 항목 하나(바이트 0)로 센다.
 //!
+//! 이름 충돌을 덮어쓰기로 풀면 대상 폴더 안 임시 이름에 다 쓴 뒤, 바꿔치기 직전에 원래 대상을 휴지통으로 보내고
+//! 임시 파일을 제 이름으로 놓는다(`Copier::place`). 휴지통이 없는 위치와 휴지통에 들어가지 않는 파일은 영구
+//! 덮어쓰기다.
+//!
 //! 통로는 크기 제한이 없다: 훑기가 복사보다 앞서 나가야 전체를 셀 수 있기 때문이다. 항목 하나가 경로 둘만큼의
 //! 메모리를 쓴다.
 
@@ -25,6 +29,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use facet_win::file_ops::{self, CopyStep, FileOpErrorKind, Link};
+use facet_win::recycle::{self, RecycleOutcome, RecycledItem};
 
 use super::{
     Conflict, ConflictItem, Context, Control, CopyRejection, ErrorAnswer, ItemFailure, ItemKind,
@@ -462,6 +467,30 @@ pub(super) struct Copier<'a> {
     pub(super) journal: Option<JournalSink>,
     /// 이름 충돌에 둘 다 유지로 답해 방금 쓴 실제 대상 경로(「이름 (2)」). 기록에 실제 이름을 남기는 데 쓴다.
     kept_as: Option<PathBuf>,
+    /// 휴지통에 넣을 수 없을 때 영구 덮어쓰기를 해도 되는가. 복사·이동 작업은 `true`(S3와 같은 영구 덮어쓰기),
+    /// 다시 실행은 `false`(영구히 지우지 않고 `refused`를 세운다).
+    pub(super) permanent_overwrite: bool,
+    /// 영구 덮어쓰기를 해도 되지 않아(`permanent_overwrite`가 `false`) 덮어쓰지 않은 항목이 있었다.
+    pub(super) refused: bool,
+    /// 마지막 덮어쓰기가 휴지통으로 보낸 원래 대상과 보내기 전 모습(`place`가 적는다).
+    pub(super) last_replaced: Option<(RecycledItem, Stamp)>,
+}
+
+/// 덮어쓰기에서 원래 대상을 어떻게 치웠는가.
+#[derive(Debug, Clone)]
+pub(super) enum Replaced {
+    /// 덮어쓰지 않았다(대상이 없던 이름에 썼다).
+    Nothing,
+    /// 원래 대상을 휴지통으로 보냈다: 휴지통 항목과 보내기 전 모습. 실행취소로 되살릴 수 있다.
+    Recycled(RecycledItem, Stamp),
+    /// 휴지통을 거치지 않고 덮어썼다(휴지통이 없는 위치, 휴지통에 들어가지 않는 파일). 되살릴 수 없다.
+    Permanently,
+}
+
+impl Replaced {
+    pub(super) fn overwrote(&self) -> bool {
+        !matches!(self, Replaced::Nothing)
+    }
 }
 
 /// 들어가 있는 폴더 하나.
@@ -477,11 +506,13 @@ struct OpenFolder {
 }
 
 /// 파일 하나를 한 결과.
-enum FileOutcome {
-    /// 복사했다(덮어썼으면 `overwritten`).
-    Copied { overwritten: bool },
+pub(super) enum FileOutcome {
+    /// 복사했다(덮어썼으면 원래 대상을 어떻게 치웠는지 `replaced`).
+    Copied { replaced: Replaced },
     /// 이름 충돌로 건너뛰었다.
     Skipped,
+    /// 휴지통에 넣을 수 없어 덮어쓰지 않았다(영구 덮어쓰기를 하지 않는 다시 실행만). 대상은 그대로다.
+    Refused,
     /// 대상이 쓰는 사이에 생겼다(다시 확인한다).
     Exists,
     /// 취소로 그만뒀다.
@@ -525,18 +556,32 @@ impl<'a> Copier<'a> {
             moving,
             journal: None,
             kept_as: None,
+            permanent_overwrite: true,
+            refused: false,
+            last_replaced: None,
         }
     }
 
-    /// 파일·링크 하나를 `source`에서 `target`으로 복사했다(이동이면 옮겼다). 작업 기록에 적는다.
-    pub(super) fn note_item(&self, source: &Path, target: &Path, overwritten: bool) {
+    /// 파일·링크 하나를 `source`에서 `target`으로 복사했다(이동이면 옮겼다). 작업 기록에 적는다. 원래 대상을
+    /// 휴지통으로 보내고 덮어썼으면 [`Step::Overwrote`], 영구 덮어썼으면 그 작업을 되돌릴 수 없다고 적는다.
+    pub(super) fn note_item(&self, source: &Path, target: &Path, replaced: Replaced) {
         let Some(journal) = &self.journal else {
             return;
         };
         let Some(stamp) = Stamp::read(target) else {
             return;
         };
-        let step = if self.moving {
+        let permanent = matches!(replaced, Replaced::Permanently);
+        let step = if let Replaced::Recycled(item, old) = replaced {
+            Step::Overwrote {
+                source: source.to_path_buf(),
+                path: target.to_path_buf(),
+                moved: self.moving,
+                stamp,
+                replaced: item,
+                replaced_stamp: old,
+            }
+        } else if self.moving {
             Step::Moved {
                 from: source.to_path_buf(),
                 to: target.to_path_buf(),
@@ -550,7 +595,7 @@ impl<'a> Copier<'a> {
             }
         };
         let mut journal = super::lock(journal);
-        journal.overwrote |= overwritten;
+        journal.overwrote |= permanent;
         journal.steps.push(step);
     }
 
@@ -913,7 +958,8 @@ impl<'a> Copier<'a> {
             source: conflict_item(source),
             target: conflict_item(target),
             can_overwrite,
-            overwrite_is_permanent: can_overwrite,
+            // 휴지통이 있는 위치면 원래 대상을 휴지통으로 보낸 뒤 덮어쓰므로 되살릴 수 있다.
+            overwrite_is_permanent: can_overwrite && !recycle::has_recycle_bin(target),
         };
         let answer = self.context.ask_conflict(conflict)?;
         if answer.apply_to_rest {
@@ -946,19 +992,20 @@ impl<'a> Copier<'a> {
     pub(super) fn copy_file(&mut self, source: &Path, target: &Path, size: u64) -> bool {
         self.reporter.current = Some(source.to_path_buf());
         self.kept_as = None;
+        self.last_replaced = None;
         let base = self.reporter.bytes_done;
         loop {
             let outcome = self.attempt_file(source, target, size, base);
             self.reporter.bytes_done = base;
             let kind = match outcome {
-                FileOutcome::Copied { overwritten } => {
+                FileOutcome::Copied { replaced } => {
                     self.summary.files_copied += 1;
                     self.summary.bytes_copied += size;
-                    if overwritten {
+                    if replaced.overwrote() {
                         self.summary.files_overwritten += 1;
                     }
                     let written = self.kept_as.take();
-                    self.note_item(source, written.as_deref().unwrap_or(target), overwritten);
+                    self.note_item(source, written.as_deref().unwrap_or(target), replaced);
                     if self.moving && !self.remove_source(source, file_ops::remove_file) {
                         return false;
                     }
@@ -966,6 +1013,10 @@ impl<'a> Copier<'a> {
                 }
                 FileOutcome::Skipped => {
                     self.summary.conflicts_skipped += 1;
+                    break;
+                }
+                FileOutcome::Refused => {
+                    self.refused = true;
                     break;
                 }
                 FileOutcome::Cancelled => {
@@ -1011,19 +1062,24 @@ impl<'a> Copier<'a> {
     pub(super) fn copy_link(&mut self, source: &Path, target: &Path) -> bool {
         self.reporter.current = Some(source.to_path_buf());
         self.kept_as = None;
+        self.last_replaced = None;
         loop {
             let kind = match self.attempt_link(source, target) {
-                FileOutcome::Copied { overwritten } => {
+                FileOutcome::Copied { replaced } => {
                     self.summary.links_copied += 1;
-                    if overwritten {
+                    if replaced.overwrote() {
                         self.summary.files_overwritten += 1;
                     }
                     let written = self.kept_as.take();
-                    self.note_item(source, written.as_deref().unwrap_or(target), overwritten);
+                    self.note_item(source, written.as_deref().unwrap_or(target), replaced);
                     return !self.moving || self.remove_source(source, file_ops::remove_link);
                 }
                 FileOutcome::Skipped => {
                     self.summary.conflicts_skipped += 1;
+                    return true;
+                }
+                FileOutcome::Refused => {
+                    self.refused = true;
                     return true;
                 }
                 FileOutcome::Cancelled => {
@@ -1071,12 +1127,12 @@ impl<'a> Copier<'a> {
         };
         match resolution {
             Resolution::Skip => FileOutcome::Skipped,
-            Resolution::Overwrite => overwrite_link(link, target),
+            Resolution::Overwrite => self.overwrite_link(link, target),
             Resolution::OverwriteIfNewer => {
                 let modified = |path: &Path| fs::metadata(path).and_then(|m| m.modified()).ok();
                 match (modified(source), modified(target)) {
                     (Some(source_time), Some(target_time)) if source_time > target_time => {
-                        overwrite_link(link, target)
+                        self.overwrite_link(link, target)
                     }
                     _ => FileOutcome::Skipped,
                 }
@@ -1145,20 +1201,114 @@ impl<'a> Copier<'a> {
         }
     }
 
-    /// 덮어쓰기: 대상 폴더 안 임시 이름에 다 쓴 뒤 바꿔치기한다. 복사가 실패하거나 취소되면 `copy_file`이 임시
-    /// 파일을 지우고 원래 파일은 그대로다. 바꿔치기가 실패하면 임시 파일을 지운다.
+    /// 덮어쓰기: 대상 폴더 안 임시 이름에 다 쓴 뒤 제 이름으로 놓는다(`place`: 원래 대상은 먼저 휴지통으로). 복사가
+    /// 실패하거나 취소되면 `copy_file`이 임시 파일을 지우고 원래 파일은 그대로다. 놓지 못하면 임시 파일을 지운다.
     fn overwrite(&mut self, source: &Path, target: &Path, size: u64, base: u64) -> FileOutcome {
         let temp = temp_path(target);
         match self.write_file(source, &temp, size, base) {
-            FileOutcome::Copied { .. } => match file_ops::replace(&temp, target) {
-                Ok(()) => FileOutcome::Copied { overwritten: true },
-                Err(error) => {
+            FileOutcome::Copied { .. } => {
+                let placed = self.place(&temp, target);
+                if !matches!(placed, FileOutcome::Copied { .. }) {
                     let _ = file_ops::remove_file(&temp);
-                    FileOutcome::Failed(error.kind())
                 }
-            },
+                placed
+            }
             FileOutcome::Exists => FileOutcome::Failed(FileOpErrorKind::TargetExists),
             outcome => outcome,
+        }
+    }
+
+    /// 파일 링크로 덮어쓰기: 대상 폴더 안 임시 이름에 링크를 만든 뒤 제 이름으로 놓는다(`place`). 놓지 못하면 임시
+    /// 링크를 지우고 원래 파일은 그대로다.
+    fn overwrite_link(&mut self, link: &Link, target: &Path) -> FileOutcome {
+        let temp = temp_path(target);
+        match write_link(link, &temp) {
+            FileOutcome::Copied { .. } => {
+                let placed = self.place(&temp, target);
+                if !matches!(placed, FileOutcome::Copied { .. }) {
+                    let _ = file_ops::remove_link(&temp);
+                }
+                placed
+            }
+            FileOutcome::Exists => FileOutcome::Failed(FileOpErrorKind::TargetExists),
+            outcome => outcome,
+        }
+    }
+
+    /// 같은 볼륨 이동의 덮어쓰기: 원본을 대상 폴더 안 임시 이름으로 옮긴 뒤 제 이름으로 놓는다(`place`). 놓지
+    /// 못하면 원본을 제자리로 되옮긴다(못 되옮기면 임시 이름으로라도 남는다, 지우지 않는다). 다른 볼륨이면 아무것도
+    /// 하지 않고 `Failed(CrossVolume)`이다. 결과 요약의 수와 작업 기록은 부르는 쪽이 적는다.
+    pub(super) fn move_over(&mut self, source: &Path, target: &Path) -> FileOutcome {
+        self.last_replaced = None;
+        let temp = temp_path(target);
+        if let Err(error) = file_ops::rename(source, &temp) {
+            return FileOutcome::Failed(error.kind());
+        }
+        let placed = self.place(&temp, target);
+        if !matches!(placed, FileOutcome::Copied { .. }) {
+            let _ = file_ops::rename(&temp, source);
+        }
+        placed
+    }
+
+    /// 덮어쓰기의 마지막 걸음: 다 쓴 `temp`(대상 폴더 안 임시 이름)를 `target` 자리에 놓는다. 놓지 못하면 `temp`는
+    /// 그대로 두고(부르는 쪽이 지우거나 되옮긴다) 원래 대상은 제자리에 있다(아래의 드문 경우는 휴지통에).
+    ///
+    /// - 휴지통이 있는 위치([`recycle::has_recycle_bin`])면 원래 대상을 **먼저 휴지통으로 보내고**(그 휴지통 항목은
+    ///   [`Summary::recycled`]와 `last_replaced`에) `temp`의 이름을 `target`으로 바꾼다. 휴지통 보내기가 실패하면
+    ///   (잠김·접근 거부·시간 초과 등) 아무것도 바꾸지 않고 실패로 돌려줘 항목별 오류로 묻는다.
+    /// - 휴지통 보내기와 이름 바꾸기 사이에 실패하면(그 사이 밖에서 같은 이름이 생김 등) 원래 대상을 휴지통에서
+    ///   제자리로 복원하려 한다. 복원도 실패하면(그 자리를 다른 항목이 차지함, 휴지통을 비움) 원래 대상은 **휴지통에
+    ///   남는다**(영구히 지우지 않으므로 사용자가 휴지통에서 되살릴 수 있다). 어느 쪽이든 `temp`는 부르는 쪽이
+    ///   지우거나(복사: 원본이 그대로라 잃는 것이 없다) 원본 자리로 되옮긴다(이동). 그래서 남는 상태는 「원래 대상이
+    ///   제자리 또는 휴지통에, 원본이 제자리에」이고 새 파일이 반쯤 놓인 상태는 없다.
+    /// - 휴지통이 없는 위치이거나 셸이 휴지통에 넣지 않으려 하면(휴지통보다 큰 파일, 휴지통을 끈 볼륨) S3처럼
+    ///   바꿔치기(`file_ops::replace`, 읽기 전용 대상도)로 영구 덮어쓴다([`Replaced::Permanently`]).
+    ///   `permanent_overwrite`가 꺼져 있으면(다시 실행) 덮어쓰지 않고 [`FileOutcome::Refused`]다.
+    fn place(&mut self, temp: &Path, target: &Path) -> FileOutcome {
+        if recycle::has_recycle_bin(target) {
+            let Some(old) = Stamp::read(target) else {
+                // 그 사이 원래 대상이 사라졌다: 덮어쓸 것 없이 놓는다.
+                return match file_ops::rename(temp, target) {
+                    Ok(()) => FileOutcome::Copied {
+                        replaced: Replaced::Nothing,
+                    },
+                    Err(error) => FileOutcome::Failed(error.kind()),
+                };
+            };
+            match recycle::recycle(&[target.to_path_buf()]).pop() {
+                Some(RecycleOutcome::Recycled(item)) => {
+                    return match file_ops::rename(temp, target) {
+                        Ok(()) => {
+                            self.summary.recycled.push(item.clone());
+                            self.last_replaced = Some((item.clone(), old));
+                            FileOutcome::Copied {
+                                replaced: Replaced::Recycled(item, old),
+                            }
+                        }
+                        Err(error) => {
+                            // 원래 대상을 제자리로 되살린다. 못 하면 휴지통에 남는다(잃지 않는다).
+                            let _ = recycle::restore(&item);
+                            FileOutcome::Failed(error.kind())
+                        }
+                    };
+                }
+                // 휴지통에 넣을 수 없다(원래 대상은 그대로): 아래의 영구 덮어쓰기로.
+                Some(RecycleOutcome::NotRecyclable) => {}
+                Some(RecycleOutcome::Failed(error)) => return FileOutcome::Failed(error.kind()),
+                Some(RecycleOutcome::NotAttempted) | None => {
+                    return FileOutcome::Failed(FileOpErrorKind::Other);
+                }
+            }
+        }
+        if !self.permanent_overwrite {
+            return FileOutcome::Refused;
+        }
+        match file_ops::replace(temp, target) {
+            Ok(()) => FileOutcome::Copied {
+                replaced: Replaced::Permanently,
+            },
+            Err(error) => FileOutcome::Failed(error.kind()),
         }
     }
 
@@ -1178,7 +1328,9 @@ impl<'a> Copier<'a> {
             }
         });
         match result {
-            Ok(()) => FileOutcome::Copied { overwritten: false },
+            Ok(()) => FileOutcome::Copied {
+                replaced: Replaced::Nothing,
+            },
             Err(error) => match error.kind() {
                 FileOpErrorKind::TargetExists => FileOutcome::Exists,
                 FileOpErrorKind::Cancelled => FileOutcome::Cancelled,
@@ -1191,26 +1343,11 @@ impl<'a> Copier<'a> {
 /// 링크를 `target`(없는 이름)에 만든다.
 fn write_link(link: &Link, target: &Path) -> FileOutcome {
     match file_ops::create_link(target, link) {
-        Ok(()) => FileOutcome::Copied { overwritten: false },
+        Ok(()) => FileOutcome::Copied {
+            replaced: Replaced::Nothing,
+        },
         Err(error) if error.kind() == FileOpErrorKind::TargetExists => FileOutcome::Exists,
         Err(error) => FileOutcome::Failed(error.kind()),
-    }
-}
-
-/// 파일 링크로 덮어쓰기: 대상 폴더 안 임시 이름에 링크를 만든 뒤 바꿔치기한다. 실패하면 임시 링크를 지우고 원래
-/// 파일은 그대로다.
-fn overwrite_link(link: &Link, target: &Path) -> FileOutcome {
-    let temp = temp_path(target);
-    match write_link(link, &temp) {
-        FileOutcome::Copied { .. } => match file_ops::replace(&temp, target) {
-            Ok(()) => FileOutcome::Copied { overwritten: true },
-            Err(error) => {
-                let _ = file_ops::remove_link(&temp);
-                FileOutcome::Failed(error.kind())
-            }
-        },
-        FileOutcome::Exists => FileOutcome::Failed(FileOpErrorKind::TargetExists),
-        outcome => outcome,
     }
 }
 

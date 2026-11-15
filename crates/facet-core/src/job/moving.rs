@@ -5,7 +5,8 @@
 //! - **다른 볼륨**(이름 바꾸기가 [`FileOpErrorKind::CrossVolume`]): 그 항목을 복사 작업과 같은 훑기·복사로 옮기되,
 //!   파일은 복사를 마친 뒤 원본을 지우고, 폴더는 안의 항목을 다 옮긴 뒤 빈 폴더일 때만 지운다. 그래서 실패·건너뛰기·
 //!   취소한 항목의 원본과 그 상위 폴더는 남는다. 바이트 진행은 이렇게 복사로 바뀐 항목만 센다.
-//! - **이름 충돌**: 같은 볼륨이어도 대상에 같은 이름이 있으면 묻는다. 폴더끼리는 묻지 않고 합친다: 안의 항목을
+//! - **이름 충돌**: 같은 볼륨이어도 대상에 같은 이름이 있으면 묻는다. 덮어쓰기는 원래 대상을 먼저 휴지통으로
+//!   보낸다(복사와 같은 `Copier::place`). 폴더끼리는 묻지 않고 합친다: 안의 항목을
 //!   하나씩 (같은 규칙으로) 옮기고 빈 원본 폴더를 지운다. 합친 폴더 안의 항목 수는 합칠 때 센다.
 //! - **같은 폴더로 이동**(원본이 대상 폴더 바로 안에 있음)은 아무것도 하지 않고 처리한 항목으로만 센다.
 //!
@@ -19,7 +20,7 @@ use std::sync::atomic::Ordering;
 
 use facet_win::file_ops::{self, FileOpErrorKind};
 
-use super::copy::{Copier, CopyJob, ErrorStep, error_kind, free_numbered, temp_path};
+use super::copy::{Copier, CopyJob, ErrorStep, FileOutcome, Replaced, error_kind, free_numbered};
 use super::{Context, CopyRejection, Resolution, Summary};
 
 /// 넣기 전에 확인을 마친 이동 작업. 시작 전에 막는 경우는 복사와 같다.
@@ -193,7 +194,7 @@ impl Mover<'_> {
         match file_ops::rename(source, target) {
             Ok(()) => {
                 self.copier.summary.items_renamed += 1;
-                self.copier.note_item(source, target, false);
+                self.copier.note_item(source, target, Replaced::Nothing);
                 Outcome::Done
             }
             Err(error) if error.kind() == FileOpErrorKind::CrossVolume => {
@@ -203,28 +204,28 @@ impl Mover<'_> {
         }
     }
 
-    /// 덮어쓰기: 같은 볼륨이면 원본을 대상 폴더 안 임시 이름으로 옮긴 뒤 바꿔치기한다(실패하면 원본 자리로
-    /// 되돌린다). 다른 볼륨이면 복사의 덮어쓰기(임시 이름에 다 쓴 뒤 바꿔치기) 뒤 원본을 지운다.
+    /// 덮어쓰기: 같은 볼륨이면 원본을 대상 폴더 안 임시 이름으로 옮긴 뒤, 원래 대상을 휴지통으로 보내고 제 이름으로
+    /// 놓는다(`Copier::move_over`, 실패하면 원본 자리로 되돌린다). 다른 볼륨이면 복사의 덮어쓰기(임시 이름에 다 쓴
+    /// 뒤 원래 대상을 휴지통으로 보내고 놓기) 뒤 원본을 지운다. 휴지통이 없는 위치는 영구 덮어쓰기다.
     fn overwrite(&mut self, source: &Path, target: &Path) -> Outcome {
-        let temp = temp_path(target);
-        match file_ops::rename(source, &temp) {
-            Ok(()) => match file_ops::replace(&temp, target) {
-                Ok(()) => {
-                    self.copier.summary.items_renamed += 1;
+        match self.copier.move_over(source, target) {
+            FileOutcome::Copied { replaced } => {
+                self.copier.summary.items_renamed += 1;
+                if replaced.overwrote() {
                     self.copier.summary.files_overwritten += 1;
-                    self.copier.note_item(source, target, true);
-                    Outcome::Done
                 }
-                Err(error) => {
-                    // 원본을 제자리로 돌려 놓는다. 못 돌리면 임시 이름으로라도 남는다(지우지 않는다).
-                    let _ = file_ops::rename(&temp, source);
-                    Outcome::Failed(error.kind())
-                }
-            },
-            Err(error) if error.kind() == FileOpErrorKind::CrossVolume => {
+                self.copier.note_item(source, target, replaced);
+                Outcome::Done
+            }
+            FileOutcome::Failed(FileOpErrorKind::CrossVolume) => {
                 self.copy_across(source, target, Some(Resolution::Overwrite))
             }
-            Err(error) => Outcome::Failed(error.kind()),
+            FileOutcome::Failed(kind) => Outcome::Failed(kind),
+            FileOutcome::Cancelled => Outcome::Cancelled,
+            // 이동 작업은 영구 덮어쓰기를 하므로 거부되지 않고, 대상이 그 사이 생김은 다시 묻지 않고 실패로 둔다.
+            FileOutcome::Refused | FileOutcome::Skipped | FileOutcome::Exists => {
+                Outcome::Failed(FileOpErrorKind::TargetExists)
+            }
         }
     }
 

@@ -185,6 +185,7 @@ pub fn revert_skip_text(reason: RevertSkip) -> &'static str {
         RevertSkip::NameTaken => "그 자리에 같은 이름의 항목이 있습니다",
         RevertSkip::NotEmpty => "폴더가 비어 있지 않습니다",
         RevertSkip::NotRecyclable => "휴지통에 넣을 수 없어 지우지 않았습니다",
+        RevertSkip::RecycledMissing => "덮어쓴 파일이 휴지통에 없습니다",
     }
 }
 
