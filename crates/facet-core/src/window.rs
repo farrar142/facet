@@ -41,6 +41,11 @@
 //! 명령([`crate::command::CommandId`])은 활성 탭에 듣는다([`App::execute`]). 파일 열기는 셸 일꾼 스레드
 //! ([`ShellWorker`], 처음 열 때 띄운다)가 하고, 그 결과도 같은 통로로 받아 탭에 넘긴다.
 //!
+//! 반대편 패널로 복사·이동: 명령은 확인 줄을 띄우라고만 하고([`Execution::ConfirmTransfer`]), 확인 줄에 보일 원본·대상·
+//! 항목 수는 [`App::transfer_plan`]이 준다. 확인하면 [`App::start_transfer`]가 앱 전체에 하나인 작업 대기열
+//! ([`crate::job::JobQueue`])에 넣고 작업 영역([`crate::work_area::WorkArea`], [`App::work_area`])에 더한다. 작업
+//! 대기열의 사건은 같은 깨우기로 알리고 [`App::poll_jobs`]가 작업 영역에 반영한다.
+//!
 //! 주소창: 친 글자로 가기([`App::go_to_text`])는 해석한 뒤 다른 이동처럼 일꾼 스레드에서 읽는다. 자동 완성 후보
 //! ([`App::complete_address`])는 폴더를 읽느라 막히므로 일꾼 스레드에서 읽고 같은 통로로 받는다.
 
@@ -55,6 +60,7 @@ use facet_win::{OpenError, OpenResult, ShellWorker};
 
 use crate::command::{self, CommandId, CommandState};
 use crate::details::Sort;
+use crate::job::{CopyRejection, JobId, JobKind, JobQueue};
 use crate::launch::LaunchTarget;
 use crate::placement::Placement;
 use crate::session::{PanelSession, Session, TabSession, WindowSession};
@@ -63,6 +69,7 @@ use crate::tab::{
     ReadResult, Tab,
 };
 use crate::watch::ChangeBatch;
+use crate::work_area::WorkArea;
 use crate::{Candidate, Location, provider_for};
 
 /// 닫은 탭 목록에 남기는 최근 탭 수. 넘으면 가장 오래된 탭이 빠진다.
@@ -261,6 +268,14 @@ impl Window {
         self.panels.get_mut(index)
     }
 
+    /// **반대편 패널**: 패널이 둘일 때 활성 패널이 아닌 쪽. 패널이 하나면 `None`이다.
+    pub fn opposite_panel(&self) -> Option<&Panel> {
+        if !self.is_split() {
+            return None;
+        }
+        self.panels.get(1 - self.active)
+    }
+
     /// 활성 패널이 몇 번째인가(0이 왼쪽).
     pub fn active_panel_index(&self) -> usize {
         self.active
@@ -371,6 +386,27 @@ pub enum Execution {
     ShowCommandPalette,
     /// 마지막 탭을 닫아 창이 닫혔다. 창이 남지 않았으면([`App::is_finished`]) 앱을 끝낸다.
     WindowClosed,
+    /// 화면이 할 일: 반대편 패널로 복사·이동의 확인 줄을 띄운다. 보일 원본·대상·항목 수는
+    /// [`App::transfer_plan`]이 주고, 확인하면 [`App::start_transfer`]로 작업을 넣는다.
+    ConfirmTransfer(JobKind),
+}
+
+/// 반대편 패널로 복사·이동할 내용([`App::transfer_plan`]): 확인 줄에 보일 대상과 항목 수, 확인하면 넣을 작업.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferPlan {
+    /// 복사·이동.
+    pub kind: JobKind,
+    /// 원본 항목의 경로들: 활성 탭의 선택(목록 순서), 선택이 없으면 커서 항목 하나.
+    pub sources: Vec<PathBuf>,
+    /// 대상 폴더: 반대편 패널의 활성 탭 위치.
+    pub target: PathBuf,
+}
+
+impl TransferPlan {
+    /// 확인 줄에 보일 항목 수(넘긴 원본 수. 폴더 안은 세지 않는다).
+    pub fn items(&self) -> usize {
+        self.sources.len()
+    }
 }
 
 /// 앱 전체의 화면 상태: 창 목록과 앱 전체에 하나인 설정(숨김 항목 보이기).
@@ -384,6 +420,10 @@ pub struct App {
     closed: VecDeque<ClosedTab>,
     /// 셸 일꾼 스레드. 콜드 스타트를 늦추지 않도록 처음 파일을 열 때 띄운다.
     shell: Option<ShellWorker>,
+    /// 작업 대기열. 앱 전체에 하나다(일꾼 스레드는 처음 작업을 넣을 때 뜬다).
+    jobs: JobQueue,
+    /// 작업 영역에 보일 작업들. 모든 창이 같은 것을 그린다.
+    work_area: WorkArea,
     outbox: Outbox,
     receiver: Receiver<Message>,
 }
@@ -573,6 +613,8 @@ impl App {
             next_window: 0,
             closed: VecDeque::new(),
             shell: None,
+            jobs: JobQueue::new(),
+            work_area: WorkArea::new(),
             outbox: Outbox {
                 sender,
                 waker: Arc::default(),
@@ -709,9 +751,14 @@ impl App {
     /// 이벤트 루프를 깨워 [`App::poll`]을 부른다. 깨우기는 일꾼 스레드에서 불리므로 막지 말아야 한다.
     ///
     /// 정하기 전에 이미 온 결과로는 깨우지 않으므로, 정한 뒤 [`App::poll`]을 한 번 부른다.
+    ///
+    /// 작업 대기열의 사건도 같은 깨우기로 알린다. 화면은 깨어나면 [`App::poll_jobs`]도 부른다.
     pub fn set_waker(&mut self, waker: impl Fn() + Send + Sync + 'static) {
+        let waker: Waker = Arc::new(waker);
+        let jobs = Arc::clone(&waker);
+        self.jobs.set_waker(move || jobs());
         if let Ok(mut slot) = self.outbox.waker.lock() {
-            *slot = Some(Arc::new(waker));
+            *slot = Some(waker);
         }
     }
 
@@ -1344,6 +1391,8 @@ impl App {
                 }
                 return Execution::Done;
             }
+            CommandId::CopyToOtherPanel => return Execution::ConfirmTransfer(JobKind::Copy),
+            CommandId::MoveToOtherPanel => return Execution::ConfirmTransfer(JobKind::Move),
             CommandId::NewWindow => {
                 let location = if self.is_finished() {
                     home_location()
@@ -1433,6 +1482,85 @@ impl App {
             .spawn(forward)
             .expect("열기 결과를 기다리는 스레드를 만들지 못했다");
         Execution::Done
+    }
+
+    /// 반대편 패널로 복사·이동할 내용: 원본은 활성 창의 활성 탭의 선택(목록 순서, 없으면 커서 항목 하나), 대상은
+    /// 반대편 패널의 활성 탭 위치다. 그 명령을 지금 실행할 수 없으면(원본이 없음, 패널이 하나, 실제 폴더가 아닌
+    /// 위치) `None`이다. 확인 줄은 이것을 보이고, 확인하면 [`App::start_transfer`]에 넘긴다.
+    pub fn transfer_plan(&self, kind: JobKind) -> Option<TransferPlan> {
+        let command = match kind {
+            JobKind::Copy => CommandId::CopyToOtherPanel,
+            JobKind::Move => CommandId::MoveToOtherPanel,
+        };
+        if !self.can_execute(command) {
+            return None;
+        }
+        let window = self.active_window();
+        let target = window
+            .opposite_panel()?
+            .active_tab()
+            .location()
+            .file_system_path()?
+            .to_path_buf();
+        let tab = window.active_panel().active_tab();
+        let folder = tab.location().file_system_path()?;
+        let mut sources: Vec<PathBuf> = tab
+            .selected_items()
+            .map(|item| folder.join(&item.name))
+            .collect();
+        if sources.is_empty() {
+            sources.push(folder.join(&tab.cursor_item()?.name));
+        }
+        Some(TransferPlan {
+            kind,
+            sources,
+            target,
+        })
+    }
+
+    /// 확인한 복사·이동을 작업 대기열에 넣고 작업 영역에 더한다. 시작 전에 막힌 경우(자기 하위로 복사, 대상 위치
+    /// 없음 등)는 작업을 만들지 않고 까닭([`CopyRejection`])을 돌려준다.
+    ///
+    /// 작업이 끝나 원본·대상 폴더가 바뀌면 그 위치를 보는 탭은 변경 감시로 갱신된다(따로 다시 읽지 않는다).
+    pub fn start_transfer(&mut self, plan: &TransferPlan) -> Result<JobId, CopyRejection> {
+        let id = self
+            .jobs
+            .submit(plan.kind, plan.sources.clone(), plan.target.clone())?;
+        self.work_area
+            .add(id, plan.kind, plan.target.clone(), plan.sources.len());
+        // 넣자마자 온 대기 사건을 바로 반영한다.
+        self.poll_jobs();
+        Ok(id)
+    }
+
+    /// 작업 대기열에서 온 사건을 모두 작업 영역에 반영한다. 무엇이든 바뀌었으면 `true`다(화면이 다시 그린다).
+    pub fn poll_jobs(&mut self) -> bool {
+        let mut changed = false;
+        for event in self.jobs.poll() {
+            changed |= self.work_area.apply(&event);
+        }
+        changed
+    }
+
+    /// 작업 영역: 넣은 작업들의 진행·상태·결과. 앱 전체에 하나라 모든 창에 같은 것이 보인다.
+    pub fn work_area(&self) -> &WorkArea {
+        &self.work_area
+    }
+
+    /// 끝난 작업을 작업 영역에서 닫는다. 없거나 끝나지 않은 작업이면 `false`다.
+    pub fn dismiss_job(&mut self, job: JobId) -> bool {
+        self.work_area.dismiss(job)
+    }
+
+    /// 작업 대기열(일시정지·이어하기·취소·지금 시작). 사건은 [`App::poll_jobs`]로 받는다: 여기서
+    /// [`JobQueue::poll`]을 부르면 작업 영역에 반영되지 않는다.
+    pub fn jobs_mut(&mut self) -> &mut JobQueue {
+        &mut self.jobs
+    }
+
+    /// 작업 대기열.
+    pub fn jobs(&self) -> &JobQueue {
+        &self.jobs
     }
 
     /// 숨김 항목을 보이는가. 앱 전체에 하나다.

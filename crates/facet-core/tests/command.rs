@@ -60,6 +60,8 @@ fn name(command: CommandId) -> &'static str {
         CommandId::TogglePanelSplit => "패널 나누기/합치기",
         CommandId::SwitchPanel => "활성 패널 바꾸기",
         CommandId::NewWindow => "새 창",
+        CommandId::CopyToOtherPanel => "반대편 패널로 복사",
+        CommandId::MoveToOtherPanel => "반대편 패널로 이동",
     }
 }
 
@@ -147,11 +149,14 @@ fn s2_탭_명령과_기본_단축키() {
     expected.push((SwitchPanel, vec![key(Key::Tab)]));
     // 창 명령: 새 창 Ctrl+N.
     expected.push((NewWindow, vec![key(letter('n')).ctrl()]));
+    // 반대편 패널로 복사·이동 F7·F8(자세한 확인은 tests/transfer.rs).
+    expected.push((CopyToOtherPanel, vec![key(Key::Function(7))]));
+    expected.push((MoveToOtherPanel, vec![key(Key::Function(8))]));
     for (command, shortcuts) in &expected {
         assert!(CommandId::ALL.contains(command), "{command:?}");
         assert_eq!(command.shortcuts(), shortcuts.as_slice(), "{command:?}");
     }
-    // S1의 14개와 탭·패널·창 명령이 전부다.
+    // S1의 14개와 탭·패널·창 명령, 반대편 패널로 복사·이동이 전부다.
     assert_eq!(CommandId::ALL.len(), 14 + expected.len());
     assert_eq!(GoToTab(3).as_str(), "go-to-tab-3");
     assert_eq!(CommandId::from_id("go-to-tab-8"), Some(GoToTab(8)));

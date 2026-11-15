@@ -19,6 +19,7 @@ pub mod session;
 pub mod tab;
 pub mod watch;
 pub mod window;
+pub mod work_area;
 
 pub use facet_win::OpenError;
 pub use file_system::FileSystemProvider;
