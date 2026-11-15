@@ -129,8 +129,12 @@ pub struct HitMessage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageMessage {
     pub hits: Vec<HitMessage>,
-    /// 질의에 맞는 결과 전체의 개수.
+    /// 질의에 맞는 결과 전체의 개수. `total_is_upper_bound`면 권한 거르기 전의 개수다.
     pub total: u64,
+    /// `total`이 「걸러지기 전 상한」인가. 인덱서 서비스는 질의한 사용자가 목록을 읽을 수 없는
+    /// 폴더 아래 결과를 내보내지 않는데, 전체 개수는 거르기 전에 센다. 그래서 받는 결과는
+    /// `total`보다 적을 수 있다.
+    pub total_is_upper_bound: bool,
     /// 남은 결과를 받을 이어 받기 표지. 다 받았으면 `None`.
     pub next: Option<u64>,
     /// 인덱스를 (다시) 만드는 중이어서 앞선 인덱스로(또는 결과 없이) 답한 볼륨들(예: `C:`).
@@ -349,6 +353,7 @@ impl Message for Response {
                     w.u32(h.attributes);
                 });
                 w.u64(p.total);
+                w.bool(p.total_is_upper_bound);
                 w.opt_u64(p.next);
                 w.list(&p.building, |w, v| w.str(v));
             }
@@ -420,6 +425,7 @@ impl Message for Response {
                 Self::Page(PageMessage {
                     hits,
                     total: r.u64()?,
+                    total_is_upper_bound: r.bool()?,
                     next: r.opt_u64()?,
                     building: r.list(Reader::str)?,
                 })

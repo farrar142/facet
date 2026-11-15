@@ -104,12 +104,14 @@ fn responses() -> Vec<Response> {
         Response::Page(PageMessage {
             hits: vec![],
             total: 0,
+            total_is_upper_bound: false,
             next: None,
             building: vec![],
         }),
         Response::Page(PageMessage {
             hits: vec![hit.clone(), hit],
             total: 5_000_000,
+            total_is_upper_bound: true,
             next: Some(7),
             building: vec!["C:".into(), "D:".into()],
         }),

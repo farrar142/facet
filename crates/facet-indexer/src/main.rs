@@ -138,13 +138,9 @@ fn run_serve(args: &ServeArgs) -> ExitCode {
     use std::sync::Arc;
 
     use facet_indexer::pipe::PipeServer;
-    use facet_indexer::sample::{SAMPLE_VOLUME, sample_index};
-    use facet_indexer::volumes::Volumes;
+    use facet_indexer::sample::{SAMPLE_VOLUME, SampleBackend};
 
-    let backend = Arc::new(Volumes::with_index(
-        SAMPLE_VOLUME,
-        sample_index(args.reports),
-    ));
+    let backend = Arc::new(SampleBackend::new(args.reports));
     match PipeServer::start(&args.pipe, backend) {
         Ok(_server) => {
             println!(

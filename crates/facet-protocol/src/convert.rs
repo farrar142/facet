@@ -144,11 +144,13 @@ impl From<HitMessage> for index::Hit {
 
 impl PageMessage {
     /// 인덱스의 결과 조각을 응답으로 바꾼다. 이어 받기 표지가 있으면 `keep`에 넘겨 보관하고,
-    /// `keep`이 돌려준 번호를 응답의 표지로 쓴다. 만드는 중인 볼륨은 비워 둔다.
+    /// `keep`이 돌려준 번호를 응답의 표지로 쓴다. 만드는 중인 볼륨은 비워 두고, 권한으로 거르지
+    /// 않았으므로 전체 개수는 상한이 아니다.
     pub fn from_page(page: index::Page, keep: impl FnOnce(index::Cursor) -> u64) -> Self {
         Self {
             hits: page.hits.into_iter().map(HitMessage::from).collect(),
             total: page.total as u64,
+            total_is_upper_bound: false,
             next: page.next.map(keep),
             building: Vec::new(),
         }

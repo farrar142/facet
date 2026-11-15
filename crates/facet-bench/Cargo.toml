@@ -14,6 +14,9 @@ path = "src/main.rs"
 [dependencies]
 facet-core.workspace = true
 facet-index.workspace = true
+# 권한 거르기를 거친 질의 벤치마크(인덱서 서비스의 `Volumes::search_as`).
+facet-indexer = { path = "../facet-indexer" }
+facet-protocol.workspace = true
 
 [dev-dependencies]
 tempfile = "3.27.0"

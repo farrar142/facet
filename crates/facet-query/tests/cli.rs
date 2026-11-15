@@ -64,8 +64,7 @@ mod with_server {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use facet_indexer::pipe::PipeServer;
-    use facet_indexer::sample::{SAMPLE_VOLUME, sample_index};
-    use facet_indexer::volumes::Volumes;
+    use facet_indexer::sample::{SAMPLE_VOLUME, SampleBackend};
 
     use super::*;
 
@@ -78,7 +77,7 @@ mod with_server {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         );
-        let backend = Arc::new(Volumes::with_index(SAMPLE_VOLUME, sample_index(REPORTS)));
+        let backend = Arc::new(SampleBackend::new(REPORTS));
         (PipeServer::start(&name, backend).unwrap(), name)
     }
 

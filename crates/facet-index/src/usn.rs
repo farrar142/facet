@@ -87,6 +87,11 @@ pub struct UsnOutcome {
     pub records: usize,
     /// 보안이 바뀐 폴더들(같은 폴더는 한 번만, 처음 나온 순서).
     pub security_changes: Vec<SecurityChange>,
+    /// 만들어지거나 이름바꾸기·이동으로 새 자리에 놓인 폴더들의 전체 경로(레코드를 모두 적용한
+    /// 뒤의 경로, 같은 폴더는 한 번만, 처음 나온 순서). 그 경로에 앞서 있던 폴더를 두고 기억한 값
+    /// (예: 폴더 권한 검사 결과)을 버리는 데 쓴다. 같은 묶음에서 지웠거나 볼륨 루트까지 닿지 않는
+    /// 폴더는 어느 결과에도 나오지 않으므로 담지 않는다.
+    pub placed_folders: Vec<String>,
 }
 
 /// USN 레코드 바이트를 적용하지 못한 까닭.
@@ -233,8 +238,16 @@ impl Index {
             self.locator = Some(self.build_locator());
         }
         let mut folders: Vec<u64> = Vec::new();
+        let mut placed: Vec<u64> = Vec::new();
         for record in &records {
             self.apply_one(record)?;
+            if record.attributes & ATTRIBUTE_DIRECTORY != 0
+                && record.reason & (USN_REASON_FILE_CREATE | USN_REASON_RENAME_NEW_NAME) != 0
+                && record.reason & USN_REASON_FILE_DELETE == 0
+                && !placed.contains(&record.number)
+            {
+                placed.push(record.number);
+            }
             if record.reason & USN_REASON_SECURITY_CHANGE != 0
                 && record.reason & USN_REASON_FILE_DELETE == 0
             {
@@ -260,9 +273,14 @@ impl Index {
                 path: self.folder_path(folder),
             })
             .collect();
+        let placed_folders = placed
+            .into_iter()
+            .filter_map(|folder| self.folder_path(folder))
+            .collect();
         Ok(UsnOutcome {
             records: records.len(),
             security_changes,
+            placed_folders,
         })
     }
 

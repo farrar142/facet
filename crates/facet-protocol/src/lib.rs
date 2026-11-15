@@ -54,11 +54,13 @@ use std::io::{Read, Write};
 ///
 /// - 1: 처음 형식.
 /// - 2: 오류 종류 [`ErrorKind::Cancelled`]를 더했다.
-pub const PROTOCOL_VERSION: u16 = 2;
+/// - 3: 결과 조각에 「전체 개수는 걸러지기 전 상한」 표시([`PageMessage::total_is_upper_bound`])를
+///   더했다.
+pub const PROTOCOL_VERSION: u16 = 3;
 
-/// 서비스가 받아들이는 가장 낮은 클라이언트 버전. 버전 1 클라이언트는 취소 오류를 읽지 못하므로
-/// 받지 않는다.
-pub const MIN_SUPPORTED_VERSION: u16 = 2;
+/// 서비스가 받아들이는 가장 낮은 클라이언트 버전. 버전 2 이하 클라이언트는 결과 조각의 형식이
+/// 달라 읽지 못하므로 받지 않는다.
+pub const MIN_SUPPORTED_VERSION: u16 = 3;
 
 /// 인덱서 서비스가 질의를 받는 파이프 이름. 서비스가 이 이름의 첫 인스턴스를 만든다.
 pub const PIPE_NAME: &str = r"\\.\pipe\facet-indexer";

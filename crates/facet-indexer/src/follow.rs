@@ -392,6 +392,8 @@ fn follow(
                 None => return Some(Next::Gone),
                 Some(Err(_)) => return Some(Next::Rebuild),
                 Some(Ok(outcome)) => {
+                    // 보안이 바뀌었거나 다른 폴더가 놓인 경로 아래의 권한 검사 기억을 버린다.
+                    volumes.forget_access(&outcome);
                     if let Some(saver) = saver.as_deref_mut() {
                         saver.applied(outcome.records);
                     }

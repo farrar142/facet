@@ -6,7 +6,8 @@
 //! - 보안 설명자([`security_sddl`])는 대화형 로그온 그룹(`S-1-5-4`)에 읽기·쓰기만 준다.
 //!   인스턴스를 더 만드는 권한(`FILE_CREATE_PIPE_INSTANCE`)은 주지 않는다. 서버 자신의 계정
 //!   (서비스면 LocalSystem)만 모든 권한을 가진다. 그래야 서버가 인스턴스를 더 만든다.
-//! - 연결마다 스레드 하나가 [`crate::session::serve`]로 대화한다. 한 연결에서 읽기와 쓰기가 동시에
+//! - 연결마다 스레드 하나가 [`crate::session::serve`]로 대화한다. 질의는 그 연결의 클라이언트
+//!   토큰으로 거른다([`crate::caller::PipeCaller`]). 한 연결에서 읽기와 쓰기가 동시에
 //!   일어나므로 겹친 입출력(overlapped)으로 연다. 동기 핸들은 한 핸들의 입출력을 줄 세워, 읽기가
 //!   막힌 동안 쓰기도 막힌다.
 
@@ -44,6 +45,7 @@ use windows_sys::Win32::System::Threading::{
     CreateEventW, GetCurrentProcess, INFINITE, OpenProcessToken, SetEvent, WaitForMultipleObjects,
 };
 
+use crate::caller::PipeCaller;
 use crate::session::{self, Backend};
 use crate::volume::Handle;
 
@@ -504,8 +506,9 @@ fn accept_loop(name: Vec<u16>, sd: Local, first: Handle, stop: &Handle, backend:
 
 fn serve_connection(pipe: Handle, backend: &dyn Backend) {
     let pipe = Arc::new(pipe);
+    let caller = PipeCaller::new(Arc::clone(&pipe));
     let (Ok(reader), Ok(writer)) = (PipeIo::new(Arc::clone(&pipe)), PipeIo::new(pipe)) else {
         return;
     };
-    session::serve(reader, writer, backend);
+    session::serve(reader, writer, backend, &caller);
 }

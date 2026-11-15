@@ -5,6 +5,9 @@
 //! 한 연결에서 읽기와 답하기를 두 스레드로 나눈다. 읽는 쪽은 질의가 도는 동안에도 다음 요청을
 //! 읽어, 새 질의가 오면 앞선 질의의 취소 표시를 세운다. 답하는 쪽은 요청을 받은 순서대로 하나씩
 //! 처리해 요청마다 응답을 꼭 하나 쓴다. 취소된 질의·이어 받기는 [`ErrorKind::Cancelled`]로 답한다.
+//!
+//! 연결마다 질의한 사용자([`Caller`])가 하나 있고, 질의·이어 받기는 그 사용자로 거른다
+//! ([`crate::access`]).
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -18,6 +21,7 @@ use facet_protocol::{
     StatusMessage, WriteError, answer_hello, read_message, write_message,
 };
 
+pub use crate::access::Caller;
 pub use crate::volumes::{Cursor, Page};
 
 /// 질의 하나의 취소 표시. 같은 연결에 새 질의가 오거나 연결이 끊기면 선다.
@@ -44,10 +48,21 @@ impl Cancel {
 /// 파이프 서버가 질의에 답하는 데 쓰는 인덱스 쪽. 여러 연결이 함께 부른다. 인덱서 서비스는
 /// 볼륨 여럿의 인덱스([`crate::volumes::Volumes`])로 답한다.
 pub trait Backend: Send + Sync {
-    /// 질의를 실행한다. 오래 걸리면 `cancel`을 보고 일찍 그만둬도 된다(그만둔 결과는 버린다).
-    fn search(&self, query: &QueryMessage, cancel: &Cancel) -> Result<Page, ErrorMessage>;
-    /// 이어 받기 표지로 다음 결과 조각을 받는다.
-    fn resume(&self, cursor: Cursor, limit: usize) -> Result<Page, ErrorMessage>;
+    /// 질의를 `caller`로 실행한다. `caller`가 목록을 읽을 수 없는 폴더 아래 결과는 내보내지 않는다.
+    /// 오래 걸리면 `cancel`을 보고 일찍 그만둬도 된다(그만둔 결과는 버린다).
+    fn search(
+        &self,
+        query: &QueryMessage,
+        caller: &dyn Caller,
+        cancel: &Cancel,
+    ) -> Result<Page, ErrorMessage>;
+    /// 이어 받기 표지로 다음 결과 조각을 받는다. 질의와 같은 `caller`로 거른다.
+    fn resume(
+        &self,
+        cursor: Cursor,
+        limit: usize,
+        caller: &dyn Caller,
+    ) -> Result<Page, ErrorMessage>;
     /// 상태 질의에 답한다.
     fn status(&self) -> StatusMessage;
 }
@@ -73,8 +88,9 @@ enum Job {
 }
 
 /// 연결 하나를 끝까지 처리한다. `reader`와 `writer`는 같은 연결의 읽는 쪽과 쓰는 쪽이고, 서로
-/// 다른 스레드에서 동시에 쓰인다(한쪽이 막혀도 다른 쪽이 움직여야 한다).
-pub fn serve<R, W, B>(mut reader: R, writer: W, backend: &B) -> Ended
+/// 다른 스레드에서 동시에 쓰인다(한쪽이 막혀도 다른 쪽이 움직여야 한다). `caller`는 이 연결의
+/// 상대(질의한 사용자)다. 버전 인사를 읽은 뒤에야 처음 묻는다.
+pub fn serve<R, W, B>(mut reader: R, writer: W, backend: &B, caller: &dyn Caller) -> Ended
 where
     R: Read,
     W: Write + Send,
@@ -82,7 +98,7 @@ where
 {
     let (jobs, inbox) = mpsc::channel::<Job>();
     thread::scope(|s| {
-        s.spawn(move || answer(inbox, writer, backend));
+        s.spawn(move || answer(inbox, writer, backend, caller));
 
         let mut greeted = false;
         let mut current = Cancel::new();
@@ -151,7 +167,12 @@ fn cancelled() -> Response {
 }
 
 /// 답하는 쪽: 일을 받은 순서대로 처리해 응답을 하나씩 쓴다.
-fn answer<W: Write, B: Backend + ?Sized>(inbox: mpsc::Receiver<Job>, mut writer: W, backend: &B) {
+fn answer<W: Write, B: Backend + ?Sized>(
+    inbox: mpsc::Receiver<Job>,
+    mut writer: W,
+    backend: &B,
+    caller: &dyn Caller,
+) {
     // 이 연결의 이어 받기 표지. 새 질의가 오면 모두 버린다.
     let mut cursors: HashMap<u64, Cursor> = HashMap::new();
     let mut next_cursor = 1u64;
@@ -159,6 +180,7 @@ fn answer<W: Write, B: Backend + ?Sized>(inbox: mpsc::Receiver<Job>, mut writer:
         Response::Page(PageMessage {
             hits: page.hits.into_iter().map(HitMessage::from).collect(),
             total: page.total as u64,
+            total_is_upper_bound: page.total_is_upper_bound,
             next: page.next.map(|c| {
                 let id = next_cursor;
                 next_cursor += 1;
@@ -177,7 +199,7 @@ fn answer<W: Write, B: Backend + ?Sized>(inbox: mpsc::Receiver<Job>, mut writer:
                 if cancel.is_cancelled() {
                     cancelled()
                 } else {
-                    match backend.search(&q, &cancel) {
+                    match backend.search(&q, caller, &cancel) {
                         _ if cancel.is_cancelled() => cancelled(),
                         Ok(page) => keep(&mut cursors, page),
                         Err(e) => Response::Error(e),
@@ -193,7 +215,7 @@ fn answer<W: Write, B: Backend + ?Sized>(inbox: mpsc::Receiver<Job>, mut writer:
                             ErrorKind::StaleCursor,
                             "모르는 이어 받기 표지입니다. 다시 질의하십시오",
                         ),
-                        Some(c) => match backend.resume(c, r.limit()) {
+                        Some(c) => match backend.resume(c, r.limit(), caller) {
                             Ok(page) => keep(&mut cursors, page),
                             Err(e) => Response::Error(e),
                         },
