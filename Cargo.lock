@@ -1163,6 +1163,7 @@ name = "facet-app"
 version = "0.1.0"
 dependencies = [
  "facet-core",
+ "facet-win",
  "slint",
  "slint-build",
 ]

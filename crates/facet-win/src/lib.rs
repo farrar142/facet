@@ -6,6 +6,8 @@
 //! - [`compare_names_like_explorer`]: 탐색기의 이름 비교(`StrCmpLogicalW`). Windows에서만 있다.
 //! - [`ShellWorker`]: COM을 초기화한 전용 일꾼 스레드에서 셸을 부른다. 기본 프로그램으로 열기를 한다.
 //! - [`DirectoryWatcher`]: 폴더 하나의 변경을 감시 스레드에서 알린다(`ReadDirectoryChangesW`).
+//! - [`top_level_window_at`]: 화면 점 아래 보이는 최상위 창(`WindowFromPoint`). 탭을 창 사이로 끌 때 쓴다.
+//!   Windows에서만 있다.
 
 use std::fmt;
 use std::io;
@@ -17,12 +19,16 @@ mod watch;
 #[cfg(windows)]
 mod windows_impl;
 #[cfg(windows)]
+mod windows_screen;
+#[cfg(windows)]
 mod windows_watch;
 
 pub use watch::{DirectoryChange, DirectoryWatcher};
 
 #[cfg(windows)]
 pub use windows_impl::compare_names_like_explorer;
+#[cfg(windows)]
+pub use windows_screen::top_level_window_at;
 
 /// 기본 프로그램으로 열기가 실패한 까닭.
 #[derive(Debug, Clone, PartialEq, Eq)]
