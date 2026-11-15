@@ -1198,6 +1198,8 @@ dependencies = [
 name = "facet-indexer"
 version = "0.1.0"
 dependencies = [
+ "facet-index",
+ "facet-protocol",
  "tempfile",
  "windows-sys 0.61.2",
 ]

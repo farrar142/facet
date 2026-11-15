@@ -31,7 +31,13 @@ pub const NEED_ADMIN: &str =
 const ALIGN: usize = 4096;
 
 /// 소유한 핸들. 버릴 때 닫는다.
-struct Handle(HANDLE);
+pub(crate) struct Handle(pub(crate) HANDLE);
+
+// SAFETY: 커널 객체 핸들은 프로세스 전체에서 유효한 번호라 어느 스레드로 옮겨도 된다.
+unsafe impl Send for Handle {}
+// SAFETY: &Handle로는 번호를 읽을 수만 있고, 닫기는 Drop에서 한 번만 한다. 같은 핸들에 여러
+// 스레드가 동시에 입출력하는 것은 Windows가 허용한다(겹친 입출력은 호출마다 구조체를 따로 둔다).
+unsafe impl Sync for Handle {}
 
 impl Drop for Handle {
     fn drop(&mut self) {
