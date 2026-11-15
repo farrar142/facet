@@ -39,6 +39,23 @@ fn name(command: CommandId) -> &'static str {
         CommandId::SortByModified => "수정한 날짜로 정렬",
         CommandId::SortByType => "유형으로 정렬",
         CommandId::SortBySize => "크기로 정렬",
+        CommandId::NewTab => "새 탭",
+        CommandId::CloseTab => "탭 닫기",
+        CommandId::NextTab => "다음 탭",
+        CommandId::PreviousTab => "이전 탭",
+        CommandId::GoToTab(n) => [
+            "",
+            "1번째 탭",
+            "2번째 탭",
+            "3번째 탭",
+            "4번째 탭",
+            "5번째 탭",
+            "6번째 탭",
+            "7번째 탭",
+            "8번째 탭",
+        ][usize::from(n).min(8)],
+        CommandId::LastTab => "마지막 탭",
+        CommandId::OpenInNewTab => "새 탭에서 열기",
     }
 }
 
@@ -96,7 +113,6 @@ fn s1_명령과_기본_단축키가_모두_명령_목록에_있다() {
         (SortByType, vec![]),
         (SortBySize, vec![]),
     ];
-    assert_eq!(CommandId::ALL.len(), expected.len());
     for (command, shortcuts) in expected {
         assert!(CommandId::ALL.contains(&command), "{command:?}");
         assert_eq!(command.shortcuts(), shortcuts.as_slice(), "{command:?}");
@@ -105,6 +121,57 @@ fn s1_명령과_기본_단축키가_모두_명령_목록에_있다() {
     for column in [Column::Name, Column::Modified, Column::Type, Column::Size] {
         assert_eq!(CommandId::sort_by(column).sort_column(), Some(column));
     }
+}
+
+#[test]
+fn s2_탭_명령과_기본_단축키() {
+    use CommandId::*;
+    let mut expected: Vec<(CommandId, Vec<Shortcut>)> = vec![
+        (NewTab, vec![key(letter('t')).ctrl()]),
+        (CloseTab, vec![key(letter('w')).ctrl()]),
+        (NextTab, vec![key(Key::Tab).ctrl()]),
+        (PreviousTab, vec![key(Key::Tab).ctrl().shift()]),
+        (LastTab, vec![key(Key::Digit(9)).ctrl()]),
+        (OpenInNewTab, vec![]),
+    ];
+    for n in 1..=8 {
+        expected.push((GoToTab(n), vec![key(Key::Digit(n)).ctrl()]));
+    }
+    for (command, shortcuts) in &expected {
+        assert!(CommandId::ALL.contains(command), "{command:?}");
+        assert_eq!(command.shortcuts(), shortcuts.as_slice(), "{command:?}");
+    }
+    // S1의 14개와 탭 명령이 전부다.
+    assert_eq!(CommandId::ALL.len(), 14 + expected.len());
+    assert_eq!(GoToTab(3).as_str(), "go-to-tab-3");
+    assert_eq!(CommandId::from_id("go-to-tab-8"), Some(GoToTab(8)));
+    assert_eq!(CommandId::from_id("go-to-tab-9"), None);
+
+    // 한글 모드에서도 같다: T 키는 「ㅅ」, W 키는 「ㅈ」을 낸다. 숫자와 Tab은 모드와 상관없다.
+    assert_eq!(
+        find_by_shortcut(key(Key::from_char('ㅅ').unwrap()).ctrl()),
+        Some(NewTab)
+    );
+    assert_eq!(
+        find_by_shortcut(key(Key::from_char('ㅈ').unwrap()).ctrl()),
+        Some(CloseTab)
+    );
+    assert_eq!(find_by_shortcut(key(Key::Tab).ctrl()), Some(NextTab));
+    assert_eq!(
+        find_by_shortcut(key(Key::Tab).ctrl().shift()),
+        Some(PreviousTab)
+    );
+    for n in 1..=8 {
+        assert_eq!(
+            find_by_shortcut(key(Key::from_char(char::from(b'0' + n)).unwrap()).ctrl()),
+            Some(GoToTab(n))
+        );
+    }
+    assert_eq!(find_by_shortcut(key(Key::Digit(9)).ctrl()), Some(LastTab));
+    // 수식 키 없는 Tab·숫자는 명령이 아니다(목록의 글자로 이동 등에 남긴다).
+    assert_eq!(find_by_shortcut(key(Key::Tab)), None);
+    assert_eq!(find_by_shortcut(key(Key::Digit(1))), None);
+    assert_eq!(find_by_shortcut(key(Key::Digit(0)).ctrl()), None);
 }
 
 #[test]

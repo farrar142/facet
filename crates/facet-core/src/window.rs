@@ -1,7 +1,13 @@
 //! 화면 상태: 앱 > 창 > 패널 > 탭.
 //!
-//! 지금(S1)은 창·패널·탭을 각 하나씩만 만든다. 그래도 창은 패널 목록을, 패널은 탭 목록을 갖고, 앱은 창 목록을
-//! 갖는다. 탭 여러 개·패널 둘·창 여러 개(S2)는 목록에 더하고 활성 번호를 옮기는 것으로 늘린다.
+//! 창은 패널 목록을, 패널은 탭 목록을 갖고, 앱은 창 목록을 갖는다. 지금은 창·패널이 하나씩이고 패널에 탭이
+//! 여럿이다. 패널 둘·창 여러 개는 목록에 더하고 활성 번호를 옮기는 것으로 늘린다.
+//!
+//! 탭 연산은 이 상태 모델에서 하고 앱은 결과를 그린다: 탭 열기([`App::open_tab`], 휠 클릭은
+//! [`App::open_in_new_tab`]), 닫기([`App::close_tab`]: 패널의 마지막 탭이면 패널이, 창의 마지막 패널이면 창이
+//! 닫히고, 창이 없으면 앱이 끝난다 [`App::is_finished`]), 활성 탭 바꾸기([`App::activate_tab`],
+//! [`App::switch_tab`]: 다음·이전은 끝에서 처음으로 돈다). 패널에서 활성 탭만 보이고, 나머지는 숨어 변경 감시를
+//! 놓는다([`Tab::hide`]). 다시 보이면 갖고 있던 목록을 먼저 보이며 다시 읽고 감시를 다시 건다([`Tab::show`]).
 //!
 //! 앱은 탭의 읽기 요청을 일꾼 스레드에서 읽고([`App::navigate`]), 그 결과를 요청한 탭에 넘긴다
 //! ([`App::poll`]·[`App::wait`]). 결과는 탭 번호로 찾아가므로 탭이 여럿이어도 섞이지 않는다.
@@ -30,7 +36,7 @@ use crate::tab::{
     ReadResult, Tab,
 };
 use crate::watch::ChangeBatch;
-use crate::{Candidate, Location};
+use crate::{Candidate, Location, provider_for};
 
 /// 앱 안의 탭 하나를 가리키는 번호. 탭을 다른 패널·창으로 옮겨도 바뀌지 않는다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -51,9 +57,43 @@ impl Panel {
         }
     }
 
-    /// 탭들을 차례로. 지금은 하나뿐이다.
+    /// 탭들을 차례로.
     pub fn tabs(&self) -> impl ExactSizeIterator<Item = (TabId, &Tab)> + '_ {
         self.tabs.iter().map(|(id, tab)| (*id, tab))
+    }
+
+    /// 탭 수. 열린 패널에는 탭이 하나 이상 있다.
+    pub fn len(&self) -> usize {
+        self.tabs.len()
+    }
+
+    /// 탭이 없는가. 열린 패널은 늘 탭을 갖는다(마지막 탭을 닫으면 패널이 닫힌다).
+    pub fn is_empty(&self) -> bool {
+        self.tabs.is_empty()
+    }
+
+    /// 보이고 있는 탭이 몇 번째인가(0부터).
+    pub fn active_index(&self) -> usize {
+        self.active
+    }
+
+    /// 탭 `id`가 몇 번째인가.
+    pub fn position(&self, id: TabId) -> Option<usize> {
+        self.tabs.iter().position(|(tab, _)| *tab == id)
+    }
+
+    /// 활성 탭을 바꿀 때 갈 탭의 번호(0부터). 없는 탭이면 `None`이다.
+    pub fn switch_target(&self, switch: TabSwitch) -> Option<usize> {
+        let len = self.tabs.len();
+        if len == 0 {
+            return None;
+        }
+        match switch {
+            TabSwitch::Next => Some((self.active + 1) % len),
+            TabSwitch::Previous => Some((self.active + len - 1) % len),
+            TabSwitch::Nth(n) => (n >= 1 && n <= len).then(|| n - 1),
+            TabSwitch::Last => Some(len - 1),
+        }
     }
 
     /// 보이고 있는 탭의 번호.
@@ -74,6 +114,28 @@ impl Panel {
     fn tabs_mut(&mut self) -> impl Iterator<Item = (TabId, &mut Tab)> + '_ {
         self.tabs.iter_mut().map(|(id, tab)| (*id, tab))
     }
+}
+
+/// 활성 탭을 어디로 바꾸는가([`App::switch_tab`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabSwitch {
+    /// 다음 탭. 끝에서는 처음으로 돈다.
+    Next,
+    /// 이전 탭. 처음에서는 끝으로 돈다.
+    Previous,
+    /// n번째 탭(1부터).
+    Nth(usize),
+    /// 마지막 탭.
+    Last,
+}
+
+/// 탭을 닫으면서 함께 닫힌 것([`App::close_tab`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Closed {
+    /// 패널의 마지막 탭이라 패널이 닫혔다.
+    pub panel: bool,
+    /// 창의 마지막 패널이라 창이 닫혔다.
+    pub window: bool,
 }
 
 /// facet의 최상위 화면 하나. 패널을 하나 또는 둘 갖는다(지금은 하나).
@@ -178,6 +240,8 @@ pub enum Execution {
     EditAddress,
     /// 화면이 할 일: 명령 팔레트를 연다.
     ShowCommandPalette,
+    /// 마지막 탭을 닫아 창이 닫혔다. 창이 남지 않았으면([`App::is_finished`]) 앱을 끝낸다.
+    WindowClosed,
 }
 
 /// 앱 전체의 화면 상태: 창 목록과 앱 전체에 하나인 설정(숨김 항목 보이기).
@@ -246,9 +310,14 @@ impl App {
         id
     }
 
-    /// 창들을 차례로. 지금은 하나뿐이다.
+    /// 창들을 차례로. 지금은 하나뿐이고, 마지막 창이 닫히면 비어 있다.
     pub fn windows(&self) -> &[Window] {
         &self.windows
+    }
+
+    /// 창이 하나도 남지 않아 앱이 끝났는가. 끝난 앱에서는 활성 창·탭을 묻지 않는다(창이 없다).
+    pub fn is_finished(&self) -> bool {
+        self.windows.is_empty()
     }
 
     /// 사용자가 보고 있는 창.
@@ -271,8 +340,140 @@ impl App {
         self.active_window_mut().active_panel_mut().active_tab_mut()
     }
 
-    fn active_tab_id(&self) -> TabId {
+    /// 활성 탭의 번호.
+    pub fn active_tab_id(&self) -> TabId {
         self.active_window().active_panel().active_tab_id()
+    }
+
+    /// 열린 탭 `id`. 닫혔으면 `None`이다.
+    pub fn tab(&self, id: TabId) -> Option<&Tab> {
+        self.windows
+            .iter()
+            .flat_map(|w| w.panels.iter())
+            .flat_map(Panel::tabs)
+            .find(|(tab_id, _)| *tab_id == id)
+            .map(|(_, tab)| tab)
+    }
+
+    /// 탭 `id`가 있는 창·패널·탭 번호.
+    fn find(&self, id: TabId) -> Option<(usize, usize, usize)> {
+        self.windows.iter().enumerate().find_map(|(w, window)| {
+            window
+                .panels
+                .iter()
+                .enumerate()
+                .find_map(|(p, panel)| panel.position(id).map(|t| (w, p, t)))
+        })
+    }
+
+    /// `location`을 보일 새 탭을 활성 패널의 활성 탭 바로 뒤에 연다. 정렬은 활성 탭을 따르고 기록은 비어 있다.
+    ///
+    /// `activate`면 새 탭을 활성으로 하고 읽기 시작한다(앞서 보이던 탭은 숨는다). 아니면 지금 탭을 그대로 두고,
+    /// 새 탭은 숨은 채로 두었다가 처음 보일 때 읽는다.
+    pub fn open_tab(&mut self, location: Location, activate: bool) -> TabId {
+        let id = self.new_tab_id();
+        let sort = self.active_tab().sort();
+        let mut tab = Tab::new(location, sort, self.show_hidden);
+        if !activate {
+            tab.hide();
+        }
+        let panel = self.active_window_mut().active_panel_mut();
+        let at = panel.active + 1;
+        panel.tabs.insert(at, (id, tab));
+        if activate {
+            panel.tabs[panel.active].1.hide();
+            panel.active = at;
+            self.navigate(Navigation::Refresh);
+        }
+        id
+    }
+
+    /// 활성 탭의 `index`번째 보이는 항목이 폴더면 그 폴더를 새 탭으로 연다(휠 클릭). 지금 탭이 그대로 활성이고
+    /// 새 탭은 그 바로 뒤에 숨은 채로 붙는다([`App::open_tab`]). 폴더가 아니거나 항목이 없으면 `None`이다.
+    pub fn open_in_new_tab(&mut self, index: usize) -> Option<TabId> {
+        let tab = self.active_tab();
+        let item = tab.get(index).filter(|item| item.is_folder)?;
+        let location = provider_for(tab.location()).child(tab.location(), &item.name);
+        Some(self.open_tab(location, false))
+    }
+
+    /// 탭 `id`를 활성 탭으로 한다: 그 창·패널을 활성으로 하고, 패널에서 보이던 탭은 숨기고, 그 탭을 다시 보인다
+    /// ([`Tab::show`]: 갖고 있던 목록을 두고 다시 읽으며 감시를 다시 건다). 없는 탭이면 `false`다.
+    pub fn activate_tab(&mut self, id: TabId) -> bool {
+        let Some((w, p, t)) = self.find(id) else {
+            return false;
+        };
+        self.active = w;
+        self.windows[w].active = p;
+        self.show_tab(t);
+        true
+    }
+
+    /// 활성 패널에서 활성 탭을 바꾼다. 갈 탭이 없으면(n번째 탭이 없음) 아무것도 하지 않고 `false`다.
+    pub fn switch_tab(&mut self, switch: TabSwitch) -> bool {
+        match self.active_window().active_panel().switch_target(switch) {
+            Some(index) => {
+                self.show_tab(index);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 활성 패널의 `index`번째 탭을 활성으로 한다. 앞서 보이던 탭은 숨는다.
+    fn show_tab(&mut self, index: usize) {
+        let panel = self.active_window_mut().active_panel_mut();
+        if panel.active != index {
+            panel.tabs[panel.active].1.hide();
+            panel.active = index;
+        }
+        let (id, tab) = &mut panel.tabs[index];
+        let id = *id;
+        if let Some(request) = tab.show() {
+            self.spawn_read(id, request);
+        }
+    }
+
+    /// 탭 `id`를 닫는다. 그 탭이 패널의 활성 탭이면 오른쪽 이웃(끝이었으면 왼쪽 이웃)이 활성이 되어 다시 보인다.
+    /// 패널의 마지막 탭이면 패널이 닫히고, 창의 마지막 패널이면 창이 닫힌다. 창이 하나도 남지 않으면 앱이
+    /// 끝난다([`App::is_finished`]). 없는 탭이면 `None`이다.
+    ///
+    /// 닫은 탭의 감시는 풀리고, 그 탭에 늦게 온 결과는 버린다.
+    pub fn close_tab(&mut self, id: TabId) -> Option<Closed> {
+        let (w, p, t) = self.find(id)?;
+        let window = &mut self.windows[w];
+        let panel = &mut window.panels[p];
+        panel.tabs.remove(t);
+        if panel.tabs.is_empty() {
+            window.panels.remove(p);
+            let window_closed = window.panels.is_empty();
+            if window_closed {
+                self.windows.remove(w);
+                if self.active >= w && self.active > 0 {
+                    self.active -= 1;
+                }
+            } else if window.active >= p && window.active > 0 {
+                window.active -= 1;
+            }
+            return Some(Closed {
+                panel: true,
+                window: window_closed,
+            });
+        }
+        if t < panel.active {
+            panel.active -= 1;
+        } else if t == panel.active {
+            panel.active = panel.active.min(panel.tabs.len() - 1);
+            let (next_id, tab) = &mut panel.tabs[panel.active];
+            let next_id = *next_id;
+            if let Some(request) = tab.show() {
+                self.spawn_read(next_id, request);
+            }
+        }
+        Some(Closed {
+            panel: false,
+            window: false,
+        })
     }
 
     fn tabs_mut(&mut self) -> impl Iterator<Item = (TabId, &mut Tab)> + '_ {
@@ -431,18 +632,19 @@ impl App {
         self.active_tab_mut().set_sort(sort);
     }
 
-    /// 명령을 활성 탭에서 지금 실행할 수 있는가([`CommandId::is_enabled`]).
+    /// 명령을 활성 패널·탭에서 지금 실행할 수 있는가([`CommandId::is_enabled_in`]). 앱이 끝났으면 아무 명령도
+    /// 실행할 수 없다.
     pub fn can_execute(&self, command: CommandId) -> bool {
-        command.is_enabled(self.active_tab())
+        !self.is_finished() && command.is_enabled_in(self.active_window().active_panel())
     }
 
-    /// 명령 팔레트 검색: 앱이 주는 명령 이름에서 찾고, 실행 가능 여부는 활성 탭을 따른다([`command::search`]).
+    /// 명령 팔레트 검색: 앱이 주는 명령 이름에서 찾고, 실행 가능 여부는 활성 패널·탭을 따른다([`command::search`]).
     pub fn search_commands<S: AsRef<str>>(
         &self,
         query: &str,
         name: impl Fn(CommandId) -> S,
     ) -> Vec<command::PaletteEntry> {
-        command::search(query, name, self.active_tab())
+        command::search(query, name, self.active_window().active_panel())
     }
 
     /// 명령을 활성 탭에서 실행한다. 지금 실행할 수 없으면 아무것도 하지 않고 [`Execution::Disabled`]다.
@@ -482,6 +684,45 @@ impl App {
                     self.set_sort(sort);
                 }
                 return Execution::Done;
+            }
+            CommandId::NewTab => {
+                let location = self.active_tab().location().clone();
+                self.open_tab(location, true);
+                return Execution::Done;
+            }
+            CommandId::OpenInNewTab => {
+                let opened = self
+                    .active_tab()
+                    .cursor()
+                    .and_then(|index| self.open_in_new_tab(index));
+                return match opened {
+                    Some(_) => Execution::Done,
+                    None => Execution::Disabled,
+                };
+            }
+            CommandId::CloseTab => {
+                let id = self.active_tab_id();
+                return match self.close_tab(id) {
+                    Some(Closed { window: true, .. }) => Execution::WindowClosed,
+                    Some(_) => Execution::Done,
+                    None => Execution::Disabled,
+                };
+            }
+            CommandId::NextTab
+            | CommandId::PreviousTab
+            | CommandId::GoToTab(_)
+            | CommandId::LastTab => {
+                let switch = match command {
+                    CommandId::NextTab => TabSwitch::Next,
+                    CommandId::PreviousTab => TabSwitch::Previous,
+                    CommandId::GoToTab(n) => TabSwitch::Nth(usize::from(n)),
+                    _ => TabSwitch::Last,
+                };
+                return if self.switch_tab(switch) {
+                    Execution::Done
+                } else {
+                    Execution::Disabled
+                };
             }
         };
         if self.navigate(navigation) {
