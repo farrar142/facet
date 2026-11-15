@@ -6,8 +6,9 @@
 //!   「정렬 바꾸기」([`DetailsList::set_sort`])를 재고 각각 상한([`LIST_LIMIT`]·[`LIST_SORT_LIMIT`]·
 //!   [`RESORT_LIMIT`])과 비교한다. `cargo xtask ci`가 이것을 부른다.
 //! - 인덱스 벤치마크: 시험 폴더와 같은 이름의 합성 인덱스([`synthetic_index`])를 만들어
-//!   메모리([`INDEX_MEMORY_LIMIT`])와 부분 일치 질의 시간([`QUERY_LIMIT`])을 잰다.
-//!   `cargo xtask ci`가 이것도 부른다.
+//!   메모리([`INDEX_MEMORY_LIMIT`])와 부분 일치 질의 시간([`QUERY_LIMIT`])을 잰다. 인덱서 서비스가
+//!   파이프로 받은 질의처럼 폴더 권한으로 거르는 질의도 권한 검사 기억이 찬 상태로 같은 상한에
+//!   견준다([`measure_filtered_query`]). `cargo xtask ci`가 이것도 부른다.
 //! - MFT 파싱 벤치마크: 저장소의 MFT 조각을 되풀이한 덩어리([`mft_image`])를 인덱스로 만드는
 //!   시간([`MFT_PARSE_LIMIT`])을 잰다. `cargo xtask ci`가 이것도 부른다.
 
@@ -457,6 +458,70 @@ pub fn measure_query(
         item_count = hits.len();
     }
     Measurement { item_count, times }
+}
+
+/// 권한 거르기 벤치마크에서 합성 인덱스를 담는 볼륨 이름.
+pub const SYNTHETIC_VOLUME: &str = "X:";
+
+/// 권한 거르기 벤치마크의 가짜 사용자. 폴더 이름의 번호가 50으로 나눠 24가 남는 폴더
+/// (`폴더 …024`, `…074`, …, 「폴더」 다섯 개 중 하나)의 목록을 읽을 수 없다. 그 아래 항목은 모두
+/// 걸러지고, 걸러진 만큼 뒤 후보로 채운다.
+#[derive(Debug, Default)]
+pub struct BenchCaller {
+    asked: std::sync::atomic::AtomicUsize,
+}
+
+impl BenchCaller {
+    /// 권한 검사 기억에 없어 물어본 폴더 수.
+    pub fn asked(&self) -> usize {
+        self.asked.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl facet_indexer::access::Caller for BenchCaller {
+    fn user(&self) -> Option<String> {
+        Some("S-1-5-21-0-0-0-1001".to_owned())
+    }
+
+    fn can_list(&self, folder: &str) -> bool {
+        self.asked
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        !(folder.ends_with("24") || folder.ends_with("74"))
+    }
+}
+
+/// 권한으로 거르는 질의(인덱서 서비스가 파이프로 받은 질의와 같은 길, `Volumes::search_as`)를
+/// `runs`번 잰다. 재기 전에 한 번 돌려 데우며, 그때 권한 검사 기억이 찬다. 잴 때 기억에 없어
+/// 다시 물은 폴더가 있으면 실패한다(「기억이 찬 상태」를 재지 못한 것이다).
+/// [`Measurement::item_count`]는 결과 수다.
+pub fn measure_filtered_query(
+    volumes: &facet_indexer::volumes::Volumes,
+    caller: &BenchCaller,
+    query: &facet_protocol::QueryMessage,
+    runs: usize,
+) -> Result<Measurement, String> {
+    let cancel = facet_indexer::session::Cancel::new();
+    let run = || {
+        volumes
+            .search_as(query, caller, &cancel)
+            .map(|page| page.hits.len())
+            .map_err(|e| e.message)
+    };
+    let mut item_count = run()?;
+    let warmed = caller.asked();
+    let mut times = Vec::with_capacity(runs);
+    for _ in 0..runs {
+        let start = Instant::now();
+        item_count = run()?;
+        times.push(start.elapsed());
+    }
+    if caller.asked() != warmed {
+        return Err(format!(
+            "권한 검사 기억이 찬 뒤에도 폴더 {}개를 다시 물었습니다",
+            caller.asked() - warmed
+        ));
+    }
+    Ok(Measurement { item_count, times })
 }
 
 /// 질의 중앙값이 `limit`을 넘으면 넘은 수치를 담은 메시지를 돌려준다.

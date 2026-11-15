@@ -6,12 +6,12 @@ use std::time::{Duration, Instant};
 
 use facet_bench::screen::{self, DEFAULT_SCROLL_ROWS, Plan};
 use facet_bench::{
-    BENCH_QUERY, BENCH_RESULT_LIMIT, BENCH_SORT, BENCH_SORTED_QUERY, DEFAULT_COUNT, INDEX_COUNT,
-    INDEX_MEMORY_LIMIT, LIST_LIMIT, LIST_SORT_LIMIT, LIST_SORT_TARGET, LIST_TARGET,
+    BENCH_QUERY, BENCH_RESULT_LIMIT, BENCH_SORT, BENCH_SORTED_QUERY, BenchCaller, DEFAULT_COUNT,
+    INDEX_COUNT, INDEX_MEMORY_LIMIT, LIST_LIMIT, LIST_SORT_LIMIT, LIST_SORT_TARGET, LIST_TARGET,
     MFT_PARSE_LIMIT, MFT_PARSE_TARGET, MFT_RECORDS, Measurement, QUERY_LIMIT, QUERY_TARGET,
-    RESORT_LIMIT, RESORT_TARGET, check_limit, check_median, check_memory, check_mft_limit,
-    check_query_limit, make_test_folder, measure_list, measure_list_sorted, measure_mft,
-    measure_query, measure_resort, mft_image, synthetic_index,
+    RESORT_LIMIT, RESORT_TARGET, SYNTHETIC_VOLUME, check_limit, check_median, check_memory,
+    check_mft_limit, check_query_limit, make_test_folder, measure_filtered_query, measure_list,
+    measure_list_sorted, measure_mft, measure_query, measure_resort, mft_image, synthetic_index,
 };
 
 const USAGE: &str = "\
@@ -287,7 +287,61 @@ fn index(args: &Args) -> Result<(), String> {
         m.item_count,
         m.times.len()
     );
-    report_query(&m, limit)
+    report_query(&m, limit)?;
+    report_filtered(index, args.runs, limit)
+}
+
+/// 폴더 권한으로 거르는 질의(인덱서 서비스가 파이프로 받는 질의)를 권한 검사 기억이 찬 상태로
+/// 잰다. 상한은 거르지 않는 질의와 같다.
+fn report_filtered(index: facet_index::Index, runs: usize, limit: Duration) -> Result<(), String> {
+    use facet_protocol::{Case, Condition, QueryMessage};
+
+    let volumes = facet_indexer::volumes::Volumes::with_index(SYNTHETIC_VOLUME, index);
+    let caller = BenchCaller::default();
+    let query = |part: &str, sort| QueryMessage {
+        condition: Condition::NameContains {
+            part: part.to_owned(),
+            case: Case::Insensitive,
+        },
+        sort,
+        limit: Some(BENCH_RESULT_LIMIT as u32),
+    };
+    let (key, order) = BENCH_SORT;
+    let sort = Some((key.into(), order.into()));
+    for (part, sort) in [(BENCH_QUERY, None), (BENCH_SORTED_QUERY, sort)] {
+        let q = query(part, sort);
+        let m = measure_filtered_query(&volumes, &caller, &q, runs)?;
+        // 걸러진 결과가 있어야 「걸러진 만큼 뒤 후보로 채우기」까지 잰다.
+        let cancel = facet_indexer::session::Cancel::new();
+        let shown = |page: facet_indexer::volumes::Page| -> Vec<String> {
+            page.hits.into_iter().map(|h| h.path).collect()
+        };
+        let unfiltered = shown(volumes.search(&q, &cancel).map_err(|e| e.message)?);
+        let filtered = shown(
+            volumes
+                .search_as(&q, &caller, &cancel)
+                .map_err(|e| e.message)?,
+        );
+        let hidden = unfiltered.iter().filter(|p| !filtered.contains(p)).count();
+        if sort.is_some() && hidden == 0 {
+            return Err(format!(
+                "권한으로 거르는 질의 \"{part}\"의 앞쪽 결과에서 걸러진 것이 없습니다(채우기를 재지 못함)"
+            ));
+        }
+        let sorted = match sort {
+            Some(_) => format!(", {key:?} {order:?}"),
+            None => String::new(),
+        };
+        println!(
+            "권한으로 거르는 질의 (\"{part}\"{sorted}, 결과 {}개 제한, {}개 나옴, 거르지 않은 앞쪽에서 {hidden}개 걸러짐, 기억한 폴더 {}개, {}회):",
+            BENCH_RESULT_LIMIT,
+            m.item_count,
+            volumes.access().len(),
+            m.times.len()
+        );
+        report_query(&m, limit)?;
+    }
+    Ok(())
 }
 
 fn mft(args: &Args) -> Result<(), String> {
