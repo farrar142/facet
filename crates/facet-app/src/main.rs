@@ -114,7 +114,7 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     let first = app.borrow().active_window_id();
-    let view = open_view(&app, first, true)?;
+    let view = open_view(&app, first)?;
     restore_placement(&view);
     if let Some(kept) = broken {
         view.ui.set_session_broken(true);
@@ -126,9 +126,18 @@ fn main() -> Result<(), slint::PlatformError> {
         // 이벤트 루프가 이미 끝났으면(창을 모두 닫았으면) 버린다.
         let _ = slint::invoke_from_event_loop(poll_all);
     });
+    // 되살린 세션의 나머지 창도 만든다(사용자 입력을 기다리지 않는다). 결과를 받기 전에 만들어야 그 창의 탭이 읽은
+    // 목록도 그 창에 들어간다.
+    sync_windows();
     // 깨우기를 걸기 전에 이미 온 결과(빨리 끝난 첫 읽기)를 받는다. 그래야 첫 화면부터 목록이 보인다.
     poll_all();
     view.ui.show()?;
+    if views().len() > 1 {
+        // 나머지 창이 먼저 떴으므로 활성 창을 앞으로 가져온다.
+        view.ui
+            .window()
+            .with_winit_window(|winit| winit.focus_window());
+    }
     drop(view);
 
     // 수신기는 이벤트 루프가 생긴 뒤(첫 창을 만든 뒤) 연다. 받은 인자는 수신기 스레드에서 해석하고 UI 스레드에는
@@ -285,21 +294,12 @@ fn view_of(window: WindowId) -> Option<Rc<View>> {
     VIEWS.with(|slot| slot.borrow().iter().find(|v| v.window == window).cloned())
 }
 
-/// 코어 창 `window`의 Slint 창을 만들고 콜백을 잇는다. 보이기는 부르는 쪽이 한다. `measure`면 측정 모드의 프레임
-/// 세기를 건다(첫 창만).
-fn open_view(
-    app: &Rc<RefCell<App>>,
-    window: WindowId,
-    measure: bool,
-) -> Result<Rc<View>, slint::PlatformError> {
+/// 코어 창 `window`의 Slint 창을 만들고 콜백을 잇는다. 보이기는 부르는 쪽이 한다. 측정 모드면 창마다 프레임 세기를 건다.
+fn open_view(app: &Rc<RefCell<App>>, window: WindowId) -> Result<Rc<View>, slint::PlatformError> {
     let ui = AppWindow::new()?;
     // Slint는 창마다 winit 이벤트 훅을 하나만 둔다: 키 위치를 적고(Ctrl+백슬래시), 그 창이 포커스를 얻으면 활성
     // 창으로 알리고, 측정 모드면 프레임을 센다.
-    let mut frames = if measure {
-        measure::frame_counter(&ui)
-    } else {
-        None
-    };
+    let mut frames = measure::frame_counter(&ui, measure::window_key(window));
     let hook_app = Rc::downgrade(app);
     // 창을 옮기거나 크기를 바꾸면(최대화·최소화 포함) 이벤트를 다 처리한 뒤 그 자리를 코어에 알린다. 끄는 동안 이벤트가
     // 잇달아 와도 한 번만 맡긴다.
@@ -412,7 +412,7 @@ fn sync_windows() {
         if kept.iter().any(|view| view.window == window) {
             continue;
         }
-        match open_view(&app, window, false) {
+        match open_view(&app, window) {
             Ok(view) => {
                 let placement = PLACEMENTS.with(|slot| {
                     let mut pending = slot.borrow_mut();
@@ -709,7 +709,10 @@ impl View {
     fn mark_loaded(&self) {
         let app = self.app.borrow();
         if let Some(window) = app.window(self.window) {
-            measure::mark_loaded(window.active_panel().active_tab().len());
+            measure::mark_loaded(
+                measure::window_key(self.window),
+                window.active_panel().active_tab().len(),
+            );
         }
     }
 

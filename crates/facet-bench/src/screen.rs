@@ -11,10 +11,19 @@ use std::process::{Command, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use facet_core::measure::{ENV_OPEN, ENV_OUT, ENV_SCROLL_ROWS, ENV_START_US, ScreenReport};
+use facet_core::measure::{
+    ENV_OPEN, ENV_OUT, ENV_SCROLL_ROWS, ENV_START_US, ENV_WINDOWS, ScreenReport,
+};
 
 /// 콜드 스타트 통과 기준: 중앙값이 이보다 짧아야 한다.
 pub const COLD_START_LIMIT: Duration = Duration::from_millis(200);
+
+/// 「세션 복원 콜드 스타트」 통과 기준: 콜드 스타트와 같다. 세션을 되살려 모든 창의 목록이 든 첫 프레임까지다.
+pub const SESSION_RESTORE_LIMIT: Duration = COLD_START_LIMIT;
+
+/// 세션 복원 콜드 스타트를 잴 세션의 모양: 창 둘, 창마다 패널 둘, 패널마다 탭 다섯 개(창마다 탭 10개).
+pub const SESSION_WINDOWS: usize = 2;
+pub const SESSION_TABS_PER_PANEL: usize = 5;
 
 /// 「폴더 열기부터 첫 화면까지」 통과 기준: 중앙값이 이보다 짧아야 한다(spec #16).
 /// 이미 떠 있는 창에서 그 폴더로 이동을 시작한 때부터 목록이 든 첫 프레임이 나올 때까지다.
@@ -150,6 +159,8 @@ pub struct ScreenResult {
     pub item_count: usize,
     pub scroll_rows: usize,
     pub cold_starts: Vec<Duration>,
+    /// 세션 복원 콜드 스타트(회차마다 하나): 탭 10개짜리 창 둘의 세션으로 띄워 모든 창의 첫 프레임까지.
+    pub session_starts: Vec<Duration>,
     /// 이미 떠 있는 창에서 폴더로 이동해 첫 화면이 나올 때까지(회차마다 하나).
     pub opens: Vec<Duration>,
     /// 스크롤하는 동안의 프레임 시간들(스크롤 회차 전체).
@@ -165,6 +176,9 @@ pub struct Verdict {
     pub cold_median: Duration,
     pub cold_worst: Duration,
     pub cold_pass: bool,
+    pub session_median: Duration,
+    pub session_worst: Duration,
+    pub session_pass: bool,
     pub open_median: Duration,
     pub open_worst: Duration,
     pub open_pass: bool,
@@ -181,7 +195,7 @@ pub struct Verdict {
 
 impl Verdict {
     pub fn pass(&self) -> bool {
-        self.cold_pass && self.open_pass && self.frame_pass
+        self.cold_pass && self.session_pass && self.open_pass && self.frame_pass
     }
 }
 
@@ -190,12 +204,16 @@ impl ScreenResult {
     pub fn verdict(&self) -> Verdict {
         let cold_median = median(&self.cold_starts);
         let open_median = median(&self.opens);
+        let session_median = median(&self.session_starts);
         let frame_worst = worst(&self.frames);
         let frame_worst_limit = frame_budget(self.spec.refresh_hz).mul_f64(FRAME_WORST_FACTOR);
         Verdict {
             cold_median,
             cold_worst: worst(&self.cold_starts),
             cold_pass: !self.cold_starts.is_empty() && cold_median < COLD_START_LIMIT,
+            session_median,
+            session_worst: worst(&self.session_starts),
+            session_pass: !self.session_starts.is_empty() && session_median < SESSION_RESTORE_LIMIT,
             open_median,
             open_worst: worst(&self.opens),
             open_pass: !self.opens.is_empty() && open_median < OPEN_LIMIT,
@@ -276,6 +294,19 @@ impl ScreenResult {
         );
         let _ = writeln!(
             t,
+            "세션 복원 콜드 스타트 중앙값 ({}회)  {:<10}  < {}ms                   {}",
+            self.session_starts.len(),
+            ms(v.session_median),
+            SESSION_RESTORE_LIMIT.as_millis(),
+            mark(v.session_pass)
+        );
+        let _ = writeln!(
+            t,
+            "세션 복원 콜드 스타트 최악값  {:<10}  (참고)",
+            ms(v.session_worst)
+        );
+        let _ = writeln!(
+            t,
             "폴더 열기 첫 화면 중앙값 ({}회)  {:<10}  < {}ms                   {}",
             self.opens.len(),
             ms(v.open_median),
@@ -353,6 +384,23 @@ impl ScreenResult {
         let _ = writeln!(j, "    \"limit_ms\": {},", COLD_START_LIMIT.as_millis());
         let _ = writeln!(j, "    \"pass\": {}", v.cold_pass);
         let _ = writeln!(j, "  }},");
+        let _ = writeln!(j, "  \"session_restore_cold_start\": {{");
+        let _ = writeln!(j, "    \"windows\": {SESSION_WINDOWS},");
+        let _ = writeln!(
+            j,
+            "    \"tabs_per_window\": {},",
+            2 * SESSION_TABS_PER_PANEL
+        );
+        let _ = writeln!(j, "    \"runs_ms\": [{}],", list(&self.session_starts));
+        let _ = writeln!(j, "    \"median_ms\": {},", ms(v.session_median));
+        let _ = writeln!(j, "    \"worst_ms\": {},", ms(v.session_worst));
+        let _ = writeln!(
+            j,
+            "    \"limit_ms\": {},",
+            SESSION_RESTORE_LIMIT.as_millis()
+        );
+        let _ = writeln!(j, "    \"pass\": {}", v.session_pass);
+        let _ = writeln!(j, "  }},");
         let _ = writeln!(j, "  \"folder_open\": {{");
         let _ = writeln!(j, "    \"runs_ms\": [{}],", list(&self.opens));
         let _ = writeln!(j, "    \"median_ms\": {},", ms(v.open_median));
@@ -417,6 +465,7 @@ pub fn run_app(
     let mut command = Command::new(app);
     command
         .arg(folder)
+        .env_remove(ENV_WINDOWS)
         .env(ENV_OUT, &out)
         .env(ENV_START_US, start_us.to_string())
         .env(ENV_SCROLL_ROWS, scroll_rows.to_string())
@@ -425,6 +474,36 @@ pub fn run_app(
     if let Some(open) = open {
         command.env(ENV_OPEN, open);
     }
+    run_to_report(command, &out, timeout)
+}
+
+/// 세션 복원 콜드 스타트를 잰다: 인자 없이 `session` 파일(`FACET_SESSION_PATH`)로 앱을 띄워 창 `windows`개의
+/// 첫 프레임까지를 잰다. 사용자의 세션 파일은 건드리지 않는다(앱은 환경 변수가 가리키는 이 파일만 읽고 쓴다).
+pub fn run_app_session(
+    app: &Path,
+    session: &Path,
+    windows: usize,
+    timeout: Duration,
+) -> io::Result<ScreenReport> {
+    let out = std::env::temp_dir().join(format!("facet-measure-{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&out);
+    let start_us = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_micros() as u64);
+    let mut command = Command::new(app);
+    command
+        .env(ENV_OUT, &out)
+        .env(ENV_START_US, start_us.to_string())
+        .env(ENV_SCROLL_ROWS, "0")
+        .env(ENV_WINDOWS, windows.to_string())
+        .env(facet_core::session::ENV_PATH, session)
+        .env_remove(ENV_OPEN)
+        .stdin(Stdio::null());
+    run_to_report(command, &out, timeout)
+}
+
+/// 앱을 띄워 끝나기를 기다리고(`timeout`이 지나면 멈춘다) 앱이 `out`에 쓴 결과를 읽는다.
+fn run_to_report(mut command: Command, out: &Path, timeout: Duration) -> io::Result<ScreenReport> {
     let mut child = command.spawn()?;
     let deadline = Instant::now() + timeout;
     let status = loop {
@@ -446,8 +525,8 @@ pub fn run_app(
             "앱이 실패로 끝났습니다: {status}"
         )));
     }
-    let text = std::fs::read_to_string(&out)?;
-    let _ = std::fs::remove_file(&out);
+    let text = std::fs::read_to_string(out)?;
+    let _ = std::fs::remove_file(out);
     ScreenReport::parse(&text).map_err(io::Error::other)
 }
 
@@ -488,6 +567,7 @@ pub fn measure(plan: &Plan<'_>) -> Result<ScreenResult, String> {
                 .ok_or("앱이 첫 화면 시각을 알리지 않았습니다")?,
         );
     }
+    let session_starts = measure_session_restore(plan)?;
     let folder = std::path::absolute(plan.folder).map_err(|e| e.to_string())?;
     let start = open_start(&folder).ok_or_else(|| {
         format!(
@@ -523,10 +603,69 @@ pub fn measure(plan: &Plan<'_>) -> Result<ScreenResult, String> {
         item_count: plan.item_count,
         scroll_rows: plan.scroll_rows,
         cold_starts,
+        session_starts,
         opens,
         frames,
         scroll_runs: plan.scroll_runs,
         spec,
         debug_build: cfg!(debug_assertions),
     })
+}
+
+/// 세션 복원 콜드 스타트용 세션 파일을 `dir` 아래에 만든다: 창 [`SESSION_WINDOWS`]개, 창마다 패널 둘, 패널마다
+/// 탭 [`SESSION_TABS_PER_PANEL`]개. 탭마다 `dir` 아래 작은 폴더(파일 몇 개)를 연다. 세션 파일 자리를 돌려준다.
+pub fn write_session_fixture(dir: &Path) -> io::Result<PathBuf> {
+    let root = dir.join("folders");
+    let location = |w: usize, p: usize, t: usize| {
+        let folder = root
+            .join(format!("창{w}"))
+            .join(format!("패널{p}"))
+            .join(format!("탭 {t}"));
+        facet_core::Location::file_system(folder)
+    };
+    let session = crate::session_fixture(SESSION_WINDOWS, SESSION_TABS_PER_PANEL, location);
+    for window in &session.windows {
+        for tab in window.panels.iter().flat_map(|p| &p.tabs) {
+            if let Some(folder) = tab.location.file_system_path() {
+                std::fs::create_dir_all(folder)?;
+                for n in 0..20 {
+                    std::fs::write(folder.join(format!("파일 {n:02}.txt")), b"facet")?;
+                }
+            }
+        }
+    }
+    let path = dir.join("session.json");
+    std::fs::write(&path, session.to_json())?;
+    Ok(path)
+}
+
+/// 세션 복원 콜드 스타트를 `plan.runs`번 잰다. 세션 파일은 임시 폴더에 만들어 `FACET_SESSION_PATH`로 앱에
+/// 알리므로 사용자의 세션 파일(`%APPDATA%\facet\session.json`)은 읽지도 바꾸지도 않는다. 앱이 세션을 닫을 때
+/// 되쓰므로 회차마다 세션 파일을 새로 만든다.
+fn measure_session_restore(plan: &Plan<'_>) -> Result<Vec<Duration>, String> {
+    let dir = std::env::temp_dir().join(format!("facet-measure-session-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let result = (|| {
+        let mut starts = Vec::new();
+        for n in 1..=plan.runs {
+            eprintln!("세션 복원 콜드 스타트 {n}/{}…", plan.runs);
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let session = write_session_fixture(&dir).map_err(|e| e.to_string())?;
+            let r = run_app_session(plan.app, &session, SESSION_WINDOWS, RUN_TIMEOUT)
+                .map_err(|e| e.to_string())?;
+            if r.windows != SESSION_WINDOWS {
+                return Err(format!(
+                    "창 {SESSION_WINDOWS}개를 기대했지만 앱이 첫 프레임을 낸 창은 {}개입니다",
+                    r.windows
+                ));
+            }
+            starts.push(
+                r.first_frame
+                    .ok_or("앱이 세션 복원 첫 화면 시각을 알리지 않았습니다")?,
+            );
+        }
+        Ok(starts)
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    result
 }

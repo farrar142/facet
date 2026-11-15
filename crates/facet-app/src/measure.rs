@@ -20,26 +20,55 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use facet_core::Location;
-use facet_core::measure::{ENV_OPEN, ENV_OUT, ENV_SCROLL_ROWS, ENV_START_US, ScreenReport};
+use facet_core::measure::{
+    ENV_OPEN, ENV_OUT, ENV_SCROLL_ROWS, ENV_START_US, ENV_WINDOWS, ScreenReport,
+};
 use slint::winit_030::winit::event::WindowEvent;
 use slint::{ComponentHandle, Model};
 
 use crate::AppWindow;
 
-/// 목록(또는 읽기 오류)이 창에 들어간 횟수.
-static LOADS: AtomicUsize = AtomicUsize::new(0);
+/// 창마다(창 열쇠 [`window_key`]) 목록(또는 읽기 오류)이 들어간 횟수. 창마다 제 목록이 든 프레임만 센다(창 여럿을 잴 때
+/// `ENV_WINDOWS`가 필요하다).
+static WINDOW_LOADS: Mutex<Vec<(u64, usize)>> = Mutex::new(Vec::new());
+
+/// 첫 프레임을 낸 창 수([`ENV_WINDOWS`]를 줬을 때).
+static FIRST_FRAMES: AtomicUsize = AtomicUsize::new(0);
+
+/// 코어 창 번호를 측정이 쓰는 열쇠로 바꾼다.
+pub fn window_key(window: facet_core::window::WindowId) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    window.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn window_loads(key: u64) -> usize {
+    WINDOW_LOADS.lock().map_or(0, |loads| {
+        loads.iter().find(|(k, _)| *k == key).map_or(0, |(_, n)| *n)
+    })
+}
 
 /// 마지막으로 창에 들어간 항목 수.
 static ROWS: AtomicUsize = AtomicUsize::new(0);
 
 /// 목록(또는 읽기 오류)이 창에 들어갔음을 알린다. 이동한 위치를 읽을 때마다 부른다.
-pub fn mark_loaded(rows: usize) {
+pub fn mark_loaded(window: u64, rows: usize) {
     ROWS.store(rows, Ordering::Relaxed);
-    LOADS.fetch_add(1, Ordering::Release);
+    if let Ok(mut loads) = WINDOW_LOADS.lock() {
+        match loads.iter_mut().find(|(k, _)| *k == window) {
+            Some((_, n)) => *n += 1,
+            None => loads.push((window, 1)),
+        }
+    }
 }
 
 struct State {
     out: String,
+    /// 이 창의 열쇠([`window_key`]).
+    key: u64,
+    /// 이 수만큼의 창이 첫 프레임을 낼 때까지를 첫 화면으로 잰다. 1이면 보통의 측정이다.
+    expected_windows: usize,
     start_us: u64,
     scroll_rows: usize,
     /// 첫 화면 뒤에 이동할 폴더.
@@ -86,7 +115,7 @@ pub fn is_enabled() -> bool {
 ///
 /// Slint는 창마다 winit 이벤트 훅을 하나만 두므로 훅은 `main`이 걸고, 키 위치 적기([`crate::keys`])와 이것을
 /// 차례로 부른다.
-pub fn frame_counter(ui: &AppWindow) -> Option<impl FnMut(&WindowEvent) + 'static> {
+pub fn frame_counter(ui: &AppWindow, key: u64) -> Option<impl FnMut(&WindowEvent) + 'static> {
     let out = std::env::var(ENV_OUT).ok().filter(|v| !v.is_empty())?;
     let env_number = |name: &str| {
         std::env::var(name)
@@ -96,6 +125,8 @@ pub fn frame_counter(ui: &AppWindow) -> Option<impl FnMut(&WindowEvent) + 'stati
     };
     let state = Arc::new(Mutex::new(State {
         out,
+        key,
+        expected_windows: (env_number(ENV_WINDOWS) as usize).max(1),
         start_us: env_number(ENV_START_US),
         scroll_rows: env_number(ENV_SCROLL_ROWS) as usize,
         open: std::env::var_os(ENV_OPEN)
@@ -116,7 +147,8 @@ pub fn frame_counter(ui: &AppWindow) -> Option<impl FnMut(&WindowEvent) + 'stati
             return;
         }
         if let Ok(mut s) = state.lock()
-            && LOADS.load(Ordering::Acquire) > s.loads_seen
+            && window_loads(s.key) > s.loads_seen
+            && !(s.expected_windows > 1 && s.report.first_frame.is_some())
             && !s.finished
             && !s.pending
         {
@@ -146,9 +178,18 @@ fn presented(weak: &slint::Weak<AppWindow>, state: &Mutex<State>) {
             let elapsed_us = now_us().saturating_sub(s.start_us);
             s.report.first_frame = Some(Duration::from_micros(elapsed_us));
             s.report.rows = ROWS.load(Ordering::Relaxed);
+            if s.expected_windows > 1 {
+                // 창 여럿: 마지막 창이 첫 프레임을 낼 때 끝낸다(그 시각이 모든 창의 첫 화면이다).
+                let shown = FIRST_FRAMES.fetch_add(1, Ordering::AcqRel) + 1;
+                if shown >= s.expected_windows {
+                    s.report.windows = shown;
+                    s.finish();
+                }
+                return;
+            }
             if let Some(open) = s.open.clone() {
                 // 이동한 폴더의 목록이 들어오기 전의 프레임(「읽는 중」 등)은 세지 않는다.
-                s.loads_seen = LOADS.load(Ordering::Acquire);
+                s.loads_seen = window_loads(s.key);
                 s.open_started = Some(Instant::now());
                 drop(s);
                 crate::with_first_view(|view| view.go(Location::file_system(open)));

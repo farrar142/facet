@@ -9,9 +9,11 @@ use facet_bench::{
     BENCH_QUERY, BENCH_RESULT_LIMIT, BENCH_SORT, BENCH_SORTED_QUERY, BenchCaller, DEFAULT_COUNT,
     INDEX_COUNT, INDEX_MEMORY_LIMIT, LIST_LIMIT, LIST_SORT_LIMIT, LIST_SORT_TARGET, LIST_TARGET,
     MFT_PARSE_LIMIT, MFT_PARSE_TARGET, MFT_RECORDS, Measurement, QUERY_LIMIT, QUERY_TARGET,
-    RESORT_LIMIT, RESORT_TARGET, SYNTHETIC_VOLUME, check_limit, check_median, check_memory,
-    check_mft_limit, check_query_limit, make_test_folder, measure_filtered_query, measure_list,
-    measure_list_sorted, measure_mft, measure_query, measure_resort, mft_image, synthetic_index,
+    RESORT_LIMIT, RESORT_TARGET, SESSION_PARSE_LIMIT, SESSION_PARSE_TARGET, SESSION_TABS,
+    SYNTHETIC_VOLUME, check_limit, check_median, check_memory, check_mft_limit, check_query_limit,
+    check_session_limit, make_test_folder, measure_filtered_query, measure_list,
+    measure_list_sorted, measure_mft, measure_query, measure_resort, measure_session, mft_image,
+    synthetic_index,
 };
 
 const USAGE: &str = "\
@@ -31,6 +33,9 @@ const USAGE: &str = "\
   facet-bench mft [--count N] [--runs N] [--limit-ms N]
       저장소의 MFT 조각을 되풀이해 레코드 N개(기본 1000000)의 MFT 덩어리를 만들고, 그것을
       인덱스로 만드는 시간을 N회(기본 5) 재어 중앙값이 상한(기본 20000ms)을 넘으면 실패한다.
+  facet-bench session [--runs N] [--limit-ms N]
+      탭 100개 세션 파일(창 다섯 개, 패널 둘, 긴 경로와 한글 경로 섞임)을 읽고 해석하는 시간을
+      N회(기본 5) 재어 중앙값이 상한(기본 50ms)을 넘으면 실패한다.
   facet-bench screen <경로> --app <facet 실행 파일> [--count N] [--runs N] [--scroll-runs N]
                      [--scroll-rows N] [--refresh-hz N] [--json <파일>]
       시험 폴더를 만들거나 확인한 뒤 앱을 측정 모드로 띄워 콜드 스타트(--runs회, 기본 5),
@@ -137,6 +142,7 @@ fn main() -> ExitCode {
         "list" => make_folder(&args).and_then(|()| list(&args)),
         "index" => index(&args),
         "mft" => mft(&args),
+        "session" => session(&args),
         "screen" => make_folder(&args).and_then(|()| screen(&args)),
         other => Err(format!("알 수 없는 명령: {other}\n\n{USAGE}")),
     };
@@ -433,6 +439,35 @@ fn report_query(m: &Measurement, limit: Duration) -> Result<(), String> {
         limit.as_millis()
     );
     check_query_limit(m, limit)?;
+    println!("  상한 안: 통과");
+    Ok(())
+}
+
+fn session(args: &Args) -> Result<(), String> {
+    if args.path.is_some() {
+        return Err(format!(
+            "session 명령은 경로를 받지 않습니다
+
+{USAGE}"
+        ));
+    }
+    warn_debug();
+    let limit = args.limit.unwrap_or(SESSION_PARSE_LIMIT);
+    let m = measure_session(args.runs)?;
+    println!(
+        "세션 읽기·해석 (탭 {}개, 기대 {SESSION_TABS}개, {}회):",
+        m.item_count,
+        m.times.len()
+    );
+    print_times(&m);
+    println!(
+        "  중앙값 {:.2}ms, 최악 {:.2}ms / 로컬 기준 {}ms, CI 상한 {}ms",
+        ms(m.median()),
+        ms(m.max()),
+        SESSION_PARSE_TARGET.as_millis(),
+        limit.as_millis()
+    );
+    check_session_limit(&m, limit)?;
     println!("  상한 안: 통과");
     Ok(())
 }
