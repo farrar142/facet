@@ -23,9 +23,17 @@ use std::time::{Duration, Instant};
 use facet_win::file_ops::{self, CopyStep, FileOpErrorKind};
 
 use super::{
-    Control, CopyRejection, ItemFailure, JobEvent, JobId, Outbox, PROGRESS_INTERVAL, Progress,
-    Remaining, Summary, is_within, same_path,
+    Conflict, ConflictItem, Context, Control, CopyRejection, ItemFailure, ItemKind, JobEvent,
+    JobId, Outbox, PROGRESS_INTERVAL, Progress, Remaining, Resolution, Summary, is_within,
+    same_path,
 };
+
+/// 대상이 이미 있어 다시 확인하는 횟수의 한도. 확인과 쓰기 사이에 밖에서 같은 이름을 만들면 다시 묻는데, 그것이
+/// 끝없이 되풀이되지 않게 한다.
+const MAX_ATTEMPTS: u32 = 3;
+
+/// 덮어쓰기 임시 파일 이름의 번호(프로세스 안에서 겹치지 않게).
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// 같은 폴더로 복사할 때 이름 뒤에 붙이는 말(탐색기와 같다).
 ///
@@ -96,7 +104,8 @@ impl CopyJob {
     /// 일시정지는 항목 사이와 파일 복사의 진행 콜백에서 기다리고, 훑기도 항목마다 기다린다. 취소하면 복사하던
     /// 파일을 그만두고(만들다 만 대상은 `copy_file`이 지운다) 훑기를 멈춘다. 취소로 멈추면 마지막 진행 사건은
     /// 보내지 않는다(끝남 사건의 결과가 마지막 수치다).
-    pub(super) fn run(self, id: JobId, outbox: &Outbox, control: &Control) -> (Summary, bool) {
+    pub(super) fn run(self, context: &Context<'_>) -> (Summary, bool) {
+        let (id, outbox, control) = (context.id, context.outbox, context.control);
         let plans = self.plan();
         let totals = Arc::new(Totals::default());
         let (sender, receiver) = mpsc::channel();
@@ -112,7 +121,9 @@ impl CopyJob {
                 reporter: Reporter::new(id, outbox.clone(), Arc::clone(&totals)),
                 summary: Summary::default(),
                 skip_depth: 0,
-                control,
+                folders: Vec::new(),
+                remembered: None,
+                context,
                 cancelled: false,
             };
             // 훑기가 끝나 통로를 닫을 때까지 받는다. 취소하면 통로를 버려 훑기도 곧 멈춘다.
@@ -182,21 +193,77 @@ impl CopyJob {
 
 /// 같은 폴더 복사의 `n`번째 이름: 1이면 「이름 - 복사본」, 2부터 「이름 - 복사본 (n)」. 파일은 확장자를 뒤에 둔다.
 fn copy_name(name: &OsStr, is_file: bool, n: u32) -> OsString {
+    let mut suffix = COPY_SUFFIX.to_owned();
+    if n > 1 {
+        suffix.push_str(&format!(" ({n})"));
+    }
+    decorated_name(name, is_file, &suffix)
+}
+
+/// 둘 다 유지의 `n`번째(2부터) 이름: 「이름 (n)」. 파일은 확장자를 뒤에 둔다(탐색기와 같다).
+fn numbered_name(name: &OsStr, is_file: bool, n: u32) -> OsString {
+    decorated_name(name, is_file, &format!(" ({n})"))
+}
+
+/// 이름 뒤(파일은 확장자 앞)에 `suffix`를 붙인다.
+fn decorated_name(name: &OsStr, is_file: bool, suffix: &str) -> OsString {
     let path = Path::new(name);
     let (stem, extension) = match (is_file, path.file_stem(), path.extension()) {
         (true, Some(stem), Some(extension)) => (stem, Some(extension)),
         _ => (name, None),
     };
     let mut result = stem.to_owned();
-    result.push(COPY_SUFFIX);
-    if n > 1 {
-        result.push(format!(" ({n})"));
-    }
+    result.push(suffix);
     if let Some(extension) = extension {
         result.push(".");
         result.push(extension);
     }
     result
+}
+
+/// 둘 다 유지에 쓸 이름: `target`과 같은 폴더에서 아직 없는 「이름 (2)」, 「이름 (3)」 ….
+fn free_numbered(target: &Path, is_file: bool) -> PathBuf {
+    let (Some(parent), Some(name)) = (target.parent(), target.file_name()) else {
+        return target.to_path_buf();
+    };
+    (2..)
+        .map(|n| parent.join(numbered_name(name, is_file, n)))
+        .find(|candidate| fs::symlink_metadata(candidate).is_err())
+        .expect("빈 이름은 언젠가 나온다")
+}
+
+/// 덮어쓰기 임시 파일 경로: 대상과 같은 폴더(바꿔치기가 같은 볼륨 안 이름 바꾸기가 되게)의 아직 없는 짧은 이름.
+/// 원래 이름을 넣지 않아 긴 이름에서도 이름 길이 한도를 넘지 않는다.
+fn temp_path(target: &Path) -> PathBuf {
+    let parent = target.parent().unwrap_or(Path::new(""));
+    loop {
+        let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!("~facet-{}-{n}.tmp", std::process::id()));
+        if fs::symlink_metadata(&candidate).is_err() {
+            return candidate;
+        }
+    }
+}
+
+/// 이름 충돌의 한 쪽 항목 정보. 링크는 가리키는 쪽의 종류로 본다(읽지 못하면 링크 자신).
+fn conflict_item(path: &Path) -> ConflictItem {
+    let metadata = fs::metadata(path)
+        .or_else(|_| fs::symlink_metadata(path))
+        .ok();
+    let is_folder = metadata.as_ref().is_some_and(fs::Metadata::is_dir);
+    ConflictItem {
+        path: path.to_path_buf(),
+        kind: if is_folder {
+            ItemKind::Folder
+        } else {
+            ItemKind::File
+        },
+        size: metadata
+            .as_ref()
+            .filter(|_| !is_folder)
+            .map(fs::Metadata::len),
+        modified: metadata.and_then(|m| m.modified().ok()),
+    }
 }
 
 /// 훑기가 센 전체. 훑기 스레드가 늘리고 복사 쪽이 읽는다.
@@ -377,9 +444,37 @@ struct Copier<'a> {
     summary: Summary,
     /// 0이 아니면 건너뛰는 폴더 안이다(그 폴더에서 열린 폴더 깊이).
     skip_depth: usize,
-    control: &'a Control,
+    /// 들어가 있는 폴더(바깥부터). 안의 항목의 대상 경로를 실제 대상 폴더 아래로 바꾸는 데 쓴다.
+    folders: Vec<OpenFolder>,
+    /// 「나머지에도 적용」으로 받은 답.
+    remembered: Option<Resolution>,
+    context: &'a Context<'a>,
     /// 취소로 멈췄다.
     cancelled: bool,
+}
+
+/// 들어가 있는 폴더 하나.
+struct OpenFolder {
+    /// 훑기가 정한 대상 경로(안의 항목의 대상 경로가 이것으로 시작한다).
+    scanned: PathBuf,
+    /// 실제 대상 경로(둘 다 유지로 「이름 (2)」가 됐거나 바깥 폴더가 그랬으면 다르다).
+    actual: PathBuf,
+    /// 이 작업이 만들었다(합친 폴더면 `false`: 시각·속성을 건드리지 않는다).
+    created: bool,
+}
+
+/// 파일 하나를 한 결과.
+enum FileOutcome {
+    /// 복사했다(덮어썼으면 `overwritten`).
+    Copied { overwritten: bool },
+    /// 이름 충돌로 건너뛰었다.
+    Skipped,
+    /// 대상이 쓰는 사이에 생겼다(다시 확인한다).
+    Exists,
+    /// 취소로 그만뒀다.
+    Cancelled,
+    /// 실패했다.
+    Failed(FileOpErrorKind),
 }
 
 impl Copier<'_> {
@@ -395,27 +490,25 @@ impl Copier<'_> {
                 target,
                 size,
             } => {
+                let target = self.actual_target(&target);
                 if self.copy_file(&source, &target, size) {
                     self.reporter.items_done += 1;
                 }
             }
             Entry::FolderStart { source, target } => {
                 self.reporter.current = Some(source.clone());
-                match file_ops::create_folder(&target) {
-                    Ok(()) => self.summary.folders_copied += 1,
-                    Err(error) => {
-                        if error.kind() == FileOpErrorKind::TargetExists {
-                            self.summary.conflicts_skipped += 1;
-                        } else {
-                            self.fail(source, error.kind());
-                        }
-                        self.skip_depth = 1;
-                    }
+                let actual = self.actual_target(&target);
+                if self.start_folder(source, target, actual) {
+                    self.reporter.items_done += 1;
                 }
-                self.reporter.items_done += 1;
             }
             Entry::FolderEnd { source, target } => {
-                if let Err(error) = file_ops::copy_folder_metadata(&source, &target) {
+                // 들어간 폴더만 끝이 온다(건너뛴 폴더의 끝은 `skip`이 먹는다).
+                let folder = self.folders.pop();
+                debug_assert!(folder.as_ref().is_some_and(|f| f.scanned == target));
+                if let Some(folder) = folder.filter(|f| f.created)
+                    && let Err(error) = file_ops::copy_folder_metadata(&source, &folder.actual)
+                {
                     self.fail(source, error.kind());
                 }
             }
@@ -429,6 +522,111 @@ impl Copier<'_> {
             }
         }
         self.reporter.maybe_emit();
+    }
+
+    /// 훑기가 정한 대상 경로를 실제 대상 경로로 바꾼다(바깥 폴더가 「이름 (2)」가 됐으면 그 아래로).
+    fn actual_target(&self, scanned: &Path) -> PathBuf {
+        match self.folders.last() {
+            Some(folder) => match scanned.strip_prefix(&folder.scanned) {
+                Ok(rest) => folder.actual.join(rest),
+                Err(_) => scanned.to_path_buf(),
+            },
+            None => scanned.to_path_buf(),
+        }
+    }
+
+    /// 폴더를 만들거나(있으면 합치거나, 파일과 부딪히면 묻고) 들어간다. 취소로 그만뒀으면 `false`.
+    fn start_folder(&mut self, source: PathBuf, scanned: PathBuf, target: PathBuf) -> bool {
+        for _ in 0..MAX_ATTEMPTS {
+            match fs::symlink_metadata(&target) {
+                // 같은 이름의 폴더(링크가 아닌): 묻지 않고 합친다.
+                Ok(metadata) if metadata.is_dir() => {
+                    self.summary.folders_merged += 1;
+                    self.enter(scanned, target, false);
+                    return true;
+                }
+                // 같은 이름의 파일(또는 링크): 묻는다. 덮어쓰기는 고를 수 없다.
+                Ok(_) => {
+                    let Some(resolution) = self.resolve(&source, &target, false) else {
+                        self.cancelled = true;
+                        return false;
+                    };
+                    match resolution {
+                        Resolution::KeepBoth => {
+                            let renamed = free_numbered(&target, false);
+                            return self.create_folder(source, scanned, renamed);
+                        }
+                        // 덮어쓰기 답은 `resolve`가 받지 않는다.
+                        _ => {
+                            self.summary.conflicts_skipped += 1;
+                            self.skip_depth = 1;
+                            return true;
+                        }
+                    }
+                }
+                Err(_) => match file_ops::create_folder(&target) {
+                    Ok(()) => {
+                        self.summary.folders_copied += 1;
+                        self.enter(scanned, target, true);
+                        return true;
+                    }
+                    // 확인한 뒤 밖에서 생겼다: 다시 본다.
+                    Err(error) if error.kind() == FileOpErrorKind::TargetExists => {}
+                    Err(error) => {
+                        self.fail(source, error.kind());
+                        self.skip_depth = 1;
+                        return true;
+                    }
+                },
+            }
+        }
+        self.fail(source, FileOpErrorKind::TargetExists);
+        self.skip_depth = 1;
+        true
+    }
+
+    /// 둘 다 유지로 정한 새 이름의 폴더를 만들고 들어간다.
+    fn create_folder(&mut self, source: PathBuf, scanned: PathBuf, target: PathBuf) -> bool {
+        match file_ops::create_folder(&target) {
+            Ok(()) => {
+                self.summary.folders_copied += 1;
+                self.enter(scanned, target, true);
+            }
+            Err(error) => {
+                self.fail(source, error.kind());
+                self.skip_depth = 1;
+            }
+        }
+        true
+    }
+
+    fn enter(&mut self, scanned: PathBuf, actual: PathBuf, created: bool) {
+        self.folders.push(OpenFolder {
+            scanned,
+            actual,
+            created,
+        });
+    }
+
+    /// 이름 충돌의 답을 정한다: 「나머지에도 적용」한 답이 이 충돌에 쓸 수 있으면 그것, 아니면 묻는다. 취소되면
+    /// `None`. 덮어쓸 수 없는 충돌에는 덮어쓰기 답이 나오지 않는다(대기열이 거부한다).
+    fn resolve(&mut self, source: &Path, target: &Path, can_overwrite: bool) -> Option<Resolution> {
+        if let Some(remembered) = self.remembered
+            && (can_overwrite || !remembered.overwrites())
+        {
+            return Some(remembered);
+        }
+        let conflict = Conflict {
+            source: conflict_item(source),
+            target: conflict_item(target),
+            can_overwrite,
+            overwrite_is_permanent: can_overwrite,
+        };
+        let answer = self.context.ask(conflict)?;
+        if answer.apply_to_rest {
+            self.remembered = Some(answer.resolution);
+        }
+        Some(answer.resolution)
     }
 
     /// 건너뛰는 폴더 안의 항목: 하지 않고 한 것으로만 센다.
@@ -447,44 +645,113 @@ impl Copier<'_> {
         }
     }
 
-    /// 파일 하나를 복사한다. 취소로 그만뒀으면 `false`(그 파일은 하지 않은 것으로 남는다).
+    /// 파일 하나를 복사한다(대상이 있으면 묻고 답대로). 취소로 그만뒀으면 `false`(그 파일은 하지 않은 것으로
+    /// 남는다).
     fn copy_file(&mut self, source: &Path, target: &Path, size: u64) -> bool {
         self.reporter.current = Some(source.to_path_buf());
         let base = self.reporter.bytes_done;
-        if fs::symlink_metadata(target).is_ok() {
-            self.summary.conflicts_skipped += 1;
-        } else {
-            let reporter = &mut self.reporter;
-            let control = self.control;
-            let result = file_ops::copy_file(source, target, &mut |progress| {
-                // 훑은 뒤 파일이 커졌거나 대체 데이터 스트림이 있어도 센 크기를 넘지 않게 한다.
-                reporter.bytes_done = base + progress.copied.min(size);
-                reporter.maybe_emit();
-                // 일시정지면 여기서(덩어리 사이) 기다린다.
-                if control.proceed() {
-                    CopyStep::Continue
-                } else {
-                    CopyStep::Cancel
-                }
-            });
-            match result {
-                Ok(()) => {
-                    self.summary.files_copied += 1;
-                    self.summary.bytes_copied += size;
-                }
-                Err(error) if error.kind() == FileOpErrorKind::TargetExists => {
-                    self.summary.conflicts_skipped += 1;
-                }
-                Err(error) if error.kind() == FileOpErrorKind::Cancelled => {
-                    self.cancelled = true;
-                    self.reporter.bytes_done = base;
-                    return false;
-                }
-                Err(error) => self.fail(source.to_path_buf(), error.kind()),
+        let mut outcome = FileOutcome::Exists;
+        for _ in 0..MAX_ATTEMPTS {
+            outcome = match fs::symlink_metadata(target) {
+                Err(_) => self.write_file(source, target, size, base),
+                Ok(_) => self.resolve_file(source, target, size, base),
+            };
+            if !matches!(outcome, FileOutcome::Exists) {
+                break;
             }
+            self.reporter.bytes_done = base;
+        }
+        match outcome {
+            FileOutcome::Copied { overwritten } => {
+                self.summary.files_copied += 1;
+                self.summary.bytes_copied += size;
+                if overwritten {
+                    self.summary.files_overwritten += 1;
+                }
+            }
+            FileOutcome::Skipped => self.summary.conflicts_skipped += 1,
+            FileOutcome::Cancelled => {
+                self.cancelled = true;
+                self.reporter.bytes_done = base;
+                return false;
+            }
+            FileOutcome::Exists => self.fail(source.to_path_buf(), FileOpErrorKind::TargetExists),
+            FileOutcome::Failed(kind) => self.fail(source.to_path_buf(), kind),
         }
         self.reporter.bytes_done = base + size;
         true
+    }
+
+    /// 대상에 같은 이름이 있는 파일: 묻고 답대로 한다.
+    fn resolve_file(&mut self, source: &Path, target: &Path, size: u64, base: u64) -> FileOutcome {
+        let target_is_folder = fs::metadata(target).is_ok_and(|m| m.is_dir())
+            || fs::symlink_metadata(target).is_ok_and(|m| m.is_dir());
+        let Some(resolution) = self.resolve(source, target, !target_is_folder) else {
+            return FileOutcome::Cancelled;
+        };
+        match resolution {
+            Resolution::Skip => FileOutcome::Skipped,
+            Resolution::Overwrite => self.overwrite(source, target, size, base),
+            Resolution::OverwriteIfNewer => {
+                let modified = |path: &Path| fs::metadata(path).and_then(|m| m.modified()).ok();
+                match (modified(source), modified(target)) {
+                    (Some(source_time), Some(target_time)) if source_time > target_time => {
+                        self.overwrite(source, target, size, base)
+                    }
+                    _ => FileOutcome::Skipped,
+                }
+            }
+            Resolution::KeepBoth => {
+                let renamed = free_numbered(target, true);
+                match self.write_file(source, &renamed, size, base) {
+                    // 고른 번호를 밖에서 먼저 썼으면 실패로 둔다(같은 질문을 되풀이하지 않게).
+                    FileOutcome::Exists => FileOutcome::Failed(FileOpErrorKind::TargetExists),
+                    outcome => outcome,
+                }
+            }
+        }
+    }
+
+    /// 덮어쓰기: 대상 폴더 안 임시 이름에 다 쓴 뒤 바꿔치기한다. 복사가 실패하거나 취소되면 `copy_file`이 임시
+    /// 파일을 지우고 원래 파일은 그대로다. 바꿔치기가 실패하면 임시 파일을 지운다.
+    fn overwrite(&mut self, source: &Path, target: &Path, size: u64, base: u64) -> FileOutcome {
+        let temp = temp_path(target);
+        match self.write_file(source, &temp, size, base) {
+            FileOutcome::Copied { .. } => match file_ops::replace(&temp, target) {
+                Ok(()) => FileOutcome::Copied { overwritten: true },
+                Err(error) => {
+                    let _ = file_ops::remove_file(&temp);
+                    FileOutcome::Failed(error.kind())
+                }
+            },
+            FileOutcome::Exists => FileOutcome::Failed(FileOpErrorKind::TargetExists),
+            outcome => outcome,
+        }
+    }
+
+    /// 파일 내용을 `target`(없는 이름)에 쓴다.
+    fn write_file(&mut self, source: &Path, target: &Path, size: u64, base: u64) -> FileOutcome {
+        let reporter = &mut self.reporter;
+        let control = self.context.control;
+        let result = file_ops::copy_file(source, target, &mut |progress| {
+            // 훑은 뒤 파일이 커졌거나 대체 데이터 스트림이 있어도 센 크기를 넘지 않게 한다.
+            reporter.bytes_done = base + progress.copied.min(size);
+            reporter.maybe_emit();
+            // 일시정지면 여기서(덩어리 사이) 기다린다.
+            if control.proceed() {
+                CopyStep::Continue
+            } else {
+                CopyStep::Cancel
+            }
+        });
+        match result {
+            Ok(()) => FileOutcome::Copied { overwritten: false },
+            Err(error) => match error.kind() {
+                FileOpErrorKind::TargetExists => FileOutcome::Exists,
+                FileOpErrorKind::Cancelled => FileOutcome::Cancelled,
+                kind => FileOutcome::Failed(kind),
+            },
+        }
     }
 
     fn fail(&mut self, source: PathBuf, kind: FileOpErrorKind) {

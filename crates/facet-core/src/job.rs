@@ -16,6 +16,11 @@
 //! 이미 도는 작업과 나란히 돌릴 수 있다. 상태가 바뀔 때마다 [`JobEvent::StateChanged`]를 보낸다. 끝난 작업에
 //! 이것들을 부르면 아무 일도 없다.
 //!
+//! 작업이 사용자의 답을 기다려야 하면(**이름 충돌**, [`JobEvent::Conflict`]) 그 작업만 [`JobState::AwaitingAnswer`]로
+//! 멈추고 질문 사건을 보낸다. 답을 기다리는 작업은 **차례를 놓는다**: 차례 실행의 다음 작업이 곧 시작할 수 있다.
+//! 답([`JobQueue::answer_conflict`])을 받은 작업은 차례를 다시 기다리지 않고 그 자리에서 이어 돈다(그동안 차례를
+//! 잡은 작업과 나란히). 답을 기다리는 작업도 취소할 수 있다. 오류 질문도 이 규칙을 따른다.
+//!
 //! 지금 있는 작업은 **복사**([`JobQueue::copy`])다. 진행·이름 충돌·오류 처리의 자세한 규칙은 그 문서에 있다.
 
 mod copy;
@@ -26,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 pub use facet_win::file_ops::FileOpErrorKind;
 
@@ -53,7 +58,7 @@ pub enum JobState {
     Running,
     /// 사용자가 멈췄다. 시작 전에 멈춘 작업은 차례가 와도 시작하지 않는다.
     Paused,
-    /// 이름 충돌·오류에 대한 사용자의 답을 기다린다(뒤 티켓).
+    /// 이름 충돌에 대한 사용자의 답을 기다린다. 차례를 잡고 있지 않다.
     AwaitingAnswer,
     /// 끝났다. 항목별 실패가 없다(이름 충돌로 건너뛴 항목은 있을 수 있다).
     Finished,
@@ -125,8 +130,13 @@ pub struct Summary {
     pub folders_copied: u64,
     /// 복사한 바이트.
     pub bytes_copied: u64,
-    /// 대상에 같은 이름이 있어 건너뛴 항목 수(폴더면 그 폴더 하나로 센다).
+    /// 이름 충돌에 건너뛰기(또는 더 새것만 덮어쓰기에서 원본이 새것이 아님)로 답해 건너뛴 항목 수(폴더면 그 폴더
+    /// 하나로 센다).
     pub conflicts_skipped: u64,
+    /// 이름 충돌에 덮어쓰기로 답해 덮어쓴 파일 수([`Summary::files_copied`]에도 든다).
+    pub files_overwritten: u64,
+    /// 대상에 같은 이름의 폴더가 있어 묻지 않고 합친 폴더 수([`Summary::folders_copied`]에는 들지 않는다).
+    pub folders_merged: u64,
     /// 따라 들어가지 않고 건너뛴 심볼릭 링크·정션 수(파일 링크 포함). 링크 자체를 복사하는 것은 뒤 티켓이다.
     pub links_skipped: u64,
     /// 실패한 항목(폴더면 그 아래는 따로 세지 않는다).
@@ -160,6 +170,14 @@ pub enum JobEvent {
         /// 새 상태.
         state: JobState,
     },
+    /// 이름 충돌: 작업이 답을 기다린다. [`JobState::AwaitingAnswer`]의 [`JobEvent::StateChanged`] 바로 뒤에 온다.
+    /// [`JobQueue::answer_conflict`]로 답한다.
+    Conflict {
+        /// 작업.
+        job: JobId,
+        /// 부딪힌 두 항목.
+        conflict: Conflict,
+    },
     /// 작업이 끝났다. 마지막 상태의 [`JobEvent::StateChanged`] 바로 뒤에 온다. 이 작업의 마지막 사건이다.
     Finished {
         /// 작업.
@@ -167,6 +185,99 @@ pub enum JobEvent {
         /// 결과 요약.
         summary: Summary,
     },
+}
+
+/// 이름 충돌의 한 쪽 항목 종류.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ItemKind {
+    /// 파일(파일 링크 포함).
+    File,
+    /// 폴더(폴더 링크·정션 포함).
+    Folder,
+}
+
+/// 이름 충돌의 한 쪽 항목: 화면이 두 쪽을 비교해 보일 정보.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictItem {
+    /// 경로(이름은 마지막 조각).
+    pub path: PathBuf,
+    /// 종류.
+    pub kind: ItemKind,
+    /// 파일 크기(바이트). 폴더는 `None`(안을 세지 않는다).
+    pub size: Option<u64>,
+    /// 수정 시각. 읽지 못하면 `None`.
+    pub modified: Option<SystemTime>,
+}
+
+/// **이름 충돌**: 복사할 항목과 같은 이름이 대상에 이미 있다. 폴더끼리는 묻지 않고 합치므로 질문이 오지 않는다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conflict {
+    /// 복사할 원본 항목.
+    pub source: ConflictItem,
+    /// 대상에 이미 있는 항목.
+    pub target: ConflictItem,
+    /// 덮어쓰기·더 새것만 덮어쓰기를 고를 수 있는지. 파일과 폴더가 부딪히면 `false`이고 그 답은 거부된다.
+    pub can_overwrite: bool,
+    /// 덮어쓰면 대상 파일을 되살릴 수 없는지(영구 삭제). 이 spec의 덮어쓰기는 덮어쓸 수 있으면 늘 `true`다. 화면이
+    /// 덮어쓰기 선택지에 그 사실을 보이는 데 쓴다(문장은 화면 몫).
+    pub overwrite_is_permanent: bool,
+}
+
+/// 이름 충돌에 대한 답의 종류.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Resolution {
+    /// 대상 파일을 원본으로 덮어쓴다(대상 폴더 안 임시 이름에 다 쓴 뒤 바꿔치기, 읽기 전용 대상도).
+    Overwrite,
+    /// 이 항목(폴더면 그 아래 전부)을 하지 않는다.
+    Skip,
+    /// 둘 다 남긴다: 원본을 「이름 (2)」(있으면 (3) …, 파일은 확장자를 뒤에)로 복사한다.
+    KeepBoth,
+    /// 원본의 수정 시각이 대상보다 늦을 때만 덮어쓰고, 아니면 건너뛴다.
+    OverwriteIfNewer,
+}
+
+impl Resolution {
+    /// 대상을 덮어쓸 수 있는 답인지(파일과 폴더가 부딪히면 고를 수 없다).
+    pub fn overwrites(self) -> bool {
+        matches!(self, Resolution::Overwrite | Resolution::OverwriteIfNewer)
+    }
+}
+
+/// 이름 충돌에 대한 답.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ConflictAnswer {
+    /// 답.
+    pub resolution: Resolution,
+    /// 「나머지에도 적용」: 그 작업의 남은 이름 충돌에 같은 답을 쓰고 더 묻지 않는다. 다만 그 답을 쓸 수 없는
+    /// 충돌(덮어쓰기 답인데 파일과 폴더가 부딪힘)은 다시 묻는다.
+    pub apply_to_rest: bool,
+}
+
+impl ConflictAnswer {
+    /// 이 충돌에만 쓰는 답.
+    pub fn once(resolution: Resolution) -> Self {
+        ConflictAnswer {
+            resolution,
+            apply_to_rest: false,
+        }
+    }
+
+    /// 남은 충돌에도 쓰는 답(「나머지에도 적용」).
+    pub fn for_rest(resolution: Resolution) -> Self {
+        ConflictAnswer {
+            resolution,
+            apply_to_rest: true,
+        }
+    }
+}
+
+/// 답을 받지 않은 까닭.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AnswerError {
+    /// 그 작업은 이름 충돌의 답을 기다리지 않는다(없는·끝난·취소 중인 작업 포함).
+    NotAsking,
+    /// 파일과 폴더가 부딪힌 충돌에 덮어쓰기 답을 했다. 작업은 계속 답을 기다린다.
+    OverwriteNotAllowed,
 }
 
 /// 복사를 시작하기 전에 막은 까닭. 이때는 작업을 만들지 않는다.
@@ -198,9 +309,9 @@ impl Job {
     }
 
     /// 작업 스레드에서 끝까지(또는 취소될 때까지) 실행한다. 취소로 멈췄으면 `true`도 돌려준다.
-    fn run(self, id: JobId, outbox: &Outbox, control: &Control) -> (Summary, bool) {
+    fn run(self, context: &Context<'_>) -> (Summary, bool) {
         match self {
-            Job::Copy(job) => job.run(id, outbox, control),
+            Job::Copy(job) => job.run(context),
         }
     }
 }
@@ -239,6 +350,8 @@ struct Control {
 struct Flags {
     paused: bool,
     cancelled: bool,
+    /// 받은 이름 충돌의 답(작업 스레드가 가져간다).
+    answer: Option<ConflictAnswer>,
 }
 
 impl Control {
@@ -263,6 +376,75 @@ impl Control {
         lock(&self.flags).cancelled = true;
         self.changed.notify_all();
     }
+
+    /// 답이 오거나 취소될 때까지 기다린다. 취소됐으면 `None`.
+    fn wait_answer(&self) -> Option<ConflictAnswer> {
+        let mut flags = lock(&self.flags);
+        loop {
+            if flags.cancelled {
+                return None;
+            }
+            if let Some(answer) = flags.answer.take() {
+                return Some(answer);
+            }
+            flags = self
+                .changed
+                .wait(flags)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    fn set_answer(&self, answer: ConflictAnswer) {
+        lock(&self.flags).answer = Some(answer);
+        self.changed.notify_all();
+    }
+}
+
+/// 도는 작업이 대기열과 주고받는 곳: 번호, 사건을 보낼 곳, 일시정지·취소 표지, 판(질문할 때 상태를 바꾼다).
+struct Context<'a> {
+    id: JobId,
+    outbox: &'a Outbox,
+    control: &'a Control,
+    shared: &'a Shared,
+}
+
+impl Context<'_> {
+    /// 이름 충돌을 묻고 답을 기다린다. 기다리는 동안 작업은 [`JobState::AwaitingAnswer`]이고 차례를 놓는다. 답이
+    /// 오면 [`JobState::Running`]으로 이어 가고(상태는 답하는 쪽이 바꾼다), 취소되면 `None`.
+    ///
+    /// 일시정지 중이면 이어 갈 때까지 기다린 뒤 묻는다(일시정지와 답 기다림이 겹치지 않게).
+    fn ask(&self, conflict: Conflict) -> Option<ConflictAnswer> {
+        loop {
+            let mut board = self.shared.board();
+            let slot = board.jobs.get_mut(&self.id)?;
+            if slot.cancelling {
+                return None;
+            }
+            if slot.state == JobState::Paused {
+                drop(board);
+                if !self.control.proceed() {
+                    return None;
+                }
+                continue;
+            }
+            slot.state = JobState::AwaitingAnswer;
+            slot.can_overwrite = conflict.can_overwrite;
+            self.outbox.send(JobEvent::StateChanged {
+                job: self.id,
+                state: JobState::AwaitingAnswer,
+            });
+            self.outbox.send(JobEvent::Conflict {
+                job: self.id,
+                conflict,
+            });
+            if board.turn == Some(self.id) {
+                board.turn = None;
+            }
+            drop(board);
+            self.shared.changed.notify_all();
+            return self.control.wait_answer();
+        }
+    }
 }
 
 /// 잠금이 독(다른 스레드의 패닉)에 걸려도 값을 쓴다. 값은 한 번에 바뀌는 단위로만 고치므로 그대로 쓸 수 있다.
@@ -278,6 +460,8 @@ struct Board {
     pending: VecDeque<JobId>,
     /// 끝나지 않은 작업.
     jobs: HashMap<JobId, Slot>,
+    /// 차례를 잡고 도는 작업. 차례 일꾼은 이것이 비어야 다음 작업을 시작한다. 답을 기다리는 작업은 차례를 놓는다.
+    turn: Option<JobId>,
     /// 대기열을 버렸다. 차례 일꾼은 더 시작할 작업이 없으면 끝난다.
     closed: bool,
 }
@@ -289,6 +473,8 @@ struct Slot {
     control: Arc<Control>,
     /// 취소를 청했다(작업 스레드가 멈추면 취소로 끝난다).
     cancelling: bool,
+    /// 답을 기다리는 이름 충돌에 덮어쓰기 답을 받을 수 있는지.
+    can_overwrite: bool,
 }
 
 /// 시작한 작업: 번호, 작업, 그 표지.
@@ -416,8 +602,14 @@ impl JobQueue {
     /// 원본이 대상과 같은 폴더에 있으면 묻지 않고 「이름 - 복사본」(있으면 「이름 - 복사본 (2)」, 「(3)」 …)으로
     /// 만든다. 파일은 확장자를 이름 뒤에 그대로 둔다.
     ///
-    /// **임시 동작**(질문으로 바꾸는 것은 뒤 티켓): 대상에 같은 이름이 이미 있으면 덮어쓰지 않고 그 항목(폴더면
-    /// 그 아래 전부)을 건너뛰어 [`Summary::conflicts_skipped`]에 센다. 항목별 오류도 묻지 않고 그 항목을 건너뛰어
+    /// **이름 충돌**(대상에 같은 이름이 이미 있음)은 사용자에게 묻는다: 작업이 [`JobState::AwaitingAnswer`]가 되고
+    /// [`JobEvent::Conflict`]를 보낸 뒤 [`JobQueue::answer_conflict`]의 답([`Resolution`])대로 푼다. 「나머지에도
+    /// 적용」이면 그 작업의 남은 충돌에 같은 답을 쓴다. 같은 이름의 폴더끼리는 묻지 않고 합친다(안의 충돌은 다시
+    /// 묻는다, 합친 폴더의 시각·속성은 대상 것을 그대로 둔다). 파일과 폴더가 부딪히면 덮어쓰기를 고를 수 없다.
+    /// 덮어쓰기는 대상 폴더 안 임시 이름에 다 쓴 뒤 바꿔치기하므로, 복사가 실패하거나 취소되면 원래 파일이 그대로
+    /// 남고 임시 파일은 남지 않는다. 덮어쓴 파일은 되살릴 수 없다(영구 삭제).
+    ///
+    /// **임시 동작**(질문으로 바꾸는 것은 뒤 티켓): 항목별 오류는 묻지 않고 그 항목을 건너뛰어
     /// [`Summary::failures`]에 담는다. 실패한 항목이 있으면 작업은 [`JobState::Failed`]로 끝난다.
     ///
     /// 일시정지하면 파일 경계를 기다리지 않고 파일 복사의 진행 콜백(덩어리 사이)에서 멈추고 훑기도 멈춘다. 취소하면
@@ -439,6 +631,7 @@ impl JobQueue {
                     job: Some(job),
                     control: Arc::default(),
                     cancelling: false,
+                    can_overwrite: false,
                 },
             );
             board.pending.push_back(id);
@@ -550,6 +743,35 @@ impl JobQueue {
         true
     }
 
+    /// 이름 충돌의 답을 기다리는 작업에 답한다. 작업은 [`JobState::Running`]이 되어(그 상태 사건을 보낸다) 차례를
+    /// 다시 기다리지 않고 그 자리에서 이어 돈다.
+    ///
+    /// 답을 기다리지 않는 작업이면 [`AnswerError::NotAsking`]. 덮어쓸 수 없는 충돌(파일과 폴더)에 덮어쓰기·더
+    /// 새것만 덮어쓰기로 답하면 [`AnswerError::OverwriteNotAllowed`]이고 작업은 계속 답을 기다린다.
+    pub fn answer_conflict(
+        &mut self,
+        job: JobId,
+        answer: ConflictAnswer,
+    ) -> Result<(), AnswerError> {
+        let mut board = self.shared.board();
+        let Some(slot) = board.jobs.get_mut(&job) else {
+            return Err(AnswerError::NotAsking);
+        };
+        if slot.cancelling || slot.state != JobState::AwaitingAnswer {
+            return Err(AnswerError::NotAsking);
+        }
+        if answer.resolution.overwrites() && !slot.can_overwrite {
+            return Err(AnswerError::OverwriteNotAllowed);
+        }
+        slot.state = JobState::Running;
+        self.outbox.send(JobEvent::StateChanged {
+            job,
+            state: JobState::Running,
+        });
+        slot.control.set_answer(answer);
+        Ok(())
+    }
+
     /// 대기 중인 작업을 차례를 기다리지 않고 바로 시작한다. 이미 도는 작업과 나란히 돌고, 차례 실행은 그대로
     /// 이어진다(이 작업이 끝나도 차례의 다음 작업은 앞 작업이 끝나야 시작한다).
     ///
@@ -575,17 +797,27 @@ impl JobQueue {
     }
 }
 
-/// 차례 일꾼: 차례의 맨 앞 대기 작업을 하나씩 실행한다. 시작할 작업이 없으면 판이 바뀌기를 기다리고, 대기열을
-/// 버렸는데 시작할 작업이 없으면 끝난다.
-fn run_in_turn(shared: &Shared, outbox: &Outbox) {
+/// 차례 일꾼: 차례를 잡은 작업이 없으면 차례의 맨 앞 대기 작업을 시작해 차례를 준다. 작업은 따로 스레드에서
+/// 돌고, 끝나거나 답을 기다리느라 차례를 놓으면 다음 작업을 시작한다. 대기열을 버렸는데 시작할 작업이 없으면
+/// 끝난다.
+fn run_in_turn(shared: &Arc<Shared>, outbox: &Outbox) {
     loop {
         let (id, job, control) = {
             let mut board = shared.board();
             loop {
-                if let Some(next) = board.take_next(outbox) {
+                if board.turn.is_none()
+                    && let Some(next) = board.take_next(outbox)
+                {
+                    board.turn = Some(next.0);
                     break next;
                 }
-                if board.closed {
+                let startable = board.pending.iter().any(|id| {
+                    board
+                        .jobs
+                        .get(id)
+                        .is_some_and(|slot| slot.state == JobState::Queued)
+                });
+                if board.closed && !startable {
                     return;
                 }
                 board = shared
@@ -594,13 +826,24 @@ fn run_in_turn(shared: &Shared, outbox: &Outbox) {
                     .unwrap_or_else(PoisonError::into_inner);
             }
         };
-        run_job(id, job, &control, shared, outbox);
+        let shared = Arc::clone(shared);
+        let outbox = outbox.clone();
+        thread::Builder::new()
+            .name("facet-job".into())
+            .spawn(move || run_job(id, job, &control, &shared, &outbox))
+            .expect("작업 스레드를 띄우지 못했다");
     }
 }
 
-/// 작업 하나를 이 스레드에서 끝까지 실행하고 마지막 상태와 끝남 사건을 보낸다.
+/// 작업 하나를 이 스레드에서 끝까지 실행하고 마지막 상태와 끝남 사건을 보낸다. 차례를 잡고 있었으면 놓는다.
 fn run_job(id: JobId, job: Job, control: &Control, shared: &Shared, outbox: &Outbox) {
-    let result = panic::catch_unwind(AssertUnwindSafe(|| job.run(id, outbox, control)));
+    let context = Context {
+        id,
+        outbox,
+        control,
+        shared,
+    };
+    let result = panic::catch_unwind(AssertUnwindSafe(|| job.run(&context)));
     let (summary, state) = match result {
         Ok((summary, true)) => (summary, JobState::Cancelled),
         Ok((summary, false)) if summary.failures.is_empty() => (summary, JobState::Finished),
@@ -611,6 +854,9 @@ fn run_job(id: JobId, job: Job, control: &Control, shared: &Shared, outbox: &Out
     let mut board = shared.board();
     // 끝남을 보내기 전에 판에서 빼, 끝남을 받은 쪽이 보면 이미 끝난 것으로 보인다.
     board.jobs.remove(&id);
+    if board.turn == Some(id) {
+        board.turn = None;
+    }
     outbox.send(JobEvent::StateChanged { job: id, state });
     outbox.send(JobEvent::Finished { job: id, summary });
     drop(board);

@@ -443,45 +443,6 @@ mod windows {
     }
 
     #[test]
-    fn 이름_충돌은_덮어쓰지_않고_건너뛰어_센다() {
-        let dir = TempDir::new().unwrap();
-        let source = dir.path().join("원본");
-        fs::create_dir_all(source.join("폴더")).unwrap();
-        fs::write(source.join("a.txt"), "새 내용").unwrap();
-        fs::write(source.join("b.txt"), "b").unwrap();
-        fs::write(source.join("폴더").join("c.txt"), "c").unwrap();
-        let target = dir.path().join("대상");
-        fs::create_dir_all(target.join("폴더")).unwrap();
-        fs::write(target.join("a.txt"), "원래 내용").unwrap();
-
-        let mut queue = JobQueue::new();
-        let sources = vec![
-            source.join("a.txt"),
-            source.join("b.txt"),
-            source.join("폴더"),
-        ];
-        let events = copy_and_wait(&mut queue, sources, &target);
-        let id = match events.last().unwrap() {
-            JobEvent::Finished { job, .. } => *job,
-            other => panic!("{other:?}"),
-        };
-        let summary = summary_of(&events, id);
-        assert_eq!(summary.conflicts_skipped, 2, "{summary:?}");
-        assert_eq!(summary.files_copied, 1, "{summary:?}");
-        assert_eq!(
-            fs::read_to_string(target.join("a.txt")).unwrap(),
-            "원래 내용"
-        );
-        assert_eq!(fs::read_to_string(target.join("b.txt")).unwrap(), "b");
-        assert!(!target.join("폴더").join("c.txt").exists());
-        // 건너뛴 것은 실패가 아니다.
-        assert!(events.contains(&JobEvent::StateChanged {
-            job: id,
-            state: JobState::Finished
-        }));
-    }
-
-    #[test]
     fn 없는_원본은_항목_오류로_세고_작업은_실패로_끝난다() {
         let dir = TempDir::new().unwrap();
         let target = dir.path().join("대상");
