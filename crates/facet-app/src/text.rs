@@ -23,6 +23,22 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::SortByModified => "수정한 날짜로 정렬",
         CommandId::SortByType => "유형으로 정렬",
         CommandId::SortBySize => "크기로 정렬",
+        CommandId::NewTab => "새 탭",
+        CommandId::CloseTab => "탭 닫기",
+        CommandId::NextTab => "다음 탭",
+        CommandId::PreviousTab => "이전 탭",
+        CommandId::GoToTab(1) => "첫 번째 탭",
+        CommandId::GoToTab(2) => "두 번째 탭",
+        CommandId::GoToTab(3) => "세 번째 탭",
+        CommandId::GoToTab(4) => "네 번째 탭",
+        CommandId::GoToTab(5) => "다섯 번째 탭",
+        CommandId::GoToTab(6) => "여섯 번째 탭",
+        CommandId::GoToTab(7) => "일곱 번째 탭",
+        CommandId::GoToTab(8) => "여덟 번째 탭",
+        // 명령 목록에는 1..=8만 있다.
+        CommandId::GoToTab(_) => "n번째 탭",
+        CommandId::LastTab => "마지막 탭",
+        CommandId::OpenInNewTab => "새 탭에서 열기",
     }
 }
 
