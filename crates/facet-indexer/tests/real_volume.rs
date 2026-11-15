@@ -26,7 +26,8 @@ use std::time::{Duration, Instant};
 
 use facet_index::ATTRIBUTE_DIRECTORY;
 use facet_indexer::SERVICE_NAME;
-use facet_indexer::follow::Stop;
+use facet_indexer::follow::{self, Stop};
+use facet_indexer::index_dir;
 use facet_indexer::service::index_volumes;
 use facet_indexer::session::Cancel;
 use facet_indexer::volume::local_volumes;
@@ -180,7 +181,7 @@ impl Following {
     fn start(targets: Vec<(String, Plan)>) -> Self {
         let volumes = Arc::new(Volumes::new());
         let stop = Stop::new();
-        let threads = index_volumes(&volumes, targets, &stop);
+        let threads = index_volumes(&volumes, targets, &stop, None);
         Self {
             volumes,
             stop,
@@ -327,6 +328,199 @@ fn service_exists() -> bool {
         .args(["query", SERVICE_NAME])
         .output()
         .is_ok_and(|o| o.status.success())
+}
+
+fn sc(args: &[&str]) {
+    let out = Command::new("sc.exe").args(args).output().unwrap();
+    assert!(
+        out.status.success(),
+        "sc {args:?} 실패: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// 서비스의 상태 이름(`RUNNING`, `STOPPED` 등).
+fn sc_state() -> Option<String> {
+    let out = Command::new("sc.exe")
+        .args(["query", SERVICE_NAME])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    ["RUNNING", "STOPPED", "START_PENDING", "STOP_PENDING"]
+        .into_iter()
+        .find(|s| text.contains(s))
+        .map(str::to_owned)
+}
+
+fn wait_until(what: &str, patience: Duration, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + patience;
+    while !done() {
+        assert!(
+            Instant::now() < deadline,
+            "{what}: {}초 안에 되지 않음",
+            patience.as_secs()
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn search_output(query: &Path, part: &str) -> String {
+    let out = Command::new(query).args(["search", part]).output().unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// 서비스 파이프에 붙어 `volume`이 「준비됨」이 될 때까지 상태 질의를 되풀이한다. 항목 수를 돌려준다.
+fn wait_ready_via_pipe(volume: &str) -> u64 {
+    let deadline = Instant::now() + Duration::from_secs(300);
+    let mut pipe = loop {
+        match OpenOptions::new()
+            .access_mode(PIPE_CLIENT_ACCESS)
+            .open(PIPE_NAME)
+        {
+            Ok(p) => break p,
+            Err(e) if Instant::now() < deadline => {
+                eprintln!("파이프를 기다림: {e}");
+                thread::sleep(Duration::from_millis(200));
+            }
+            Err(e) => panic!("서비스 파이프에 붙지 못함: {e}"),
+        }
+    };
+    assert!(matches!(
+        ask(
+            &mut pipe,
+            &Request::Hello {
+                version: PROTOCOL_VERSION
+            }
+        ),
+        Response::HelloAccepted { .. }
+    ));
+    loop {
+        let Response::Status(status) = ask(&mut pipe, &Request::Status) else {
+            panic!("상태 응답이 아님")
+        };
+        let state = status
+            .volumes
+            .iter()
+            .find(|v| v.volume == volume)
+            .map(|v| v.state.clone());
+        match state {
+            Some(VolumeState::Ready { items }) => return items,
+            Some(VolumeState::Building { .. }) | None => {}
+            Some(other) => panic!("{volume}의 상태가 {other:?}"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{volume}의 인덱스가 300초 안에 준비되지 않음"
+        );
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// 모든 권한(`FILE_ALL_ACCESS`).
+const FILE_ALL_ACCESS: u32 = 0x001F_01FF;
+
+/// `path`의 DACL이 SYSTEM과 Administrators에게만 모든 권한을 준다(허용 ACE만, 그 둘만).
+fn assert_only_system_and_administrators(path: &Path) {
+    let security = index_dir::read_security(path).unwrap();
+    let sids: BTreeSet<&str> = security.aces.iter().map(|a| a.sid.as_str()).collect();
+    assert_eq!(
+        sids,
+        BTreeSet::from([index_dir::SYSTEM_SID, index_dir::ADMINISTRATORS_SID]),
+        "{}: {security:?}",
+        path.display()
+    );
+    for ace in &security.aces {
+        assert!(
+            ace.allow && ace.mask == FILE_ALL_ACCESS,
+            "{}: {security:?}",
+            path.display()
+        );
+    }
+}
+
+/// `path`가 SYSTEM과 Administrators만 쓰는 폴더다: 소유자 Administrators, 상속을 막은 DACL에 그 둘만.
+fn assert_locked_down(path: &Path) {
+    let security = index_dir::read_security(path).unwrap();
+    assert!(path.is_dir(), "{}가 폴더가 아님", path.display());
+    assert!(
+        !fs::symlink_metadata(path).unwrap().file_type().is_symlink(),
+        "{}가 링크임",
+        path.display()
+    );
+    assert_eq!(
+        security.owner,
+        index_dir::ADMINISTRATORS_SID,
+        "{}",
+        path.display()
+    );
+    assert!(
+        security.protected,
+        "{}: 상속을 막지 않음 {security:?}",
+        path.display()
+    );
+    assert_only_system_and_administrators(path);
+}
+
+#[test]
+#[ignore = "실제 볼륨 테스트: 관리자 권한이 필요하다(소유자를 바꾼다. cargo xtask ci가 관리자일 때 돌린다)"]
+fn real_volume_index_dir_is_locked_down_even_if_someone_made_it_first() {
+    // 새로 만들 때.
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("facet").join("index");
+    index_dir::prepare(&dir).unwrap();
+    assert_locked_down(dir.parent().unwrap());
+    assert_locked_down(&dir);
+    // 다시 해도 된다.
+    index_dir::prepare(&dir).unwrap();
+    assert_locked_down(&dir);
+
+    // 다른 사람이 먼저 만들어 자기 소유로 두고 모두에게 권한을 준 폴더와 그 안에 넣어 둔 파일.
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("facet").join("index");
+    fs::create_dir_all(&dir).unwrap();
+    let planted = dir.join("C.facetidx");
+    fs::write(&planted, b"planted").unwrap();
+    let open = "O:WDD:(A;OICI;FA;;;WD)";
+    index_dir::apply_sddl(dir.parent().unwrap(), open).unwrap();
+    index_dir::apply_sddl(&dir, open).unwrap();
+    index_dir::apply_sddl(&planted, "O:WDD:P(A;;FA;;;WD)").unwrap();
+    assert_eq!(index_dir::read_security(&dir).unwrap().owner, "S-1-1-0");
+    index_dir::prepare(&dir).unwrap();
+    assert_locked_down(dir.parent().unwrap());
+    assert_locked_down(&dir);
+    assert!(!planted.exists(), "남이 넣어 둔 파일이 남아 있음");
+
+    // 인덱스 폴더 자리에 다른 곳을 가리키는 접합(junction)이 있으면 따라가지 않는다.
+    let base = tempfile::tempdir().unwrap();
+    let elsewhere = base.path().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::write(elsewhere.join("keep.txt"), b"keep").unwrap();
+    let dir = base.path().join("facet").join("index");
+    fs::create_dir_all(dir.parent().unwrap()).unwrap();
+    let made = Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&dir)
+        .arg(&elsewhere)
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "접합을 만들지 못함");
+    index_dir::prepare(&dir).unwrap();
+    assert_locked_down(&dir);
+    assert!(
+        elsewhere.join("keep.txt").exists(),
+        "접합이 가리키던 곳을 건드림"
+    );
+    let elsewhere_security = index_dir::read_security(&elsewhere).unwrap();
+    assert!(
+        !elsewhere_security.protected,
+        "접합이 가리키던 곳의 권한을 바꿈"
+    );
+
+    // 제거하면 인덱스 폴더와 빈 부모 폴더가 사라진다.
+    index_dir::remove(&dir).unwrap();
+    assert!(!dir.exists());
+    assert!(!dir.parent().unwrap().exists());
+    index_dir::remove(&dir).unwrap();
 }
 
 fn ask(pipe: &mut fs::File, request: &Request) -> Response {
@@ -479,12 +673,51 @@ fn real_volume_service_install_index_query_uninstall() {
         thread::sleep(Duration::from_millis(20));
     }
 
+    // 시험 볼륨의 인덱스가 인덱스 폴더에 저장되고, 폴더는 SYSTEM과 Administrators만 쓴다.
+    let dir = index_dir::default_dir();
+    let saved = dir.join(follow::file_name(&volume));
+    wait_until("인덱스 파일 저장", Duration::from_secs(60), || {
+        saved.exists()
+    });
+    assert_locked_down(&dir);
+    assert_locked_down(dir.parent().unwrap());
+    assert_only_system_and_administrators(&saved);
+
+    // 서비스 중지 → 파일 바꾸기 → 시작 → 꺼져 있던 동안의 변경이 반영된다.
+    sc(&["stop", SERVICE_NAME]);
+    wait_until("서비스 멈춤", Duration::from_secs(60), || {
+        sc_state().as_deref() == Some("STOPPED")
+    });
+    let stopped_bytes = fs::read(&saved).unwrap();
+    let offline = format!("꺼진 동안 {}.txt", std::process::id());
+    let offline_path = scratch.file(&offline, 9).display().to_string();
+    fs::remove_file(&file).unwrap();
+    sc(&["start", SERVICE_NAME]);
+    let items = wait_ready_via_pipe(&volume);
+    assert!(items > 0);
+    wait_until(
+        "꺼져 있던 동안의 변경 반영",
+        Duration::from_secs(30),
+        || {
+            let made = search_output(&query, &offline);
+            let gone = search_output(&query, &unique);
+            made.contains(&offline_path) && !gone.contains(&file_path)
+        },
+    );
+    // 저장한 인덱스를 읽어 따라잡았다: 다시 만들었다면 만든 즉시 새 인덱스로 파일을 바꿨을 것이다.
+    assert_eq!(
+        fs::read(&saved).unwrap(),
+        stopped_bytes,
+        "다시 뜬 서비스가 저장한 인덱스를 쓰지 않고 다시 만듦"
+    );
+
     let removed = Command::new(env!("CARGO_BIN_EXE_facet-indexer"))
         .arg("uninstall")
         .status()
         .unwrap();
     assert!(removed.success(), "uninstall 실패: {removed}");
     assert!(!service_exists(), "제거한 뒤에도 서비스가 남아 있음");
+    assert!(!dir.exists(), "제거한 뒤에도 인덱스 폴더가 남아 있음");
     // 서비스가 멈췄으므로 파이프도 없다.
     let out = Command::new(&query).arg("status").output().unwrap();
     assert_eq!(

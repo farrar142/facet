@@ -104,7 +104,7 @@ fn last_error() -> io::Error {
 }
 
 /// `LocalFree`로 풀어야 하는 메모리.
-struct Local(*mut c_void);
+pub(crate) struct Local(pub(crate) *mut c_void);
 
 impl Drop for Local {
     fn drop(&mut self) {
@@ -136,7 +136,7 @@ unsafe fn read_wide(p: *const u16) -> String {
 ///
 /// # Safety
 /// `sid`는 유효한 SID를 가리켜야 한다.
-unsafe fn sid_string(sid: PSID) -> io::Result<String> {
+pub(crate) unsafe fn sid_string(sid: PSID) -> io::Result<String> {
     let mut out: *mut u16 = null_mut();
     // SAFETY: 호출자가 sid의 유효함을 보장하고, out은 쓸 수 있는 지역 변수다.
     if unsafe { ConvertSidToStringSidW(sid, &mut out) } == 0 {
@@ -181,7 +181,7 @@ pub fn current_user_sid() -> io::Result<String> {
 }
 
 /// SDDL에서 만든 자기 완결 보안 설명자.
-fn security_descriptor(sddl: &str) -> io::Result<Local> {
+pub(crate) fn security_descriptor(sddl: &str) -> io::Result<Local> {
     let text = wide(sddl);
     let mut sd: PSECURITY_DESCRIPTOR = null_mut();
     // SAFETY: text는 NUL로 끝나는 UTF-16 문자열이고 sd는 쓸 수 있는 지역 변수다. 크기는 받지 않는다.
@@ -226,39 +226,50 @@ fn read_security(handle: HANDLE) -> io::Result<PipeSecurity> {
     if unsafe { GetSecurityDescriptorControl(sd.0, &mut control, &mut revision) } == 0 {
         return Err(last_error());
     }
-    let mut aces = Vec::new();
-    if !dacl.is_null() {
-        // SAFETY: dacl은 sd 안을 가리키고 sd는 이 함수가 끝날 때까지 살아 있다.
-        let count = unsafe { (*dacl).AceCount };
-        for i in 0..u32::from(count) {
-            let mut ace: *mut c_void = null_mut();
-            // SAFETY: i는 ACE 개수보다 작다.
-            if unsafe { GetAce(dacl, i, &mut ace) } == 0 {
-                return Err(last_error());
-            }
-            // SAFETY: GetAce가 돌려준 ACE는 ACE_HEADER로 시작한다.
-            let kind = unsafe { (*ace.cast::<ACE_HEADER>()).AceType };
-            // 0 = ACCESS_ALLOWED_ACE_TYPE, 1 = ACCESS_DENIED_ACE_TYPE. 둘은 배치가 같다.
-            if kind > 1 {
-                continue;
-            }
-            let ace = ace.cast::<ACCESS_ALLOWED_ACE>();
-            // SAFETY: 허용·거부 ACE는 머리, 권한, SID 순서이고 SID는 SidStart에서 시작한다.
-            let (mask, sid) = unsafe {
-                let sid_ptr: PSID = (&raw mut (*ace).SidStart).cast();
-                ((*ace).Mask, sid_string(sid_ptr)?)
-            };
-            aces.push(Ace {
-                allow: kind == 0,
-                sid,
-                mask,
-            });
-        }
-    }
+    // SAFETY: dacl은 널이거나 sd 안을 가리키고 sd는 이 함수가 끝날 때까지 살아 있다.
+    let aces = unsafe { dacl_aces(dacl) }?;
     Ok(PipeSecurity {
         protected: control & SE_DACL_PROTECTED != 0,
         aces,
     })
+}
+
+/// DACL의 허용·거부 ACE들. 다른 종류의 ACE는 담지 않는다. `dacl`이 널이면 빈 목록이다.
+///
+/// # Safety
+/// `dacl`은 널이거나 유효한 ACL을 가리켜야 한다.
+pub(crate) unsafe fn dacl_aces(dacl: *const ACL) -> io::Result<Vec<Ace>> {
+    let mut aces = Vec::new();
+    if dacl.is_null() {
+        return Ok(aces);
+    }
+    // SAFETY: 호출자가 dacl의 유효함을 보장한다.
+    let count = unsafe { (*dacl).AceCount };
+    for i in 0..u32::from(count) {
+        let mut ace: *mut c_void = null_mut();
+        // SAFETY: i는 ACE 개수보다 작다.
+        if unsafe { GetAce(dacl, i, &mut ace) } == 0 {
+            return Err(last_error());
+        }
+        // SAFETY: GetAce가 돌려준 ACE는 ACE_HEADER로 시작한다.
+        let kind = unsafe { (*ace.cast::<ACE_HEADER>()).AceType };
+        // 0 = ACCESS_ALLOWED_ACE_TYPE, 1 = ACCESS_DENIED_ACE_TYPE. 둘은 배치가 같다.
+        if kind > 1 {
+            continue;
+        }
+        let ace = ace.cast::<ACCESS_ALLOWED_ACE>();
+        // SAFETY: 허용·거부 ACE는 머리, 권한, SID 순서이고 SID는 SidStart에서 시작한다.
+        let (mask, sid) = unsafe {
+            let sid_ptr: PSID = (&raw mut (*ace).SidStart).cast();
+            ((*ace).Mask, sid_string(sid_ptr)?)
+        };
+        aces.push(Ace {
+            allow: kind == 0,
+            sid,
+            mask,
+        });
+    }
+    Ok(aces)
 }
 
 /// 파이프 인스턴스 하나를 만든다.

@@ -45,7 +45,7 @@ const USAGE: &str = "\
                                  영문자·숫자·`.`·`-`·`_`만 쓸 수 있다
   indexer <install|uninstall>    (관리자) install: facet-indexer를 릴리스 빌드하고 target/release의 실행 파일을
                                  인덱서 서비스(LocalSystem, 자동 시작)로 등록해 시작한다.
-                                 uninstall: 서비스를 멈추고 지운다. 서비스가 도는 동안에는 실행 파일이 잠겨
+                                 uninstall: 서비스를 멈추고 지우고 인덱스 폴더도 지운다. 서비스가 도는 동안에는 실행 파일이 잠겨
                                  다시 빌드하지 못하므로, 코드를 고친 뒤에는 uninstall 다음 install을 한다";
 
 /// 벤치마크 폴더의 항목 수.

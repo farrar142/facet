@@ -59,11 +59,13 @@ fn run_uninstall() -> ExitCode {
 
     match facet_indexer::service::uninstall() {
         Ok(Uninstalled::Removed) => {
-            println!("서비스 {SERVICE_NAME}를 멈추고 지웠습니다.");
+            println!("서비스 {SERVICE_NAME}를 멈추고 지웠습니다. 인덱스 폴더도 지웠습니다.");
             ExitCode::SUCCESS
         }
         Ok(Uninstalled::NotInstalled) => {
-            println!("서비스 {SERVICE_NAME}는 설치돼 있지 않습니다.");
+            println!(
+                "서비스 {SERVICE_NAME}는 설치돼 있지 않습니다. 남은 인덱스 폴더가 있으면 지웠습니다."
+            );
             ExitCode::SUCCESS
         }
         Err(e) => {

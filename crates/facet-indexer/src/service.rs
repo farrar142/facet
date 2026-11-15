@@ -4,7 +4,10 @@
 //!   로컬 NTFS 볼륨마다 첫 인덱스를 만든 뒤 USN 저널을 따라간다([`index_volumes`]). 멈추라는
 //!   제어가 오면 따라가기에 멈추라고 알리고 파이프 서버를 닫고 끝난다.
 //! - 설치([`install`]): 이 실행 파일을 LocalSystem 계정의 자동 시작 서비스로 등록하고 시작한다.
-//! - 제거([`uninstall`]): 서비스를 멈추고 지운다.
+//! - 제거([`uninstall`]): 서비스를 멈추고 지우고, 인덱스 폴더도 지운다.
+//!
+//! 본체는 볼륨마다 인덱스를 `%ProgramData%\facet\index\`([`index_dir`])에 저장하고, 다시 뜨면 그
+//! 파일을 읽어 꺼져 있던 동안의 변경을 따라잡는다([`follow::run`]). 멈출 때 한 번 더 저장한다.
 
 use std::ffi::c_void;
 use std::io;
@@ -32,7 +35,8 @@ use windows_sys::Win32::System::Services::{
     SetServiceStatus, StartServiceCtrlDispatcherW, StartServiceW,
 };
 
-use crate::follow::{self, Stop};
+use crate::follow::{self, IndexFile, Stop};
+use crate::index_dir;
 use crate::pipe::PipeServer;
 use crate::volume::{self, NEED_ADMIN, is_elevated};
 use crate::volumes::{Plan, Volumes};
@@ -196,11 +200,18 @@ pub enum Uninstalled {
     NotInstalled,
 }
 
-/// 제거 명령: 서비스 [`SERVICE_NAME`]을 멈추고 지운다. 지워질 때까지 기다린다.
+/// 제거 명령: 서비스 [`SERVICE_NAME`]을 멈추고 지운 뒤(지워질 때까지 기다린다) 인덱스 폴더
+/// ([`index_dir::default_dir`])도 지운다. 서비스가 없어도 남은 인덱스 폴더는 지운다.
 pub fn uninstall() -> Result<Uninstalled, String> {
     if !is_elevated() {
         return Err(NEED_ADMIN.to_owned());
     }
+    let removed = remove_service()?;
+    index_dir::remove(&index_dir::default_dir())?;
+    Ok(removed)
+}
+
+fn remove_service() -> Result<Uninstalled, String> {
     let manager = open_manager()?;
     let Some(service) = open_service(&manager)? else {
         return Ok(Uninstalled::NotInstalled);
@@ -246,11 +257,16 @@ pub fn uninstall() -> Result<Uninstalled, String> {
 ///
 /// 스레드는 `stop`이 서면 끝난다(인덱스를 만드는 중이면 다 만든 뒤에).
 ///
+/// `index_dir`을 주면 볼륨마다 그 폴더의 파일 하나([`follow::file_name`])에 인덱스를 저장하고,
+/// 시작할 때 그 파일이 쓸 만하면 다시 만들지 않고 쓴다([`follow::run`]). 저장 주기는
+/// [`follow::SAVE_POLICY`]다.
+///
 /// 볼륨마다 스레드를 따로 두는 것은, 큰 볼륨(C:)을 읽는 동안 작은 볼륨이 기다리지 않게 하려는 것이다.
 pub fn index_volumes(
     volumes: &Arc<Volumes>,
     targets: Vec<(String, Plan)>,
     stop: &Stop,
+    index_dir: Option<&Path>,
 ) -> Vec<JoinHandle<()>> {
     let mut threads = Vec::new();
     for (name, plan) in targets {
@@ -263,11 +279,19 @@ pub fn index_volumes(
                 };
                 let shared = Arc::clone(volumes);
                 let stop = stop.clone();
+                let file = index_dir.map(|dir| IndexFile::in_dir(dir, &name, follow::SAVE_POLICY));
                 let spawned = thread::Builder::new()
                     .name(format!("facet-index-{drive}"))
                     .spawn(move || {
                         let mut source = volume::NtfsSource::new(drive);
-                        follow::run(&shared, &name, &mut source, &stop, follow::POLL);
+                        follow::run(
+                            &shared,
+                            &name,
+                            &mut source,
+                            &stop,
+                            follow::POLL,
+                            file.as_ref(),
+                        );
                     });
                 match spawned {
                     Ok(t) => threads.push(t),
@@ -386,9 +410,19 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut windows_sys::core
             return;
         }
     };
-    // 인덱스는 뒤에서 만들고 따라간다. 그동안 상태 질의는 「만드는 중」을 돌려준다.
+    // 인덱스 폴더를 SYSTEM과 Administrators만 쓰도록 준비한다. 준비하지 못하면 저장하지 않고 메모리
+    // 인덱스로만 돈다(아무나 쓸 수 있는 곳에 쓰지 않는다).
+    let dir = index_dir::default_dir();
+    let dir = index_dir::prepare(&dir).ok().map(|()| dir);
+    // 인덱스는 뒤에서 만들거나 저장한 파일에서 읽고 따라간다. 그동안 상태 질의는 「만드는 중」을
+    // 돌려준다.
     let followers = Stop::new();
-    let _threads = index_volumes(&volumes, volume::local_volumes(), &followers);
+    let threads = index_volumes(
+        &volumes,
+        volume::local_volumes(),
+        &followers,
+        dir.as_deref(),
+    );
     report(SERVICE_RUNNING, NO_ERROR);
 
     let (lock, wake) = &STOP;
@@ -399,7 +433,16 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut windows_sys::core
     drop(stop);
     followers.stop();
     drop(server);
-    // 따라가기 스레드는 기다리지 않는다(인덱스를 만드는 중이면 오래 걸린다). 멈춤을 알리면
-    // 프로세스가 끝나며 함께 끝난다.
+    // 따라가던 스레드는 멈추며 인덱스를 저장하므로 [`STOP_WAIT`]까지 기다린다. 인덱스를 처음 만드는
+    // 중인 스레드는 기다리지 않는다(오래 걸린다). 멈춤을 알리면 프로세스가 끝나며 함께 끝난다.
+    let deadline = Instant::now() + STOP_WAIT;
+    while threads.iter().any(|t| !t.is_finished()) && Instant::now() < deadline {
+        report(SERVICE_STOP_PENDING, NO_ERROR);
+        thread::sleep(Duration::from_millis(100));
+    }
     report(SERVICE_STOPPED, NO_ERROR);
 }
+
+/// 서비스가 멈출 때 볼륨 스레드들이 인덱스를 저장하기를 기다리는 시간의 상한. 시스템 종료 때
+/// 서비스 관리자가 기다려 주는 시간(기본 수 초~20초) 안쪽으로 잡았다.
+const STOP_WAIT: Duration = Duration::from_secs(15);

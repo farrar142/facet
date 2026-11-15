@@ -11,8 +11,10 @@
 //!   드라이브 문자가 있는 로컬 NTFS 볼륨마다 MFT 전체를 읽어 첫 인덱스를 만들고([`build`]) USN
 //!   저널을 따라가 변경을 적용한다. 따라갈 수 없게 되면 스스로 다시 만든다([`follow`]).
 //!   볼륨 여럿의 인덱스와 상태는 [`volumes::Volumes`]가 들고 질의에 답한다. NTFS가 아닌 볼륨은
-//!   상태 질의에 「인덱스 없음(까닭)」으로 보인다.
-//! - 개발용 설치·제거(하위 명령 `install`·`uninstall`, 관리자 권한).
+//!   상태 질의에 「인덱스 없음(까닭)」으로 보인다. 인덱스는 볼륨마다 `%ProgramData%\facet\index\`
+//!   ([`index_dir`], SYSTEM과 Administrators만 쓴다)에 저장해 다시 뜬 뒤 읽고 꺼져 있던 동안의
+//!   변경을 따라잡는다([`follow::IndexFile`]).
+//! - 개발용 설치·제거(하위 명령 `install`·`uninstall`, 관리자 권한). 제거는 인덱스 폴더도 지운다.
 //! - 개발용 하위 명령 `dump-mft`. 관리자 권한으로 NTFS 볼륨을 열어 MFT의 원시 레코드를
 //!   덩어리째 읽어 파일로 떠 낸다. MFT 파서 테스트에 쓰는 「MFT 조각」을 만드는 데
 //!   쓴다(`testdata/mft/README.md`).
@@ -23,6 +25,8 @@ pub mod build;
 pub mod cli;
 pub mod dump;
 pub mod follow;
+#[cfg(windows)]
+pub mod index_dir;
 pub mod layout;
 #[cfg(windows)]
 pub mod pipe;
