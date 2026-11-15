@@ -182,22 +182,49 @@ pub fn make_test_folder(path: &Path, count: usize) -> Result<MakeReport, TestFol
             .map_err(io_err(&item_path))?;
     }
 
-    let created = wanted.len();
+    let mut created = 0;
     for entry in wanted.into_values() {
         let item_path = path.join(&entry.name);
-        if entry.is_folder {
-            fs::create_dir(&item_path).map_err(io_err(&item_path))?;
+        let made = if entry.is_folder {
+            fs::create_dir(&item_path)
         } else {
             OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(&item_path)
                 .and_then(|f| f.set_len(entry.size))
-                .map_err(io_err(&item_path))?;
+        };
+        match made {
+            Ok(()) => created += 1,
+            // 목록을 읽은 뒤 다른 프로세스(같은 폴더를 채우는 다른 실행, 끝나지 않고 남은 앞선 실행)가
+            // 먼저 만들었다. 이미 있는 항목으로 보고 확인한다.
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                keep_existing(&item_path, &entry)?;
+                kept += 1;
+            }
+            Err(e) => return Err(io_err(&item_path)(e)),
         }
     }
 
     Ok(MakeReport { created, kept })
+}
+
+/// 만들려는 순간 이미 있던 항목을 확인한다. 종류가 다르면 거절하고 파일 크기가 다르면 고친다.
+fn keep_existing(item_path: &Path, entry: &TestEntry) -> Result<(), TestFolderError> {
+    let metadata = fs::symlink_metadata(item_path).map_err(io_err(item_path))?;
+    if metadata.is_dir() != entry.is_folder {
+        return Err(TestFolderError::WrongKind {
+            path: item_path.to_path_buf(),
+        });
+    }
+    if !entry.is_folder && metadata.len() != entry.size {
+        OpenOptions::new()
+            .write(true)
+            .open(item_path)
+            .and_then(|f| f.set_len(entry.size))
+            .map_err(io_err(item_path))?;
+    }
+    Ok(())
 }
 
 /// 목록 읽기 측정 결과.
