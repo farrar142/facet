@@ -7,10 +7,11 @@ use std::time::{Duration, Instant};
 use facet_bench::screen::{self, DEFAULT_SCROLL_ROWS, Plan};
 use facet_bench::{
     BENCH_QUERY, BENCH_RESULT_LIMIT, BENCH_SORT, BENCH_SORTED_QUERY, DEFAULT_COUNT, INDEX_COUNT,
-    INDEX_MEMORY_LIMIT, LIST_LIMIT, LIST_TARGET, MFT_PARSE_LIMIT, MFT_PARSE_TARGET, MFT_RECORDS,
-    Measurement, QUERY_LIMIT, QUERY_TARGET, check_limit, check_memory, check_mft_limit,
-    check_query_limit, make_test_folder, measure_list, measure_mft, measure_query, mft_image,
-    synthetic_index,
+    INDEX_MEMORY_LIMIT, LIST_LIMIT, LIST_SORT_LIMIT, LIST_SORT_TARGET, LIST_TARGET,
+    MFT_PARSE_LIMIT, MFT_PARSE_TARGET, MFT_RECORDS, Measurement, QUERY_LIMIT, QUERY_TARGET,
+    RESORT_LIMIT, RESORT_TARGET, check_limit, check_median, check_memory, check_mft_limit,
+    check_query_limit, make_test_folder, measure_list, measure_list_sorted, measure_mft,
+    measure_query, measure_resort, mft_image, synthetic_index,
 };
 
 const USAGE: &str = "\
@@ -19,7 +20,9 @@ const USAGE: &str = "\
       N개(기본 100000) 항목이 든 시험 폴더를 만든다. 다시 돌려도 결과가 같다.
   facet-bench list <경로> [--count N] [--runs N] [--limit-ms N]
       시험 폴더를 만들거나 확인한 뒤 코어 목록 읽기를 N회(기본 5) 재고,
-      중앙값이 상한(기본 1000ms)을 넘으면 실패한다.
+      중앙값이 상한(기본 1000ms)을 넘으면 실패한다. 이어서 「읽기+정렬」(상한 1500ms)과
+      「정렬 바꾸기」(상한 500ms)도 N회씩 재어 중앙값이 상한을 넘으면 실패한다.
+      --limit-ms는 목록 읽기의 상한만 바꾼다.
   facet-bench index [--count N] [--runs N] [--limit-ms N]
       항목 N개(기본 1000000)의 합성 인덱스를 만들어 메모리를 재고(150MB 이상이면 실패),
       부분 일치 질의와 결과 10만 개를 경로로 정렬하는 질의(둘 다 결과 100개 제한)를
@@ -201,6 +204,42 @@ fn list(args: &Args) -> Result<(), String> {
         limit.as_millis()
     );
     check_limit(&m, limit)?;
+    println!("  상한 안: 통과");
+
+    let path = args.path()?;
+    let m = measure_list_sorted(path, args.runs).map_err(|e| e.to_string())?;
+    println!(
+        "코어 읽기+정렬 ({}항목, 이름 오름차순, {}회):",
+        m.item_count,
+        m.times.len()
+    );
+    report_median("읽기+정렬", &m, LIST_SORT_TARGET, LIST_SORT_LIMIT)?;
+
+    let m = measure_resort(path, args.runs).map_err(|e| e.to_string())?;
+    println!(
+        "코어 정렬 바꾸기 ({}항목, 열·방향을 차례로 바꿈, {}회):",
+        m.item_count,
+        m.times.len()
+    );
+    report_median("정렬 바꾸기", &m, RESORT_TARGET, RESORT_LIMIT)
+}
+
+/// 측정값을 출력하고 중앙값이 `limit`을 넘으면 실패한다.
+fn report_median(
+    what: &str,
+    m: &Measurement,
+    target: Duration,
+    limit: Duration,
+) -> Result<(), String> {
+    print_times(m);
+    println!(
+        "  중앙값 {:.1}ms, 최악 {:.1}ms / 로컬 기준 {}ms, CI 상한 {}ms",
+        ms(m.median()),
+        ms(m.max()),
+        target.as_millis(),
+        limit.as_millis()
+    );
+    check_median(what, m, limit)?;
     println!("  상한 안: 통과");
     Ok(())
 }

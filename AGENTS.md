@@ -50,10 +50,11 @@ Rust는 [rustup](https://rustup.rs)으로 설치한다. 툴체인과 `rustfmt`·
 
 - 시험 폴더 만들기: `cargo xtask test-folder [경로] [--count N]` — N개(기본 100000) 항목이 든 폴더를 만든다. 경로를 빼면 임시 폴더 아래 `facet-test-folders/items-N`(Windows에서는 `%TEMP%\facet-test-folders\items-N`). CI 캐시에 섞이지 않게 `target/` 밑에 두지 않는다. 이름에 한글·이모지·긴 이름이 섞이고 열 개 중 두 개가 폴더다. 같은 명령을 다시 돌리면 빠진 항목만 채워 결과(이름·종류·크기)가 같다. 시험 폴더의 항목이 아닌 것이 들어 있으면 아무것도 지우지 않고 멈춘다.
 - 벤치마크: `cargo xtask bench` — 릴리스 빌드로 세 가지를 잰다. `cargo xtask ci`의 마지막 세 단계이기도 하다.
-  - 코어 벤치마크: `facet-test-folders/items-100000`을 만들거나 확인한 뒤 「위치의 항목 목록 읽기」를 한 번 데우고 5회 재어 중앙값·최악값을 출력한다.
+  - 코어 벤치마크: `facet-test-folders/items-100000`을 만들거나 확인한 뒤 세 가지를 각각 한 번 데우고 5회 재어 중앙값·최악값을 출력한다. 「위치의 항목 목록 읽기」, 「10만 항목 읽기+정렬」(목록 읽기와 자세히 보기 기본 정렬인 이름 오름차순, `DetailsList::new`), 「10만 항목 정렬 바꾸기」(이미 읽은 목록을 크기·유형·날짜·이름 열과 방향을 차례로 바꿔 다시 정렬, `DetailsList::set_sort`. 순서만 뒤집는 바꾸기는 거의 공짜라 열을 바꾸는 쪽을 섞는다).
   - 인덱스 벤치마크: 시험 폴더와 같은 이름의 합성 인덱스 100만 개를 메모리에 만들어 메모리 사용을 출력하고, 인덱스 파일 저장·읽기 시간(상한 없이 출력만), 부분 일치 질의(결과 100개 제한, 끝쪽 항목 하나만 맞아 인덱스 전체를 훑는 조각)와 정렬 질의(결과 10만 개를 경로 내림으로 정렬해 100개만 받기)를 각각 한 번 데우고 5회 재어 중앙값·최악값을 출력한다.
   - MFT 파싱 벤치마크: 저장소의 MFT 조각(`testdata/mft/ntfs-basic.mft`)을 되풀이해 레코드 100만 개(1GB)의 MFT 덩어리를 메모리에 만들고, 그것을 인덱스로 만드는 시간(`Index::from_mft`)을 한 번 데우고 5회 재어 중앙값·최악값을 출력한다.
 - 기준과 상한: 로컬 기준은 10만 항목 100ms 미만(`LIST_TARGET`), CI 상한은 그 10배인 1000ms(`LIST_LIMIT`, `crates/facet-bench/src/lib.rs`). 중앙값이 상한을 넘으면 넘은 수치를 출력하고 실패한다. 공유 러너의 편차를 견디면서 알고리즘이 한 단계 나빠지는 실수만 잡으려는 값이다(`docs/roadmap.md`의 「속도는 두 군데서 지킨다」). 미세한 회귀는 잡지 않는다.
+- 정렬 기준과 상한: 「정렬 바꾸기」 로컬 기준 50ms(`RESORT_TARGET`), CI 상한 500ms(`RESORT_LIMIT`). 「읽기+정렬」 로컬 기준 150ms(`LIST_SORT_TARGET`, spec #16의 「폴더 열기부터 첫 화면까지 150ms」에서 코어 몫), CI 상한 1500ms(`LIST_SORT_LIMIT`). 중앙값이 상한을 넘으면 실패한다. `facet-bench list`의 `--limit-ms`는 목록 읽기의 상한만 바꾼다.
 - 인덱스 기준과 상한: 질의 로컬 기준 30ms(`QUERY_TARGET`), CI 상한 300ms(`QUERY_LIMIT`). 두 질의 모두 같은 상한을 지킨다. 메모리는 100만 개에 150MB(10진, `INDEX_MEMORY_LIMIT`) 미만이어야 하고 넘으면 실패한다. 메모리는 인덱스가 할당한 용량(`Index::memory_bytes`)으로 센다.
 - MFT 파싱 기준과 상한: 레코드 100만 개 로컬 기준 2000ms(`MFT_PARSE_TARGET`), CI 상한 20000ms(`MFT_PARSE_LIMIT`). 「100만 항목 첫 인덱스 10초 미만」에서 1GB MFT를 느린 디스크로 읽는 약 7초와 저장·준비 약 1초를 뺀 몫이다(근거는 상수의 문서 주석).
 - 다른 수나 상한으로 직접 재기: `cargo run --release -p facet-bench -- list <경로> [--count N] [--runs N] [--limit-ms N]`, `cargo run --release -p facet-bench -- index [--count N] [--runs N] [--limit-ms N]`, `cargo run --release -p facet-bench -- mft [--count N] [--runs N] [--limit-ms N]`(N은 레코드 수).

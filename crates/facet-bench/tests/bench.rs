@@ -5,7 +5,9 @@ use std::fs;
 use std::time::Duration;
 
 use facet_bench::{
-    Measurement, TestFolderError, check_limit, make_test_folder, measure_list, test_folder_entry,
+    LIST_SORT_LIMIT, LIST_SORT_TARGET, Measurement, RESORT_CYCLE, RESORT_LIMIT, RESORT_TARGET,
+    TestFolderError, check_limit, check_median, make_test_folder, measure_list,
+    measure_list_sorted, measure_resort, test_folder_entry,
 };
 use facet_core::{FileSystemProvider, Location, Provider};
 use tempfile::TempDir;
@@ -126,6 +128,46 @@ fn 측정은_항목_수와_회차별_시간을_돌려준다() {
     assert_eq!(m.item_count, 30);
     assert_eq!(m.times.len(), 3);
     assert!(m.median() <= m.max());
+}
+
+#[test]
+fn 읽기_정렬_측정은_항목_수와_회차별_시간을_돌려준다() {
+    let dir = TempDir::new().unwrap();
+    make_test_folder(dir.path(), 30).unwrap();
+    let m = measure_list_sorted(dir.path(), 3).unwrap();
+    assert_eq!(m.item_count, 30);
+    assert_eq!(m.times.len(), 3);
+}
+
+#[test]
+fn 정렬_바꾸기_측정은_회차마다_다른_정렬로_바꾼다() {
+    let dir = TempDir::new().unwrap();
+    make_test_folder(dir.path(), 30).unwrap();
+    let m = measure_resort(dir.path(), 7).unwrap();
+    assert_eq!(m.item_count, 30);
+    assert_eq!(m.times.len(), 7);
+    for pair in RESORT_CYCLE.windows(2) {
+        assert_ne!(pair[0], pair[1]);
+    }
+    assert_ne!(RESORT_CYCLE[0], RESORT_CYCLE[RESORT_CYCLE.len() - 1]);
+    assert_ne!(RESORT_CYCLE[0], facet_core::details::Sort::default());
+}
+
+#[test]
+fn 정렬_기준과_상한() {
+    assert_eq!(RESORT_TARGET, Duration::from_millis(50));
+    assert_eq!(RESORT_LIMIT, RESORT_TARGET * 10);
+    assert_eq!(LIST_SORT_LIMIT, LIST_SORT_TARGET * 10);
+}
+
+#[test]
+fn 이름을_붙인_상한_판정은_무엇이_넘었는지_알린다() {
+    assert!(check_median("정렬 바꾸기", &measurement(&[40, 600, 45]), RESORT_LIMIT).is_ok());
+    let msg =
+        check_median("정렬 바꾸기", &measurement(&[600, 700, 550]), RESORT_LIMIT).unwrap_err();
+    assert!(msg.contains("정렬 바꾸기"), "{msg}");
+    assert!(msg.contains("600"), "{msg}");
+    assert!(msg.contains("500"), "{msg}");
 }
 
 fn measurement(ms: &[u64]) -> Measurement {
