@@ -58,6 +58,8 @@ pub enum FileOpErrorKind {
     CrossVolume,
     /// 진행 콜백이 취소했다.
     Cancelled,
+    /// 정한 시간 안에 끝나지 않았다(셸 호출이 멈춤, [`crate::recycle`]).
+    TimedOut,
     /// 이 환경(Windows가 아닌 곳)에서는 할 수 없다.
     Unsupported,
     /// 그 밖의 오류. 원래 코드는 [`FileOpError::code`]에 있다.
