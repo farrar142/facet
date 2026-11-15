@@ -103,103 +103,136 @@ pub fn modified_text(item: &Item) -> String {
 /// 탐색기(`StrCmpLogicalW`)는 언어별 규칙으로 글자를 비교하므로 악센트 글자나 `-`·`'`가 든 이름 등에서는
 /// 다를 수 있다. 숫자·앞자리 0·한글·대소문자는 같다(Windows 전용 테스트가 확인한다).
 pub fn compare_names(a: &str, b: &str) -> Ordering {
-    compare_folded(a.to_lowercase().as_bytes(), b.to_lowercase().as_bytes())
+    natural_key(a).cmp(&natural_key(b))
 }
 
-/// 소문자로 바꾼 두 이름의 UTF-8 바이트를 자연 정렬로 비교한다.
+/// 숫자 덩어리 표지. 기호·공백의 부호보다 크고 문자의 부호보다 작다.
+const DIGITS: u8 = 0x43;
+
+/// ASCII 바이트의 부호: 기호·공백·제어 문자는 0x01..=0x42(바이트 순서대로), 영문자는 대소문자를 접어
+/// 0x44..=0x5D. 숫자는 덩어리로 따로 부호화한다. ASCII가 아닌 바이트는 부호화하지 않고 그대로 쓴다(0x80 이상).
+const ASCII_CODE: [u8; 128] = {
+    let mut table = [0u8; 128];
+    let mut rank = 1;
+    let mut byte = 0;
+    while byte < 128 {
+        let b = byte as u8;
+        if b.is_ascii_alphabetic() {
+            table[byte] = DIGITS + 1 + (b.to_ascii_lowercase() - b'a');
+        } else if !b.is_ascii_digit() {
+            table[byte] = rank;
+            rank += 1;
+        }
+        byte += 1;
+    }
+    table
+};
+
+/// 자연 정렬의 정렬 키: 이 바이트열을 그냥 바이트 순서로 비교하면 [`compare_names`]의 순서가 된다.
 ///
-/// ASCII가 아닌 글자는 모두 문자 무리이고, UTF-8 바이트 순서는 코드 포인트 순서와 같으므로
-/// 바이트 단위로 비교해도 된다.
-fn compare_folded(a: &[u8], b: &[u8]) -> Ordering {
-    let (mut i, mut j) = (0, 0);
-    loop {
-        let (x, y) = match (a.get(i), b.get(j)) {
-            (None, None) => return Ordering::Equal,
-            (None, Some(_)) => return Ordering::Less,
-            (Some(_), None) => return Ordering::Greater,
-            (Some(&x), Some(&y)) => (x, y),
-        };
-        if x.is_ascii_digit() && y.is_ascii_digit() {
-            let end_a = digit_run_end(a, i);
-            let end_b = digit_run_end(b, j);
-            let ordering = compare_numbers(&a[i..end_a], &b[j..end_b]);
-            if ordering != Ordering::Equal {
-                return ordering;
+/// 한 번 만들어 두면 비교가 바이트열 비교(`memcmp`) 하나라서 정렬을 여러 번 바꿔도 빠르다.
+/// - ASCII 글자는 [`ASCII_CODE`]로 바꾸어 기호·공백 < 숫자 < 문자 순서와 대소문자 접기를 넣는다.
+/// - ASCII가 아닌 글자는 소문자로 바꾼 UTF-8 바이트 그대로다. UTF-8 바이트 순서는 코드 포인트 순서와 같다.
+/// - 숫자 덩어리는 [`DIGITS`], 앞자리 0을 뺀 자릿수, 그 숫자들, 앞자리 0 개수의 역순으로 부호화한다.
+///   그래서 자릿수가 적은 쪽, 같으면 값이 작은 쪽, 같으면 앞자리 0이 많은 쪽이 앞이다.
+fn natural_key(name: &str) -> Vec<u8> {
+    natural_key_and_extension(name).0
+}
+
+/// [`natural_key`]와, 키 안에서 확장자(마지막 `.` 뒤)의 키가 시작하는 위치. 확장자가 없거나 비면 `None`이다.
+///
+/// `.`은 한 바이트 부호이고 숫자 덩어리를 끊으므로, 확장자의 키는 이름 키의 그 위치부터 끝까지와 같다.
+fn natural_key_and_extension(name: &str) -> (Vec<u8>, Option<usize>) {
+    let bytes = name.as_bytes();
+    let mut extension = None;
+    let mut key = Vec::with_capacity(bytes.len() + 8);
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b.is_ascii_digit() {
+            let end = bytes[i..]
+                .iter()
+                .position(|d| !d.is_ascii_digit())
+                .map_or(bytes.len(), |n| i + n);
+            let run = &bytes[i..end];
+            let zeros = run.iter().take_while(|&&d| d == b'0').count();
+            let value = &run[zeros..];
+            key.push(DIGITS);
+            match u8::try_from(value.len()) {
+                Ok(len) if len < u8::MAX => key.push(len),
+                _ => {
+                    key.push(u8::MAX);
+                    let len = u32::try_from(value.len()).unwrap_or(u32::MAX);
+                    key.extend_from_slice(&len.to_be_bytes());
+                }
             }
-            i = end_a;
-            j = end_b;
-        } else {
-            let ordering = (class(x), x).cmp(&(class(y), y));
-            if ordering != Ordering::Equal {
-                return ordering;
-            }
+            key.extend_from_slice(value);
+            let zeros = u32::try_from(zeros).unwrap_or(u32::MAX);
+            key.extend_from_slice(&(u32::MAX - zeros).to_be_bytes());
+            i = end;
+        } else if b.is_ascii() {
+            key.push(ASCII_CODE[usize::from(b)]);
             i += 1;
-            j += 1;
+            if b == b'.' {
+                extension = Some(key.len());
+            }
+        } else {
+            let c = name[i..].chars().next().expect("글자 경계");
+            let len = c.len_utf8();
+            if is_caseless(c) {
+                key.extend_from_slice(&bytes[i..i + len]);
+                i += len;
+                continue;
+            }
+            for lower in c.to_lowercase() {
+                if lower.is_ascii() {
+                    key.push(ASCII_CODE[lower as usize]);
+                } else {
+                    let mut buffer = [0; 4];
+                    key.extend_from_slice(lower.encode_utf8(&mut buffer).as_bytes());
+                }
+            }
+            i += len;
         }
     }
+    let extension = extension.filter(|&start| start < key.len());
+    (key, extension)
 }
 
-fn digit_run_end(bytes: &[u8], start: usize) -> usize {
-    bytes[start..]
-        .iter()
-        .position(|b| !b.is_ascii_digit())
-        .map_or(bytes.len(), |n| start + n)
-}
-
-/// 숫자 덩어리 둘을 값으로, 값이 같으면 앞자리 0이 많은(긴) 쪽을 앞으로.
-fn compare_numbers(a: &[u8], b: &[u8]) -> Ordering {
-    let trim = |digits: &[u8]| -> usize {
-        digits
-            .iter()
-            .position(|&d| d != b'0')
-            .unwrap_or(digits.len())
-    };
-    let (va, vb) = (&a[trim(a)..], &b[trim(b)..]);
-    va.len()
-        .cmp(&vb.len())
-        .then_with(|| va.cmp(vb))
-        .then_with(|| b.len().cmp(&a.len()))
-}
-
-/// 글자 무리: 기호·공백(0) < 숫자(1) < 문자(2). ASCII가 아닌 바이트는 문자다.
-fn class(byte: u8) -> u8 {
-    if byte.is_ascii_digit() {
-        1
-    } else if byte.is_ascii_alphabetic() || !byte.is_ascii() {
-        2
-    } else {
-        0
-    }
+/// 대소문자가 없는 글자가 확실한 범위(한중일 기호·가나·한자, 한글 음절, 그림 문자).
+/// 이 범위는 소문자 표를 찾지 않고 그대로 쓴다. 범위 밖이어도 결과는 같고 조금 느릴 뿐이다.
+fn is_caseless(c: char) -> bool {
+    matches!(c, '\u{3000}'..='\u{9FFF}' | '\u{AC00}'..='\u{D7A3}' | '\u{1F300}'..='\u{1FAFF}')
 }
 
 /// 정렬에 쓰는 값을 미리 계산해 둔 항목.
 #[derive(Debug, Clone)]
 struct Entry {
     item: Item,
-    /// 소문자로 바꾼 이름.
-    folded: Box<str>,
-    /// 대문자로 바꾼 확장자. 폴더와 확장자 없는 파일은 `None`.
-    extension: Option<Box<str>>,
+    /// 이름의 자연 정렬 키([`natural_key`]).
+    key: Vec<u8>,
+    /// 확장자의 키가 `key` 안에서 시작하는 위치. 폴더와 확장자 없는 파일은 `None`.
+    extension: Option<usize>,
 }
 
 impl Entry {
     fn new(item: Item) -> Self {
-        let name = item.name.to_string_lossy();
-        let folded = name.to_lowercase().into_boxed_str();
-        let extension = if item.is_folder {
-            None
-        } else {
-            extension_upper(&name).map(String::into_boxed_str)
-        };
+        let (key, extension) = natural_key_and_extension(&item.name.to_string_lossy());
+        let extension = extension.filter(|_| !item.is_folder);
         Entry {
             item,
-            folded,
+            key,
             extension,
         }
     }
 
+    fn extension_key(&self) -> Option<&[u8]> {
+        self.extension.map(|start| &self.key[start..])
+    }
+
     fn compare_names(&self, other: &Self) -> Ordering {
-        compare_folded(self.folded.as_bytes(), other.folded.as_bytes())
+        self.key
+            .cmp(&other.key)
             .then_with(|| self.item.name.cmp(&other.item.name))
     }
 }
@@ -217,10 +250,8 @@ fn compare_entries(a: &Entry, b: &Entry, sort: Sort) -> Ordering {
     let key = match sort.column {
         Column::Name => return directed(a.compare_names(b)),
         Column::Modified => a.item.modified.cmp(&b.item.modified),
-        Column::Type => match (&a.extension, &b.extension) {
-            (Some(x), Some(y)) => compare_folded(x.as_bytes(), y.as_bytes()),
-            (x, y) => x.is_some().cmp(&y.is_some()),
-        },
+        // 확장자 없는 파일이 앞이다(`None` < `Some`).
+        Column::Type => a.extension_key().cmp(&b.extension_key()),
         // 폴더는 크기를 보이지 않으므로 크기로 가르지 않는다.
         Column::Size if a.item.is_folder => Ordering::Equal,
         Column::Size => a.item.size.cmp(&b.item.size),
@@ -288,5 +319,39 @@ impl DetailsList {
     /// 정렬된 순서의 항목들.
     pub fn into_items(self) -> Vec<Item> {
         self.entries.into_iter().map(|e| e.item).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 확장자의_키는_이름_키의_꼬리와_같다() {
+        for name in [
+            "a.txt",
+            "사진 01.JPEG",
+            "v1.2.mp3",
+            "archive.tar.gz",
+            ".gitignore",
+            "x.7z",
+            "x.007",
+            "데이터.파일",
+        ] {
+            let (key, start) = natural_key_and_extension(name);
+            let (_, extension) = name.rsplit_once('.').unwrap();
+            assert_eq!(&key[start.unwrap()..], natural_key(extension), "{name}");
+        }
+        for name in ["README", "끝에 점.", "12"] {
+            assert_eq!(natural_key_and_extension(name).1, None, "{name}");
+        }
+    }
+
+    #[test]
+    fn 대소문자가_없는_범위도_소문자_바꾸기와_같다() {
+        for c in ['가', '힣', '漢', 'あ', '🎉', '🦀'] {
+            assert!(is_caseless(c));
+            assert_eq!(c.to_lowercase().collect::<String>(), c.to_string());
+        }
     }
 }
