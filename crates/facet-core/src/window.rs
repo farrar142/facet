@@ -60,7 +60,9 @@ use facet_win::{OpenError, OpenResult, ShellWorker};
 
 use crate::command::{self, CommandId, CommandState};
 use crate::details::Sort;
-use crate::job::{CopyRejection, JobId, JobKind, JobQueue};
+use crate::job::{
+    AnswerError, ConflictAnswer, CopyRejection, ErrorAnswer, JobId, JobKind, JobQueue,
+};
 use crate::launch::LaunchTarget;
 use crate::placement::Placement;
 use crate::session::{PanelSession, Session, TabSession, WindowSession};
@@ -1550,6 +1552,32 @@ impl App {
     /// 끝난 작업을 작업 영역에서 닫는다. 없거나 끝나지 않은 작업이면 `false`다.
     pub fn dismiss_job(&mut self, job: JobId) -> bool {
         self.work_area.dismiss(job)
+    }
+
+    /// 이름 충돌 질문([`crate::job::JobQuestion::Conflict`])에 답한다. 받으면 작업 영역의 질문을 곧바로 지운다(모든
+    /// 창이 같은 작업 영역을 그리므로 어느 창에서 답해도 모든 창에서 사라진다).
+    ///
+    /// 한 질문에는 한 번만 답한다: 이미 답했거나(다른 창에서 먼저 답함) 그 종류의 질문을 기다리지 않으면
+    /// [`AnswerError::NotAsking`]이고 아무 일도 없다. 덮어쓸 수 없는 충돌에 덮어쓰기 답이면
+    /// [`AnswerError::OverwriteNotAllowed`]이고 질문은 남는다.
+    pub fn answer_conflict(
+        &mut self,
+        job: JobId,
+        answer: ConflictAnswer,
+    ) -> Result<(), AnswerError> {
+        self.jobs.answer_conflict(job, answer)?;
+        self.work_area.answered(job);
+        self.poll_jobs();
+        Ok(())
+    }
+
+    /// 항목별 오류 질문([`crate::job::JobQuestion::Error`])에 답한다. 받으면 작업 영역의 질문을 곧바로 지운다. 한
+    /// 질문에는 한 번만 답한다([`App::answer_conflict`]와 같다).
+    pub fn answer_error(&mut self, job: JobId, answer: ErrorAnswer) -> Result<(), AnswerError> {
+        self.jobs.answer_error(job, answer)?;
+        self.work_area.answered(job);
+        self.poll_jobs();
+        Ok(())
     }
 
     /// 작업 대기열(일시정지·이어하기·취소·지금 시작). 사건은 [`App::poll_jobs`]로 받는다: 여기서

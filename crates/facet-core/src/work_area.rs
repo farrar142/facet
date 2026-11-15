@@ -10,7 +10,7 @@
 
 use std::path::PathBuf;
 
-use crate::job::{JobEvent, JobId, JobKind, JobState, Progress, Summary};
+use crate::job::{JobEvent, JobId, JobKind, JobQuestion, JobState, Progress, Summary};
 
 /// 작업 영역의 작업 하나: 진행 표시에 그릴 값.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +29,10 @@ pub struct JobEntry {
     pub progress: Option<Progress>,
     /// 결과 요약. 끝났으면 있다.
     pub summary: Option<Summary>,
+    /// 답을 기다리는 질문(이름 충돌·항목별 오류). 답하거나([`crate::window::App::answer_conflict`]·
+    /// [`crate::window::App::answer_error`]) 작업이 답 기다림을 벗어나면(취소·끝남 포함) 없어진다. 화면은 이것이
+    /// 있으면 그 작업의 진행 표시에 질문 대화를 붙인다.
+    pub question: Option<JobQuestion>,
 }
 
 impl JobEntry {
@@ -63,12 +67,14 @@ impl WorkArea {
             state: JobState::Queued,
             progress: None,
             summary: None,
+            question: None,
         });
     }
 
     /// 대기열의 사건 하나를 반영한다. 모르는 작업의 사건이면 아무것도 하지 않고 `false`다.
     ///
-    /// 이름 충돌·항목별 오류 질문은 상태([`JobState::AwaitingAnswer`])로만 보인다(질문 대화는 화면 몫).
+    /// 이름 충돌·항목별 오류 질문은 상태를 [`JobState::AwaitingAnswer`]로 하고 [`JobEntry::question`]에 둔다. 답
+    /// 기다림이 아닌 상태로 바뀌거나 끝나면 질문을 지운다.
     pub fn apply(&mut self, event: &JobEvent) -> bool {
         let id = match event {
             JobEvent::Progress { job, .. }
@@ -82,13 +88,33 @@ impl WorkArea {
         };
         match event {
             JobEvent::Progress { progress, .. } => entry.progress = Some(progress.clone()),
-            JobEvent::StateChanged { state, .. } => entry.state = *state,
-            JobEvent::Conflict { .. } | JobEvent::ItemError { .. } => {
-                entry.state = JobState::AwaitingAnswer;
+            JobEvent::StateChanged { state, .. } => {
+                entry.state = *state;
+                if *state != JobState::AwaitingAnswer {
+                    entry.question = None;
+                }
             }
-            JobEvent::Finished { summary, .. } => entry.summary = Some(summary.clone()),
+            JobEvent::Conflict { conflict, .. } => {
+                entry.state = JobState::AwaitingAnswer;
+                entry.question = Some(JobQuestion::Conflict(conflict.clone()));
+            }
+            JobEvent::ItemError { error, .. } => {
+                entry.state = JobState::AwaitingAnswer;
+                entry.question = Some(JobQuestion::Error(error.clone()));
+            }
+            JobEvent::Finished { summary, .. } => {
+                entry.summary = Some(summary.clone());
+                entry.question = None;
+            }
         }
         true
+    }
+
+    /// 작업 `id`의 질문에 답했다: 대기열의 다음 사건을 기다리지 않고 질문을 지운다(모든 창에서 곧바로 사라진다).
+    pub(crate) fn answered(&mut self, id: JobId) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) {
+            entry.question = None;
+        }
     }
 
     /// 끝난 작업을 작업 영역에서 닫는다. 없거나 끝나지 않은 작업이면 `false`다.

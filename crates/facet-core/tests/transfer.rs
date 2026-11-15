@@ -393,6 +393,176 @@ fn 작업_영역은_모든_창에_하나다() {
     assert!(dst.join("파일.txt").is_file());
 }
 
+/// 작업 영역의 작업 `job`이 질문을 들 때까지 앱이 받은 것을 넘긴다.
+#[cfg(windows)]
+fn wait_question(app: &mut App, job: facet_core::job::JobId) {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        app.poll_jobs();
+        if app
+            .work_area()
+            .entry(job)
+            .is_some_and(|e| e.question.is_some())
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "질문이 시간 안에 오지 않았다: {:?}",
+            app.work_area()
+        );
+        app.wait_update(Duration::from_millis(50));
+    }
+}
+
+/// 이름 충돌 질문은 작업 영역(모든 창에 하나)에 들고, 한 번 답하면 사라지며 같은 질문에 두 번째 답은 무시된다.
+#[cfg(windows)]
+#[test]
+fn 이름_충돌_질문은_작업_영역에_있고_두_번째_답은_무시된다() {
+    use facet_core::job::{
+        AnswerError, ConflictAnswer, ItemKind, JobQuestion, JobState, Resolution,
+    };
+
+    let dir = tree();
+    let src = dir.path().join("src");
+    let dst = dir.path().join("dst");
+    fs::write(dst.join("파일.txt"), b"old target").unwrap();
+    let mut app = two_panels(&src, &dst);
+    let file = index_of(app.active_tab(), "파일.txt");
+    app.active_tab_mut().select_only(file);
+    let plan = app.transfer_plan(JobKind::Copy).unwrap();
+    let job = app.start_transfer(&plan).unwrap();
+    // 두 번째 창: 작업 영역은 앱 전체에 하나라 같은 질문을 본다.
+    app.open_window(loc(&dst));
+    settle(&mut app);
+
+    wait_question(&mut app, job);
+    let entry = app.work_area().entry(job).unwrap();
+    assert_eq!(entry.state, JobState::AwaitingAnswer);
+    let Some(JobQuestion::Conflict(conflict)) = &entry.question else {
+        panic!("이름 충돌 질문이어야 한다: {:?}", entry.question);
+    };
+    assert_eq!(conflict.source.path, src.join("파일.txt"));
+    assert_eq!(conflict.target.path, dst.join("파일.txt"));
+    assert_eq!(conflict.source.kind, ItemKind::File);
+    assert_eq!(conflict.source.size, Some(1));
+    assert_eq!(conflict.target.size, Some(10));
+    assert!(conflict.can_overwrite);
+    assert!(conflict.overwrite_is_permanent);
+
+    // 한 창에서 답하면 곧바로 질문이 사라진다(다른 창도 같은 작업 영역을 그린다).
+    assert_eq!(
+        app.answer_conflict(job, ConflictAnswer::once(Resolution::Overwrite)),
+        Ok(())
+    );
+    assert_eq!(app.work_area().entry(job).unwrap().question, None);
+    // 같은 질문에 다른 창에서 늦게 온 두 번째 답은 무시된다.
+    assert_eq!(
+        app.answer_conflict(job, ConflictAnswer::once(Resolution::KeepBoth)),
+        Err(AnswerError::NotAsking)
+    );
+    wait_until(&mut app, |_| true);
+    assert_eq!(fs::read(dst.join("파일.txt")).unwrap(), b"x");
+    assert!(!dst.join("파일 (2).txt").exists());
+    let entry = app.work_area().entry(job).unwrap();
+    assert_eq!(entry.question, None);
+    assert_eq!(entry.summary.as_ref().unwrap().files_overwritten, 1);
+}
+
+/// 항목별 오류 질문도 작업 영역에 들고, 한 번 답하면 사라지며 두 번째 답은 무시된다.
+#[cfg(windows)]
+#[test]
+fn 항목별_오류_질문은_작업_영역에_있고_두_번째_답은_무시된다() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    use facet_core::job::{AnswerError, ErrorAnswer, FileOpErrorKind, JobQuestion, JobState};
+
+    let dir = tree();
+    let src = dir.path().join("src");
+    let dst = dir.path().join("dst");
+    let mut app = two_panels(&src, &dst);
+    let file = index_of(app.active_tab(), "파일.txt");
+    app.active_tab_mut().select_only(file);
+    // 공유 없이 열어 잠근다.
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(src.join("파일.txt"))
+        .unwrap();
+    let plan = app.transfer_plan(JobKind::Copy).unwrap();
+    let job = app.start_transfer(&plan).unwrap();
+
+    wait_question(&mut app, job);
+    let entry = app.work_area().entry(job).unwrap();
+    assert_eq!(entry.state, JobState::AwaitingAnswer);
+    let Some(JobQuestion::Error(error)) = &entry.question else {
+        panic!("항목별 오류 질문이어야 한다: {:?}", entry.question);
+    };
+    assert_eq!(error.source, src.join("파일.txt"));
+    assert_eq!(error.kind, FileOpErrorKind::Locked);
+
+    // 종류가 다른 답은 받지 않고 질문은 남는다.
+    assert_eq!(
+        app.answer_conflict(
+            job,
+            facet_core::job::ConflictAnswer::once(facet_core::job::Resolution::Skip)
+        ),
+        Err(AnswerError::NotAsking)
+    );
+    assert!(app.work_area().entry(job).unwrap().question.is_some());
+
+    assert_eq!(app.answer_error(job, ErrorAnswer::Skip), Ok(()));
+    assert_eq!(app.work_area().entry(job).unwrap().question, None);
+    drop(lock);
+    // 두 번째 답(다시 시도)은 무시된다: 잠금을 풀었어도 다시 복사하지 않는다.
+    assert_eq!(
+        app.answer_error(job, ErrorAnswer::Retry),
+        Err(AnswerError::NotAsking)
+    );
+    wait_until(&mut app, |_| true);
+    assert!(!dst.join("파일.txt").exists());
+    let entry = app.work_area().entry(job).unwrap();
+    assert_eq!(entry.state, JobState::Failed);
+    assert_eq!(entry.question, None);
+    assert_eq!(entry.summary.as_ref().unwrap().errors_skipped(), 1);
+}
+
+/// 작업 취소로 답하면 질문이 곧바로 사라지고 작업은 취소로 끝난다.
+#[cfg(windows)]
+#[test]
+fn 작업_취소로_답하면_질문이_사라진다() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    use facet_core::job::{AnswerError, ErrorAnswer, JobState};
+
+    let dir = tree();
+    let src = dir.path().join("src");
+    let dst = dir.path().join("dst");
+    let mut app = two_panels(&src, &dst);
+    let file = index_of(app.active_tab(), "파일.txt");
+    app.active_tab_mut().select_only(file);
+    let _lock = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(src.join("파일.txt"))
+        .unwrap();
+    let plan = app.transfer_plan(JobKind::Copy).unwrap();
+    let job = app.start_transfer(&plan).unwrap();
+    wait_question(&mut app, job);
+
+    assert_eq!(app.answer_error(job, ErrorAnswer::CancelJob), Ok(()));
+    assert_eq!(app.work_area().entry(job).unwrap().question, None);
+    assert_eq!(
+        app.answer_error(job, ErrorAnswer::Skip),
+        Err(AnswerError::NotAsking)
+    );
+    wait_until(&mut app, |_| true);
+    assert_eq!(
+        app.work_area().entry(job).unwrap().state,
+        JobState::Cancelled
+    );
+}
+
 #[test]
 fn 결과에서_끝낸_항목과_건너뛴_항목을_센다() {
     use facet_core::job::{FileOpErrorKind, ItemFailure, Summary};

@@ -230,6 +230,16 @@ pub enum JobEvent {
     },
 }
 
+/// 답을 기다리는 작업이 사용자에게 묻는 질문: [`JobEvent::Conflict`]나 [`JobEvent::ItemError`]의 내용. 작업
+/// 영역([`crate::work_area::JobEntry::question`])이 답을 받을 때까지 들고 있어 화면이 대화를 그린다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobQuestion {
+    /// 이름 충돌. [`JobQueue::answer_conflict`]로 답한다.
+    Conflict(Conflict),
+    /// 항목별 오류. [`JobQueue::answer_error`]로 답한다.
+    Error(ItemFailure),
+}
+
 /// 이름 충돌의 한 쪽 항목 종류.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ItemKind {
