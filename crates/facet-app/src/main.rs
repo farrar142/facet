@@ -8,6 +8,8 @@
 //! - 행 문자열은 화면에 보이는 행만 그때그때 만든다([`TabRows`]).
 //! - 실행 인자로 받은 폴더(없으면 사용자 홈 폴더)를 연다.
 //! - 패널 위에 탭 줄을 그린다. 탭 연산(열기·닫기·오가기)은 코어가 하고, 앱은 탭을 누름·휠 클릭을 넘긴다.
+//! - 창이 나뉘었으면 두 패널을 나란히 그린다. 패널마다 탭 줄·주소창·자세히 보기·상태 표시줄을 갖고, 패널을 누르면
+//!   활성 패널이 바뀐다. 키 입력과 명령은 활성 패널의 활성 탭으로 간다. 패널 나누기·합치기·분할 비율은 코어가 한다.
 //! - 주소창은 코어의 경로 조각([`facet_core::Provider::segments`]), 글자 해석([`App::go_to_text`]), 자동 완성
 //!   ([`App::complete_address`], 일꾼 스레드)을 그리기만 한다.
 
@@ -23,9 +25,10 @@ use facet_core::details::{self, Column, Direction};
 use facet_core::file_list;
 use facet_core::name_input::NameInput;
 use facet_core::selection::{CursorMove, Pick};
-use facet_core::tab::{AutoRefresh, Navigation, ReadOutcome, Relocation};
-use facet_core::window::{App, Execution, Update};
+use facet_core::tab::{AutoRefresh, Navigation, ReadOutcome, Relocation, Tab};
+use facet_core::window::{App, Execution, MAX_PANELS, Panel, Update};
 use facet_core::{ListError, Location, OpenError, ResolveError, provider_for};
+use slint::winit_030::{EventResult, WinitWindowAccessor};
 use slint::{
     ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, Timer, TimerMode,
     VecModel,
@@ -52,7 +55,15 @@ fn main() -> Result<(), slint::PlatformError> {
     let app = App::new(start);
 
     let ui = AppWindow::new()?;
-    measure::install(&ui);
+    // Slint는 창마다 winit 이벤트 훅을 하나만 둔다: 키 위치를 적고(Ctrl+백슬래시), 측정 모드면 프레임을 센다.
+    let mut frames = measure::frame_counter(&ui);
+    ui.window().on_winit_window_event(move |_, event| {
+        keys::note_window_event(event);
+        if let Some(frames) = frames.as_mut() {
+            frames(event);
+        }
+        EventResult::Propagate
+    });
 
     let view = View::new(&ui, app);
     VIEW.with(|slot| *slot.borrow_mut() = Some(Rc::clone(&view)));
@@ -96,6 +107,9 @@ fn connect(ui: &AppWindow) {
         handled
     });
     ui.on_typed(|text| with_view(|view| view.typed(&text)));
+    ui.on_panel_pressed(|index| with_view(|view| view.panel_pressed(index)));
+    ui.on_split_dragged(|ratio| with_view(|view| view.split_dragged(ratio)));
+    ui.on_split_reset(|| with_view(View::split_reset));
     ui.on_row_pressed(|row, ctrl, shift| {
         with_view(|view| view.row_pressed(row, Pick::for_click(ctrl, shift)));
     });
@@ -154,11 +168,10 @@ fn connect(ui: &AppWindow) {
 struct View {
     ui: slint::Weak<AppWindow>,
     app: Rc<RefCell<App>>,
-    rows: Rc<TabRows>,
+    /// 패널마다(0 왼쪽, 1 오른쪽) 화면에 넘긴 모델.
+    panels: [PanelModels; MAX_PANELS],
     /// 열려 있는 이름 입력란. 화면의 `editing`과 함께 바뀐다.
     name_input: RefCell<Option<NameInput>>,
-    /// 주소창 경로 조각의 이름. 바뀔 때만 고쳐 화면 요소를 다시 만들지 않는다.
-    segments: Rc<VecModel<SharedString>>,
     /// 주소창을 고쳐 쓰는 중이면 그 상태. 화면의 `address-editing`과 함께 바뀐다.
     address: RefCell<Option<AddressEdit>>,
     /// 자동 완성 후보의 이름.
@@ -169,33 +182,44 @@ struct View {
     palette_rows: Rc<VecModel<PaletteRow>>,
     /// 「읽는 중」을 드러낼 때 다시 그리는 타이머.
     reading_timer: Timer,
-    /// 활성 패널의 탭 줄.
+}
+
+/// 패널 하나의 화면 모델: 보이는 탭의 행, 탭 줄, 주소창 경로 조각. 탭 줄과 경로 조각은 바뀔 때만 고쳐 화면 요소를
+/// 다시 만들지 않는다.
+struct PanelModels {
+    rows: Rc<TabRows>,
     tabs: Rc<VecModel<TabItem>>,
+    segments: Rc<VecModel<SharedString>>,
 }
 
 impl View {
     fn new(ui: &AppWindow, app: App) -> Rc<Self> {
         let app = Rc::new(RefCell::new(app));
-        let rows = Rc::new(TabRows {
-            app: Rc::clone(&app),
-            notify: ModelNotify::default(),
+        let panels = [0, 1].map(|panel| PanelModels {
+            rows: Rc::new(TabRows {
+                app: Rc::clone(&app),
+                panel,
+                notify: ModelNotify::default(),
+            }),
+            tabs: Rc::new(VecModel::default()),
+            segments: Rc::new(VecModel::default()),
         });
-        ui.set_rows(ModelRc::from(Rc::clone(&rows)));
-        let segments = Rc::new(VecModel::default());
-        ui.set_segments(ModelRc::from(Rc::clone(&segments)));
+        let [left, right] = &panels;
+        ui.set_left_rows(ModelRc::from(Rc::clone(&left.rows)));
+        ui.set_left_tabs(ModelRc::from(Rc::clone(&left.tabs)));
+        ui.set_left_segments(ModelRc::from(Rc::clone(&left.segments)));
+        ui.set_right_rows(ModelRc::from(Rc::clone(&right.rows)));
+        ui.set_right_tabs(ModelRc::from(Rc::clone(&right.tabs)));
+        ui.set_right_segments(ModelRc::from(Rc::clone(&right.segments)));
         let candidates = Rc::new(VecModel::default());
         ui.set_candidates(ModelRc::from(Rc::clone(&candidates)));
         let palette_rows = Rc::new(VecModel::default());
         ui.set_palette_rows(ModelRc::from(Rc::clone(&palette_rows)));
-        let tabs = Rc::new(VecModel::default());
-        ui.set_tabs(ModelRc::from(Rc::clone(&tabs)));
         Rc::new(View {
-            tabs,
             ui: ui.as_weak(),
             app,
-            rows,
+            panels,
             name_input: RefCell::default(),
-            segments,
             address: RefCell::default(),
             candidates,
             palette: RefCell::default(),
@@ -204,41 +228,53 @@ impl View {
         })
     }
 
-    /// 일꾼 스레드에서 온 결과를 모두 탭에 넘기고 다시 그린다.
+    /// 일꾼 스레드에서 온 결과를 모두 탭에 넘기고 다시 그린다. 두 패널의 보이는 탭 어느 쪽 결과든 그린다.
     fn poll(&self) {
         // 지금 스크롤 위치를 탭에 알린다: 이동이 확정되면 떠나는 위치의 기록에 남는다.
         self.remember_scroll();
         if self.app.borrow().is_finished() {
             return;
         }
-        let (updates, active) = {
+        let (updates, visible, active) = {
             let mut app = self.app.borrow_mut();
             let updates = app.poll();
-            (updates, app.active_window().active_panel().active_tab_id())
+            let window = app.active_window();
+            let visible: Vec<_> = window
+                .panels()
+                .iter()
+                .map(|panel| panel.active_tab_id())
+                .collect();
+            (updates, visible, window.active_panel_index())
         };
         if updates.is_empty() {
             return;
         }
-        let mut committed = false;
+        let mut committed = [false; MAX_PANELS];
         for (tab, update) in updates {
-            if tab != active {
+            let Some(panel) = visible.iter().position(|id| *id == tab) else {
                 continue;
-            }
+            };
             match update {
-                Update::Read(ReadOutcome::Committed) => committed = true,
-                Update::Read(ReadOutcome::Failed) => self.mark_loaded(),
-                Update::Completion { id, candidates } => self.receive_candidates(id, candidates),
+                Update::Read(ReadOutcome::Committed) => committed[panel] = true,
+                Update::Read(ReadOutcome::Failed) if panel == active => self.mark_loaded(),
+                Update::Completion { id, candidates } if panel == active => {
+                    self.receive_candidates(id, candidates);
+                }
                 _ => {}
             }
         }
-        if committed {
+        if committed[active] {
             // 다른 위치의 목록이 들어왔으면 이름 입력란은 닫는다.
             self.close_rename();
         }
         self.render();
-        if committed {
+        if committed[active] {
             self.mark_loaded();
-            self.restore_scroll();
+        }
+        for (panel, committed) in committed.into_iter().enumerate() {
+            if committed {
+                self.restore_scroll(panel);
+            }
         }
     }
 
@@ -247,115 +283,188 @@ impl View {
         measure::mark_loaded(self.app.borrow().active_tab().len());
     }
 
-    /// 활성 탭의 상태를 창에 넣는다.
+    /// 활성 패널 번호(0 왼쪽).
+    fn active_panel(&self) -> usize {
+        self.app.borrow().active_window().active_panel_index()
+    }
+
+    /// 창(패널이 몇인가, 활성 패널, 분할 비율)과 패널마다 보이는 탭의 상태를 화면에 넣는다.
     fn render(&self) {
         let Some(ui) = self.ui.upgrade() else { return };
         if self.app.borrow().is_finished() {
             return;
         }
-        self.render_tabs(&ui);
         {
             let app = self.app.borrow();
-            let tab = app.active_tab();
-            let labels: Vec<SharedString> = provider_for(tab.location())
-                .segments(tab.location())
-                .into_iter()
-                .map(|segment| segment.label.into())
-                .collect();
-            if !self.segments.iter().eq(labels.iter().cloned()) {
-                self.segments.set_vec(labels);
+            let window = app.active_window();
+            ui.set_split(window.is_split());
+            ui.set_active_panel(count(window.active_panel_index()));
+            ui.set_split_ratio(window.split_ratio());
+        }
+        let now = Instant::now();
+        let mut redraw_at: Option<Instant> = None;
+        for panel in 0..MAX_PANELS {
+            if let Some(at) = self.render_panel(&ui, panel, now) {
+                redraw_at = Some(redraw_at.map_or(at, |earlier| earlier.min(at)));
             }
+        }
+        if let Some(at) = redraw_at {
+            // 「읽는 중」을 드러낼 때가 오면 다시 그린다.
+            self.reading_timer
+                .start(TimerMode::SingleShot, at - now, || with_view(View::render));
+        }
+    }
 
-            let (problem, value, detail) = match tab.address_error() {
+    /// 패널 하나의 보이는 탭을 화면에 넣는다. 그 패널이 없으면(나뉘지 않음) 비운다. 「읽는 중」을 앞으로 드러낼
+    /// 때가 있으면 그 시각을 돌려준다.
+    fn render_panel(&self, ui: &AppWindow, panel: usize, now: Instant) -> Option<Instant> {
+        let models = &self.panels[panel];
+        let app = self.app.borrow();
+        let Some(shown) = app.active_window().panels().get(panel) else {
+            if models.tabs.row_count() > 0 {
+                models.tabs.set_vec(Vec::new());
+                models.segments.set_vec(Vec::new());
+                set_panel_data(ui, panel, PanelData::default());
+                models.rows.notify.reset();
+            }
+            return None;
+        };
+        self.render_tabs(ui, panel, shown);
+        let tab = shown.active_tab();
+        let labels: Vec<SharedString> = provider_for(tab.location())
+            .segments(tab.location())
+            .into_iter()
+            .map(|segment| segment.label.into())
+            .collect();
+        if !models.segments.iter().eq(labels.iter().cloned()) {
+            models.segments.set_vec(labels);
+        }
+
+        let (address_problem, address_problem_value, address_problem_detail) =
+            match tab.address_error() {
                 Some(error) => address_problem(error),
                 None => (Problem::None, String::new(), String::new()),
             };
-            ui.set_address_problem(problem);
-            ui.set_address_problem_value(value.into());
-            ui.set_address_problem_detail(detail.into());
-
-            let now = Instant::now();
-            ui.set_reading(tab.is_reading(now));
-            if let Some(at) = tab.reading_shown_at().filter(|at| *at > now) {
-                // 「읽는 중」을 드러낼 때가 오면 다시 그린다.
-                self.reading_timer
-                    .start(TimerMode::SingleShot, at - now, || with_view(View::render));
-            }
-
-            let (problem, location, detail) = match tab.error() {
-                Some(error) => list_problem(error),
-                None => (Problem::None, String::new(), String::new()),
-            };
-            ui.set_list_problem(problem);
-            ui.set_list_problem_location(location.into());
-            ui.set_list_problem_detail(detail.into());
-            let (problem, detail) = match tab.open_error() {
-                Some(error) => open_problem(error),
-                None => (Problem::None, String::new()),
-            };
-            ui.set_open_problem(problem);
-            ui.set_open_problem_detail(detail.into());
-
-            ui.set_auto_refresh_off(matches!(tab.auto_refresh(), AutoRefresh::Off(_)));
-            let (relocation, vanished) = match tab.relocation() {
-                Some(Relocation::ToParent { vanished }) => (1, vanished.to_string()),
-                Some(Relocation::ToHome { vanished }) => (2, vanished.to_string()),
-                None => (0, String::new()),
-            };
-            ui.set_relocation(relocation);
-            ui.set_relocation_vanished(vanished.into());
-
-            let sort = tab.sort();
-            ui.set_sort_column(match sort.column {
-                Column::Name => 0,
-                Column::Modified => 1,
-                Column::Type => 2,
-                Column::Size => 3,
-            });
-            ui.set_sort_descending(sort.direction == Direction::Descending);
-
-            let status = tab.status();
-            ui.set_item_count(count(status.item_count));
-            ui.set_selected_count(count(status.selected_count));
-            let size = if status.selected_size > 0 {
-                file_list::format_size(status.selected_size)
-            } else {
-                String::new()
-            };
-            ui.set_selected_size(size.into());
-        }
+        let (list_problem, list_problem_location, list_problem_detail) = match tab.error() {
+            Some(error) => list_problem(error),
+            None => (Problem::None, String::new(), String::new()),
+        };
+        let (open_problem, open_problem_detail) = match tab.open_error() {
+            Some(error) => open_problem(error),
+            None => (Problem::None, String::new()),
+        };
+        let (relocation, relocation_vanished) = match tab.relocation() {
+            Some(Relocation::ToParent { vanished }) => (1, vanished.to_string()),
+            Some(Relocation::ToHome { vanished }) => (2, vanished.to_string()),
+            None => (0, String::new()),
+        };
+        let sort = tab.sort();
+        let status = tab.status();
+        let selected_size = if status.selected_size > 0 {
+            file_list::format_size(status.selected_size)
+        } else {
+            String::new()
+        };
+        set_panel_data(
+            ui,
+            panel,
+            PanelData {
+                address_problem,
+                address_problem_value: address_problem_value.into(),
+                address_problem_detail: address_problem_detail.into(),
+                reading: tab.is_reading(now),
+                list_problem,
+                list_problem_location: list_problem_location.into(),
+                list_problem_detail: list_problem_detail.into(),
+                open_problem,
+                open_problem_detail: open_problem_detail.into(),
+                auto_refresh_off: matches!(tab.auto_refresh(), AutoRefresh::Off(_)),
+                relocation,
+                relocation_vanished: relocation_vanished.into(),
+                sort_column: match sort.column {
+                    Column::Name => 0,
+                    Column::Modified => 1,
+                    Column::Type => 2,
+                    Column::Size => 3,
+                },
+                sort_descending: sort.direction == Direction::Descending,
+                item_count: count(status.item_count),
+                selected_count: count(status.selected_count),
+                selected_size: selected_size.into(),
+            },
+        );
+        let redraw_at = tab.reading_shown_at().filter(|at| *at > now);
+        drop(app);
         // 화면은 보이는 행만 다시 묻는다.
-        self.rows.notify.reset();
+        models.rows.notify.reset();
+        redraw_at
     }
 
-    /// 활성 패널의 탭 줄: 제목(폴더 이름), 툴팁(전체 경로), 활성 탭. 바뀔 때만 고쳐 화면 요소를 다시 만들지 않고,
+    /// 패널의 탭 줄: 제목(폴더 이름), 툴팁(전체 경로), 활성 탭. 바뀔 때만 고쳐 화면 요소를 다시 만들지 않고,
     /// 활성 탭이 줄 밖이면 보이게 넘긴다.
-    fn render_tabs(&self, ui: &AppWindow) {
-        let (items, active) = {
-            let app = self.app.borrow();
-            let panel = app.active_window().active_panel();
-            let active = panel.active_index();
-            let items: Vec<TabItem> = panel
-                .tabs()
-                .enumerate()
-                .map(|(i, (_, tab))| TabItem {
-                    title: tab.title().into(),
-                    path: tab.location().to_string().into(),
-                    active: i == active,
-                })
-                .collect();
-            (items, active)
-        };
-        if !self.tabs.iter().eq(items.iter().cloned()) {
-            self.tabs.set_vec(items);
+    fn render_tabs(&self, ui: &AppWindow, panel: usize, shown: &Panel) {
+        let active = shown.active_index();
+        let items: Vec<TabItem> = shown
+            .tabs()
+            .enumerate()
+            .map(|(i, (_, tab))| TabItem {
+                title: tab.title().into(),
+                path: tab.location().to_string().into(),
+                active: i == active,
+            })
+            .collect();
+        let tabs = &self.panels[panel].tabs;
+        if !tabs.iter().eq(items.iter().cloned()) {
+            tabs.set_vec(items);
         }
+        let strip = PanelUi::of(ui, panel);
         let offset = file_list::scroll_to_show(
             active,
-            ui.get_tab_width(),
-            -ui.get_tab_strip_x(),
-            ui.get_tab_strip_width(),
+            strip.tab_width(),
+            -strip.tab_strip_x(),
+            strip.tab_strip_width(),
         );
-        ui.set_tab_strip_x(-offset);
+        strip.set_tab_strip_x(-offset);
+    }
+
+    /// 패널을 눌렀다: 그 패널을 활성 패널로 한다. 이미 활성이면 아무것도 하지 않는다.
+    fn panel_pressed(&self, index: i32) {
+        let Ok(index) = usize::try_from(index) else {
+            return;
+        };
+        if index == self.active_panel() {
+            return;
+        }
+        self.remember_scroll();
+        if self.app.borrow_mut().activate_panel(index) {
+            self.panel_switched();
+        }
+    }
+
+    /// 활성 패널이 바뀌었다(두 패널의 보이는 탭은 그대로): 이름 입력란·주소창 고쳐 쓰기를 닫고 다시 그린다.
+    /// 스크롤 위치는 패널마다 그대로 둔다.
+    fn panel_switched(&self) {
+        self.close_rename();
+        self.close_address_edit();
+        self.render();
+    }
+
+    /// 패널 사이 경계를 끌었다: 코어가 한도 안으로 자른 분할 비율을 그린다.
+    fn split_dragged(&self, ratio: f32) {
+        self.app
+            .borrow_mut()
+            .active_window_mut()
+            .set_split_ratio(ratio);
+        self.render();
+    }
+
+    /// 패널 사이 경계를 두 번 눌렀다: 반반으로 맞춘다.
+    fn split_reset(&self) {
+        self.app
+            .borrow_mut()
+            .active_window_mut()
+            .reset_split_ratio();
+        self.render();
     }
 
     /// 키 입력 하나. 명령이나 커서 이동으로 처리했으면 `true`, 글자 입력이면 `false`다.
@@ -402,7 +511,9 @@ impl View {
             let _ = slint::quit_event_loop();
             return;
         }
-        if self.app.borrow().active_tab_id() != before {
+        if command == CommandId::SwitchPanel && execution == Execution::Done {
+            self.panel_switched();
+        } else if self.app.borrow().active_tab_id() != before {
             self.tab_switched();
         } else {
             self.render();
@@ -414,13 +525,15 @@ impl View {
         }
     }
 
-    /// 활성 탭이 바뀌었다: 이름 입력란·주소창 고쳐 쓰기를 닫고, 그 탭이 갖고 있던 목록과 스크롤 위치를 바로 그린다.
-    /// 다시 읽은 결과는 나중에 와서 바꾼다.
+    /// 활성 탭이 바뀌었다(탭 바꾸기·열기·닫기, 패널 나누기·합치기): 이름 입력란·주소창 고쳐 쓰기를 닫고, 패널마다
+    /// 보이는 탭이 갖고 있던 목록과 스크롤 위치를 바로 그린다. 다시 읽은 결과는 나중에 와서 바꾼다.
     fn tab_switched(&self) {
         self.close_rename();
         self.close_address_edit();
         self.render();
-        self.restore_scroll();
+        for panel in 0..MAX_PANELS {
+            self.restore_scroll(panel);
+        }
     }
 
     /// 탭 줄의 `index`번째 탭을 눌렀다: 그 탭으로 간다.
@@ -708,53 +821,76 @@ impl View {
         self.execute(CommandId::Open);
     }
 
-    /// 한 쪽의 행 수.
+    /// 활성 패널 한 쪽의 행 수.
     fn page_rows(&self) -> usize {
         let Some(ui) = self.ui.upgrade() else {
             return 1;
         };
         let row_height = ui.get_row_height();
         if row_height > 0.0 {
-            (ui.get_view_height() / row_height) as usize
+            (PanelUi::of(&ui, self.active_panel()).view_height() / row_height) as usize
         } else {
             1
         }
     }
 
-    /// 맨 위에 보이는 행 번호를 탭에 알린다.
+    /// 패널마다 맨 위에 보이는 행 번호를 그 패널의 보이는 탭에 알린다.
     fn remember_scroll(&self) {
         let Some(ui) = self.ui.upgrade() else { return };
         let row_height = ui.get_row_height();
-        if row_height > 0.0 {
-            let top = (-ui.get_content_y() / row_height).max(0.0) as usize;
-            self.app.borrow_mut().active_tab_mut().set_scroll(top);
+        if row_height <= 0.0 {
+            return;
+        }
+        let mut app = self.app.borrow_mut();
+        if app.is_finished() {
+            return;
+        }
+        let window = app.active_window_mut();
+        for panel in 0..MAX_PANELS {
+            if let Some(shown) = window.panel_mut(panel) {
+                let content_y = PanelUi::of(&ui, panel).content_y();
+                let top = (-content_y / row_height).max(0.0) as usize;
+                shown.active_tab_mut().set_scroll(top);
+            }
         }
     }
 
-    /// 이동이 확정된 뒤: 탭이 기억한 스크롤 위치로 가고(뒤로 가면 되살아난다) 커서 항목을 보인다.
-    fn restore_scroll(&self) {
+    /// 패널의 보이는 탭이 기억한 스크롤 위치로 가고(뒤로 가면 되살아난다), 활성 패널이면 커서 항목을 보인다.
+    fn restore_scroll(&self, panel: usize) {
         let Some(ui) = self.ui.upgrade() else { return };
-        let (scroll, cursor) = {
+        let (scroll, cursor, active) = {
             let app = self.app.borrow();
-            let tab = app.active_tab();
-            (tab.scroll(), tab.cursor())
+            if app.is_finished() {
+                return;
+            }
+            let window = app.active_window();
+            let Some(shown) = window.panels().get(panel) else {
+                return;
+            };
+            let tab = shown.active_tab();
+            (
+                tab.scroll(),
+                tab.cursor(),
+                window.active_panel_index() == panel,
+            )
         };
-        ui.set_content_y(-(scroll as f32 * ui.get_row_height()));
-        if let Some(index) = cursor {
+        PanelUi::of(&ui, panel).set_content_y(-(scroll as f32 * ui.get_row_height()));
+        if active && let Some(index) = cursor {
             self.show_row(index);
         }
     }
 
-    /// `index`번 행이 화면 밖이면 그 행이 보이게 스크롤한다.
+    /// 활성 패널에서 `index`번 행이 화면 밖이면 그 행이 보이게 스크롤한다.
     fn show_row(&self, index: usize) {
         let Some(ui) = self.ui.upgrade() else { return };
+        let list = PanelUi::of(&ui, self.active_panel());
         let offset = file_list::scroll_to_show(
             index,
             ui.get_row_height(),
-            -ui.get_content_y(),
-            ui.get_view_height(),
+            -list.content_y(),
+            list.view_height(),
         );
-        ui.set_content_y(-offset);
+        list.set_content_y(-offset);
     }
 
     /// F2: 커서 항목의 이름 입력란을 연다.
@@ -819,6 +955,86 @@ fn count(n: usize) -> i32 {
     i32::try_from(n).unwrap_or(i32::MAX)
 }
 
+/// 패널 하나(0 왼쪽, 1 오른쪽)의 화면 값: 목록 스크롤과 탭 줄. 창의 `left-*`·`right-*` 속성을 고른다.
+struct PanelUi<'a> {
+    ui: &'a AppWindow,
+    right: bool,
+}
+
+impl<'a> PanelUi<'a> {
+    fn of(ui: &'a AppWindow, panel: usize) -> Self {
+        PanelUi {
+            ui,
+            right: panel == 1,
+        }
+    }
+
+    fn content_y(&self) -> f32 {
+        if self.right {
+            self.ui.get_right_content_y()
+        } else {
+            self.ui.get_left_content_y()
+        }
+    }
+
+    fn set_content_y(&self, y: f32) {
+        if self.right {
+            self.ui.set_right_content_y(y);
+        } else {
+            self.ui.set_left_content_y(y);
+        }
+    }
+
+    fn view_height(&self) -> f32 {
+        if self.right {
+            self.ui.get_right_view_height()
+        } else {
+            self.ui.get_left_view_height()
+        }
+    }
+
+    fn tab_width(&self) -> f32 {
+        if self.right {
+            self.ui.get_right_tab_width()
+        } else {
+            self.ui.get_left_tab_width()
+        }
+    }
+
+    fn tab_strip_x(&self) -> f32 {
+        if self.right {
+            self.ui.get_right_tab_strip_x()
+        } else {
+            self.ui.get_left_tab_strip_x()
+        }
+    }
+
+    fn set_tab_strip_x(&self, x: f32) {
+        if self.right {
+            self.ui.set_right_tab_strip_x(x);
+        } else {
+            self.ui.set_left_tab_strip_x(x);
+        }
+    }
+
+    fn tab_strip_width(&self) -> f32 {
+        if self.right {
+            self.ui.get_right_tab_strip_width()
+        } else {
+            self.ui.get_left_tab_strip_width()
+        }
+    }
+}
+
+/// 패널 하나의 수치·알림을 화면에 넣는다.
+fn set_panel_data(ui: &AppWindow, panel: usize, data: PanelData) {
+    if panel == 1 {
+        ui.set_right_data(data);
+    } else {
+        ui.set_left_data(data);
+    }
+}
+
 /// 목록 읽기 오류를 화면의 종류와 값으로. 문장은 화면이 만든다.
 fn list_problem(error: &ListError) -> (Problem, String, String) {
     let location = error.location().to_string();
@@ -872,31 +1088,37 @@ fn open_problem(error: &OpenError) -> (Problem, String) {
     }
 }
 
-/// 활성 탭의 보이는 항목들. 행 문자열은 화면이 그 행을 물을 때만 만든다.
+/// 패널 하나(`panel`번째)의 보이는 탭의 항목들. 행 문자열은 화면이 그 행을 물을 때만 만든다. 그 패널이 없으면
+/// 비어 있다.
 struct TabRows {
     app: Rc<RefCell<App>>,
+    panel: usize,
     notify: ModelNotify,
+}
+
+impl TabRows {
+    /// 이 패널의 보이는 탭.
+    fn tab<'a>(&self, app: &'a App) -> Option<&'a Tab> {
+        if app.is_finished() {
+            return None;
+        }
+        let panel = app.active_window().panels().get(self.panel)?;
+        Some(panel.active_tab())
+    }
 }
 
 impl Model for TabRows {
     type Data = Row;
 
     fn row_count(&self) -> usize {
-        self.app.try_borrow().map_or(0, |app| {
-            if app.is_finished() {
-                0
-            } else {
-                app.active_tab().len()
-            }
-        })
+        self.app
+            .try_borrow()
+            .map_or(0, |app| self.tab(&app).map_or(0, Tab::len))
     }
 
     fn row_data(&self, row: usize) -> Option<Row> {
         let app = self.app.try_borrow().ok()?;
-        if app.is_finished() {
-            return None;
-        }
-        let tab = app.active_tab();
+        let tab = self.tab(&app)?;
         let item = tab.get(row)?;
         Some(Row {
             name: item.name.to_string_lossy().as_ref().into(),
