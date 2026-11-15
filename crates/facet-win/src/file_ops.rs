@@ -359,6 +359,9 @@ pub fn read_link(path: &Path) -> FileOpResult<Link> {
 /// 아님, `ERROR_PRIVILEGE_NOT_HELD`) [`FileOpErrorKind::AccessDenied`]다. 정션은 권한 없이 만들 수 있고, 만들다
 /// 실패하면 만든 빈 폴더를 지운다. 링크의 시각·속성은 원본 링크를 따르지 않는다(만든 때).
 pub fn create_link(path: &Path, link: &Link) -> FileOpResult<()> {
+    if let Some(error) = fault::link_creation_error(path) {
+        return Err(error);
+    }
     #[cfg(windows)]
     {
         crate::windows_file_ops::create_link(path, link)
@@ -380,6 +383,55 @@ pub fn remove_link(path: &Path) -> FileOpResult<()> {
     {
         let _ = path;
         Err(FileOpError::unsupported())
+    }
+}
+
+/// 시험용 오류 주입: 링크를 만들 권한이 없는 환경을 흉내 낸다.
+///
+/// CI 러너처럼 관리자(심볼릭 링크 권한, 쓰기 권한 검사를 건너뛰는 복원 권한)로 도는 곳에서는 링크 만들기를 실제로
+/// 실패하게 할 방법이 없다. 그래서 테스트가 폴더 하나를 정하면 그 아래에 [`create_link`]를 부를 때 운영체제가
+/// 권한이 없을 때 돌려주는 코드(`ERROR_PRIVILEGE_NOT_HELD`)로 실패한다. 폴더로 범위를 정하므로 나란히 도는 다른
+/// 테스트에 번지지 않는다. 앱은 부르지 않는다.
+#[doc(hidden)]
+pub mod fault {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    use super::{ERROR_PRIVILEGE_NOT_HELD, FileOpError};
+
+    static NO_LINK_PRIVILEGE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+    /// 돌려준 값이 살아 있는 동안 `folder` 아래에 링크를 만들면 권한 없음으로 실패한다.
+    #[must_use = "버리면 곧바로 주입이 풀린다"]
+    pub fn deny_link_creation_under(folder: &Path) -> LinkCreationDenied {
+        let folder = folder.to_path_buf();
+        lock().push(folder.clone());
+        LinkCreationDenied(folder)
+    }
+
+    /// [`deny_link_creation_under`]의 주입. 버리면 풀린다.
+    pub struct LinkCreationDenied(PathBuf);
+
+    impl Drop for LinkCreationDenied {
+        fn drop(&mut self) {
+            let mut folders = lock();
+            if let Some(index) = folders.iter().position(|f| *f == self.0) {
+                folders.remove(index);
+            }
+        }
+    }
+
+    fn lock() -> std::sync::MutexGuard<'static, Vec<PathBuf>> {
+        NO_LINK_PRIVILEGE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(super) fn link_creation_error(path: &Path) -> Option<FileOpError> {
+        lock()
+            .iter()
+            .any(|folder| path.starts_with(folder))
+            .then(|| FileOpError::from_win32(ERROR_PRIVILEGE_NOT_HELD))
     }
 }
 

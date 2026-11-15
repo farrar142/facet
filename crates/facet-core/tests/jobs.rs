@@ -473,52 +473,6 @@ mod windows {
         assert_same_tree(&source, &target.join("원본 🌏"));
     }
 
-    #[test]
-    fn 폴더_정션은_따라_들어가지_않는다() {
-        let dir = TempDir::new().unwrap();
-        let source = dir.path().join("원본");
-        fs::create_dir_all(&source).unwrap();
-        fs::write(source.join("a.txt"), "a").unwrap();
-        // 원본 자신을 가리키는 정션: 따라 들어가면 끝나지 않는다.
-        let junction = source.join("고리");
-        let status = Command::new("cmd")
-            .arg("/c")
-            .arg("mklink")
-            .arg("/J")
-            .arg(&junction)
-            .arg(&source)
-            .status()
-            .unwrap();
-        assert!(status.success(), "mklink /J");
-        let target = dir.path().join("대상");
-        fs::create_dir_all(&target).unwrap();
-
-        let mut queue = JobQueue::new();
-        let events = copy_and_wait(&mut queue, vec![source.clone()], &target);
-        let id = match events.last().unwrap() {
-            JobEvent::Finished { job, .. } => *job,
-            other => panic!("{other:?}"),
-        };
-        let summary = summary_of(&events, id);
-        assert_eq!(summary.links_skipped, 1, "{summary:?}");
-        assert_eq!(summary.files_copied, 1, "{summary:?}");
-        assert_eq!(
-            fs::read_to_string(target.join("원본").join("a.txt")).unwrap(),
-            "a"
-        );
-        assert!(!target.join("원본").join("고리").exists());
-
-        // 정션 자체를 원본으로 넘겨도 따라 들어가지 않는다.
-        let events = copy_and_wait(&mut queue, vec![junction.clone()], &target);
-        let id = match events.last().unwrap() {
-            JobEvent::Finished { job, .. } => *job,
-            other => panic!("{other:?}"),
-        };
-        assert_eq!(summary_of(&events, id).links_skipped, 1);
-        assert!(!target.join("고리").exists());
-        fs::remove_dir(&junction).unwrap();
-    }
-
     /// 일시정지·취소·지금 시작을 확인하는 큰 파일의 크기. 복사가 일시정지·취소를 부르기 전에 끝나지 않을 만큼
     /// 크고(무버퍼 입출력 문턱 256MiB도 넘는다), 테스트가 너무 느려지지 않을 만큼 작다.
     const BIG: usize = 300 * 1024 * 1024;

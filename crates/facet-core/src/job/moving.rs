@@ -239,7 +239,7 @@ impl Mover<'_> {
                 self.copier.reporter.items_done += 1;
             }
         } else {
-            // 폴더(와 따라 들어가지 않는 링크)는 훑기가 그 항목부터 다시 센다.
+            // 폴더와 링크(링크 자체를 만든다)는 훑기가 그 항목부터 다시 센다.
             totals.items.fetch_sub(1, Ordering::AcqRel);
             self.copier.preset = answer;
             self.copier

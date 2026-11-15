@@ -628,3 +628,27 @@ fn 심볼릭_링크를_읽고_만든다_개발자_모드에서만() {
     assert!(file.is_file());
     assert_eq!(fs::read_dir(&sub).unwrap().count(), 0);
 }
+
+#[test]
+fn 링크를_만들_권한이_없으면_접근_거부다_오류_주입() {
+    let dir = TempDir::new().unwrap();
+    let pointee = dir.path().join("폴더");
+    fs::create_dir(&pointee).unwrap();
+    let link = file_ops::Link {
+        kind: file_ops::LinkKind::Junction,
+        target: pointee.clone(),
+        relative: false,
+    };
+    let path = dir.path().join("정션");
+    {
+        let _denied = file_ops::fault::deny_link_creation_under(dir.path());
+        let error = file_ops::create_link(&path, &link).unwrap_err();
+        assert_eq!(error.kind(), FileOpErrorKind::AccessDenied);
+        // ERROR_PRIVILEGE_NOT_HELD: 개발자 모드가 아닌 일반 사용자가 심볼릭 링크를 만들 때 받는 코드.
+        assert_eq!(error.code(), Some(1314));
+        assert!(fs::symlink_metadata(&path).is_err());
+    }
+    // 주입을 버리면 만든다.
+    file_ops::create_link(&path, &link).unwrap();
+    file_ops::remove_link(&path).unwrap();
+}
