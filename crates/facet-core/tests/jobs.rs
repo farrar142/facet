@@ -583,4 +583,362 @@ mod windows {
         assert!(!target.join("고리").exists());
         fs::remove_dir(&junction).unwrap();
     }
+
+    /// 일시정지·취소·지금 시작을 확인하는 큰 파일의 크기. 복사가 일시정지·취소를 부르기 전에 끝나지 않을 만큼
+    /// 크고(무버퍼 입출력 문턱 256MiB도 넘는다), 테스트가 너무 느려지지 않을 만큼 작다.
+    const BIG: usize = 300 * 1024 * 1024;
+
+    /// 큰 파일을 1MiB 덩어리로 쓴다(덩어리마다 내용이 달라 어긋난 복사를 잡는다).
+    fn write_big(path: &Path) {
+        use std::io::Write;
+        let mut file = std::io::BufWriter::new(fs::File::create(path).unwrap());
+        let chunk = 1024 * 1024;
+        for i in 0..BIG / chunk {
+            file.write_all(&pattern(chunk, i)).unwrap();
+        }
+        file.flush().unwrap();
+    }
+
+    /// 두 파일의 내용이 같은지 덩어리로 비교한다.
+    fn assert_same_content(a: &Path, b: &Path) {
+        use std::io::Read;
+        assert_eq!(
+            fs::metadata(a).unwrap().len(),
+            fs::metadata(b).unwrap().len()
+        );
+        let mut a = std::io::BufReader::new(fs::File::open(a).unwrap());
+        let mut b = std::io::BufReader::new(fs::File::open(b).unwrap());
+        let mut x = vec![0; 1024 * 1024];
+        let mut y = vec![0; 1024 * 1024];
+        loop {
+            let n = a.read(&mut x).unwrap();
+            if n == 0 {
+                break;
+            }
+            b.read_exact(&mut y[..n]).unwrap();
+            assert!(x[..n] == y[..n], "내용이 다르다");
+        }
+    }
+
+    /// `wanted`인 사건이 올 때까지 사건을 `events`에 모은다.
+    fn wait_for(
+        queue: &mut JobQueue,
+        events: &mut Vec<JobEvent>,
+        wanted: impl Fn(&JobEvent) -> bool,
+    ) {
+        let deadline = std::time::Instant::now() + JOB_TIMEOUT;
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let event = queue
+                .wait_event(left)
+                .unwrap_or_else(|| panic!("기다린 사건이 오지 않았다: {events:?}"));
+            let found = wanted(&event);
+            events.push(event);
+            if found {
+                return;
+            }
+        }
+    }
+
+    fn state_changed(job: JobId, state: JobState) -> JobEvent {
+        JobEvent::StateChanged { job, state }
+    }
+
+    fn position(events: &[JobEvent], wanted: &JobEvent) -> usize {
+        events
+            .iter()
+            .position(|e| e == wanted)
+            .unwrap_or_else(|| panic!("{wanted:?} 없음: {events:?}"))
+    }
+
+    fn is_copying(event: &JobEvent, id: JobId) -> bool {
+        matches!(event, JobEvent::Progress { job, progress } if *job == id && progress.bytes_done > 0)
+    }
+
+    #[test]
+    fn 일시정지_동안_대상_파일이_자라지_않고_이어하면_끝나며_내용이_같다() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("큰 파일.bin");
+        write_big(&source);
+        let target_dir = dir.path().join("대상");
+        fs::create_dir_all(&target_dir).unwrap();
+        let target = target_dir.join("큰 파일.bin");
+
+        let mut queue = JobQueue::new();
+        let id = queue
+            .copy(vec![source.clone()], target_dir.clone())
+            .unwrap();
+        let mut events = Vec::new();
+        wait_for(&mut queue, &mut events, |e| is_copying(e, id));
+        assert!(queue.pause(id), "실행 중인 작업은 일시정지된다");
+        assert_eq!(queue.state(id), Some(JobState::Paused));
+        assert!(!queue.pause(id), "이미 일시정지한 작업은 그대로");
+
+        // 진행 콜백이 멈춤을 볼 때까지 조금 기다린 뒤부터 잰다.
+        std::thread::sleep(Duration::from_millis(300));
+        events.extend(queue.poll());
+        assert!(
+            events.contains(&state_changed(id, JobState::Paused)),
+            "{events:?}"
+        );
+        let before = fs::metadata(&target).unwrap().len();
+        std::thread::sleep(Duration::from_millis(1000));
+        let after = fs::metadata(&target).unwrap().len();
+        assert_eq!(before, after, "일시정지 동안 대상 파일 크기가 늘었다");
+        let during = queue.poll();
+        assert!(
+            during
+                .iter()
+                .all(|e| !matches!(e, JobEvent::Progress { .. } | JobEvent::Finished { .. })),
+            "일시정지 동안 진행·끝남이 왔다: {during:?}"
+        );
+        assert!(queue.has_unfinished());
+
+        assert!(queue.resume(id));
+        assert!(!queue.resume(id), "이미 이어 간 작업은 그대로");
+        let mut rest = collect_until_finished(&mut queue, &[id]);
+        assert_eq!(rest[0], state_changed(id, JobState::Running));
+        events.append(&mut rest);
+        assert!(events.contains(&state_changed(id, JobState::Finished)));
+        let summary = summary_of(&events, id);
+        assert_eq!(summary.files_copied, 1);
+        assert_eq!(summary.items_done, 1);
+        assert_eq!(summary.items_remaining, 0);
+        assert!(summary.all_counted);
+        assert_same_content(&source, &target);
+    }
+
+    #[test]
+    fn 취소하면_만들다_만_파일이_없고_다_복사한_항목은_남고_남은_항목_수가_맞다() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("원본");
+        fs::create_dir_all(&source).unwrap();
+        // NTFS 목록은 이름 차례다: a… 다섯 개를 다 복사한 뒤 큰 파일을 복사하는 중에 취소하고, c… 셋은 못 한다.
+        for i in 1..=5 {
+            fs::write(source.join(format!("a{i}.bin")), pattern(1000, i)).unwrap();
+        }
+        let big = source.join("b 큰 파일.bin");
+        write_big(&big);
+        for i in 1..=3 {
+            fs::write(source.join(format!("c{i}.bin")), pattern(1000, i)).unwrap();
+        }
+        let target = dir.path().join("대상");
+        fs::create_dir_all(&target).unwrap();
+        let next_source = dir.path().join("다음.txt");
+        fs::write(&next_source, "다음 작업").unwrap();
+        let next_target = dir.path().join("다음 대상");
+        fs::create_dir_all(&next_target).unwrap();
+
+        let mut queue = JobQueue::new();
+        let id = queue.copy(vec![source.clone()], target.clone()).unwrap();
+        let next = queue
+            .copy(vec![next_source.clone()], next_target.clone())
+            .unwrap();
+        let mut events = Vec::new();
+        wait_for(&mut queue, &mut events, |e| match e {
+            JobEvent::Progress { job, progress } => {
+                *job == id && progress.current.as_deref() == Some(big.as_path())
+            }
+            _ => false,
+        });
+        assert!(queue.cancel(id));
+        assert!(!queue.cancel(id), "취소 중인 작업은 다시 취소하지 않는다");
+        assert!(!queue.pause(id), "취소 중인 작업은 일시정지하지 않는다");
+        let mut rest = collect_until_finished(&mut queue, &[id, next]);
+        events.append(&mut rest);
+
+        let cancelled = position(&events, &state_changed(id, JobState::Cancelled));
+        let finished = position(
+            &events,
+            &JobEvent::Finished {
+                job: id,
+                summary: summary_of(&events, id),
+            },
+        );
+        assert_eq!(finished, cancelled + 1);
+        let summary = summary_of(&events, id);
+        assert_eq!(summary.files_copied, 5, "{summary:?}");
+        assert_eq!(summary.folders_copied, 1, "{summary:?}");
+        assert!(summary.failures.is_empty(), "{summary:?}");
+        assert!(summary.all_counted, "{summary:?}");
+        // 원본 폴더 + a 다섯 개를 했고, 큰 파일 + c 셋이 남았다.
+        assert_eq!(summary.items_done, 6, "{summary:?}");
+        assert_eq!(summary.items_remaining, 4, "{summary:?}");
+
+        let copied = target.join("원본");
+        let mut names: Vec<_> = fs::read_dir(&copied)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["a1.bin", "a2.bin", "a3.bin", "a4.bin", "a5.bin"],
+            "만들다 만 파일이나 못 한 항목이 있다"
+        );
+        for i in 1..=5 {
+            let name = format!("a{i}.bin");
+            assert_same_content(&source.join(&name), &copied.join(&name));
+        }
+
+        // 취소한 작업 뒤의 작업은 막히지 않고 돈다.
+        assert!(events.contains(&state_changed(next, JobState::Finished)));
+        assert!(position(&events, &state_changed(next, JobState::Running)) > cancelled);
+        assert_eq!(
+            fs::read_to_string(next_target.join("다음.txt")).unwrap(),
+            "다음 작업"
+        );
+        assert!(!queue.has_unfinished());
+    }
+
+    #[test]
+    fn 대기_중에_일시정지한_작업은_차례가_와도_시작하지_않고_뒤_작업이_먼저_돈다() {
+        let dir = TempDir::new().unwrap();
+        let big = dir.path().join("큰 파일.bin");
+        write_big(&big);
+        let small = dir.path().join("작은 파일.txt");
+        fs::write(&small, "작은").unwrap();
+        let targets: Vec<PathBuf> = (0..4)
+            .map(|i| {
+                let target = dir.path().join(format!("대상 {i}"));
+                fs::create_dir_all(&target).unwrap();
+                target
+            })
+            .collect();
+
+        let mut queue = JobQueue::new();
+        let first = queue.copy(vec![big.clone()], targets[0].clone()).unwrap();
+        let mut events = Vec::new();
+        wait_for(&mut queue, &mut events, |e| {
+            *e == state_changed(first, JobState::Running)
+        });
+        // 시작하자마자 멈춰 둔다(차례를 쥔 채 멈추므로 뒤 작업을 넣는 동안 앞 작업이 끝나 버리지 않는다).
+        assert!(queue.pause(first), "앞 작업이 이미 끝났다: {events:?}");
+        let paused = queue.copy(vec![small.clone()], targets[1].clone()).unwrap();
+        let after = queue.copy(vec![small.clone()], targets[2].clone()).unwrap();
+        let dropped = queue.copy(vec![small.clone()], targets[3].clone()).unwrap();
+        assert_eq!(queue.state(after), Some(JobState::Queued));
+        assert!(queue.pause(paused));
+        assert!(queue.pause(dropped));
+        assert_eq!(queue.state(paused), Some(JobState::Paused));
+        // 도는 앞 작업을 취소하면 차례는 일시정지한 작업을 건너 다음 작업으로 간다.
+        assert!(queue.cancel(first));
+        wait_for(
+            &mut queue,
+            &mut events,
+            |e| matches!(e, JobEvent::Finished { job, .. } if *job == after),
+        );
+        assert!(
+            events.contains(&state_changed(first, JobState::Cancelled)),
+            "{events:?}"
+        );
+        assert!(events.contains(&state_changed(after, JobState::Finished)));
+        assert!(
+            !events.contains(&state_changed(paused, JobState::Running)),
+            "일시정지한 대기 작업이 시작했다: {events:?}"
+        );
+        assert_eq!(queue.state(paused), Some(JobState::Paused));
+        assert!(!targets[0].join("큰 파일.bin").exists());
+        assert!(!targets[1].join("작은 파일.txt").exists());
+        assert!(targets[2].join("작은 파일.txt").is_file());
+
+        // 시작 전에 일시정지한 작업을 취소하면 곧바로 끝나고 남은 항목은 넘긴 원본 수다.
+        assert!(queue.cancel(dropped));
+        let mut tail = queue.poll();
+        assert_eq!(
+            tail,
+            [
+                state_changed(dropped, JobState::Cancelled),
+                JobEvent::Finished {
+                    job: dropped,
+                    summary: facet_core::job::Summary {
+                        items_remaining: 1,
+                        ..Default::default()
+                    }
+                }
+            ]
+        );
+        events.append(&mut tail);
+
+        // 이어 가면 대기로 돌아가 곧 시작한다.
+        assert!(queue.resume(paused));
+        let mut rest = collect_until_finished(&mut queue, &[paused]);
+        assert_eq!(rest[0], state_changed(paused, JobState::Queued));
+        assert_eq!(rest[1], state_changed(paused, JobState::Running));
+        events.append(&mut rest);
+        assert!(events.contains(&state_changed(paused, JobState::Finished)));
+        assert!(targets[1].join("작은 파일.txt").is_file());
+        assert!(!targets[3].join("작은 파일.txt").exists());
+        assert!(!queue.has_unfinished());
+    }
+
+    #[test]
+    fn 지금_시작한_작업은_앞_작업과_나란히_돌고_차례_실행은_이어진다() {
+        let dir = TempDir::new().unwrap();
+        let big = dir.path().join("큰 파일.bin");
+        write_big(&big);
+        let small = dir.path().join("급한 파일.txt");
+        fs::write(&small, "급함").unwrap();
+        let targets: Vec<PathBuf> = (0..3)
+            .map(|i| {
+                let target = dir.path().join(format!("대상 {i}"));
+                fs::create_dir_all(&target).unwrap();
+                target
+            })
+            .collect();
+
+        let mut queue = JobQueue::new();
+        let first = queue.copy(vec![big.clone()], targets[0].clone()).unwrap();
+        let urgent = queue.copy(vec![small.clone()], targets[1].clone()).unwrap();
+        let later = queue.copy(vec![small.clone()], targets[2].clone()).unwrap();
+        let mut events = Vec::new();
+        // 앞 작업이 시작하자마자(큰 파일을 복사하는 동안) 지금 시작한다.
+        wait_for(&mut queue, &mut events, |e| {
+            *e == state_changed(first, JobState::Running)
+        });
+        assert!(queue.start_now(urgent));
+        assert!(!queue.start_now(urgent), "이미 시작한 작업");
+        assert!(!queue.start_now(first), "실행 중인 작업");
+        let mut rest = collect_until_finished(&mut queue, &[first, urgent, later]);
+        events.append(&mut rest);
+
+        let running_first = position(&events, &state_changed(first, JobState::Running));
+        let running_urgent = position(&events, &state_changed(urgent, JobState::Running));
+        let finished_first = position(&events, &state_changed(first, JobState::Finished));
+        let finished_urgent = position(&events, &state_changed(urgent, JobState::Finished));
+        let running_later = position(&events, &state_changed(later, JobState::Running));
+        // 두 작업이 동시에 실행 중인 순간이 있다.
+        assert!(
+            running_first < running_urgent && running_urgent < finished_first,
+            "{events:?}"
+        );
+        assert!(finished_urgent < finished_first, "{events:?}");
+        // 나란히 돌던 작업이 끝나도 차례의 다음 작업은 앞 작업을 기다린다.
+        assert!(finished_first < running_later, "{events:?}");
+        assert_same_content(&big, &targets[0].join("큰 파일.bin"));
+        assert!(targets[1].join("급한 파일.txt").is_file());
+        assert!(targets[2].join("급한 파일.txt").is_file());
+        assert!(!queue.has_unfinished());
+    }
+
+    #[test]
+    fn 끝난_작업에_일시정지_취소_지금_시작을_하면_아무_일도_없다() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("a.txt");
+        fs::write(&source, "a").unwrap();
+        let target = dir.path().join("대상");
+        fs::create_dir_all(&target).unwrap();
+
+        let mut queue = JobQueue::new();
+        let id = queue.copy(vec![source.clone()], target.clone()).unwrap();
+        collect_until_finished(&mut queue, &[id]);
+        assert_eq!(queue.state(id), None);
+        assert!(!queue.pause(id));
+        assert!(!queue.resume(id));
+        assert!(!queue.cancel(id));
+        assert!(!queue.start_now(id));
+        assert!(queue.poll().is_empty(), "끝난 작업에 사건이 왔다");
+        assert!(!queue.has_unfinished());
+        assert_eq!(fs::read_to_string(target.join("a.txt")).unwrap(), "a");
+    }
 }
