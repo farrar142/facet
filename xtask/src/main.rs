@@ -321,7 +321,7 @@ fn session_bench_step() -> Step {
     }
 }
 
-/// 임시 폴더에서 1GiB 파일 하나의 복사 처리량과 4KiB 파일 1만 개 폴더의 복사 시간을 잰다(작업 대기열의 복사
+/// 임시 폴더에서 256MiB 파일 하나의 복사 처리량과 4KiB 파일 2천 개 폴더의 복사 시간을 잰다(작업 대기열의 복사
 /// 작업). 크기·수·한도는 `facet-bench`의 기본값이다.
 fn copy_bench_step() -> Step {
     Step {

@@ -1,11 +1,13 @@
 //! 복사 벤치마크와 탐색기 비교 측정.
 //!
 //! - **복사 벤치마크**(CI가 지킴, `facet-bench copy`): 작업 대기열([`JobQueue`])의 복사 작업으로 (1) 큰 파일 하나
-//!   ([`COPY_BIG_SIZE`], 1GiB)의 처리량을 하한([`COPY_THROUGHPUT_LIMIT`])과, (2) 작은 파일([`COPY_SMALL_SIZE`],
-//!   4KiB) [`COPY_SMALL_COUNT`]개(1만 개)가 든 폴더의 복사 시간을 상한([`COPY_SMALL_LIMIT`])과 견준다. 시험 파일은
-//!   임시 폴더에 만들고(`target/` 밑이 아님) 대상은 매번 지운다.
+//!   ([`COPY_BENCH_BIG_SIZE`], 256MiB)의 처리량을 하한([`COPY_THROUGHPUT_LIMIT`])과, (2) 작은 파일
+//!   ([`COPY_SMALL_SIZE`], 4KiB) [`COPY_BENCH_SMALL_COUNT`]개(2천 개)가 든 폴더의 복사 시간을 상한
+//!   ([`COPY_SMALL_LIMIT`])과 견준다. 각각 한 번 데우고 [`COPY_BENCH_RUNS`]회(3회) 잰다. 시험 파일은 임시 폴더에
+//!   만들고(`target/` 밑이 아님) 대상은 매번 지운다.
 //! - **탐색기 비교 측정**(사람이 잼, `facet-bench compare-copy`): 같은 복사를 facet 엔진과 셸의 `IFileOperation`
-//!   ([`facet_win::shell_copy`])으로 번갈아 해 [`CompareResult`]로 낸다. 통과 기준은 큰 파일 처리량이 탐색기의
+//!   ([`facet_win::shell_copy`])으로 번갈아 해 [`CompareResult`]로 낸다. 크기는 spec #18대로 1GiB
+//!   ([`COPY_BIG_SIZE`])와 1만 개([`COPY_SMALL_COUNT`])다. 통과 기준은 큰 파일 처리량이 탐색기의
 //!   [`EXPLORER_THROUGHPUT_RATIO`](90%) 이상, 작은 파일 1만 개 시간이 탐색기보다 길지 않음이다(spec #18).
 
 use std::fmt::Write as _;
@@ -19,41 +21,60 @@ use facet_core::job::{JobEvent, JobQueue};
 use crate::Measurement;
 use crate::screen::{SystemSpec, json_string};
 
-/// 큰 파일 벤치마크의 파일 크기: 1GiB.
+/// 탐색기 비교 측정의 큰 파일 크기: 1GiB(spec #18).
 pub const COPY_BIG_SIZE: u64 = 1 << 30;
 
-/// 작은 파일 벤치마크의 파일 수.
+/// 탐색기 비교 측정의 작은 파일 수: 1만 개(spec #18).
 pub const COPY_SMALL_COUNT: usize = 10_000;
+
+/// 복사 벤치마크(CI)의 큰 파일 크기: 256MiB.
+///
+/// 무버퍼 입출력 경로의 문턱(`facet_win::file_ops::UNBUFFERED_COPY_THRESHOLD`, 256MiB 이상)과 같아 1GiB와
+/// 같은 경로를 탄다. 처리량만 보므로 1GiB일 까닭이 없고, 1GiB였을 때는 원본 만들기와 6번 복사로 이 단계가 CI를
+/// 2~5분 늘렸다.
+pub const COPY_BENCH_BIG_SIZE: u64 = 256 << 20;
+
+/// 복사 벤치마크(CI)의 작은 파일 수: 2천 개. 상한은 이 수에 맞춘 [`COPY_SMALL_LIMIT`]이다.
+pub const COPY_BENCH_SMALL_COUNT: usize = 2_000;
+
+/// 복사 벤치마크(CI)가 재는 횟수(데우기 한 번은 따로). 중앙값으로 판정하므로 3회면 한 번 튄 값을 견딘다.
+pub const COPY_BENCH_RUNS: usize = 3;
 
 /// 작은 파일 벤치마크의 파일 하나 크기: 4KiB(NTFS 클러스터 하나).
 pub const COPY_SMALL_SIZE: usize = 4096;
 
 /// 큰 파일 하나 복사 처리량의 기준(로컬, 릴리스 빌드, 초당 바이트): 400MB/s.
 ///
-/// 1GiB 이상 파일은 무버퍼 입출력으로 디스크를 직접 읽고 쓰므로(`UNBUFFERED_COPY_THRESHOLD`) 처리량은 디스크가
+/// 256MiB 이상 파일은 무버퍼 입출력으로 디스크를 직접 읽고 쓰므로(`UNBUFFERED_COPY_THRESHOLD`) 처리량은 디스크가
 /// 정한다. 같은 SSD 안 복사는 읽기와 쓰기가 한 디스크를 나눠 쓰므로 SATA SSD(순차 약 500MB/s) 안에서는 그
 /// 무렵, NVMe에서는 그보다 높다. 하드 디스크(약 150MB/s)에서는 못 맞추는 값이고, 하드 디스크와의 비교는 탐색기
 /// 비교 측정이 같은 기계에서 한다. 이 기준은 「엔진이 SSD 속도를 낸다」를 적어 둔 것이다.
 pub const COPY_THROUGHPUT_TARGET: u64 = 400_000_000;
 
-/// CI가 실패시키는 큰 파일 복사 처리량의 하한: 로컬 기준 [`COPY_THROUGHPUT_TARGET`]의 1/10(40MB/s).
+/// CI가 실패시키는 큰 파일 복사 처리량의 하한: 로컬 기준 [`COPY_THROUGHPUT_TARGET`]의 1/40(10MB/s).
 ///
-/// 공유 러너의 디스크는 편차가 크고(GitHub 호스트 러너의 임시 폴더 디스크는 측정에서 초당 수백 MB였다가 한참
-/// 느려지기도 한다) 다른 작업과 나눠 쓴다. 이 하한은 엔진이 한 단계 나빠지는 실수(덩어리마다 동기 쓰기, 작은
-/// 버퍼로 읽기, 진행 콜백마다 무거운 일 등)를 잡는 용도이지 미세한 회귀를 잡는 용도가 아니다
+/// 다른 벤치마크의 「기준의 10배」보다 넉넉하다. GitHub 호스트 Windows 러너의 디스크 처리량은 실행마다 크게
+/// 다르다: 2026-11-15 성공한 실행 16번의 1GiB 복사 중앙값은 61~167MB/s였고, 같은 코드가 31.9MB/s로 떨어진
+/// 실행도 있었다(그때 하한 40MB/s로 실패). 10MB/s는 관측한 가장 느린 값보다 세 배 넘게 아래라 러너 편차로는
+/// 떨어지지 않고, 엔진이 한 단계 나빠지는 실수(바이트나 작은 덩어리 단위 복사, 덩어리마다 동기 쓰기, 진행
+/// 콜백마다 무거운 일 등)는 초당 수 MB 아래로 떨어지므로 잡는다. 미세한 회귀를 잡는 용도가 아니다
 /// (`docs/roadmap.md`의 「속도는 두 군데서 지킨다」).
-pub const COPY_THROUGHPUT_LIMIT: u64 = COPY_THROUGHPUT_TARGET / 10;
+pub const COPY_THROUGHPUT_LIMIT: u64 = COPY_THROUGHPUT_TARGET / 40;
 
-/// 4KiB 파일 1만 개가 든 폴더 복사 시간의 기준(로컬, 릴리스 빌드): 5초.
+/// 4KiB 파일 2천 개([`COPY_BENCH_SMALL_COUNT`])가 든 폴더 복사 시간의 기준(로컬, 릴리스 빌드): 1초.
 ///
 /// 작은 파일 복사는 바이트가 아니라 파일마다 드는 일(열기·만들기·시각과 속성 맞추기·닫기, 백신 검사)이 정한다.
 /// 탐색기는 SSD 기계에서 파일 하나에 0.3~0.5ms 안팎이 들어 1만 개에 3~5초쯤이다. facet은 탐색기보다 느리지
-/// 않아야 하므로(spec #18) 그 위쪽 끝인 5초를 기준으로 둔다. 실제 비교는 탐색기 비교 측정이 한다.
-pub const COPY_SMALL_TARGET: Duration = Duration::from_secs(5);
+/// 않아야 하므로(spec #18) 그 위쪽 끝인 파일당 0.5ms를 기준으로 두어 2천 개에 1초다. 실제 비교는 탐색기 비교
+/// 측정이 한다.
+pub const COPY_SMALL_TARGET: Duration = Duration::from_secs(1);
 
-/// CI가 실패시키는 작은 파일 1만 개 복사 시간의 상한: 로컬 기준 [`COPY_SMALL_TARGET`]의 10배(50초).
-/// [`COPY_THROUGHPUT_LIMIT`]과 같은 까닭으로 넉넉하다(파일마다 일이 한 단계 늘어나는 실수만 잡는다).
-pub const COPY_SMALL_LIMIT: Duration = Duration::from_secs(50);
+/// CI가 실패시키는 작은 파일 2천 개 복사 시간의 상한: 로컬 기준 [`COPY_SMALL_TARGET`]의 20배(20초, 파일당 10ms).
+///
+/// 러너에서 1만 개 복사는 파일당 0.6~1.5ms였는데(2026-11-15 실행 16번), 큰 파일 처리량이 네다섯 배 떨어지는
+/// 러너도 있었으므로 [`COPY_THROUGHPUT_LIMIT`]과 같은 까닭으로 10배보다 넉넉히 둔다(파일마다 일이 한 단계
+/// 늘어나는 실수만 잡는다).
+pub const COPY_SMALL_LIMIT: Duration = Duration::from_secs(20);
 
 /// 탐색기 비교 측정의 큰 파일 기준: facet 처리량이 탐색기 처리량의 이 비율 이상이어야 한다(spec #18의 90%).
 pub const EXPLORER_THROUGHPUT_RATIO: f64 = 0.9;
