@@ -51,6 +51,8 @@ pub struct Session {
     pub windows: Vec<WindowSession>,
     /// 마지막 활성 창이 `windows`의 몇 번째인가.
     pub active_window: usize,
+    /// 최근 대상 폴더(가장 최근 것부터, 앱 전체에 하나). 앞선 파일에는 없고 그러면 비어 있다.
+    pub recent_targets: Vec<PathBuf>,
 }
 
 /// 창 하나: 패널(왼쪽부터), 활성 패널, 분할 비율.
@@ -364,6 +366,10 @@ fn run_saver(path: &Path, delay: Duration, receiver: &Receiver<SaverMessage>) ->
 struct FileV1 {
     version: u64,
     active_window: usize,
+    /// 최근 대상 폴더. 이 필드를 더하기 전의 버전 1 파일에는 없으므로 비어 있는 것으로 읽는다(그래서 버전을
+    /// 올리지 않았다). UTF-16 짝이 맞지 않는 경로는 대체 문자로 바꿔 쓴다.
+    #[serde(default)]
+    recent_targets: Vec<String>,
     windows: Vec<WindowV1>,
 }
 
@@ -456,6 +462,11 @@ impl FileV1 {
         FileV1 {
             version: FORMAT_VERSION,
             active_window: session.active_window,
+            recent_targets: session
+                .recent_targets
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
             windows: session
                 .windows
                 .iter()
@@ -482,6 +493,7 @@ impl FileV1 {
     fn into_session(self) -> Session {
         Session {
             active_window: self.active_window,
+            recent_targets: self.recent_targets.into_iter().map(PathBuf::from).collect(),
             windows: self
                 .windows
                 .into_iter()

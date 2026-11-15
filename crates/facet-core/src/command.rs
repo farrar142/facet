@@ -78,11 +78,17 @@ pub enum CommandId {
     CopyToOtherPanel,
     /// 반대편 패널로 이동: 복사와 같고 이동 작업을 넣는다.
     MoveToOtherPanel,
+    /// 복사 위치…: 활성 탭의 선택(없으면 커서 항목)을 고른 폴더로 복사한다. 화면이 대상 선택 창을 띄우고
+    /// ([`crate::window::Execution::ChooseTransferTarget`]) 거기서 Enter가 확인이다. 기본 단축키가 없다. 패널이 하나뿐일
+    /// 때는 「반대편 패널로 복사」(F7)도 이 선택 창을 연다.
+    CopyTo,
+    /// 이동 위치…: 복사 위치와 같고 이동 작업을 넣는다.
+    MoveTo,
 }
 
 impl CommandId {
     /// 모든 명령. 명령 팔레트는 검색어가 없으면 이 순서로 보인다.
-    pub const ALL: [CommandId; 34] = [
+    pub const ALL: [CommandId; 36] = [
         CommandId::Open,
         CommandId::Back,
         CommandId::Forward,
@@ -117,6 +123,8 @@ impl CommandId {
         CommandId::NewWindow,
         CommandId::CopyToOtherPanel,
         CommandId::MoveToOtherPanel,
+        CommandId::CopyTo,
+        CommandId::MoveTo,
     ];
 
     /// 바뀌지 않는 ID 글자. 화면 문장이 아니다.
@@ -158,6 +166,8 @@ impl CommandId {
             CommandId::NewWindow => "new-window",
             CommandId::CopyToOtherPanel => "copy-to-other-panel",
             CommandId::MoveToOtherPanel => "move-to-other-panel",
+            CommandId::CopyTo => "copy-to",
+            CommandId::MoveTo => "move-to",
         }
     }
 
@@ -187,11 +197,11 @@ impl CommandId {
         }
     }
 
-    /// 반대편 패널로 복사·이동 명령이면 그 작업 종류.
+    /// 복사·이동 명령(반대편 패널로, 위치를 골라)이면 그 작업 종류.
     pub const fn transfer_kind(self) -> Option<JobKind> {
         match self {
-            CommandId::CopyToOtherPanel => Some(JobKind::Copy),
-            CommandId::MoveToOtherPanel => Some(JobKind::Move),
+            CommandId::CopyToOtherPanel | CommandId::CopyTo => Some(JobKind::Copy),
+            CommandId::MoveToOtherPanel | CommandId::MoveTo => Some(JobKind::Move),
             _ => None,
         }
     }
@@ -248,6 +258,7 @@ impl CommandId {
             CommandId::NewWindow => const { &[key(letter('N')).ctrl()] },
             CommandId::CopyToOtherPanel => const { &[key(Key::Function(7))] },
             CommandId::MoveToOtherPanel => const { &[key(Key::Function(8))] },
+            CommandId::CopyTo | CommandId::MoveTo => &[],
         }
     }
 
@@ -271,7 +282,10 @@ impl CommandId {
             CommandId::Forward => tab.can_go_forward(),
             CommandId::Up => tab.can_go_up(),
             CommandId::SelectAll => !tab.is_empty(),
-            CommandId::CopyToOtherPanel | CommandId::MoveToOtherPanel => has_sources(tab),
+            CommandId::CopyToOtherPanel
+            | CommandId::MoveToOtherPanel
+            | CommandId::CopyTo
+            | CommandId::MoveTo => has_sources(tab),
             CommandId::Refresh
             | CommandId::EditAddress
             | CommandId::ToggleHidden
@@ -311,16 +325,16 @@ impl CommandId {
     ///
     /// - 활성 패널 바꾸기: 패널이 둘일 때.
     /// - 패널 나누기/합치기: 늘 켜져 있다(하나면 나누고 둘이면 합친다).
-    /// - 반대편 패널로 복사·이동: 패널이 둘이고, 반대편 패널의 활성 탭 위치가 실제 폴더이고, 활성 탭에 원본이 있을
-    ///   때. 패널이 하나면 꺼진다(대상 폴더를 고르는 「복사 위치…」는 따로 붙는다).
+    /// - 반대편 패널로 복사·이동: 활성 탭에 원본이 있을 때, 패널이 둘이면 반대편 패널의 활성 탭 위치가 실제 폴더일
+    ///   때도. 패널이 하나여도 켜지고 대상 선택 창을 연다(「복사 위치…」와 같다).
+    /// - 복사 위치…·이동 위치…: 활성 탭에 원본이 있을 때(패널 수와 상관없다).
     pub fn is_enabled_in_window(self, window: &Window) -> bool {
         match self {
             CommandId::SwitchPanel => window.is_split(),
             CommandId::CopyToOtherPanel | CommandId::MoveToOtherPanel => {
-                window
-                    .opposite_panel()
-                    .is_some_and(|other| other.active_tab().location().file_system_path().is_some())
-                    && self.is_enabled_in(window.active_panel())
+                window.opposite_panel().is_none_or(|other| {
+                    other.active_tab().location().file_system_path().is_some()
+                }) && self.is_enabled_in(window.active_panel())
             }
             command => command.is_enabled_in(window.active_panel()),
         }

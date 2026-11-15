@@ -13,7 +13,7 @@ use facet_core::Location;
 use facet_core::command::{CommandId, Key, Shortcut, find_by_shortcut};
 use facet_core::job::{CopyRejection, JobKind};
 use facet_core::tab::{Navigation, ReadOutcome, Tab};
-use facet_core::window::{App, Execution, TransferPlan};
+use facet_core::window::{App, Execution, TargetError, TransferPlan};
 use tempfile::TempDir;
 
 const WAIT: Duration = Duration::from_secs(10);
@@ -130,14 +130,21 @@ fn 패널이_하나이거나_원본이_없으면_꺼진다() {
     let mut app = app_at(&src);
     let commands = [CommandId::CopyToOtherPanel, CommandId::MoveToOtherPanel];
 
-    // 패널 하나: 선택이 있어도 꺼진다.
+    // 패널 하나: 선택이 있으면 켜지고 대상 선택 창을 연다(반대편이 없으므로 확인 줄이 아니다).
     let index = index_of(app.active_tab(), "파일.txt");
     app.active_tab_mut().select_only(index);
     for command in commands {
-        assert!(!app.can_execute(command), "{command:?}");
-        assert_eq!(app.execute(command), Execution::Disabled);
+        assert!(app.can_execute(command), "{command:?}");
     }
     assert_eq!(app.transfer_plan(JobKind::Copy), None);
+    // 선택도 커서도 없으면 꺼진다.
+    let empty = dir.path().join("dst");
+    let mut bare = app_at(&empty);
+    assert!(bare.active_tab().is_empty());
+    for command in commands {
+        assert!(!bare.can_execute(command), "{command:?}");
+        assert_eq!(bare.execute(command), Execution::Disabled);
+    }
 
     // 패널 둘: 새 오른쪽 패널(활성)에는 선택도 커서도 없어 꺼진다.
     app.split_panel().expect("나누기");
@@ -579,4 +586,168 @@ fn 결과에서_끝낸_항목과_건너뛴_항목을_센다() {
     assert_eq!(summary.items_skipped(), 2);
     assert_eq!(summary.items_completed(), 3);
     assert_eq!(Summary::default().items_completed(), 0);
+}
+
+#[test]
+fn 복사_위치_이동_위치는_팔레트에_있고_기본_단축키가_없다() {
+    let dir = tree();
+    let mut app = app_at(&dir.path().join("src"));
+    let index = index_of(app.active_tab(), "파일.txt");
+    app.active_tab_mut().select_only(index);
+    let found = app.search_commands("위치", |c| match c {
+        CommandId::CopyTo => "복사 위치…",
+        CommandId::MoveTo => "이동 위치…",
+        _ => "다른 명령",
+    });
+    let commands: Vec<_> = found.iter().map(|e| e.command).collect();
+    assert_eq!(commands, vec![CommandId::CopyTo, CommandId::MoveTo]);
+    assert_eq!(CommandId::CopyTo.as_str(), "copy-to");
+    assert_eq!(CommandId::MoveTo.as_str(), "move-to");
+    assert_eq!(CommandId::CopyTo.transfer_kind(), Some(JobKind::Copy));
+    assert_eq!(CommandId::MoveTo.transfer_kind(), Some(JobKind::Move));
+    assert!(CommandId::CopyTo.shortcuts().is_empty());
+    assert!(CommandId::MoveTo.shortcuts().is_empty());
+    // 원본(커서 항목)이 있으면 켜진다.
+    assert!(found.iter().all(|e| e.enabled));
+    assert_eq!(
+        app.execute(CommandId::CopyTo),
+        Execution::ChooseTransferTarget(JobKind::Copy)
+    );
+    assert_eq!(
+        app.execute(CommandId::MoveTo),
+        Execution::ChooseTransferTarget(JobKind::Move)
+    );
+}
+
+#[test]
+fn 패널이_하나이면_f7_f8은_대상_선택_창을_연다() {
+    let dir = tree();
+    let mut app = app_at(&dir.path().join("src"));
+    let index = index_of(app.active_tab(), "파일.txt");
+    app.active_tab_mut().select_only(index);
+    let f7 = find_by_shortcut(Shortcut::new(Key::Function(7))).unwrap();
+    let f8 = find_by_shortcut(Shortcut::new(Key::Function(8))).unwrap();
+    assert_eq!(
+        app.execute(f7),
+        Execution::ChooseTransferTarget(JobKind::Copy)
+    );
+    assert_eq!(
+        app.execute(f8),
+        Execution::ChooseTransferTarget(JobKind::Move)
+    );
+    // 두 패널이면 그대로 확인 줄이다.
+    let dst = dir.path().join("dst");
+    let mut two = two_panels(&dir.path().join("src"), &dst);
+    let index = index_of(two.active_tab(), "파일.txt");
+    two.active_tab_mut().select_only(index);
+    assert_eq!(two.execute(f7), Execution::ConfirmTransfer(JobKind::Copy));
+    // 복사 위치…는 두 패널이어도 선택 창이다.
+    assert_eq!(
+        two.execute(CommandId::CopyTo),
+        Execution::ChooseTransferTarget(JobKind::Copy)
+    );
+}
+
+#[test]
+fn 대상_선택_창은_원본과_반대편_위치와_최근_대상을_보이고_글자를_폴더로_해석한다() {
+    let dir = tree();
+    let src = dir.path().join("src");
+    let dst = dir.path().join("dst");
+    let mut app = app_at(&src);
+    let index = index_of(app.active_tab(), "파일.txt");
+    app.active_tab_mut().select_only(index);
+    let choice = app.transfer_choice(JobKind::Copy).expect("선택 창");
+    assert_eq!(choice.sources, vec![src.join("파일.txt")]);
+    assert_eq!(choice.opposite, None);
+    assert!(choice.recent.is_empty());
+
+    // 글자 해석: 앞뒤 공백과 큰따옴표를 걷고 폴더로 해석한다.
+    let plan = app
+        .transfer_plan_to(JobKind::Copy, &format!("  \"{}\" ", dst.display()))
+        .expect("해석");
+    assert_eq!(plan.target, dst);
+    assert_eq!(plan.sources, vec![src.join("파일.txt")]);
+    // 해석하지 못한 글자·없는 위치·파일은 까닭을 준다.
+    assert!(matches!(
+        app.transfer_plan_to(JobKind::Copy, ""),
+        Err(TargetError::Resolve(_))
+    ));
+    assert!(matches!(
+        app.transfer_plan_to(JobKind::Copy, &dir.path().join("없음").display().to_string()),
+        Err(TargetError::Resolve(_))
+    ));
+    assert!(matches!(
+        app.transfer_plan_to(JobKind::Copy, &src.join("파일.txt").display().to_string()),
+        Err(TargetError::NotAFolder { .. })
+    ));
+    // 실패는 최근 대상에 남지 않는다.
+    assert!(app.recent_targets().is_empty());
+
+    // 패널이 둘이면 반대편 위치도 준다.
+    let two = two_panels(&src, &dst);
+    let mut two = two;
+    let index = index_of(two.active_tab(), "파일.txt");
+    two.active_tab_mut().select_only(index);
+    assert_eq!(
+        two.transfer_choice(JobKind::Move).unwrap().opposite,
+        Some(dst)
+    );
+}
+
+#[test]
+fn 최근_대상은_실제로_시작한_대상만_열_개까지_같은_폴더는_앞으로_옮겨_한_번만_둔다() {
+    let dir = tree();
+    let src = dir.path().join("src");
+    let mut app = app_at(&src);
+    let index = index_of(app.active_tab(), "파일.txt");
+    app.active_tab_mut().select_only(index);
+
+    // 시작 전에 막힌 대상은 남지 않는다.
+    let blocked = TransferPlan {
+        kind: JobKind::Copy,
+        sources: vec![src.join("파일.txt")],
+        target: dir.path().join("없는 폴더"),
+    };
+    assert!(app.start_transfer(&blocked).is_err());
+    assert!(app.recent_targets().is_empty());
+
+    let mut targets = Vec::new();
+    for n in 0..12 {
+        let target = dir.path().join(format!("t{n}"));
+        fs::create_dir(&target).unwrap();
+        targets.push(target);
+    }
+    for target in &targets {
+        let plan = app
+            .transfer_plan_to(JobKind::Copy, &target.display().to_string())
+            .unwrap();
+        app.start_transfer(&plan).expect("시작");
+    }
+    // 가장 최근 것부터 10개.
+    let expected: Vec<_> = targets.iter().rev().take(10).cloned().collect();
+    assert_eq!(app.recent_targets(), expected.as_slice());
+
+    // 같은 폴더를 다시 쓰면 한 번만 있고 앞으로 온다.
+    let again = TransferPlan {
+        kind: JobKind::Move,
+        sources: vec![src.join("b")],
+        target: targets[5].clone(),
+    };
+    app.start_transfer(&again).expect("시작");
+    assert_eq!(app.recent_targets().len(), 10);
+    assert_eq!(app.recent_targets()[0], targets[5]);
+    assert_eq!(
+        app.recent_targets()
+            .iter()
+            .filter(|t| **t == targets[5])
+            .count(),
+        1
+    );
+    assert_eq!(app.recent_targets()[1], targets[11]);
+
+    // 선택 창에도 보인다.
+    assert_eq!(
+        app.transfer_choice(JobKind::Copy).unwrap().recent,
+        app.recent_targets()
+    );
 }

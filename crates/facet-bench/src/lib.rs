@@ -676,6 +676,7 @@ pub fn session_fixture(
     Session {
         windows,
         active_window: 0,
+        recent_targets: Vec::new(),
     }
 }
 
