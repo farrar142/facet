@@ -33,7 +33,8 @@ const USAGE: &str = "\
       인덱스로 만드는 시간을 N회(기본 5) 재어 중앙값이 상한(기본 20000ms)을 넘으면 실패한다.
   facet-bench screen <경로> --app <facet 실행 파일> [--count N] [--runs N] [--scroll-runs N]
                      [--scroll-rows N] [--refresh-hz N] [--json <파일>]
-      시험 폴더를 만들거나 확인한 뒤 앱을 측정 모드로 띄워 콜드 스타트(--runs회, 기본 5)와
+      시험 폴더를 만들거나 확인한 뒤 앱을 측정 모드로 띄워 콜드 스타트(--runs회, 기본 5),
+      시험 폴더의 상위로 띄운 창에서 시험 폴더로 이동한 폴더 열기 첫 화면(--runs회),
       스크롤 프레임 시간(--scroll-runs회, 기본 1)을 잰다. 표를 출력하고 --json이면 JSON도 쓴다.
       통과 기준을 못 맞추면 실패한다. 보통 `cargo xtask measure`로 부른다.";
 

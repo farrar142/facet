@@ -12,7 +12,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Instant;
@@ -162,8 +162,6 @@ struct View {
     palette_rows: Rc<VecModel<PaletteRow>>,
     /// 「읽는 중」을 드러낼 때 다시 그리는 타이머.
     reading_timer: Timer,
-    /// 첫 목록(또는 읽기 오류)이 창에 들어갔는가. 측정 모드가 쓴다.
-    loaded: Cell<bool>,
 }
 
 impl View {
@@ -191,7 +189,6 @@ impl View {
             palette: RefCell::default(),
             palette_rows,
             reading_timer: Timer::default(),
-            loaded: Cell::new(false),
         })
     }
 
@@ -230,10 +227,9 @@ impl View {
         }
     }
 
+    /// 읽기 결과(목록이나 오류)가 창에 들어갔음을 측정 모드에 알린다.
     fn mark_loaded(&self) {
-        if !self.loaded.replace(true) {
-            measure::mark_loaded(self.app.borrow().active_tab().len());
-        }
+        measure::mark_loaded(self.app.borrow().active_tab().len());
     }
 
     /// 활성 탭의 상태를 창에 넣는다.
