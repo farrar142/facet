@@ -9,7 +9,8 @@
 //! 1. 클라이언트가 [`Request::Hello`]에 자기 버전([`PROTOCOL_VERSION`])을 담아 보낸다.
 //! 2. 서비스는 [`answer_hello`]로 받아들이거나, 지원 버전 범위를 담아 거절한다.
 //! 3. 받아들였으면 클라이언트는 [`Request::Query`]·[`Request::Resume`]·[`Request::Status`]를
-//!    보내고 응답을 하나씩 받는다.
+//!    보내고 응답을 하나씩 받는다. 서비스는 요청마다 응답을 꼭 하나, 받은 순서대로 보낸다.
+//!    새 질의 때문에 취소된 앞선 질의의 응답은 [`ErrorKind::Cancelled`] 오류다.
 //!
 //! ```
 //! use facet_protocol::{
@@ -50,10 +51,17 @@ pub use wire::{DecodeError, MAX_DEPTH};
 use std::io::{Read, Write};
 
 /// 이 크레이트가 말하는 프로토콜 버전. 메시지 형식을 바꾸면 올린다.
-pub const PROTOCOL_VERSION: u16 = 1;
+///
+/// - 1: 처음 형식.
+/// - 2: 오류 종류 [`ErrorKind::Cancelled`]를 더했다.
+pub const PROTOCOL_VERSION: u16 = 2;
 
-/// 서비스가 받아들이는 가장 낮은 클라이언트 버전.
-pub const MIN_SUPPORTED_VERSION: u16 = 1;
+/// 서비스가 받아들이는 가장 낮은 클라이언트 버전. 버전 1 클라이언트는 취소 오류를 읽지 못하므로
+/// 받지 않는다.
+pub const MIN_SUPPORTED_VERSION: u16 = 2;
+
+/// 인덱서 서비스가 질의를 받는 파이프 이름. 서비스가 이 이름의 첫 인스턴스를 만든다.
+pub const PIPE_NAME: &str = r"\\.\pipe\facet-indexer";
 
 /// 서비스가 받아들이는 가장 높은 클라이언트 버전.
 pub const MAX_SUPPORTED_VERSION: u16 = PROTOCOL_VERSION;

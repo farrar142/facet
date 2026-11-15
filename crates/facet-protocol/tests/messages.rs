@@ -153,6 +153,7 @@ fn responses() -> Vec<Response> {
         ErrorKind::InvalidQuery,
         ErrorKind::StaleCursor,
         ErrorKind::Internal,
+        ErrorKind::Cancelled,
     ] {
         out.push(Response::Error(ErrorMessage {
             kind,
