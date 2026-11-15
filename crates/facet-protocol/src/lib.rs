@@ -63,6 +63,12 @@ pub const MIN_SUPPORTED_VERSION: u16 = 2;
 /// 인덱서 서비스가 질의를 받는 파이프 이름. 서비스가 이 이름의 첫 인스턴스를 만든다.
 pub const PIPE_NAME: &str = r"\\.\pipe\facet-indexer";
 
+/// 클라이언트가 파이프를 열 때 청하는 권한: 읽기(`FILE_GENERIC_READ`)와 데이터
+/// 쓰기(`FILE_WRITE_DATA`). 서비스의 파이프 보안 설명자는 대화형 로그온 그룹에 이것만 준다.
+/// `FILE_GENERIC_WRITE`는 파이프 인스턴스를 더 만드는 권한(`FILE_APPEND_DATA`와 같은 비트)을
+/// 담으므로 청하지도 주지도 않는다.
+pub const PIPE_CLIENT_ACCESS: u32 = 0x0012_0089 | 0x0002;
+
 /// 서비스가 받아들이는 가장 높은 클라이언트 버전.
 pub const MAX_SUPPORTED_VERSION: u16 = PROTOCOL_VERSION;
 

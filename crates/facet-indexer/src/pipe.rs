@@ -53,10 +53,8 @@ pub const INTERACTIVE_SID: &str = "S-1-5-4";
 /// 네트워크 로그온 그룹(NETWORK)의 SID. 보안 설명자가 이 그룹을 거부한다.
 pub const NETWORK_SID: &str = "S-1-5-2";
 
-/// 대화형 로그온 그룹에 주는 권한: 읽기(`FILE_GENERIC_READ`)와 데이터 쓰기(`FILE_WRITE_DATA`).
-/// `FILE_GENERIC_WRITE`는 `FILE_APPEND_DATA`(파이프에서는 [`FILE_CREATE_PIPE_INSTANCE`])를
-/// 담으므로 쓰지 않는다. 클라이언트는 이 권한만 청해 연다.
-pub const CLIENT_ACCESS: u32 = 0x0012_0089 | 0x0002;
+/// 대화형 로그온 그룹에 주는 권한. 클라이언트가 청하는 권한과 같다.
+pub const CLIENT_ACCESS: u32 = facet_protocol::PIPE_CLIENT_ACCESS;
 
 /// 파이프 인스턴스를 더 만드는 권한. 서버 계정 말고는 갖지 않아야 한다.
 pub const FILE_CREATE_PIPE_INSTANCE: u32 = 0x0004;
