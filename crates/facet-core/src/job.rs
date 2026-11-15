@@ -11,14 +11,20 @@
 //! 대기열을 `App` 없이 따로 테스트·벤치마크할 수 있어야 하기 때문이다. 깨우기 방식은 같으므로 앱은 두 통로를
 //! 한 깨우기에서 차례로 받으면 된다.
 //!
+//! 작업은 기본으로 넣은 차례대로 하나씩 돈다. 사용자는 작업을 일시정지·이어하기([`JobQueue::pause`]·
+//! [`JobQueue::resume`])·취소([`JobQueue::cancel`])하고, 대기 중인 작업을 「지금 시작」([`JobQueue::start_now`])해
+//! 이미 도는 작업과 나란히 돌릴 수 있다. 상태가 바뀔 때마다 [`JobEvent::StateChanged`]를 보낸다. 끝난 작업에
+//! 이것들을 부르면 아무 일도 없다.
+//!
 //! 지금 있는 작업은 **복사**([`JobQueue::copy`])다. 진행·이름 충돌·오류 처리의 자세한 규칙은 그 문서에 있다.
 
 mod copy;
 
+use std::collections::{HashMap, VecDeque};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
 
@@ -45,7 +51,7 @@ pub enum JobState {
     Queued,
     /// 실행 중이다.
     Running,
-    /// 사용자가 멈췄다(뒤 티켓).
+    /// 사용자가 멈췄다. 시작 전에 멈춘 작업은 차례가 와도 시작하지 않는다.
     Paused,
     /// 이름 충돌·오류에 대한 사용자의 답을 기다린다(뒤 티켓).
     AwaitingAnswer,
@@ -53,7 +59,7 @@ pub enum JobState {
     Finished,
     /// 끝났지만 실패한 항목이 있다.
     Failed,
-    /// 사용자가 취소했다(뒤 티켓).
+    /// 사용자가 취소했다. 이미 다 복사한 항목은 남는다.
     Cancelled,
 }
 
@@ -125,6 +131,14 @@ pub struct Summary {
     pub links_skipped: u64,
     /// 실패한 항목(폴더면 그 아래는 따로 세지 않는다).
     pub failures: Vec<ItemFailure>,
+    /// 처리한 항목 수([`Progress::items_done`]와 같은 셈: 건너뛴 항목도 든다).
+    pub items_done: u64,
+    /// 하지 못한 항목 수: 센 항목 가운데 처리하지 못한 것. 끝까지 돈 작업은 0이고, 취소한 작업은 남은 만큼이다.
+    /// 다 세기 전에 취소했으면([`Summary::all_counted`]가 `false`) 센 데까지의 수라 실제로는 더 많을 수 있다.
+    /// 시작하기 전에 취소한 작업은 넘긴 원본 수다.
+    pub items_remaining: u64,
+    /// 원본을 다 셌는지. `true`면 `items_done + items_remaining`이 원본 전체 항목 수다.
+    pub all_counted: bool,
 }
 
 /// 대기열이 보내는 사건.
@@ -137,7 +151,9 @@ pub enum JobEvent {
         /// 진행.
         progress: Progress,
     },
-    /// 상태가 바뀌었다. 넣으면 [`JobState::Queued`], 시작하면 [`JobState::Running`], 끝나면 마지막 상태다.
+    /// 상태가 바뀌었다. 넣으면 [`JobState::Queued`], 시작하면 [`JobState::Running`], 일시정지하면
+    /// [`JobState::Paused`], 이어 가면 [`JobState::Running`](시작 전에 멈췄던 작업은 [`JobState::Queued`]),
+    /// 끝나면 마지막 상태다.
     StateChanged {
         /// 작업.
         job: JobId,
@@ -173,6 +189,22 @@ enum Job {
     Copy(copy::CopyJob),
 }
 
+impl Job {
+    /// 시작하지 않은 채 취소할 때 남은 항목 수로 알릴 값: 넘긴 원본 수(그 아래는 세지 않았다).
+    fn root_count(&self) -> u64 {
+        match self {
+            Job::Copy(job) => job.root_count(),
+        }
+    }
+
+    /// 작업 스레드에서 끝까지(또는 취소될 때까지) 실행한다. 취소로 멈췄으면 `true`도 돌려준다.
+    fn run(self, id: JobId, outbox: &Outbox, control: &Control) -> (Summary, bool) {
+        match self {
+            Job::Copy(job) => job.run(id, outbox, control),
+        }
+    }
+}
+
 /// 깨우기.
 type Waker = Arc<dyn Fn() + Send + Sync>;
 
@@ -196,20 +228,134 @@ impl Outbox {
     }
 }
 
+/// 도는 작업 하나의 일시정지·취소 표지. 작업 스레드(복사의 진행 콜백, 항목 사이)와 훑기 스레드가 본다.
+#[derive(Default)]
+struct Control {
+    flags: Mutex<Flags>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct Flags {
+    paused: bool,
+    cancelled: bool,
+}
+
+impl Control {
+    /// 일시정지면 풀리거나 취소될 때까지 기다린다. 계속해도 되면 `true`, 취소됐으면 `false`.
+    fn proceed(&self) -> bool {
+        let mut flags = lock(&self.flags);
+        while flags.paused && !flags.cancelled {
+            flags = self
+                .changed
+                .wait(flags)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        !flags.cancelled
+    }
+
+    fn set_paused(&self, paused: bool) {
+        lock(&self.flags).paused = paused;
+        self.changed.notify_all();
+    }
+
+    fn cancel(&self) {
+        lock(&self.flags).cancelled = true;
+        self.changed.notify_all();
+    }
+}
+
+/// 잠금이 독(다른 스레드의 패닉)에 걸려도 값을 쓴다. 값은 한 번에 바뀌는 단위로만 고치므로 그대로 쓸 수 있다.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// 대기열의 판: 끝나지 않은 작업과 차례. 작업 상태는 이 판에서만 바꾸고, 바꾼 그 잠금 안에서 상태 사건을 보내
+/// 상태 사건의 차례가 판의 차례와 같다.
+#[derive(Default)]
+struct Board {
+    /// 아직 시작하지 않은 작업의 차례(대기·시작 전 일시정지).
+    pending: VecDeque<JobId>,
+    /// 끝나지 않은 작업.
+    jobs: HashMap<JobId, Slot>,
+    /// 대기열을 버렸다. 차례 일꾼은 더 시작할 작업이 없으면 끝난다.
+    closed: bool,
+}
+
+struct Slot {
+    state: JobState,
+    /// 시작하기 전이면 작업, 시작했으면 `None`.
+    job: Option<Job>,
+    control: Arc<Control>,
+    /// 취소를 청했다(작업 스레드가 멈추면 취소로 끝난다).
+    cancelling: bool,
+}
+
+/// 시작한 작업: 번호, 작업, 그 표지.
+type Started = (JobId, Job, Arc<Control>);
+
+impl Board {
+    /// 차례에서 다음에 시작할 작업(맨 앞의 대기 상태, 일시정지는 건너뜀)을 꺼내 실행 중으로 한다.
+    fn take_next(&mut self, outbox: &Outbox) -> Option<Started> {
+        let index = self.pending.iter().position(|id| {
+            self.jobs
+                .get(id)
+                .is_some_and(|slot| slot.state == JobState::Queued)
+        })?;
+        let id = self.pending.remove(index)?;
+        self.start(id, outbox)
+    }
+
+    /// 시작하지 않은 작업을 실행 중으로 하고 꺼낸다(차례에서는 부르는 쪽이 뺀다).
+    fn start(&mut self, id: JobId, outbox: &Outbox) -> Option<Started> {
+        let slot = self.jobs.get_mut(&id)?;
+        let job = slot.job.take()?;
+        slot.state = JobState::Running;
+        outbox.send(JobEvent::StateChanged {
+            job: id,
+            state: JobState::Running,
+        });
+        Some((id, job, Arc::clone(&slot.control)))
+    }
+}
+
+/// 판과 그 바뀜 알림. 차례 일꾼이 시작할 작업이 생기기를 기다린다.
+#[derive(Default)]
+struct Shared {
+    board: Mutex<Board>,
+    changed: Condvar,
+}
+
+impl Shared {
+    fn board(&self) -> MutexGuard<'_, Board> {
+        lock(&self.board)
+    }
+}
+
 /// 작업 대기열. 앱 전체에 하나다.
 ///
-/// 일꾼 스레드는 처음 작업을 넣을 때 띄운다. 대기열을 버려도 이미 넣은 작업은 끝까지 돈다.
+/// 작업은 넣은 차례대로 하나씩 실행한다(차례 일꾼 스레드 하나, 처음 작업을 넣을 때 띄움). 사용자가 대기 중인
+/// 작업을 [`JobQueue::start_now`]하면 그 작업만 따로 스레드를 띄워 차례를 기다리지 않고 나란히 돈다.
+///
+/// 대기열을 버려도 이미 시작한 작업과 대기 중인 작업은 끝까지 돈다(일시정지한 작업은 이을 쪽이 없으니 남는다).
 pub struct JobQueue {
     next_id: u64,
-    worker: Option<Sender<(JobId, Job)>>,
+    shared: Arc<Shared>,
+    runner: bool,
     outbox: Outbox,
     receiver: Receiver<JobEvent>,
-    unfinished: Arc<AtomicUsize>,
 }
 
 impl Default for JobQueue {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for JobQueue {
+    fn drop(&mut self) {
+        self.shared.board().closed = true;
+        self.shared.changed.notify_all();
     }
 }
 
@@ -219,17 +365,18 @@ impl JobQueue {
         let (sender, receiver) = mpsc::channel();
         JobQueue {
             next_id: 1,
-            worker: None,
+            shared: Arc::default(),
+            runner: false,
             outbox: Outbox {
                 sender,
                 waker: Arc::default(),
             },
             receiver,
-            unfinished: Arc::default(),
         }
     }
 
-    /// 사건을 보낼 때마다 부를 깨우기를 정한다(일꾼 스레드에서 불린다).
+    /// 사건을 보낼 때마다 부를 깨우기를 정한다. 일꾼 스레드에서, 또 상태를 바꾸는 이 대기열의 메서드 안에서
+    /// 대기열의 잠금을 쥔 채 불린다. 그러니 깨우기 안에서 대기열을 다시 부르지 않는다(앱은 이벤트 루프만 깨운다).
     pub fn set_waker(&mut self, waker: impl Fn() + Send + Sync + 'static) {
         if let Ok(mut slot) = self.outbox.waker.lock() {
             *slot = Some(Arc::new(waker));
@@ -248,7 +395,12 @@ impl JobQueue {
 
     /// 끝나지 않은(기다리거나 도는) 작업이 있는지. 마지막 작업의 [`JobEvent::Finished`]를 보낸 뒤 `false`가 된다.
     pub fn has_unfinished(&self) -> bool {
-        self.unfinished.load(Ordering::Acquire) > 0
+        !self.shared.board().jobs.is_empty()
+    }
+
+    /// 끝나지 않은 작업의 지금 상태. 끝난(또는 없는) 작업이면 `None`.
+    pub fn state(&self, job: JobId) -> Option<JobState> {
+        self.shared.board().jobs.get(&job).map(|slot| slot.state)
     }
 
     /// 원본 항목들(파일·폴더)을 `target` 폴더 안으로 복사하는 작업을 넣는다.
@@ -267,6 +419,9 @@ impl JobQueue {
     /// **임시 동작**(질문으로 바꾸는 것은 뒤 티켓): 대상에 같은 이름이 이미 있으면 덮어쓰지 않고 그 항목(폴더면
     /// 그 아래 전부)을 건너뛰어 [`Summary::conflicts_skipped`]에 센다. 항목별 오류도 묻지 않고 그 항목을 건너뛰어
     /// [`Summary::failures`]에 담는다. 실패한 항목이 있으면 작업은 [`JobState::Failed`]로 끝난다.
+    ///
+    /// 일시정지하면 파일 경계를 기다리지 않고 파일 복사의 진행 콜백(덩어리 사이)에서 멈추고 훑기도 멈춘다. 취소하면
+    /// 복사하다 만 파일은 지우고, 이미 다 복사한 항목은 남긴다.
     pub fn copy(&mut self, sources: Vec<PathBuf>, target: PathBuf) -> Result<JobId, CopyRejection> {
         let job = copy::CopyJob::prepare(sources, target)?;
         Ok(self.enqueue(Job::Copy(job)))
@@ -275,51 +430,191 @@ impl JobQueue {
     fn enqueue(&mut self, job: Job) -> JobId {
         let id = JobId(self.next_id);
         self.next_id += 1;
-        self.unfinished.fetch_add(1, Ordering::AcqRel);
-        // 대기 상태를 일꾼에게 넘기기 전에 보내 이 작업의 다른 사건보다 먼저 온다.
-        self.outbox.send(JobEvent::StateChanged {
-            job: id,
-            state: JobState::Queued,
-        });
-        let sender = self
-            .worker
-            .get_or_insert_with(|| spawn_worker(self.outbox.clone(), Arc::clone(&self.unfinished)));
-        if let Err(mpsc::SendError((id, job))) = sender.send((id, job)) {
-            // 일꾼이 죽었으면(패닉) 새로 띄운다.
-            let sender = spawn_worker(self.outbox.clone(), Arc::clone(&self.unfinished));
-            let _ = sender.send((id, job));
-            self.worker = Some(sender);
+        {
+            let mut board = self.shared.board();
+            board.jobs.insert(
+                id,
+                Slot {
+                    state: JobState::Queued,
+                    job: Some(job),
+                    control: Arc::default(),
+                    cancelling: false,
+                },
+            );
+            board.pending.push_back(id);
+            // 대기 상태를 판에 올린 잠금 안에서 보내 이 작업의 다른 사건보다 먼저 온다.
+            self.outbox.send(JobEvent::StateChanged {
+                job: id,
+                state: JobState::Queued,
+            });
         }
+        if !self.runner {
+            self.runner = true;
+            let shared = Arc::clone(&self.shared);
+            let outbox = self.outbox.clone();
+            thread::Builder::new()
+                .name("facet-jobs".into())
+                .spawn(move || run_in_turn(&shared, &outbox))
+                .expect("작업 일꾼 스레드를 띄우지 못했다");
+        }
+        self.shared.changed.notify_all();
         id
+    }
+
+    /// 작업을 일시정지한다. 실행 중이면 파일 경계를 기다리지 않고 멈추고(훑기도 멈춘다), 대기 중이면 차례가 와도
+    /// 시작하지 않고 뒤 작업이 먼저 돈다. 상태는 [`JobState::Paused`]가 되고 그 사건을 보낸다.
+    ///
+    /// 실행 중에 멈춘 작업은 차례를 쥔 채 멈춘다: 뒤에서 기다리는 작업은 시작하지 않는다(디스크를 잠시 다른 일에
+    /// 쓰려고 멈추는 것이므로). 뒤 작업을 돌리려면 그 작업을 [`JobQueue::start_now`]한다.
+    ///
+    /// 대기·실행 중이 아니면(이미 일시정지, 취소 중, 끝남, 없는 작업) 아무 일도 하지 않고 `false`.
+    pub fn pause(&mut self, job: JobId) -> bool {
+        let mut board = self.shared.board();
+        let Some(slot) = board.jobs.get_mut(&job) else {
+            return false;
+        };
+        if slot.cancelling {
+            return false;
+        }
+        match slot.state {
+            JobState::Queued => {}
+            JobState::Running => slot.control.set_paused(true),
+            _ => return false,
+        }
+        slot.state = JobState::Paused;
+        self.outbox.send(JobEvent::StateChanged {
+            job,
+            state: JobState::Paused,
+        });
+        true
+    }
+
+    /// 일시정지한 작업을 잇는다. 실행 중에 멈췄으면 멈춘 자리에서 이어 [`JobState::Running`], 시작 전에 멈췄으면
+    /// 차례의 제자리로 돌아가 [`JobState::Queued`]가 된다(앞에 도는 작업이 없으면 곧 시작한다).
+    ///
+    /// 일시정지가 아니면 아무 일도 하지 않고 `false`.
+    pub fn resume(&mut self, job: JobId) -> bool {
+        let mut board = self.shared.board();
+        let Some(slot) = board.jobs.get_mut(&job) else {
+            return false;
+        };
+        if slot.cancelling || slot.state != JobState::Paused {
+            return false;
+        }
+        let state = if slot.job.is_some() {
+            JobState::Queued
+        } else {
+            slot.control.set_paused(false);
+            JobState::Running
+        };
+        slot.state = state;
+        self.outbox.send(JobEvent::StateChanged { job, state });
+        drop(board);
+        self.shared.changed.notify_all();
+        true
+    }
+
+    /// 작업을 취소한다(대기·실행 중·일시정지).
+    ///
+    /// 시작하지 않은 작업은 곧바로 [`JobState::Cancelled`]와 끝남 사건을 보낸다(남은 항목 수는 넘긴 원본 수,
+    /// [`Summary::all_counted`]는 `false`). 시작한 작업은 복사하던 파일을 그 자리에서 그만두고 만들다 만 파일을
+    /// 지운 뒤 취소로 끝난다. 이미 다 복사한 항목은 되돌리지 않는다. 끝남 사건의 결과에 끝낸 항목 수와 남은 항목
+    /// 수가 있다. 차례는 다음 작업으로 넘어간다.
+    ///
+    /// 거의 끝난 작업은 취소가 닿기 전에 마저 끝나 [`JobState::Finished`]로 끝날 수 있다. 끝났거나 이미 취소 중이면
+    /// 아무 일도 하지 않고 `false`.
+    pub fn cancel(&mut self, job: JobId) -> bool {
+        let mut board = self.shared.board();
+        let Some(slot) = board.jobs.get_mut(&job) else {
+            return false;
+        };
+        if slot.cancelling {
+            return false;
+        }
+        if slot.job.is_none() {
+            slot.cancelling = true;
+            slot.control.cancel();
+            return true;
+        }
+        let slot = board.jobs.remove(&job).expect("방금 본 작업");
+        board.pending.retain(|id| *id != job);
+        let summary = Summary {
+            items_remaining: slot.job.as_ref().map_or(0, Job::root_count),
+            ..Summary::default()
+        };
+        self.outbox.send(JobEvent::StateChanged {
+            job,
+            state: JobState::Cancelled,
+        });
+        self.outbox.send(JobEvent::Finished { job, summary });
+        true
+    }
+
+    /// 대기 중인 작업을 차례를 기다리지 않고 바로 시작한다. 이미 도는 작업과 나란히 돌고, 차례 실행은 그대로
+    /// 이어진다(이 작업이 끝나도 차례의 다음 작업은 앞 작업이 끝나야 시작한다).
+    ///
+    /// 시작 전에 일시정지한 작업도 바로 시작한다(이어하기를 겸한다). 시작한 작업·끝난 작업이면 아무 일도 하지
+    /// 않고 `false`.
+    pub fn start_now(&mut self, job: JobId) -> bool {
+        let mut board = self.shared.board();
+        if !board.jobs.get(&job).is_some_and(|slot| slot.job.is_some()) {
+            return false;
+        }
+        board.pending.retain(|id| *id != job);
+        let Some((id, job, control)) = board.start(job, &self.outbox) else {
+            return false;
+        };
+        drop(board);
+        let shared = Arc::clone(&self.shared);
+        let outbox = self.outbox.clone();
+        thread::Builder::new()
+            .name("facet-job-now".into())
+            .spawn(move || run_job(id, job, &control, &shared, &outbox))
+            .expect("작업 스레드를 띄우지 못했다");
+        true
     }
 }
 
-fn spawn_worker(outbox: Outbox, unfinished: Arc<AtomicUsize>) -> Sender<(JobId, Job)> {
-    let (sender, receiver) = mpsc::channel::<(JobId, Job)>();
-    thread::Builder::new()
-        .name("facet-jobs".into())
-        .spawn(move || {
-            for (id, job) in receiver {
-                outbox.send(JobEvent::StateChanged {
-                    job: id,
-                    state: JobState::Running,
-                });
-                let summary = match job {
-                    Job::Copy(job) => job.run(id, &outbox),
-                };
-                let state = if summary.failures.is_empty() {
-                    JobState::Finished
-                } else {
-                    JobState::Failed
-                };
-                outbox.send(JobEvent::StateChanged { job: id, state });
-                // 끝남을 보내기 전에 줄여, 끝남을 받은 쪽이 보면 이미 끝난 것으로 보인다.
-                unfinished.fetch_sub(1, Ordering::AcqRel);
-                outbox.send(JobEvent::Finished { job: id, summary });
+/// 차례 일꾼: 차례의 맨 앞 대기 작업을 하나씩 실행한다. 시작할 작업이 없으면 판이 바뀌기를 기다리고, 대기열을
+/// 버렸는데 시작할 작업이 없으면 끝난다.
+fn run_in_turn(shared: &Shared, outbox: &Outbox) {
+    loop {
+        let (id, job, control) = {
+            let mut board = shared.board();
+            loop {
+                if let Some(next) = board.take_next(outbox) {
+                    break next;
+                }
+                if board.closed {
+                    return;
+                }
+                board = shared
+                    .changed
+                    .wait(board)
+                    .unwrap_or_else(PoisonError::into_inner);
             }
-        })
-        .expect("작업 일꾼 스레드를 띄우지 못했다");
-    sender
+        };
+        run_job(id, job, &control, shared, outbox);
+    }
+}
+
+/// 작업 하나를 이 스레드에서 끝까지 실행하고 마지막 상태와 끝남 사건을 보낸다.
+fn run_job(id: JobId, job: Job, control: &Control, shared: &Shared, outbox: &Outbox) {
+    let result = panic::catch_unwind(AssertUnwindSafe(|| job.run(id, outbox, control)));
+    let (summary, state) = match result {
+        Ok((summary, true)) => (summary, JobState::Cancelled),
+        Ok((summary, false)) if summary.failures.is_empty() => (summary, JobState::Finished),
+        Ok((summary, false)) => (summary, JobState::Failed),
+        // 작업 코드의 버그: 대기열은 계속 돌게 하고 그 작업만 실패로 끝낸다.
+        Err(_) => (Summary::default(), JobState::Failed),
+    };
+    let mut board = shared.board();
+    // 끝남을 보내기 전에 판에서 빼, 끝남을 받은 쪽이 보면 이미 끝난 것으로 보인다.
+    board.jobs.remove(&id);
+    outbox.send(JobEvent::StateChanged { job: id, state });
+    outbox.send(JobEvent::Finished { job: id, summary });
+    drop(board);
+    shared.changed.notify_all();
 }
 
 /// 두 경로가 같은지(Windows는 대소문자를 가리지 않는다). 둘 다 정규화한 경로라야 한다.

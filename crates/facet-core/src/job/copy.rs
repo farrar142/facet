@@ -23,8 +23,8 @@ use std::time::{Duration, Instant};
 use facet_win::file_ops::{self, CopyStep, FileOpErrorKind};
 
 use super::{
-    CopyRejection, ItemFailure, JobEvent, JobId, Outbox, PROGRESS_INTERVAL, Progress, Remaining,
-    Summary, is_within, same_path,
+    Control, CopyRejection, ItemFailure, JobEvent, JobId, Outbox, PROGRESS_INTERVAL, Progress,
+    Remaining, Summary, is_within, same_path,
 };
 
 /// 같은 폴더로 복사할 때 이름 뒤에 붙이는 말(탐색기와 같다).
@@ -86,31 +86,59 @@ impl CopyJob {
         Ok(CopyJob { roots, target })
     }
 
-    /// 작업 일꾼 스레드에서 끝까지 실행하고 결과 요약을 돌려준다.
-    pub(super) fn run(self, id: JobId, outbox: &Outbox) -> Summary {
+    /// 넘긴 원본 수.
+    pub(super) fn root_count(&self) -> u64 {
+        self.roots.len() as u64
+    }
+
+    /// 작업 스레드에서 끝까지(또는 취소될 때까지) 실행하고 결과 요약과 취소로 멈췄는지를 돌려준다.
+    ///
+    /// 일시정지는 항목 사이와 파일 복사의 진행 콜백에서 기다리고, 훑기도 항목마다 기다린다. 취소하면 복사하던
+    /// 파일을 그만두고(만들다 만 대상은 `copy_file`이 지운다) 훑기를 멈춘다. 취소로 멈추면 마지막 진행 사건은
+    /// 보내지 않는다(끝남 사건의 결과가 마지막 수치다).
+    pub(super) fn run(self, id: JobId, outbox: &Outbox, control: &Control) -> (Summary, bool) {
         let plans = self.plan();
         let totals = Arc::new(Totals::default());
         let (sender, receiver) = mpsc::channel();
-        let scanner = {
-            let totals = Arc::clone(&totals);
-            thread::Builder::new()
-                .name("facet-job-scan".into())
-                .spawn(move || scan(plans, &sender, &totals))
-                .expect("훑기 스레드를 띄우지 못했다")
-        };
-        let mut copier = Copier {
-            reporter: Reporter::new(id, outbox.clone(), totals),
-            summary: Summary::default(),
-            skip_depth: 0,
-        };
-        // 훑기가 끝나 통로를 닫을 때까지 받는다.
-        for entry in receiver {
-            copier.handle(entry);
-        }
-        let _ = scanner.join();
-        copier.reporter.current = None;
-        copier.reporter.finish();
-        copier.summary
+        let (mut summary, cancelled) = thread::scope(|scope| {
+            let scanner = {
+                let totals = Arc::clone(&totals);
+                thread::Builder::new()
+                    .name("facet-job-scan".into())
+                    .spawn_scoped(scope, move || scan(plans, &sender, &totals, control))
+                    .expect("훑기 스레드를 띄우지 못했다")
+            };
+            let mut copier = Copier {
+                reporter: Reporter::new(id, outbox.clone(), Arc::clone(&totals)),
+                summary: Summary::default(),
+                skip_depth: 0,
+                control,
+                cancelled: false,
+            };
+            // 훑기가 끝나 통로를 닫을 때까지 받는다. 취소하면 통로를 버려 훑기도 곧 멈춘다.
+            for entry in receiver {
+                if !control.proceed() {
+                    copier.cancelled = true;
+                }
+                if copier.cancelled {
+                    break;
+                }
+                copier.handle(entry);
+            }
+            let _ = scanner.join();
+            if !copier.cancelled {
+                copier.reporter.current = None;
+                copier.reporter.finish();
+            }
+            copier.summary.items_done = copier.reporter.items_done;
+            (copier.summary, copier.cancelled)
+        });
+        summary.all_counted = totals.counted.load(Ordering::Acquire);
+        summary.items_remaining = totals
+            .items
+            .load(Ordering::Acquire)
+            .saturating_sub(summary.items_done);
+        (summary, cancelled)
     }
 
     /// 원본마다 대상 경로를 정한다. 같은 폴더 복사면 지금 있는 이름과 이 작업에서 이미 정한 이름을 피해
@@ -199,7 +227,14 @@ enum Entry {
 }
 
 /// 원본을 깊이 우선으로 훑어 항목을 넣는다. 넣기 전에 센 것에 더해, 복사 쪽이 한 것이 센 것을 넘지 않는다.
-fn scan(plans: Vec<(PathBuf, Option<PathBuf>)>, sender: &Sender<Entry>, totals: &Totals) {
+///
+/// 항목마다 일시정지면 기다리고, 취소됐으면 다 세지 않은 채(`counted`를 세우지 않고) 멈춘다.
+fn scan(
+    plans: Vec<(PathBuf, Option<PathBuf>)>,
+    sender: &Sender<Entry>,
+    totals: &Totals,
+    control: &Control,
+) {
     let send = |entry: Entry| {
         match entry {
             // 폴더 끝은 항목이 아니라 표지다.
@@ -216,6 +251,9 @@ fn scan(plans: Vec<(PathBuf, Option<PathBuf>)>, sender: &Sender<Entry>, totals: 
         let _ = sender.send(entry);
     };
     for (source, target) in plans {
+        if !control.proceed() {
+            return;
+        }
         let Some(target) = target else {
             send(Entry::Failed {
                 source,
@@ -229,7 +267,11 @@ fn scan(plans: Vec<(PathBuf, Option<PathBuf>)>, sender: &Sender<Entry>, totals: 
                 kind: error_kind(&error),
             }),
             Ok(metadata) if metadata.file_type().is_symlink() => send(Entry::Link),
-            Ok(metadata) if metadata.is_dir() => walk(source, target, &send),
+            Ok(metadata) if metadata.is_dir() => {
+                if !walk(source, target, &send, control) {
+                    return;
+                }
+            }
             Ok(metadata) => send(Entry::File {
                 source,
                 target,
@@ -240,11 +282,15 @@ fn scan(plans: Vec<(PathBuf, Option<PathBuf>)>, sender: &Sender<Entry>, totals: 
     totals.counted.store(true, Ordering::Release);
 }
 
-/// 폴더 하나를 깊이 우선으로 훑는다. 깊은 폴더에서 스택이 넘치지 않게 되부르지 않고 스택을 쓴다.
-fn walk(source: PathBuf, target: PathBuf, send: &dyn Fn(Entry)) {
+/// 폴더 하나를 깊이 우선으로 훑는다. 깊은 폴더에서 스택이 넘치지 않게 되부르지 않고 스택을 쓴다. 취소돼 멈췄으면
+/// `false`.
+fn walk(source: PathBuf, target: PathBuf, send: &dyn Fn(Entry), control: &Control) -> bool {
     let mut stack = Vec::new();
     open_folder(source, target, &mut stack, send);
     while let Some((listing, source, target)) = stack.last_mut() {
+        if !control.proceed() {
+            return false;
+        }
         match listing.next() {
             None => {
                 let (_, source, target) = stack.pop().expect("방금 본 폴더");
@@ -286,6 +332,7 @@ fn walk(source: PathBuf, target: PathBuf, send: &dyn Fn(Entry)) {
             }
         }
     }
+    true
 }
 
 type Listing = (fs::ReadDir, PathBuf, PathBuf);
@@ -320,14 +367,17 @@ fn error_kind(error: &io::Error) -> FileOpErrorKind {
 }
 
 /// 훑은 항목을 받아 복사한다.
-struct Copier {
+struct Copier<'a> {
     reporter: Reporter,
     summary: Summary,
     /// 0이 아니면 건너뛰는 폴더 안이다(그 폴더에서 열린 폴더 깊이).
     skip_depth: usize,
+    control: &'a Control,
+    /// 취소로 멈췄다.
+    cancelled: bool,
 }
 
-impl Copier {
+impl Copier<'_> {
     fn handle(&mut self, entry: Entry) {
         if self.skip_depth > 0 {
             self.skip(entry);
@@ -340,8 +390,9 @@ impl Copier {
                 target,
                 size,
             } => {
-                self.copy_file(&source, &target, size);
-                self.reporter.items_done += 1;
+                if self.copy_file(&source, &target, size) {
+                    self.reporter.items_done += 1;
+                }
             }
             Entry::FolderStart { source, target } => {
                 self.reporter.current = Some(source.clone());
@@ -391,18 +442,25 @@ impl Copier {
         }
     }
 
-    fn copy_file(&mut self, source: &Path, target: &Path, size: u64) {
+    /// 파일 하나를 복사한다. 취소로 그만뒀으면 `false`(그 파일은 하지 않은 것으로 남는다).
+    fn copy_file(&mut self, source: &Path, target: &Path, size: u64) -> bool {
         self.reporter.current = Some(source.to_path_buf());
         let base = self.reporter.bytes_done;
         if fs::symlink_metadata(target).is_ok() {
             self.summary.conflicts_skipped += 1;
         } else {
             let reporter = &mut self.reporter;
+            let control = self.control;
             let result = file_ops::copy_file(source, target, &mut |progress| {
                 // 훑은 뒤 파일이 커졌거나 대체 데이터 스트림이 있어도 센 크기를 넘지 않게 한다.
                 reporter.bytes_done = base + progress.copied.min(size);
                 reporter.maybe_emit();
-                CopyStep::Continue
+                // 일시정지면 여기서(덩어리 사이) 기다린다.
+                if control.proceed() {
+                    CopyStep::Continue
+                } else {
+                    CopyStep::Cancel
+                }
             });
             match result {
                 Ok(()) => {
@@ -412,10 +470,16 @@ impl Copier {
                 Err(error) if error.kind() == FileOpErrorKind::TargetExists => {
                     self.summary.conflicts_skipped += 1;
                 }
+                Err(error) if error.kind() == FileOpErrorKind::Cancelled => {
+                    self.cancelled = true;
+                    self.reporter.bytes_done = base;
+                    return false;
+                }
                 Err(error) => self.fail(source.to_path_buf(), error.kind()),
             }
         }
         self.reporter.bytes_done = base + size;
+        true
     }
 
     fn fail(&mut self, source: PathBuf, kind: FileOpErrorKind) {
