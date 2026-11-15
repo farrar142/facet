@@ -127,32 +127,7 @@ impl Provider for FileSystemProvider {
     /// 앞뒤 공백과 감싼 큰따옴표를 걷고 `%NAME%`을 환경 변수 값으로 펼친다. 끝 구분자는 있어도 없어도
     /// 같다. 전체 경로여야 한다. 폴더면 그 폴더로, 파일이면 파일을 열지 않고 그 폴더로 가서 파일을 고르게 한다.
     fn resolve(&self, text: &str) -> Result<Resolved, ResolveError> {
-        let path = parse_address(text)?;
-        let location = Location::file_system(&path);
-        let metadata = fs::metadata(&path).map_err(|source| match source.kind() {
-            io::ErrorKind::NotFound => ResolveError::NotFound {
-                location: location.clone(),
-            },
-            io::ErrorKind::PermissionDenied => ResolveError::PermissionDenied {
-                location: location.clone(),
-            },
-            _ => ResolveError::Io {
-                location: location.clone(),
-                source,
-            },
-        })?;
-        if !metadata.is_dir()
-            && let (Some(parent), Some(name)) = (path.parent(), path.file_name())
-        {
-            return Ok(Resolved {
-                location: Location::file_system(parent),
-                select: Some(name.to_os_string()),
-            });
-        }
-        Ok(Resolved {
-            location,
-            select: None,
-        })
+        resolve_path(parse_address(text)?)
     }
 
     /// 마지막 구분자 앞까지를 폴더로 보고, 그 하위 폴더 중 뒤쪽 글자로 시작하는 이름을 이름순으로 낸다.
@@ -190,8 +165,54 @@ impl Provider for FileSystemProvider {
     }
 }
 
-/// 주소창 글자를 경로로 바꾼다: 다듬고, 환경 변수를 펼치고, 글자를 검사하고, 끝 구분자를 없앤다.
+/// 전체 경로 하나를 위치로 해석한다(주소창과 실행 인자가 함께 쓴다). 파일 시스템에 한 번 묻는다. 폴더면 그
+/// 폴더로, 파일이면 그 폴더로 가서 파일을 고르게 한다.
+pub(crate) fn resolve_path(path: PathBuf) -> Result<Resolved, ResolveError> {
+    let location = Location::file_system(&path);
+    let metadata = fs::metadata(&path).map_err(|source| match source.kind() {
+        io::ErrorKind::NotFound => ResolveError::NotFound {
+            location: location.clone(),
+        },
+        io::ErrorKind::PermissionDenied => ResolveError::PermissionDenied {
+            location: location.clone(),
+        },
+        _ => ResolveError::Io {
+            location: location.clone(),
+            source,
+        },
+    })?;
+    if !metadata.is_dir()
+        && let (Some(parent), Some(name)) = (path.parent(), path.file_name())
+    {
+        return Ok(Resolved {
+            location: Location::file_system(parent),
+            select: Some(name.to_os_string()),
+        });
+    }
+    Ok(Resolved {
+        location,
+        select: None,
+    })
+}
+
+/// 주소창 글자를 경로로 바꾼다: 다듬고, 환경 변수를 펼치고, 글자를 검사하고, 끝 구분자를 없앤다. 전체 경로가
+/// 아니면 오류다.
 fn parse_address(text: &str) -> Result<PathBuf, ResolveError> {
+    let (expanded, normalized) = parse(text)?;
+    if !normalized.is_absolute() {
+        return Err(ResolveError::NotAbsolute { text: expanded });
+    }
+    Ok(normalized)
+}
+
+/// 주소 글자를 경로로 바꾼다: 다듬고, 감싼 큰따옴표를 걷고, 환경 변수를 펼치고, 글자를 검사하고, 끝 구분자를
+/// 없앤다. 상대 경로일 수 있다(실행 인자는 작업 폴더 기준으로 푼다).
+pub(crate) fn parse_text(text: &str) -> Result<PathBuf, ResolveError> {
+    parse(text).map(|(_, normalized)| normalized)
+}
+
+/// [`parse_text`]와 같고, 펼친 글자도 함께 돌려준다.
+fn parse(text: &str) -> Result<(String, PathBuf), ResolveError> {
     let text = text.trim();
     let text = text
         .strip_prefix('"')
@@ -212,10 +233,7 @@ fn parse_address(text: &str) -> Result<PathBuf, ResolveError> {
     }
     // 구성 요소로 다시 이어 끝 구분자와 겹친 구분자를 정리한다.
     let normalized: PathBuf = Path::new(&expanded).components().collect();
-    if !normalized.is_absolute() {
-        return Err(ResolveError::NotAbsolute { text: expanded });
-    }
-    Ok(normalized)
+    Ok((expanded, normalized))
 }
 
 /// `%NAME%`을 환경 변수 값으로 바꾼다. 짝이 없는 `%`는 그대로 둔다.

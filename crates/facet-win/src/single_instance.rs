@@ -334,6 +334,8 @@ pub fn claim(name: &InstanceName) -> io::Result<Claim> {
 
 /// 주인에게 `launch`를 넘긴다. 파이프가 아직 없거나 바쁘면 `timeout`까지 짧게 다시 시도한다.
 /// 주인이 받았다고 답하면 `Ok`다.
+///
+/// Windows에서는 넘기기 전에 주인 프로세스에 포그라운드 권한을 넘겨, 주인이 받고 연 창이 앞으로 나올 수 있게 한다.
 pub fn forward(
     name: &InstanceName,
     launch: &Launch,

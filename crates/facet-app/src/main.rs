@@ -6,7 +6,10 @@
 //! - 목록 읽기는 코어가 일꾼 스레드에서 한다. 결과가 오면 코어가 깨우기([`App::set_waker`])를 부르고, 앱은
 //!   이벤트 루프에서 [`App::poll`]로 받아 다시 그린다.
 //! - 행 문자열은 화면에 보이는 행만 그때그때 만든다([`TabRows`]).
-//! - 실행 인자로 받은 폴더(없으면 사용자 홈 폴더)를 연다.
+//! - 실행 인자로 받은 경로마다 탭 하나로(없으면 사용자 홈 폴더) 창을 연다. 해석은 코어가 한다
+//!   ([`facet_core::launch::resolve_launch`], 상대 경로는 작업 폴더 기준).
+//! - 단일 실행([`instance`]): 첫 프로세스가 주인이 되고, 다시 실행하면 인자와 작업 폴더를 주인에게 넘기고 끝난다.
+//!   주인은 받은 인자로 새 창을 열어 앞으로 가져온다([`App::open_launch_window`]). 측정 모드는 끼지 않는다.
 //! - 패널 위에 탭 줄을 그린다. 탭 연산(열기·닫기·오가기·옮기기)은 코어가 하고, 앱은 탭을 누름·휠 클릭·끌기를
 //!   넘긴다. 탭을 끌면(끌기 시작 문턱과 놓일 자리는 [`tab_drag`]) 같은 패널 안 순서를 바꾸거나 반대편 패널·다른 창의
 //!   탭 줄로 옮기고, facet의 어느 창 위도 아닌 곳에 놓으면 그 탭으로 새 창을 놓은 자리에 띄운다([`App::move_tab`]).
@@ -25,13 +28,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::cell::RefCell;
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use facet_core::command::{self, CommandId, Key};
 use facet_core::details::{self, Column, Direction};
 use facet_core::file_list;
+use facet_core::launch::{LaunchTarget, resolve_launch};
 use facet_core::name_input::NameInput;
 use facet_core::selection::{CursorMove, Pick};
 use facet_core::tab::{AutoRefresh, Navigation, ReadOutcome, Relocation, Tab};
@@ -52,6 +55,7 @@ use crate::tab_drag::{Frame, Hover, Point, ScreenPoint, Strip, TabDrag, Target};
 
 mod address;
 mod ime;
+mod instance;
 mod keys;
 mod measure;
 mod palette;
@@ -61,12 +65,21 @@ mod text;
 slint::include_modules!();
 
 fn main() -> Result<(), slint::PlatformError> {
+    let launch = instance::this_launch();
+    // 단일 실행: 이미 떠 있는 facet이 있으면 인자를 넘기고 끝난다. 주인 확인은 뮤텍스 하나라 기다리지 않는다.
+    // 측정 모드는 끼지 않는다(잴 때마다 띄운 프로세스가 스스로 창을 연다).
+    let mut owner = if measure::is_enabled() {
+        None
+    } else {
+        match instance::start(&launch) {
+            instance::Start::Run(owner) => owner,
+            instance::Start::Forwarded => return Ok(()),
+        }
+    };
+
     // 창 만들기(렌더러 준비)가 콜드 스타트에서 가장 오래 걸리므로, 목록은 그보다 먼저 읽기 시작해 겹친다.
-    let start = std::env::args_os().nth(1).map(|arg| {
-        let path = PathBuf::from(arg);
-        Location::file_system(std::path::absolute(&path).unwrap_or(path))
-    });
-    let app = Rc::new(RefCell::new(App::new(start)));
+    let targets = resolve_launch(&launch.working_dir, &launch.paths);
+    let app = Rc::new(RefCell::new(App::launch(targets)));
     APP.with(|slot| *slot.borrow_mut() = Some(Rc::clone(&app)));
 
     let first = app.borrow().active_window_id();
@@ -81,8 +94,22 @@ fn main() -> Result<(), slint::PlatformError> {
     view.ui.show()?;
     drop(view);
 
+    // 수신기는 이벤트 루프가 생긴 뒤(첫 창을 만든 뒤) 연다. 받은 인자는 수신기 스레드에서 해석하고 UI 스레드에는
+    // 새 창 열기만 맡긴다. 그 사이 두 번째 실행이 오면 넘기는 쪽이 파이프가 생길 때까지 다시 시도한다.
+    if let Some(owner) = owner.as_mut()
+        && let Err(error) = owner.listen(|launch| {
+            let targets = resolve_launch(&launch.working_dir, &launch.paths);
+            // 이벤트 루프가 이미 끝났으면(마지막 창을 닫음) 버린다.
+            let _ = slint::invoke_from_event_loop(move || open_launch_window(targets));
+        })
+    {
+        eprintln!("단일 실행 수신기를 열지 못함: {error}");
+    }
+
     // 창을 닫아도 이벤트 루프는 스스로 끝나지 않는다. 끝낼지는 코어가 정한다([`App::is_finished`], [`sync_windows`]).
     let result = slint::run_event_loop_until_quit();
+    // 주인 자리를 바로 내놓는다: 그 뒤의 실행은 이 프로세스에 넘기지 않고 스스로 주인이 된다.
+    drop(owner);
     // Slint의 스레드 지역 상태보다 먼저 버린다. 스레드가 끝날 때 버리면 Slint 타이머·모델이 이미 사라진
     // 상태를 건드려 멈춘다.
     let views = VIEWS.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
@@ -196,6 +223,20 @@ fn close_window(window: WindowId) {
     // 활성 창이 바뀌었을 수 있다(닫은 탭 되살리기는 활성 창에 연다). 남은 창들을 다시 그린다.
     for view in views() {
         view.render();
+    }
+}
+
+/// 다시 실행한 facet이 넘긴 인자로 새 창을 열고 앞으로 가져온다. 창이 하나도 없어도 연다.
+fn open_launch_window(targets: Vec<LaunchTarget>) {
+    let Some(app) = APP.with(|slot| slot.borrow().clone()) else {
+        return;
+    };
+    let window = app.borrow_mut().open_launch_window(targets);
+    sync_windows();
+    if let Some(view) = view_of(window) {
+        view.ui
+            .window()
+            .with_winit_window(|winit| winit.focus_window());
     }
 }
 

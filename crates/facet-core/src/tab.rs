@@ -34,6 +34,7 @@ use crate::watch::{self, ChangeBatch, ChangeSink, Watch, WatchError};
 use crate::window::home_location;
 use facet_win::OpenError;
 
+use crate::launch::LaunchTarget;
 use crate::{Candidate, Item, ListError, Location, ResolveError, provider_for};
 
 /// 읽기가 이만큼 넘게 걸리면 탭이 「읽는 중」을 드러낸다([`Tab::is_reading`]).
@@ -443,6 +444,25 @@ impl Tab {
         tab.cursor = view.cursor.map(|name| (name, 0));
         tab.anchor = view.anchor;
         tab.scroll = view.scroll;
+        tab
+    }
+
+    /// 실행 인자 하나([`LaunchTarget`])를 보일 탭. 목록은 비어 있고 기록도 없다. 파일 경로였으면 그 파일을 고른
+    /// 채로(선택·커서·범위 기준이 그 이름) 시작해, 읽으면 그 항목이 골라져 있다. 해석하지 못한 인자면
+    /// [`Tab::address_error`]에 까닭을 갖는다(이때는 읽지 않는다).
+    pub fn launched(target: LaunchTarget, sort: Sort, show_hidden: bool) -> Tab {
+        let LaunchTarget {
+            location,
+            select,
+            error,
+        } = target;
+        let mut tab = Tab::new(location, sort, show_hidden);
+        tab.address_error = error;
+        if let Some(name) = select {
+            tab.selection.insert(name.clone());
+            tab.cursor = Some((name.clone(), 0));
+            tab.anchor = Some(name);
+        }
         tab
     }
 

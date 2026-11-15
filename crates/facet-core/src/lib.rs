@@ -7,6 +7,7 @@ pub mod command;
 pub mod details;
 pub mod file_list;
 mod file_system;
+pub mod launch;
 mod location;
 pub mod measure;
 pub mod name_input;

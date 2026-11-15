@@ -52,6 +52,7 @@ use facet_win::{OpenError, OpenResult, ShellWorker};
 
 use crate::command::{self, CommandId, CommandState};
 use crate::details::Sort;
+use crate::launch::LaunchTarget;
 use crate::tab::{
     ChangeOutcome, ClosedTab, CompletionId, CompletionResult, Navigation, ReadOutcome, ReadRequest,
     ReadResult, Tab,
@@ -384,8 +385,23 @@ impl App {
     /// 읽기는 일꾼 스레드에서 하므로 돌아왔을 때 목록은 아직 비어 있을 수 있다. 시작 위치를 읽지 못하면
     /// 탭은 그 위치에 빈 목록과 오류를 갖는다.
     pub fn new(start: Option<Location>) -> Self {
+        let mut app = App::empty();
+        app.push_window(start.unwrap_or_else(home_location), Sort::default());
+        app
+    }
+
+    /// 실행 인자를 해석한 탭들([`crate::launch::resolve_launch`])로 창 하나를 연 앱([`App::open_launch_window`]).
+    /// 첫 실행이 쓴다.
+    pub fn launch(targets: Vec<LaunchTarget>) -> Self {
+        let mut app = App::empty();
+        app.open_launch_window(targets);
+        app
+    }
+
+    /// 창이 없는 앱.
+    fn empty() -> Self {
         let (sender, receiver) = mpsc::channel();
-        let mut app = App {
+        App {
             windows: Vec::new(),
             active: 0,
             show_hidden: false,
@@ -398,9 +414,42 @@ impl App {
                 waker: Arc::default(),
             },
             receiver,
+        }
+    }
+
+    /// 실행 인자로 새 창을 연다(두 번째 실행이 넘긴 인자, 첫 실행의 인자). 해석한 인자마다 탭 하나를 넘긴 순서대로
+    /// 패널 하나에 두고 첫 탭을 활성 탭으로, 새 창을 활성 창으로 한다. 탭이 없으면 사용자 홈 폴더 탭 하나다.
+    ///
+    /// 첫 탭만 일꾼 스레드에서 읽기 시작하고, 나머지 탭은 숨은 채로 두었다가 처음 보일 때 읽는다. 해석하지 못한
+    /// 인자의 탭은 읽지 않고 까닭([`Tab::address_error`])을 보인다. 정렬은 활성 탭을 따르고(창이 없으면 기본 정렬)
+    /// 기록은 비어 있다. 창이 하나도 없는 앱(마지막 창을 닫은 뒤)에서도 연다.
+    pub fn open_launch_window(&mut self, targets: Vec<LaunchTarget>) -> WindowId {
+        let sort = if self.is_finished() {
+            Sort::default()
+        } else {
+            self.active_tab().sort()
         };
-        app.push_window(start.unwrap_or_else(home_location), Sort::default());
-        app
+        let mut targets = targets;
+        if targets.is_empty() {
+            targets.push(LaunchTarget::home());
+        }
+        let mut tabs = Vec::with_capacity(targets.len());
+        for (index, target) in targets.into_iter().enumerate() {
+            let mut tab = Tab::launched(target, sort, self.show_hidden);
+            if index > 0 {
+                tab.hide();
+            }
+            tabs.push((self.new_tab_id(), tab));
+        }
+        let id = WindowId(self.next_window);
+        self.next_window += 1;
+        self.windows
+            .push(Window::new(id, Panel { tabs, active: 0 }));
+        self.active = self.windows.len() - 1;
+        if self.active_tab().address_error().is_none() {
+            self.navigate(Navigation::Refresh);
+        }
+        id
     }
 
     /// `location`을 보일 탭 하나로 새 창을 열어 활성 창으로 하고, 그 위치를 일꾼 스레드에서 읽는다. 정렬은 활성

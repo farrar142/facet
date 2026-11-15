@@ -76,6 +76,12 @@ fn now_us() -> u64 {
         .map_or(0, |d| d.as_micros() as u64)
 }
 
+/// 측정 모드인가(환경 변수 [`ENV_OUT`]이 있다). 측정 모드는 단일 실행에 끼지 않는다: 잴 때마다 띄운 프로세스가
+/// 떠 있는 facet에 넘기지 않고 스스로 창을 연다.
+pub fn is_enabled() -> bool {
+    std::env::var_os(ENV_OUT).is_some_and(|v| !v.is_empty())
+}
+
 /// 측정 모드이면 프레임 세기(창의 winit 이벤트마다 부를 것)를 돌려준다. 아니면 `None`이다.
 ///
 /// Slint는 창마다 winit 이벤트 훅을 하나만 두므로 훅은 `main`이 걸고, 키 위치 적기([`crate::keys`])와 이것을
