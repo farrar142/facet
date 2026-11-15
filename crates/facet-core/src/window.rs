@@ -9,6 +9,11 @@
 //! [`App::switch_tab`]: 다음·이전은 끝에서 처음으로 돈다). 패널에서 활성 탭만 보이고, 나머지는 숨어 변경 감시를
 //! 놓는다([`Tab::hide`]). 다시 보이면 갖고 있던 목록을 먼저 보이며 다시 읽고 감시를 다시 건다([`Tab::show`]).
 //!
+//! 닫은 탭은 앱 전체에 하나인 닫은 탭 목록에 최근 [`CLOSED_TABS_LIMIT`]개까지 남는다([`App::closed_tabs`]). 탭을
+//! 닫으면 들어가고, 여러 탭을 한 번에 넣을 수도 있다([`App::remember_closed_tabs`], 창 닫기가 쓴다). 되살리기
+//! ([`App::reopen_closed_tab`])는 마지막에 넣은 탭부터 위치·기록·정렬을 그대로 활성 창의 활성 패널에 활성 탭으로
+//! 열고 그 위치를 다시 읽는다. 이 목록은 저장하지 않는다.
+//!
 //! 앱은 탭의 읽기 요청을 일꾼 스레드에서 읽고([`App::navigate`]), 그 결과를 요청한 탭에 넘긴다
 //! ([`App::poll`]·[`App::wait`]). 결과는 탭 번호로 찾아가므로 탭이 여럿이어도 섞이지 않는다.
 //! 읽을 때 위치의 변경 감시도 함께 걸어, 묶은 변경을 같은 통로로 받아 탭에 반영한다. 알림을 잃었거나 위치가
@@ -21,6 +26,7 @@
 //! 주소창: 친 글자로 가기([`App::go_to_text`])는 해석한 뒤 다른 이동처럼 일꾼 스레드에서 읽는다. 자동 완성 후보
 //! ([`App::complete_address`])는 폴더를 읽느라 막히므로 일꾼 스레드에서 읽고 같은 통로로 받는다.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -29,14 +35,17 @@ use std::time::{Duration, Instant};
 
 use facet_win::{OpenError, OpenResult, ShellWorker};
 
-use crate::command::{self, CommandId};
+use crate::command::{self, CommandId, CommandState};
 use crate::details::Sort;
 use crate::tab::{
-    ChangeOutcome, CompletionId, CompletionResult, Navigation, ReadOutcome, ReadRequest,
+    ChangeOutcome, ClosedTab, CompletionId, CompletionResult, Navigation, ReadOutcome, ReadRequest,
     ReadResult, Tab,
 };
 use crate::watch::ChangeBatch;
 use crate::{Candidate, Location, provider_for};
+
+/// 닫은 탭 목록에 남기는 최근 탭 수. 넘으면 가장 오래된 탭이 빠진다.
+pub const CLOSED_TABS_LIMIT: usize = 20;
 
 /// 앱 안의 탭 하나를 가리키는 번호. 탭을 다른 패널·창으로 옮겨도 바뀌지 않는다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -250,6 +259,8 @@ pub struct App {
     active: usize,
     show_hidden: bool,
     next_tab: u64,
+    /// 닫은 탭 목록. 가장 최근에 닫은 탭이 끝이다. [`CLOSED_TABS_LIMIT`]개까지.
+    closed: VecDeque<ClosedTab>,
     /// 셸 일꾼 스레드. 콜드 스타트를 늦추지 않도록 처음 파일을 열 때 띄운다.
     shell: Option<ShellWorker>,
     outbox: Outbox,
@@ -279,6 +290,7 @@ impl App {
             active: 0,
             show_hidden: false,
             next_tab: 0,
+            closed: VecDeque::new(),
             shell: None,
             outbox: Outbox {
                 sender,
@@ -434,16 +446,17 @@ impl App {
         }
     }
 
-    /// 탭 `id`를 닫는다. 그 탭이 패널의 활성 탭이면 오른쪽 이웃(끝이었으면 왼쪽 이웃)이 활성이 되어 다시 보인다.
+    /// 탭 `id`를 닫고 닫은 탭 목록에 넣는다([`App::reopen_closed_tab`]로 되살린다). 그 탭이 패널의 활성 탭이면 오른쪽 이웃(끝이었으면 왼쪽 이웃)이 활성이 되어 다시 보인다.
     /// 패널의 마지막 탭이면 패널이 닫히고, 창의 마지막 패널이면 창이 닫힌다. 창이 하나도 남지 않으면 앱이
     /// 끝난다([`App::is_finished`]). 없는 탭이면 `None`이다.
     ///
     /// 닫은 탭의 감시는 풀리고, 그 탭에 늦게 온 결과는 버린다.
     pub fn close_tab(&mut self, id: TabId) -> Option<Closed> {
         let (w, p, t) = self.find(id)?;
+        let (_, tab) = self.windows[w].panels[p].tabs.remove(t);
+        self.remember_closed(tab);
         let window = &mut self.windows[w];
         let panel = &mut window.panels[p];
-        panel.tabs.remove(t);
         if panel.tabs.is_empty() {
             window.panels.remove(p);
             let window_closed = window.panels.is_empty();
@@ -474,6 +487,45 @@ impl App {
             panel: false,
             window: false,
         })
+    }
+
+    /// 닫은 탭 목록: 먼저 되살아날 것(가장 최근에 넣은 것)부터.
+    pub fn closed_tabs(&self) -> impl ExactSizeIterator<Item = &ClosedTab> + '_ {
+        self.closed.iter().rev()
+    }
+
+    /// 탭들을 차례로 닫은 탭 목록에 넣는다. 넣은 순서대로 쌓이므로 마지막에 넣은 탭이 먼저 되살아난다. 목록이
+    /// [`CLOSED_TABS_LIMIT`]개를 넘으면 가장 오래된 탭부터 빠진다. 창을 닫을 때 그 창의 탭들을 넣는 데 쓴다.
+    pub fn remember_closed_tabs(&mut self, tabs: impl IntoIterator<Item = Tab>) {
+        for tab in tabs {
+            self.remember_closed(tab);
+        }
+    }
+
+    fn remember_closed(&mut self, tab: Tab) {
+        if self.closed.len() == CLOSED_TABS_LIMIT {
+            self.closed.pop_front();
+        }
+        self.closed.push_back(tab.close());
+    }
+
+    /// 마지막에 닫은 탭을 되살린다: 위치·뒤로·앞으로 기록·정렬을 닫을 때 그대로 갖는 탭을 활성 창의 활성 패널에서
+    /// 활성 탭 바로 뒤에 열어 활성으로 하고(앞서 보이던 탭은 숨는다), 그 위치를 일꾼 스레드에서 다시 읽는다.
+    /// 닫은 탭이 없거나 앱이 끝났으면 `None`이다.
+    pub fn reopen_closed_tab(&mut self) -> Option<TabId> {
+        if self.is_finished() {
+            return None;
+        }
+        let closed = self.closed.pop_back()?;
+        let id = self.new_tab_id();
+        let tab = Tab::reopen(closed, self.show_hidden);
+        let panel = self.active_window_mut().active_panel_mut();
+        let at = panel.active + 1;
+        panel.tabs.insert(at, (id, tab));
+        panel.tabs[panel.active].1.hide();
+        panel.active = at;
+        self.navigate(Navigation::Refresh);
+        Some(id)
     }
 
     fn tabs_mut(&mut self) -> impl Iterator<Item = (TabId, &mut Tab)> + '_ {
@@ -635,16 +687,23 @@ impl App {
     /// 명령을 활성 패널·탭에서 지금 실행할 수 있는가([`CommandId::is_enabled_in`]). 앱이 끝났으면 아무 명령도
     /// 실행할 수 없다.
     pub fn can_execute(&self, command: CommandId) -> bool {
-        !self.is_finished() && command.is_enabled_in(self.active_window().active_panel())
+        if self.is_finished() {
+            return false;
+        }
+        match command {
+            CommandId::ReopenClosedTab => !self.closed.is_empty(),
+            command => command.is_enabled_in(self.active_window().active_panel()),
+        }
     }
 
-    /// 명령 팔레트 검색: 앱이 주는 명령 이름에서 찾고, 실행 가능 여부는 활성 패널·탭을 따른다([`command::search`]).
+    /// 명령 팔레트 검색: 앱이 주는 명령 이름에서 찾고, 실행 가능 여부는 [`App::can_execute`]를 따른다
+    /// ([`command::search`]).
     pub fn search_commands<S: AsRef<str>>(
         &self,
         query: &str,
         name: impl Fn(CommandId) -> S,
     ) -> Vec<command::PaletteEntry> {
-        command::search(query, name, self.active_window().active_panel())
+        command::search(query, name, self)
     }
 
     /// 명령을 활성 탭에서 실행한다. 지금 실행할 수 없으면 아무것도 하지 않고 [`Execution::Disabled`]다.
@@ -704,6 +763,12 @@ impl App {
                 let id = self.active_tab_id();
                 return match self.close_tab(id) {
                     Some(Closed { window: true, .. }) => Execution::WindowClosed,
+                    Some(_) => Execution::Done,
+                    None => Execution::Disabled,
+                };
+            }
+            CommandId::ReopenClosedTab => {
+                return match self.reopen_closed_tab() {
                     Some(_) => Execution::Done,
                     None => Execution::Disabled,
                 };
@@ -794,6 +859,12 @@ impl App {
         for (_, tab) in self.tabs_mut() {
             tab.set_show_hidden(show_hidden);
         }
+    }
+}
+
+impl CommandState for App {
+    fn is_enabled(&self, command: CommandId) -> bool {
+        self.can_execute(command)
     }
 }
 

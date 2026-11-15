@@ -56,6 +56,7 @@ fn name(command: CommandId) -> &'static str {
         ][usize::from(n).min(8)],
         CommandId::LastTab => "마지막 탭",
         CommandId::OpenInNewTab => "새 탭에서 열기",
+        CommandId::ReopenClosedTab => "닫은 탭 되살리기",
     }
 }
 
@@ -133,6 +134,7 @@ fn s2_탭_명령과_기본_단축키() {
         (PreviousTab, vec![key(Key::Tab).ctrl().shift()]),
         (LastTab, vec![key(Key::Digit(9)).ctrl()]),
         (OpenInNewTab, vec![]),
+        (ReopenClosedTab, vec![key(letter('t')).ctrl().shift()]),
     ];
     for n in 1..=8 {
         expected.push((GoToTab(n), vec![key(Key::Digit(n)).ctrl()]));

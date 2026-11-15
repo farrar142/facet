@@ -58,11 +58,14 @@ pub enum CommandId {
     LastTab,
     /// 새 탭에서 열기: 커서 항목인 폴더를 새 탭으로 활성 탭 바로 뒤에 연다. 지금 탭은 그대로 활성이다.
     OpenInNewTab,
+    /// 닫은 탭 되살리기: 마지막에 닫은 탭을 활성 패널에 활성 탭으로 되살린다. 닫은 탭이 없으면 꺼진다
+    /// (닫은 탭 목록은 앱 전체에 하나라 [`crate::window::App::can_execute`]가 본다).
+    ReopenClosedTab,
 }
 
 impl CommandId {
     /// 모든 명령. 명령 팔레트는 검색어가 없으면 이 순서로 보인다.
-    pub const ALL: [CommandId; 28] = [
+    pub const ALL: [CommandId; 29] = [
         CommandId::Open,
         CommandId::Back,
         CommandId::Forward,
@@ -91,6 +94,7 @@ impl CommandId {
         CommandId::GoToTab(8),
         CommandId::LastTab,
         CommandId::OpenInNewTab,
+        CommandId::ReopenClosedTab,
     ];
 
     /// 바뀌지 않는 ID 글자. 화면 문장이 아니다.
@@ -126,6 +130,7 @@ impl CommandId {
             CommandId::GoToTab(_) => "go-to-tab",
             CommandId::LastTab => "last-tab",
             CommandId::OpenInNewTab => "open-in-new-tab",
+            CommandId::ReopenClosedTab => "reopen-closed-tab",
         }
     }
 
@@ -201,6 +206,7 @@ impl CommandId {
             CommandId::GoToTab(8) => const { &[key(Key::Digit(8)).ctrl()] },
             CommandId::GoToTab(_) => &[],
             CommandId::LastTab => const { &[key(Key::Digit(9)).ctrl()] },
+            CommandId::ReopenClosedTab => const { &[key(letter('T')).ctrl().shift()] },
         }
     }
 
@@ -211,7 +217,8 @@ impl CommandId {
     /// - 모두 선택: 보이는 항목이 있을 때.
     /// - 새 탭에서 열기: 커서 항목이 폴더일 때.
     /// - 나머지는 늘 켜져 있다. 다음·이전·n번째 탭은 탭 하나만 보아서는 모르므로 켜져 있다고 하고, 패널의 탭
-    ///   수는 [`CommandId::is_enabled_in`]이 본다.
+    ///   수는 [`CommandId::is_enabled_in`]이 본다. 닫은 탭 되살리기도 켜져 있다고 하고, 닫은 탭 목록은
+    ///   [`crate::window::App::can_execute`]가 본다.
     pub fn is_enabled(self, tab: &Tab) -> bool {
         match self {
             CommandId::Open | CommandId::ToggleCursorSelection => tab.cursor_item().is_some(),
@@ -233,7 +240,8 @@ impl CommandId {
             | CommandId::NextTab
             | CommandId::PreviousTab
             | CommandId::GoToTab(_)
-            | CommandId::LastTab => true,
+            | CommandId::LastTab
+            | CommandId::ReopenClosedTab => true,
         }
     }
 
@@ -251,7 +259,8 @@ impl CommandId {
     }
 }
 
-/// 명령의 실행 가능 여부를 정하는 상태: 탭 하나([`CommandId::is_enabled`])나 패널([`CommandId::is_enabled_in`]).
+/// 명령의 실행 가능 여부를 정하는 상태: 탭 하나([`CommandId::is_enabled`]), 패널([`CommandId::is_enabled_in`]),
+/// 앱 전체([`crate::window::App::can_execute`], 닫은 탭 목록까지 본다).
 pub trait CommandState {
     /// `command`를 지금 실행할 수 있는가.
     fn is_enabled(&self, command: CommandId) -> bool;
@@ -435,7 +444,7 @@ pub struct PaletteEntry {
 ///
 /// - 대소문자를 가리지 않는다. 앞뒤 공백은 무시하고, 비면 모든 명령을 [`CommandId::ALL`] 순서로 준다.
 /// - 이름이 검색어로 시작하는 명령이 먼저다. 그 안에서, 그리고 나머지는 [`CommandId::ALL`] 순서다.
-/// - 실행 가능 여부는 `state`(탭이나 패널)로 정한다([`CommandState`]). 꺼진 명령도 결과에 든다.
+/// - 실행 가능 여부는 `state`(탭·패널·앱)로 정한다([`CommandState`]). 꺼진 명령도 결과에 든다.
 pub fn search<S: AsRef<str>>(
     query: &str,
     name: impl Fn(CommandId) -> S,
