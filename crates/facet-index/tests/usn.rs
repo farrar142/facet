@@ -342,6 +342,31 @@ fn records_without_security_change_report_nothing() {
     let mut index = base();
     let outcome = index.apply_usn(&create(60, 41, 1, FILE, "a.txt")).unwrap();
     assert!(outcome.security_changes.is_empty());
+    assert!(outcome.placed_folders.is_empty());
+}
+
+#[test]
+fn folders_created_or_moved_into_a_path_are_reported() {
+    let mut index = base();
+    let outcome = index
+        .apply_usn(
+            &[
+                create(60, 41, 1, DIR, "여행"),
+                // 파일 만들기, 폴더 지우기는 새 자리에 놓인 폴더가 아니다.
+                create(61, 60, 2, FILE, "a.txt"),
+                rename(40, (ROOT, "문서"), (41, "옮긴 문서"), 3, DIR),
+                create(62, 41, 300, DIR, "곧 지움"),
+                delete(62, 41, 301, DIR, "곧 지움"),
+            ]
+            .concat(),
+        )
+        .unwrap();
+    // 같은 묶음에서 지운 폴더는 아무 자리에도 남지 않으므로 알리지 않는다.
+    assert_eq!(
+        outcome.placed_folders,
+        [r"C:\사진\여행".to_owned(), r"C:\사진\옮긴 문서".to_owned()]
+    );
+    assert!(outcome.security_changes.is_empty());
 }
 
 #[test]
