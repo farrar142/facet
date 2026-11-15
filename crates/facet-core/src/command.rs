@@ -13,6 +13,7 @@
 //! 위치로 정한다. 글자로만 알 때는 「\」·「₩」·「￦」를 그 키로 본다.
 
 use crate::details::{Column, Direction, Sort};
+use crate::job::JobKind;
 use crate::tab::Tab;
 use crate::window::{Panel, Window};
 
@@ -71,11 +72,17 @@ pub enum CommandId {
     SwitchPanel,
     /// 새 창: 활성 탭의 위치(창이 없으면 사용자 홈 폴더) 탭 하나로 새 창을 열고 활성 창으로 한다.
     NewWindow,
+    /// 반대편 패널로 복사: 활성 탭의 선택(없으면 커서 항목)을 반대편 패널의 활성 탭 위치로 복사한다. 화면이 확인 줄을
+    /// 띄우고([`crate::window::Execution::ConfirmTransfer`]) 확인하면 작업을 넣는다. 원본이 없거나 패널이 하나면
+    /// 꺼진다.
+    CopyToOtherPanel,
+    /// 반대편 패널로 이동: 복사와 같고 이동 작업을 넣는다.
+    MoveToOtherPanel,
 }
 
 impl CommandId {
     /// 모든 명령. 명령 팔레트는 검색어가 없으면 이 순서로 보인다.
-    pub const ALL: [CommandId; 32] = [
+    pub const ALL: [CommandId; 34] = [
         CommandId::Open,
         CommandId::Back,
         CommandId::Forward,
@@ -108,6 +115,8 @@ impl CommandId {
         CommandId::TogglePanelSplit,
         CommandId::SwitchPanel,
         CommandId::NewWindow,
+        CommandId::CopyToOtherPanel,
+        CommandId::MoveToOtherPanel,
     ];
 
     /// 바뀌지 않는 ID 글자. 화면 문장이 아니다.
@@ -147,6 +156,8 @@ impl CommandId {
             CommandId::TogglePanelSplit => "toggle-panel-split",
             CommandId::SwitchPanel => "switch-panel",
             CommandId::NewWindow => "new-window",
+            CommandId::CopyToOtherPanel => "copy-to-other-panel",
+            CommandId::MoveToOtherPanel => "move-to-other-panel",
         }
     }
 
@@ -172,6 +183,15 @@ impl CommandId {
             CommandId::SortByModified => Some(Column::Modified),
             CommandId::SortByType => Some(Column::Type),
             CommandId::SortBySize => Some(Column::Size),
+            _ => None,
+        }
+    }
+
+    /// 반대편 패널로 복사·이동 명령이면 그 작업 종류.
+    pub const fn transfer_kind(self) -> Option<JobKind> {
+        match self {
+            CommandId::CopyToOtherPanel => Some(JobKind::Copy),
+            CommandId::MoveToOtherPanel => Some(JobKind::Move),
             _ => None,
         }
     }
@@ -226,6 +246,8 @@ impl CommandId {
             CommandId::TogglePanelSplit => const { &[key(Key::Backslash).ctrl()] },
             CommandId::SwitchPanel => const { &[key(Key::Tab)] },
             CommandId::NewWindow => const { &[key(letter('N')).ctrl()] },
+            CommandId::CopyToOtherPanel => const { &[key(Key::Function(7))] },
+            CommandId::MoveToOtherPanel => const { &[key(Key::Function(8))] },
         }
     }
 
@@ -235,6 +257,8 @@ impl CommandId {
     /// - 뒤로·앞으로: 그쪽 기록이 있을 때. 위로: 상위 위치가 있을 때(드라이브 루트에서 꺼진다).
     /// - 모두 선택: 보이는 항목이 있을 때.
     /// - 새 탭에서 열기: 커서 항목이 폴더일 때.
+    /// - 반대편 패널로 복사·이동: 원본(선택, 없으면 커서 항목)이 있고 탭 위치가 실제 폴더일 때. 반대편 패널은
+    ///   [`CommandId::is_enabled_in_window`]가 본다.
     /// - 나머지는 늘 켜져 있다. 다음·이전·n번째 탭은 탭 하나만 보아서는 모르므로 켜져 있다고 하고, 패널의 탭
     ///   수는 [`CommandId::is_enabled_in`]이 본다. 닫은 탭 되살리기도 켜져 있다고 하고, 닫은 탭 목록은
     ///   [`crate::window::App::can_execute`]가 본다. 패널 나누기/합치기와 활성 패널 바꾸기도 켜져 있다고 하고, 창의
@@ -247,6 +271,7 @@ impl CommandId {
             CommandId::Forward => tab.can_go_forward(),
             CommandId::Up => tab.can_go_up(),
             CommandId::SelectAll => !tab.is_empty(),
+            CommandId::CopyToOtherPanel | CommandId::MoveToOtherPanel => has_sources(tab),
             CommandId::Refresh
             | CommandId::EditAddress
             | CommandId::ToggleHidden
@@ -286,9 +311,17 @@ impl CommandId {
     ///
     /// - 활성 패널 바꾸기: 패널이 둘일 때.
     /// - 패널 나누기/합치기: 늘 켜져 있다(하나면 나누고 둘이면 합친다).
+    /// - 반대편 패널로 복사·이동: 패널이 둘이고, 반대편 패널의 활성 탭 위치가 실제 폴더이고, 활성 탭에 원본이 있을
+    ///   때. 패널이 하나면 꺼진다(대상 폴더를 고르는 「복사 위치…」는 따로 붙는다).
     pub fn is_enabled_in_window(self, window: &Window) -> bool {
         match self {
             CommandId::SwitchPanel => window.is_split(),
+            CommandId::CopyToOtherPanel | CommandId::MoveToOtherPanel => {
+                window
+                    .opposite_panel()
+                    .is_some_and(|other| other.active_tab().location().file_system_path().is_some())
+                    && self.is_enabled_in(window.active_panel())
+            }
             command => command.is_enabled_in(window.active_panel()),
         }
     }
@@ -318,6 +351,12 @@ impl CommandState for Window {
     fn is_enabled(&self, command: CommandId) -> bool {
         command.is_enabled_in_window(self)
     }
+}
+
+/// 복사·이동할 원본이 있는가: 선택이나 커서 항목이 있고 탭 위치가 실제 폴더다.
+fn has_sources(tab: &Tab) -> bool {
+    tab.location().file_system_path().is_some()
+        && (tab.selected_items().next().is_some() || tab.cursor_item().is_some())
 }
 
 /// 열 머리글을 누른 것처럼 정렬을 바꾼다: 같은 열이면 방향을 뒤집고, 다른 열이면 그 열 오름차순.

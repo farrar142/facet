@@ -29,6 +29,12 @@
 //!   활성 창으로 알린 뒤 넘기므로, 어느 창에서 친 키든 그 창의 활성 패널의 활성 탭으로 간다. 명령으로 창이 생기거나
 //!   닫히면 코어의 창 목록에 화면을 맞추고(`sync_windows`), 창이 남지 않으면([`App::is_finished`]) 이벤트 루프를
 //!   끝낸다. 제목 줄의 닫기 단추는 코어의 창 닫기([`App::close_window`])다. 깨우기 하나로 모든 창을 갱신한다.
+//! - 반대편 패널로 복사·이동(F7·F8): 코어가 확인 줄을 띄우라고 하면([`Execution::ConfirmTransfer`]) 창 아래에 대상과
+//!   항목 수([`App::transfer_plan`])를 보이고, Enter면 작업 대기열에 넣는다([`App::start_transfer`], 막히면 까닭을
+//!   보인다). Esc면 아무것도 하지 않는다.
+//! - 작업 영역: 창 아래쪽에 작업마다 진행 표시를 그린다([`App::work_area`], 모든 창에 같은 것). 작업 대기열의 사건은
+//!   같은 깨우기로 오고([`App::poll_jobs`], 작업마다 초당 10번 이하) 그때만 다시 그린다. 일시정지·이어하기·취소·
+//!   지금 시작·닫기 단추는 코어의 작업 대기열을 부른다.
 //! - 주소창은 코어의 경로 조각([`facet_core::Provider::segments`]), 글자 해석([`App::go_to_text`]), 자동 완성
 //!   ([`App::complete_address`], 일꾼 스레드)을 그리기만 한다.
 
@@ -41,6 +47,7 @@ use std::time::{Duration, Instant};
 use facet_core::command::{self, CommandId, Key};
 use facet_core::details::{self, Column, Direction};
 use facet_core::file_list;
+use facet_core::job::{CopyRejection, JobId, JobKind, JobState, Remaining};
 use facet_core::launch::{LaunchTarget, resolve_launch};
 use facet_core::name_input::NameInput;
 use facet_core::placement::{self, Monitor, Rect, WindowState};
@@ -48,8 +55,9 @@ use facet_core::selection::{CursorMove, Pick};
 use facet_core::session::{self, Loaded, SAVE_DELAY, Saver};
 use facet_core::tab::{AutoRefresh, Navigation, ReadOutcome, Relocation, Tab};
 use facet_core::window::{
-    App, Execution, MAX_PANELS, Panel, TabDestination, TabId, Update, WindowId,
+    App, Execution, MAX_PANELS, Panel, TabDestination, TabId, TransferPlan, Update, WindowId,
 };
+use facet_core::work_area::JobEntry;
 use facet_core::{ListError, Location, OpenError, ResolveError, provider_for};
 use slint::winit_030::winit::event::WindowEvent;
 use slint::winit_030::{EventResult, WinitWindowAccessor};
@@ -334,6 +342,7 @@ fn open_view(app: &Rc<RefCell<App>>, window: WindowId) -> Result<Rc<View>, slint
     let view = View::new(ui, Rc::clone(app), window);
     VIEWS.with(|slot| slot.borrow_mut().push(Rc::clone(&view)));
     view.render();
+    view.render_jobs();
     for panel in 0..MAX_PANELS {
         view.restore_scroll(panel);
     }
@@ -492,13 +501,18 @@ fn poll_all() {
     for view in &views {
         view.remember_scroll();
     }
-    let updates = {
+    let (updates, jobs) = {
         let mut app = app.borrow_mut();
         if app.is_finished() {
             return;
         }
-        app.poll()
+        (app.poll(), app.poll_jobs())
     };
+    if jobs {
+        for view in &views {
+            view.render_jobs();
+        }
+    }
     if updates.is_empty() {
         return;
     }
@@ -584,6 +598,151 @@ fn connect(ui: &AppWindow, w: WindowId) {
         ran
     });
     ui.on_palette_close(move || with_view(w, View::close_palette));
+    ui.on_confirm_accept(move || with_view(w, View::accept_transfer));
+    ui.on_confirm_cancel(move || with_view(w, View::close_transfer));
+    ui.on_job_pause(move |id| job_action(id, JobAction::Pause));
+    ui.on_job_resume(move |id| job_action(id, JobAction::Resume));
+    ui.on_job_cancel(move |id| job_action(id, JobAction::Cancel));
+    ui.on_job_start_now(move |id| job_action(id, JobAction::StartNow));
+    ui.on_job_dismiss(move |id| job_action(id, JobAction::Dismiss));
+}
+
+/// 진행 표시의 단추.
+#[derive(Debug, Clone, Copy)]
+enum JobAction {
+    Pause,
+    Resume,
+    Cancel,
+    StartNow,
+    Dismiss,
+}
+
+/// 진행 표시의 단추를 눌렀다: 화면에 넘긴 작업 번호로 작업을 찾아 코어의 작업 대기열을 부르고, 모든 창의 작업 영역을
+/// 다시 그린다. 끝난 작업에 부르면 코어가 아무것도 하지 않는다.
+fn job_action(id: i32, action: JobAction) {
+    let Some(app) = APP.with(|slot| slot.borrow().clone()) else {
+        return;
+    };
+    {
+        let mut app = app.borrow_mut();
+        let Some(job) = app
+            .work_area()
+            .entries()
+            .iter()
+            .map(|entry| entry.id)
+            .find(|job| job_number(*job) == id)
+        else {
+            return;
+        };
+        match action {
+            JobAction::Pause => {
+                app.jobs_mut().pause(job);
+            }
+            JobAction::Resume => {
+                app.jobs_mut().resume(job);
+            }
+            JobAction::Cancel => {
+                app.jobs_mut().cancel(job);
+            }
+            JobAction::StartNow => {
+                app.jobs_mut().start_now(job);
+            }
+            JobAction::Dismiss => {
+                app.dismiss_job(job);
+            }
+        }
+    }
+    refresh_jobs();
+}
+
+/// 작업 대기열에서 온 사건을 작업 영역에 반영하고 모든 창의 작업 영역을 다시 그린다.
+fn refresh_jobs() {
+    let Some(app) = APP.with(|slot| slot.borrow().clone()) else {
+        return;
+    };
+    if let Ok(mut app) = app.try_borrow_mut() {
+        app.poll_jobs();
+    }
+    for view in views() {
+        view.render_jobs();
+    }
+}
+
+/// 화면에 넘기는 작업 번호.
+fn job_number(job: JobId) -> i32 {
+    i32::try_from(job.get()).unwrap_or(i32::MAX)
+}
+
+fn count64(n: u64) -> i32 {
+    i32::try_from(n).unwrap_or(i32::MAX)
+}
+
+/// 작업 영역의 작업 하나를 진행 표시의 값으로. 수치 글자는 여기서 만들고 문장은 화면이 만든다.
+fn job_row(entry: &JobEntry) -> JobRow {
+    let progress = entry.progress.as_ref();
+    let summary = entry.summary.as_ref();
+    let remaining = match progress.map(|p| p.remaining) {
+        Some(Remaining::Known(left)) => text::remaining_text(left),
+        Some(Remaining::Calculating) | None => String::new(),
+    };
+    JobRow {
+        id: job_number(entry.id),
+        moving: entry.kind == JobKind::Move,
+        target: entry.target.display().to_string().into(),
+        status: match entry.state {
+            JobState::Queued => JobStatus::Queued,
+            JobState::Running => JobStatus::Running,
+            JobState::Paused => JobStatus::Paused,
+            JobState::AwaitingAnswer => JobStatus::AwaitingAnswer,
+            JobState::Finished => JobStatus::Finished,
+            JobState::Failed => JobStatus::Failed,
+            JobState::Cancelled => JobStatus::Cancelled,
+        },
+        terminal: entry.state.is_terminal(),
+        items_done: progress.map_or(0, |p| count64(p.items_done)),
+        // 진행이 오기 전에는 넘긴 원본 수를 보인다(다 세지 않은 수).
+        items_total: progress.map_or(count(entry.sources), |p| count64(p.items_total)),
+        counted: progress.is_some_and(|p| p.counted),
+        bytes_done: file_list::format_size(progress.map_or(0, |p| p.bytes_done)).into(),
+        bytes_total: file_list::format_size(progress.map_or(0, |p| p.bytes_total)).into(),
+        speed: progress
+            .map(|p| file_list::format_size(p.bytes_per_second))
+            .unwrap_or_default()
+            .into(),
+        remaining: remaining.into(),
+        current: progress
+            .and_then(|p| p.current.as_ref())
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+            .into(),
+        finished: summary.is_some(),
+        completed: summary.map_or(0, |s| count64(s.items_completed())),
+        skipped: summary.map_or(0, |s| count64(s.items_skipped())),
+        left: summary.map_or(0, |s| count64(s.items_remaining)),
+    }
+}
+
+/// 시작 전에 막힌 까닭을 확인 줄의 종류와 경로로. 문장은 화면이 만든다.
+fn transfer_problem(rejection: &CopyRejection, plan: &TransferPlan) -> (TransferProblem, String) {
+    match rejection {
+        CopyRejection::NoSources => (TransferProblem::NoSources, String::new()),
+        CopyRejection::TargetMissing => (
+            TransferProblem::TargetMissing,
+            plan.target.display().to_string(),
+        ),
+        CopyRejection::TargetNotFolder => (
+            TransferProblem::TargetNotFolder,
+            plan.target.display().to_string(),
+        ),
+        CopyRejection::IntoItself(source) => {
+            (TransferProblem::IntoItself, source.display().to_string())
+        }
+        CopyRejection::TargetInsideSource(source) => (
+            TransferProblem::TargetInsideSource,
+            source.display().to_string(),
+        ),
+    }
 }
 
 /// UI 스레드의 창 하나의 화면 상태: 코어의 창 하나와 그것을 그리는 Slint 창.
@@ -610,6 +769,10 @@ struct View {
     keep_rows: Cell<bool>,
     /// 누른 탭의 끌기 상태. 탭을 누르면 생기고 놓거나 끊기면 없어진다.
     tab_drag: RefCell<Option<TabDrag<WindowId>>>,
+    /// 확인 줄이 열려 있으면 확인하면 넣을 복사·이동. 화면의 `confirm-open`과 함께 바뀐다.
+    transfer: RefCell<Option<TransferPlan>>,
+    /// 작업 영역의 진행 표시들.
+    jobs: Rc<VecModel<JobRow>>,
 }
 
 /// 패널 하나의 화면 모델: 보이는 탭의 행, 탭 줄, 주소창 경로 조각. 탭 줄과 경로 조각은 바뀔 때만 고쳐 화면 요소를
@@ -643,6 +806,8 @@ impl View {
         ui.set_candidates(ModelRc::from(Rc::clone(&candidates)));
         let palette_rows = Rc::new(VecModel::default());
         ui.set_palette_rows(ModelRc::from(Rc::clone(&palette_rows)));
+        let jobs = Rc::new(VecModel::default());
+        ui.set_jobs(ModelRc::from(Rc::clone(&jobs)));
         Rc::new(View {
             window,
             ui,
@@ -656,7 +821,83 @@ impl View {
             reading_timer: Timer::default(),
             keep_rows: Cell::new(false),
             tab_drag: RefCell::default(),
+            transfer: RefCell::default(),
+            jobs,
         })
+    }
+
+    /// 작업 영역을 그린다. 같은 작업들이면 바뀐 줄만 고쳐 단추 같은 화면 요소를 다시 만들지 않는다.
+    fn render_jobs(&self) {
+        let rows: Vec<JobRow> = {
+            let Ok(app) = self.app.try_borrow() else {
+                return;
+            };
+            app.work_area().entries().iter().map(job_row).collect()
+        };
+        let same = self.jobs.row_count() == rows.len()
+            && self
+                .jobs
+                .iter()
+                .zip(&rows)
+                .all(|(old, new)| old.id == new.id);
+        if !same {
+            self.jobs.set_vec(rows);
+            return;
+        }
+        for (i, row) in rows.into_iter().enumerate() {
+            if self.jobs.row_data(i).as_ref() != Some(&row) {
+                self.jobs.set_row_data(i, row);
+            }
+        }
+    }
+
+    /// 반대편 패널로 복사·이동의 확인 줄을 연다: 대상과 항목 수를 보인다. 지금 할 수 없으면 열지 않는다.
+    fn open_transfer(&self, kind: JobKind) {
+        let Some(plan) = self.app.borrow().transfer_plan(kind) else {
+            return;
+        };
+        self.close_rename();
+        self.close_address_edit();
+        let ui = &self.ui;
+        ui.set_confirm_moving(kind == JobKind::Move);
+        ui.set_confirm_target(plan.target.display().to_string().into());
+        ui.set_confirm_items(count(plan.items()));
+        ui.set_confirm_problem(TransferProblem::None);
+        ui.set_confirm_problem_path(SharedString::new());
+        ui.set_confirm_open(true);
+        *self.transfer.borrow_mut() = Some(plan);
+    }
+
+    /// 확인 줄의 Enter: 작업을 대기열에 넣고 확인 줄을 닫는다. 시작 전에 막히면 작업을 만들지 않고 까닭을 보인다(다음
+    /// Enter·Esc로 닫는다).
+    fn accept_transfer(&self) {
+        let plan = self.transfer.borrow().clone();
+        let Some(plan) = plan else {
+            self.close_transfer();
+            return;
+        };
+        if self.ui.get_confirm_problem() != TransferProblem::None {
+            self.close_transfer();
+            return;
+        }
+        let started = self.app.borrow_mut().start_transfer(&plan);
+        match started {
+            Ok(_) => {
+                self.close_transfer();
+                refresh_jobs();
+            }
+            Err(rejection) => {
+                let (problem, path) = transfer_problem(&rejection, &plan);
+                self.ui.set_confirm_problem(problem);
+                self.ui.set_confirm_problem_path(path.into());
+            }
+        }
+    }
+
+    /// 확인 줄을 닫는다(Esc): 아무것도 하지 않는다.
+    fn close_transfer(&self) {
+        self.transfer.borrow_mut().take();
+        self.ui.set_confirm_open(false);
     }
 
     /// 탭에 넘긴 결과 가운데 이 창의 패널에 보이는 탭의 것을 그린다. 결과는 탭 번호로 찾아가므로 다른 창의 탭
@@ -980,6 +1221,7 @@ impl View {
         match execution {
             Execution::EditAddress => self.begin_address_edit(),
             Execution::ShowCommandPalette => self.open_palette(),
+            Execution::ConfirmTransfer(kind) => self.open_transfer(kind),
             Execution::Done | Execution::Disabled | Execution::WindowClosed => {}
         }
     }

@@ -52,6 +52,15 @@ impl JobId {
     }
 }
 
+/// 작업의 종류: 복사([`JobQueue::copy`])나 이동([`JobQueue::move_items`]). [`JobQueue::submit`]이 이것으로 고른다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum JobKind {
+    /// 복사.
+    Copy,
+    /// 이동.
+    Move,
+}
+
 /// 작업의 상태.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum JobState {
@@ -164,6 +173,16 @@ impl Summary {
     /// 항목별 오류로 건너뛴 항목 수([`Summary::failures`]의 수).
     pub fn errors_skipped(&self) -> u64 {
         self.failures.len() as u64
+    }
+
+    /// 건너뛴 항목 수: 이름 충돌로 건너뛴 것과 항목별 오류로 건너뛴 것(폴더면 그 폴더 하나로 센다).
+    pub fn items_skipped(&self) -> u64 {
+        self.conflicts_skipped + self.errors_skipped()
+    }
+
+    /// 끝낸 항목 수: 처리한 항목([`Summary::items_done`]) 가운데 건너뛰지 않은 것.
+    pub fn items_completed(&self) -> u64 {
+        self.items_done.saturating_sub(self.items_skipped())
     }
 }
 
@@ -730,6 +749,19 @@ impl JobQueue {
     ) -> Result<JobId, CopyRejection> {
         let job = moving::MoveJob::prepare(sources, target)?;
         Ok(self.enqueue(Job::Move(job)))
+    }
+
+    /// 종류에 따라 복사([`JobQueue::copy`])나 이동([`JobQueue::move_items`]) 작업을 넣는다.
+    pub fn submit(
+        &mut self,
+        kind: JobKind,
+        sources: Vec<PathBuf>,
+        target: PathBuf,
+    ) -> Result<JobId, CopyRejection> {
+        match kind {
+            JobKind::Copy => self.copy(sources, target),
+            JobKind::Move => self.move_items(sources, target),
+        }
     }
 
     fn enqueue(&mut self, job: Job) -> JobId {

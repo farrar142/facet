@@ -43,6 +43,8 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::TogglePanelSplit => "패널 나누기/합치기",
         CommandId::SwitchPanel => "활성 패널 바꾸기",
         CommandId::NewWindow => "새 창",
+        CommandId::CopyToOtherPanel => "반대편 패널로 복사",
+        CommandId::MoveToOtherPanel => "반대편 패널로 이동",
     }
 }
 
@@ -94,6 +96,18 @@ pub fn file_type_text(file_type: &FileType) -> String {
     }
 }
 
+/// 진행 표시의 남은 시간 글자: 한 시간 미만은 `분:초`(`2:05`), 그 이상은 `시:분:초`(`1:02:03`). 숫자와 쌍점뿐이라
+/// 번역하지 않는다. 1초 미만은 1초로 올린다(끝나기 직전에 0:00으로 멈춘 것처럼 보이지 않게).
+pub fn remaining_text(left: std::time::Duration) -> String {
+    let seconds = left.as_secs() + u64::from(left.subsec_nanos() > 0);
+    let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
 /// 운영 체제가 준 오류 문장과 코드(HRESULT)를 한 글자로: `메시지 (0x80070005)`.
 /// 문장은 운영 체제의 언어로 오므로 번역하지 않는다.
 pub fn os_error_detail(message: &str, code: i32) -> String {
@@ -137,6 +151,15 @@ mod tests {
             shortcut_text(&Shortcut::new(Key::Backslash).ctrl()),
             "Ctrl+\\"
         );
+    }
+
+    #[test]
+    fn 남은_시간_글자() {
+        use std::time::Duration;
+        assert_eq!(remaining_text(Duration::from_secs(125)), "2:05");
+        assert_eq!(remaining_text(Duration::from_secs(3723)), "1:02:03");
+        assert_eq!(remaining_text(Duration::from_millis(300)), "0:01");
+        assert_eq!(remaining_text(Duration::ZERO), "0:00");
     }
 
     #[test]
