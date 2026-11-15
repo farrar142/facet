@@ -250,9 +250,13 @@ pub(crate) fn create_folder(path: &Path) -> FileOpResult<()> {
 pub(crate) fn copy_folder_metadata(source: &Path, target: &Path) -> FileOpResult<()> {
     let metadata = source_metadata(source)?;
     let missing_target = |error: FileOpError| refine_missing(error, source);
+    apply_folder_metadata(&metadata, target).map_err(missing_target)
+}
+
+pub(crate) fn apply_folder_metadata(metadata: &fs::Metadata, target: &Path) -> FileOpResult<()> {
     // 읽기 전용 속성은 시각 맞추기를 막지 않지만, 순서를 시각 → 속성으로 두어 걱정할 것을 없앤다.
-    set_times(target, &metadata, true).map_err(missing_target)?;
-    set_attributes(target, metadata.file_attributes() & FOLDER_ATTRIBUTES).map_err(missing_target)
+    set_times(target, metadata, true)?;
+    set_attributes(target, metadata.file_attributes() & FOLDER_ATTRIBUTES)
 }
 
 fn move_file(source: &Path, target: &Path, flags: MOVE_FILE_FLAGS) -> FileOpResult<()> {

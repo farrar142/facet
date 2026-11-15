@@ -217,6 +217,23 @@ pub fn copy_folder_metadata(source: &Path, target: &Path) -> FileOpResult<()> {
     }
 }
 
+/// `target` 폴더의 만든 시각·수정 시각·속성을 미리 읽어 둔 원본 폴더의 `metadata`(`std::fs::metadata`)와 같게
+/// 한다.
+///
+/// 이동 엔진은 원본 폴더 안의 항목을 옮기며 지우므로 원본 폴더의 수정 시각이 바뀐다. 그래서 들어갈 때 읽어 둔
+/// 값을 안의 항목을 다 쓴 뒤 이것으로 맞춘다.
+pub fn apply_folder_metadata(metadata: &std::fs::Metadata, target: &Path) -> FileOpResult<()> {
+    #[cfg(windows)]
+    {
+        crate::windows_file_ops::apply_folder_metadata(metadata, target)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (metadata, target);
+        Err(FileOpError::unsupported())
+    }
+}
+
 /// 파일·폴더를 같은 볼륨 안의 `target`으로 옮긴다(이름 바꾸기). 복사로 바꾸지 않는다.
 ///
 /// 다른 볼륨이면 [`FileOpErrorKind::CrossVolume`], 대상이 있으면 [`FileOpErrorKind::TargetExists`]다.
