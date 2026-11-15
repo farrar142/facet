@@ -471,8 +471,10 @@ pub(crate) fn parse_reparse(buffer: &[u8], is_folder: bool) -> Option<Link> {
     let length = usize::from(u16_at(10)?);
     let bytes = buffer.get(path_start + offset..path_start + offset + length)?;
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
         .collect();
     let substitute = String::from_utf16(&units).ok()?;
     let relative = kind != LinkKind::Junction && flags & SYMLINK_FLAG_RELATIVE != 0;
