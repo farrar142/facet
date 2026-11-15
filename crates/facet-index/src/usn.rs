@@ -290,14 +290,16 @@ impl Index {
                 .pending_renames
                 .remove(&r.number)
                 .and_then(|parent| self.locate(r.number, parent));
-            let (size, modified) = old.map_or((0, r.timestamp), |at| {
+            // 옛 이름 레코드를 못 받았어도(또는 NTFS가 닫을 때 새 이름 레코드를 한 번 더 내면) 새
+            // 자리에 같은 항목이 있으면 그것을 새 이름으로 바꾼다. 크기·날짜는 그 항목의 값을 잇는다.
+            let present = self.locate(r.number, r.parent);
+            let (size, modified) = old.or(present).map_or((0, r.timestamp), |at| {
                 (self.records[at].size, self.records[at].modified)
             });
             if let Some(at) = old {
                 self.kill(at);
             }
-            // 옛 이름 레코드를 못 받았어도 새 자리에 같은 항목이 있으면 그것을 새 이름으로 바꾼다.
-            if let Some(at) = self.locate(r.number, r.parent) {
+            if let Some(at) = present {
                 self.kill(at);
             }
             self.add(r, size, modified)?;
