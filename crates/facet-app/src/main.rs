@@ -6,7 +6,12 @@
 //! - 목록 읽기는 코어가 일꾼 스레드에서 한다. 결과가 오면 코어가 깨우기([`App::set_waker`])를 부르고, 앱은
 //!   이벤트 루프에서 [`App::poll`]로 받아 다시 그린다.
 //! - 행 문자열은 화면에 보이는 행만 그때그때 만든다([`TabRows`]).
-//! - 실행 인자로 받은 경로마다 탭 하나로(없으면 사용자 홈 폴더) 창을 연다. 해석은 코어가 한다
+//! - 시작하면 세션 파일(`%APPDATA%\facet\session.json`, [`facet_core::session`])을 읽어 창·패널·탭을 되살린다
+//!   ([`App::restore`]). 파일이 없으면 기본 창으로, 깨졌으면 기본 창으로 뜨고 첫 창 위에 그 사실과 남긴 파일 자리를
+//!   보인다. 상태가 바뀌면 코어의 [`Saver`]에 넘기고(디스크는 일꾼 스레드가 2초를 묶어 쓴다), 끝낼 때 한 번 더 쓴다.
+//!   측정 모드는 `FACET_SESSION_PATH`가 없으면 세션 파일을 읽지도 쓰지도 않는다.
+//! - 실행 인자로 받은 경로마다 탭 하나를 연다: 되살린 세션이 있으면 마지막 활성 창의 활성 패널에 더하고, 없으면 그
+//!   탭들로(없으면 사용자 홈 폴더) 창을 연다. 해석은 코어가 한다
 //!   ([`facet_core::launch::resolve_launch`], 상대 경로는 작업 폴더 기준).
 //! - 단일 실행([`instance`]): 첫 프로세스가 주인이 되고, 다시 실행하면 인자와 작업 폴더를 주인에게 넘기고 끝난다.
 //!   주인은 받은 인자로 새 창을 열어 앞으로 가져온다([`App::open_launch_window`]). 측정 모드는 끼지 않는다.
@@ -37,6 +42,7 @@ use facet_core::file_list;
 use facet_core::launch::{LaunchTarget, resolve_launch};
 use facet_core::name_input::NameInput;
 use facet_core::selection::{CursorMove, Pick};
+use facet_core::session::{self, Loaded, SAVE_DELAY, Saver};
 use facet_core::tab::{AutoRefresh, Navigation, ReadOutcome, Relocation, Tab};
 use facet_core::window::{
     App, Execution, MAX_PANELS, Panel, TabDestination, TabId, Update, WindowId,
@@ -78,12 +84,39 @@ fn main() -> Result<(), slint::PlatformError> {
     };
 
     // 창 만들기(렌더러 준비)가 콜드 스타트에서 가장 오래 걸리므로, 목록은 그보다 먼저 읽기 시작해 겹친다.
-    let targets = resolve_launch(&launch.working_dir, &launch.paths);
-    let app = Rc::new(RefCell::new(App::launch(targets)));
+    // 세션 파일 읽기와 해석은 작아(탭 100개에도 몇 ms) 여기서 한다. 저장은 일꾼 스레드가 한다.
+    let session_path = session::session_path(measure::is_enabled());
+    let loaded = session_path
+        .as_deref()
+        .map_or(Loaded::Missing, session::load);
+    let broken = match &loaded {
+        Loaded::Broken { error, kept } => {
+            eprintln!("세션 파일을 되살리지 못함: {error}");
+            Some(kept.clone())
+        }
+        Loaded::Missing | Loaded::Restored(_) => None,
+    };
+    let saved = loaded.session().cloned();
+    // 경로 인자가 없으면 되살린 세션만 연다(세션이 없으면 코어가 홈 폴더 창을 연다).
+    let targets = if launch.paths.is_empty() {
+        Vec::new()
+    } else {
+        resolve_launch(&launch.working_dir, &launch.paths)
+    };
+    let app = Rc::new(RefCell::new(App::restore(loaded.into_session(), targets)));
     APP.with(|slot| *slot.borrow_mut() = Some(Rc::clone(&app)));
+    if let Some(path) = session_path {
+        let saver = Saver::spawn(path, SAVE_DELAY, saved);
+        SAVER.with(|slot| *slot.borrow_mut() = Some(saver));
+    }
 
     let first = app.borrow().active_window_id();
     let view = open_view(&app, first, true)?;
+    if let Some(kept) = broken {
+        view.ui.set_session_broken(true);
+        let kept = kept.map(|path| path.display().to_string());
+        view.ui.set_session_kept(kept.unwrap_or_default().into());
+    }
     // 결과는 일꾼 스레드에서 온다. 이벤트 루프를 깨워 UI 스레드에서 받는다. 깨우기 하나로 모든 창을 갱신한다.
     app.borrow_mut().set_waker(|| {
         // 이벤트 루프가 이미 끝났으면(창을 모두 닫았으면) 버린다.
@@ -117,13 +150,36 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = view.ui.hide();
     }
     drop(views);
+    // 마지막 상태를 한 번 더 쓴다. 창이 모두 닫혀 끝났으면 마지막 창이 있던 세션이 남는다.
+    save_session();
+    if let Some(saver) = SAVER.with(|slot| slot.borrow_mut().take())
+        && let Err(error) = saver.finish()
+    {
+        eprintln!("세션을 저장하지 못함: {error}");
+    }
     APP.with(|slot| slot.borrow_mut().take());
     result
+}
+
+/// 지금 화면 상태를 세션 저장에 알린다. 바뀌었을 때만 일꾼 스레드에 넘기고 디스크는 기다리지 않는다.
+fn save_session() {
+    let Some(app) = APP.with(|slot| slot.borrow().clone()) else {
+        return;
+    };
+    let Ok(app) = app.try_borrow() else { return };
+    let session = app.session();
+    SAVER.with(|slot| {
+        if let Some(saver) = slot.borrow_mut().as_mut() {
+            saver.update(session);
+        }
+    });
 }
 
 thread_local! {
     /// UI 스레드의 코어 앱. 모든 창이 함께 쓴다.
     static APP: RefCell<Option<Rc<RefCell<App>>>> = const { RefCell::new(None) };
+    /// 세션 저장(일꾼 스레드). 세션 파일 자리가 없으면(측정 모드 등) `None`이다.
+    static SAVER: RefCell<Option<Saver>> = const { RefCell::new(None) };
     /// UI 스레드의 화면 상태: 코어의 창마다 하나, 연 차례로.
     static VIEWS: RefCell<Vec<Rc<View>>> = const { RefCell::new(Vec::new()) };
     /// 탭을 창 밖에 놓아 생긴, 아직 띄우지 않은 창의 자리와 크기. `sync_windows`가 띄울 때 쓰고 지운다.
@@ -282,6 +338,8 @@ fn sync_windows() {
             Err(error) => eprintln!("창을 만들지 못함: {error}"),
         }
     }
+    // 창·패널·탭·분할 비율이 바뀌었을 수 있다(사용자 입력은 모두 여기를 지난다).
+    save_session();
     if app.borrow().is_finished() {
         let _ = slint::quit_event_loop();
     }
@@ -351,6 +409,8 @@ fn poll_all() {
     for view in &views {
         view.receive(&updates);
     }
+    // 이동이 확정되거나 사라진 위치에서 옮겨 위치가 바뀌었을 수 있다.
+    save_session();
 }
 
 /// 창의 콜백을 그 창의 화면 상태에 잇는다.

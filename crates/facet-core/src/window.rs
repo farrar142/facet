@@ -29,6 +29,9 @@
 //! ([`App::reopen_closed_tab`])는 마지막에 넣은 탭부터 위치·기록·정렬을 그대로 활성 창의 활성 패널에 활성 탭으로
 //! 열고 그 위치를 다시 읽는다. 이 목록은 저장하지 않는다.
 //!
+//! 세션([`crate::session`]): [`App::session`]이 지금 창·패널·탭·위치·정렬·분할 비율을 세션으로 내고,
+//! [`App::restore`]가 세션을 되살린다(보이는 탭만 읽기 시작하고, 나머지는 처음 보일 때 읽는다).
+//!
 //! 앱은 탭의 읽기 요청을 일꾼 스레드에서 읽고([`App::navigate`]), 그 결과를 요청한 탭에 넘긴다
 //! ([`App::poll`]·[`App::wait`]). 결과는 탭 번호로 찾아가므로 탭이 여럿이어도 섞이지 않는다.
 //! 읽을 때 위치의 변경 감시도 함께 걸어, 묶은 변경을 같은 통로로 받아 탭에 반영한다. 알림을 잃었거나 위치가
@@ -53,6 +56,7 @@ use facet_win::{OpenError, OpenResult, ShellWorker};
 use crate::command::{self, CommandId, CommandState};
 use crate::details::Sort;
 use crate::launch::LaunchTarget;
+use crate::session::{PanelSession, Session, TabSession, WindowSession};
 use crate::tab::{
     ChangeOutcome, ClosedTab, CompletionId, CompletionResult, Navigation, ReadOutcome, ReadRequest,
     ReadResult, Tab,
@@ -396,6 +400,148 @@ impl App {
         let mut app = App::empty();
         app.open_launch_window(targets);
         app
+    }
+
+    /// 세션([`Session`])을 되살린 앱. 세션이 없으면(첫 실행, 깨진 파일) [`App::launch`]처럼 `launch`로 창 하나를 연다
+    /// (`launch`가 비면 사용자 홈 폴더 탭 하나).
+    ///
+    /// 세션이 있으면 창·패널·탭·위치·정렬·분할 비율·창마다 활성 패널·패널마다 활성 탭·마지막 활성 창을 그대로
+    /// 되살린다. 기록은 비어 있다. 콜드 스타트를 늦추지 않도록 각 창의 각 패널에서 보이는(활성) 탭만 일꾼 스레드에서
+    /// 읽기 시작하고, 나머지 탭은 숨은 채로 두었다가 처음 보일 때 읽는다. 위치가 사라졌으면 읽을 때(보이는 탭은
+    /// 곧바로, 숨은 탭은 처음 보일 때) 가장 가까운 남은 상위로, 상위가 하나도 없으면 홈 폴더로 옮기고
+    /// [`Tab::relocation`]에 원래 위치를 남긴다.
+    ///
+    /// 그 뒤 `launch`(첫 실행의 경로 인자)가 있으면 마지막 활성 창의 활성 패널에 탭으로 더한다
+    /// ([`App::open_launch_tabs`]). 세션의 활성 번호가 범위 밖이면 끝으로 자르고, 탭이 없는 패널과 패널이 없는 창은
+    /// 빼고, 패널은 [`MAX_PANELS`]개까지만 쓴다. 남는 창이 없으면 세션이 없는 것처럼 연다.
+    pub fn restore(session: Option<Session>, launch: Vec<LaunchTarget>) -> Self {
+        let mut app = App::empty();
+        if let Some(session) = session {
+            app.push_session(session);
+        }
+        if app.is_finished() {
+            app.open_launch_window(launch);
+        } else {
+            app.open_launch_tabs(launch);
+        }
+        app
+    }
+
+    /// 세션의 창들을 더하고 보이는 탭만 읽기 시작한다.
+    fn push_session(&mut self, session: Session) {
+        let mut active = None;
+        for (w, window) in session.windows.into_iter().enumerate() {
+            let mut panels = Vec::new();
+            let mut active_panel = 0;
+            for (p, panel) in window.panels.into_iter().enumerate() {
+                if panel.tabs.is_empty() || panels.len() == MAX_PANELS {
+                    continue;
+                }
+                if p <= window.active_panel {
+                    active_panel = panels.len();
+                }
+                let active_tab = panel.active_tab.min(panel.tabs.len() - 1);
+                let tabs = panel
+                    .tabs
+                    .into_iter()
+                    .map(|saved| {
+                        let mut tab = Tab::new(saved.location, saved.sort, self.show_hidden);
+                        tab.hide();
+                        (self.new_tab_id(), tab)
+                    })
+                    .collect();
+                panels.push(Panel {
+                    tabs,
+                    active: active_tab,
+                });
+            }
+            if panels.is_empty() {
+                continue;
+            }
+            let id = WindowId(self.next_window);
+            self.next_window += 1;
+            let mut restored = Window::new(id, panels.remove(0));
+            restored.panels.extend(panels);
+            restored.active = active_panel;
+            restored.set_split_ratio(window.split_ratio);
+            if w <= session.active_window {
+                active = Some(self.windows.len());
+            }
+            self.windows.push(restored);
+        }
+        self.active = active.unwrap_or(0);
+        let mut reads = Vec::new();
+        for panel in self.windows.iter_mut().flat_map(|w| w.panels.iter_mut()) {
+            let (id, tab) = &mut panel.tabs[panel.active];
+            if let Some(request) = tab.show() {
+                reads.push((*id, request));
+            }
+        }
+        for (id, request) in reads {
+            self.spawn_read(id, request);
+        }
+    }
+
+    /// 지금 화면 상태를 세션으로([`crate::session::save`]로 저장한다). 창이 하나도 없으면(앱이 끝남) `None`이다.
+    pub fn session(&self) -> Option<Session> {
+        if self.is_finished() {
+            return None;
+        }
+        let windows = self
+            .windows
+            .iter()
+            .map(|window| WindowSession {
+                panels: window
+                    .panels
+                    .iter()
+                    .map(|panel| PanelSession {
+                        tabs: panel
+                            .tabs
+                            .iter()
+                            .map(|(_, tab)| TabSession {
+                                location: tab.location().clone(),
+                                sort: tab.sort(),
+                            })
+                            .collect(),
+                        active_tab: panel.active,
+                    })
+                    .collect(),
+                active_panel: window.active,
+                split_ratio: window.split_ratio,
+            })
+            .collect();
+        Some(Session {
+            windows,
+            active_window: self.active,
+        })
+    }
+
+    /// 실행 인자를 해석한 탭들을 활성 창의 활성 패널에서 활성 탭 바로 뒤에 넘긴 순서대로 더하고, 첫 탭을 활성 탭으로
+    /// 한다(앞서 보이던 탭은 숨는다). 첫 탭만 읽기 시작하고 나머지는 숨은 채로 두었다가 처음 보일 때 읽는다. 해석하지
+    /// 못한 인자의 탭은 읽지 않고 까닭을 보인다. 정렬은 활성 탭을 따른다. 탭이 없거나 앱이 끝났으면 아무것도 하지
+    /// 않는다. 세션을 되살린 첫 실행이 경로 인자를 받았을 때 쓴다.
+    pub fn open_launch_tabs(&mut self, targets: Vec<LaunchTarget>) {
+        if targets.is_empty() || self.is_finished() {
+            return;
+        }
+        let sort = self.active_tab().sort();
+        let show_hidden = self.show_hidden;
+        let mut tabs = Vec::with_capacity(targets.len());
+        for (index, target) in targets.into_iter().enumerate() {
+            let mut tab = Tab::launched(target, sort, show_hidden);
+            if index > 0 {
+                tab.hide();
+            }
+            tabs.push((self.new_tab_id(), tab));
+        }
+        let panel = self.active_window_mut().active_panel_mut();
+        let at = panel.active + 1;
+        panel.tabs[panel.active].1.hide();
+        panel.tabs.splice(at..at, tabs);
+        panel.active = at;
+        if self.active_tab().address_error().is_none() {
+            self.navigate(Navigation::Refresh);
+        }
     }
 
     /// 창이 없는 앱.

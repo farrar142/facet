@@ -834,6 +834,10 @@ export component AppWindow inherits Window {
     in-out property <length> candidate-content-y <=> candidate-list.content-y;
     out property <length> candidate-view-height: candidate-list.visible-height;
     in-out property <bool> show-about;
+    // 세션 파일이 깨져 기본 창으로 시작했다(첫 창만). 「닫기」를 누르면 감춘다. `session-kept`는 원래 파일을 옆에 남긴
+    // 자리이고, 남기지 못했으면 비어 있다.
+    in-out property <bool> session-broken;
+    in property <string> session-kept;
     // 명령 팔레트: 열려 있는가, 검색 결과 줄, 고른 줄(없으면 -1), 입력 글자.
     in property <bool> palette-open;
     in property <[PaletteRow]> palette-rows;
@@ -997,11 +1001,49 @@ export component AppWindow inherits Window {
 
     // 패널들: 왼쪽 패널과, 나뉘었으면 경계와 오른쪽 패널. 오른쪽 패널은 늘 만들어 두고 나뉘지 않았으면 너비 0으로 숨긴다
     // (자동 완성 후보가 활성 패널의 주소창 자리를 읽고, 스크롤 위치를 Rust와 잇기 위해서다).
-    panels := Rectangle {
+    // 세션 파일이 깨졌음을 알리는 띠. 보이면 패널들이 그만큼 아래로 내려간다.
+    property <length> banner-height: root.session-broken ? 34px : 0px;
+    if root.session-broken: Rectangle {
         x: 8px;
         y: 8px;
         width: parent.width - 16px;
-        height: parent.height - 16px;
+        height: 28px;
+        background: #fff4ce;
+        border-radius: 4px;
+        HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            spacing: 12px;
+            Text {
+                text: root.session-kept != ""
+                    ? @tr("세션 파일이 깨져 기본 창으로 시작했습니다. 원래 파일은 {}에 남겼습니다", root.session-kept)
+                    : @tr("세션 파일이 깨져 기본 창으로 시작했습니다. 원래 파일을 옆에 남기지 못했습니다");
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+                overflow: elide;
+                color: #6b5200;
+            }
+            Rectangle {
+                width: banner-close.preferred-width;
+                banner-close := Text {
+                    text: @tr("닫기");
+                    vertical-alignment: center;
+                    color: #6b5200;
+                }
+                TouchArea {
+                    clicked => {
+                        root.session-broken = false;
+                    }
+                }
+            }
+        }
+    }
+
+    panels := Rectangle {
+        x: 8px;
+        y: 8px + root.banner-height;
+        width: parent.width - 16px;
+        height: parent.height - 16px - root.banner-height;
         property <length> gap: root.split ? 6px : 0px;
         property <length> left-width: root.split ? round((self.width - self.gap) * root.split-ratio / 1px) * 1px : self.width;
 

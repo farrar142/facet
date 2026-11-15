@@ -38,3 +38,6 @@ all = { level = "warn", priority = -1 }
 
 [build-dependencies]
 slint-build = "~1.18"
+
+[dev-dependencies]
+tempfile = "3.27.0"

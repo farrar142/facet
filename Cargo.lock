@@ -1166,6 +1166,7 @@ dependencies = [
  "facet-win",
  "slint",
  "slint-build",
+ "tempfile",
 ]
 
 [[package]]
@@ -1185,6 +1186,8 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "facet-win",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 

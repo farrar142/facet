@@ -90,12 +90,22 @@ fn 측정_모드는_단일_실행에_끼지_않는다() {
         })
         .expect("수신기");
     let out = std::env::temp_dir().join(format!("facet-measure-test-{}.txt", std::process::id()));
+    // 측정 모드는 사용자의 세션 파일(`%APPDATA%\facet\session.json`)을 읽지도 쓰지도 않는다: 가짜 `APPDATA`에
+    // 세션 파일을 두면 그대로 남고 다른 파일도 생기지 않는다. 저장을 묶는 시간(2초)보다 오래 띄워 둔다.
+    let appdata = tempfile::TempDir::new().unwrap();
+    let session_dir = appdata.path().join("facet");
+    std::fs::create_dir(&session_dir).unwrap();
+    let session_file = session_dir.join("session.json");
+    std::fs::write(&session_file, "깨진 세션").unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_facet"))
         .arg(std::env::temp_dir())
         .env("FACET_MEASURE_OUT", &out)
+        .env("APPDATA", appdata.path())
+        .env_remove(facet_core::session::ENV_PATH)
         .spawn()
         .expect("facet 실행");
     let received = receiver.recv_timeout(Duration::from_secs(3));
+    std::thread::sleep(Duration::from_secs(1));
     let _ = child.kill();
     let _ = child.wait();
     let _ = std::fs::remove_file(&out);
@@ -103,4 +113,10 @@ fn 측정_모드는_단일_실행에_끼지_않는다() {
         received.is_err(),
         "측정 모드가 주인에게 넘겼다: {received:?}"
     );
+    assert_eq!(std::fs::read_to_string(&session_file).unwrap(), "깨진 세션");
+    let files: Vec<_> = std::fs::read_dir(&session_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(files, ["session.json"], "측정 모드가 세션 폴더를 건드렸다");
 }
