@@ -175,8 +175,8 @@ fn s2_탭_명령과_기본_단축키() {
         );
     }
     assert_eq!(find_by_shortcut(key(Key::Digit(9)).ctrl()), Some(LastTab));
-    // 수식 키 없는 Tab·숫자는 명령이 아니다(목록의 글자로 이동 등에 남긴다).
-    assert_eq!(find_by_shortcut(key(Key::Tab)), None);
+    // 수식 키 없는 Tab은 활성 패널 바꾸기다. 수식 키 없는 숫자는 명령이 아니다(글자로 이동에 남긴다).
+    assert_eq!(find_by_shortcut(key(Key::Tab)), Some(SwitchPanel));
     assert_eq!(find_by_shortcut(key(Key::Digit(1))), None);
     assert_eq!(find_by_shortcut(key(Key::Digit(0)).ctrl()), None);
 }
