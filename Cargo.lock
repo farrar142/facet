@@ -1166,6 +1166,7 @@ dependencies = [
  "facet-win",
  "slint",
  "slint-build",
+ "tempfile",
 ]
 
 [[package]]
