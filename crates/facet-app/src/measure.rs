@@ -6,13 +6,20 @@
 //! 측정 모드에서는 목록이 창에 들어간 뒤 처음 그려진 프레임이 화면에 나갈 때까지의 시간을 재고,
 //! [`ENV_SCROLL_ROWS`]가 있으면 프레임마다 그 수만큼의 행씩 목록 끝까지 스크롤하며
 //! 프레임 사이의 시간을 모은다. 끝나면 결과를 파일에 쓰고 이벤트 루프를 끝낸다.
+//!
+//! 프레임은 렌더러의 그리기 알림이 아니라 winit의 「다시 그려라」 이벤트로 센다. Slint의 winit 백엔드는
+//! 그 이벤트를 받으면 그 자리에서 그리고 화면에 내보낸다(present). 그래서 이벤트를 받을 때 이벤트 루프에
+//! 일을 하나 맡겨 두면, 그 일은 그 프레임을 내보낸 뒤에 돈다. 그리기 알림을 부르지 않는 skia(D3D)나
+//! 그리기 알림이 없는 software 렌더러에서도 femtovg와 같은 구간(내보내고 이벤트 루프로 돌아온 때)을 잰다.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use facet_core::measure::{ENV_OUT, ENV_SCROLL_ROWS, ENV_START_US, ScreenReport};
-use slint::{ComponentHandle, Model, RenderingState};
+use slint::winit_030::winit::event::WindowEvent;
+use slint::winit_030::{EventResult, WinitWindowAccessor};
+use slint::{ComponentHandle, Model};
 
 use crate::AppWindow;
 
@@ -34,9 +41,9 @@ struct State {
     scroll_rows: usize,
     report: ScreenReport,
     last_frame: Option<Instant>,
-    /// 목록이 든 첫 프레임을 그렸고, 화면에 내보낸 뒤의 시각을 기다리는 중이다.
-    first_pending: bool,
-    /// 목록 맨 끝까지 내렸다: 다음에 그려지는 프레임이 마지막이다.
+    /// 그리는 프레임이 있어, 그것을 내보낸 뒤의 시각을 기다리는 중이다.
+    pending: bool,
+    /// 목록 맨 끝까지 내렸다: 다음에 내보내는 프레임이 마지막이다.
     at_end: bool,
     finished: bool,
 }
@@ -60,7 +67,7 @@ fn now_us() -> u64 {
         .map_or(0, |d| d.as_micros() as u64)
 }
 
-/// 측정 모드이면 창에 그리기 알림을 건다. 아니면 아무것도 하지 않는다.
+/// 측정 모드이면 창에 프레임 세기를 건다. 아니면 아무것도 하지 않는다.
 pub fn install(ui: &AppWindow) {
     let Some(out) = std::env::var(ENV_OUT).ok().filter(|v| !v.is_empty()) else {
         return;
@@ -77,66 +84,55 @@ pub fn install(ui: &AppWindow) {
         scroll_rows: env_number(ENV_SCROLL_ROWS) as usize,
         report: ScreenReport::default(),
         last_frame: None,
-        first_pending: false,
+        pending: false,
         at_end: false,
         finished: false,
     }));
 
     let weak = ui.as_weak();
-    let result = ui
-        .window()
-        .set_rendering_notifier(move |rendering_state, _| {
-            if !matches!(rendering_state, RenderingState::AfterRendering)
-                || !LOADED.load(Ordering::Acquire)
-            {
-                return;
-            }
-            let Ok(mut s) = state.lock() else { return };
-            if s.finished || s.first_pending {
-                return;
-            }
+    ui.window().on_winit_window_event(move |_, event| {
+        if !matches!(event, WindowEvent::RedrawRequested) || !LOADED.load(Ordering::Acquire) {
+            return EventResult::Propagate;
+        }
+        if let Ok(mut s) = state.lock()
+            && !s.finished
+            && !s.pending
+        {
+            // 이 이벤트를 넘기면 Slint가 곧바로 그리고 내보낸다. 맡긴 일은 그 뒤에 돈다.
+            s.pending = true;
             let weak = weak.clone();
             let state = Arc::clone(&state);
-            if s.report.first_frame.is_none() {
-                // 그리기 알림은 화면에 내보내기(present) 전에 온다. 첫 화면을 처음 내보낼 때는
-                // 수십 ms 걸리기도 하므로, 내보내고 이벤트 루프로 돌아온 때를 첫 화면 시각으로 삼는다.
-                // 스크롤 프레임도 이때부터 재어, 창이 처음 뜨는 비용이 스크롤에 섞이지 않게 한다.
-                s.first_pending = true;
-                let _ = slint::invoke_from_event_loop(move || first_presented(&weak, &state));
-                return;
-            }
-            let now = Instant::now();
-            if let Some(last) = s.last_frame {
-                s.report.frames.push(now - last);
-            }
-            s.last_frame = Some(now);
-            if s.at_end {
+            let _ = slint::invoke_from_event_loop(move || presented(&weak, &state));
+        }
+        EventResult::Propagate
+    });
+}
+
+/// 목록이 든 프레임을 화면에 내보낸 뒤마다 한 번.
+///
+/// 첫 번째면 첫 화면 시각을 적는다. 스크롤을 잴 거면 앞 프레임과의 간격을 모으고 한 걸음 더 내린다.
+/// 스크롤 프레임은 첫 화면 뒤부터 재어, 창이 처음 뜨는 비용이 섞이지 않게 한다.
+fn presented(weak: &slint::Weak<AppWindow>, state: &Mutex<State>) {
+    {
+        let Ok(mut s) = state.lock() else { return };
+        s.pending = false;
+        if s.finished {
+            return;
+        }
+        let now = Instant::now();
+        if s.report.first_frame.is_none() {
+            let elapsed_us = now_us().saturating_sub(s.start_us);
+            s.report.first_frame = Some(Duration::from_micros(elapsed_us));
+            s.report.rows = ROWS.load(Ordering::Relaxed);
+            if s.scroll_rows == 0 {
                 s.finish();
                 return;
             }
-            // 다음 프레임을 위해 한 걸음 스크롤한다. 그리는 중에는 창을 건드리지 않고 이벤트 루프에 맡긴다.
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(ui) = weak.upgrade() {
-                    step(&ui, &state);
-                }
-            });
-        });
-    if let Err(e) = result {
-        eprintln!("이 렌더러는 그리기 알림을 지원하지 않아 측정할 수 없습니다: {e}");
-        std::process::exit(2);
-    }
-}
-
-/// 목록이 든 첫 프레임을 화면에 내보낸 뒤 한 번: 첫 화면 시각을 적고, 스크롤을 잴 거면 첫 걸음을 내딛는다.
-fn first_presented(weak: &slint::Weak<AppWindow>, state: &Mutex<State>) {
-    {
-        let Ok(mut s) = state.lock() else { return };
-        s.first_pending = false;
-        let elapsed_us = now_us().saturating_sub(s.start_us);
-        s.report.first_frame = Some(Duration::from_micros(elapsed_us));
-        s.report.rows = ROWS.load(Ordering::Relaxed);
-        s.last_frame = Some(Instant::now());
-        if s.scroll_rows == 0 {
+        } else if let Some(last) = s.last_frame {
+            s.report.frames.push(now - last);
+        }
+        s.last_frame = Some(now);
+        if s.at_end {
             s.finish();
             return;
         }
@@ -146,7 +142,7 @@ fn first_presented(weak: &slint::Weak<AppWindow>, state: &Mutex<State>) {
     }
 }
 
-/// 프레임마다 한 번: 목록을 `scroll_rows`행 내린다. 더 내릴 곳이 없으면 측정을 끝낸다.
+/// 목록을 `scroll_rows`행 내린다. 더 내릴 곳이 없으면 측정을 끝낸다.
 fn step(ui: &AppWindow, state: &Mutex<State>) {
     let Ok(mut s) = state.lock() else { return };
     let count = ui.get_rows().row_count();
