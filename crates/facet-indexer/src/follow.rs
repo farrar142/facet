@@ -133,6 +133,11 @@ pub fn run(volumes: &Volumes, volume: &str, source: &mut impl Source, stop: &Sto
 fn build(source: &mut impl Source) -> Result<(Index, JournalState), String> {
     let now = source.journal()?;
     let mut index = source.build()?;
+    // 레코드를 처음 적용할 때 만드는 항목 찾기 표를 「준비됨」 전에 만들어 둔다. 그러지 않으면 큰
+    // 볼륨에서 첫 변경의 반영이 그만큼 늦는다. 빈 바이트는 아무것도 바꾸지 않는다.
+    index
+        .apply_usn(&[])
+        .map_err(|e| format!("인덱스를 준비하지 못함: {e}"))?;
     let state = JournalState {
         journal_id: now.journal_id,
         usn: now.next_usn,
