@@ -69,11 +69,13 @@ pub enum CommandId {
     TogglePanelSplit,
     /// 활성 패널 바꾸기: 반대편 패널을 활성 패널로 한다. 패널이 하나면 꺼진다.
     SwitchPanel,
+    /// 새 창: 활성 탭의 위치(창이 없으면 사용자 홈 폴더) 탭 하나로 새 창을 열고 활성 창으로 한다.
+    NewWindow,
 }
 
 impl CommandId {
     /// 모든 명령. 명령 팔레트는 검색어가 없으면 이 순서로 보인다.
-    pub const ALL: [CommandId; 31] = [
+    pub const ALL: [CommandId; 32] = [
         CommandId::Open,
         CommandId::Back,
         CommandId::Forward,
@@ -105,6 +107,7 @@ impl CommandId {
         CommandId::ReopenClosedTab,
         CommandId::TogglePanelSplit,
         CommandId::SwitchPanel,
+        CommandId::NewWindow,
     ];
 
     /// 바뀌지 않는 ID 글자. 화면 문장이 아니다.
@@ -143,6 +146,7 @@ impl CommandId {
             CommandId::ReopenClosedTab => "reopen-closed-tab",
             CommandId::TogglePanelSplit => "toggle-panel-split",
             CommandId::SwitchPanel => "switch-panel",
+            CommandId::NewWindow => "new-window",
         }
     }
 
@@ -221,6 +225,7 @@ impl CommandId {
             CommandId::ReopenClosedTab => const { &[key(letter('T')).ctrl().shift()] },
             CommandId::TogglePanelSplit => const { &[key(Key::Backslash).ctrl()] },
             CommandId::SwitchPanel => const { &[key(Key::Tab)] },
+            CommandId::NewWindow => const { &[key(letter('N')).ctrl()] },
         }
     }
 
@@ -258,7 +263,8 @@ impl CommandId {
             | CommandId::LastTab
             | CommandId::ReopenClosedTab
             | CommandId::TogglePanelSplit
-            | CommandId::SwitchPanel => true,
+            | CommandId::SwitchPanel
+            | CommandId::NewWindow => true,
         }
     }
 

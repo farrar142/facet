@@ -59,6 +59,7 @@ fn name(command: CommandId) -> &'static str {
         CommandId::ReopenClosedTab => "닫은 탭 되살리기",
         CommandId::TogglePanelSplit => "패널 나누기/합치기",
         CommandId::SwitchPanel => "활성 패널 바꾸기",
+        CommandId::NewWindow => "새 창",
     }
 }
 
@@ -144,11 +145,13 @@ fn s2_탭_명령과_기본_단축키() {
     // 패널 명령: 나누기/합치기 Ctrl+백슬래시, 활성 패널 바꾸기 Tab.
     expected.push((TogglePanelSplit, vec![key(Key::Backslash).ctrl()]));
     expected.push((SwitchPanel, vec![key(Key::Tab)]));
+    // 창 명령: 새 창 Ctrl+N.
+    expected.push((NewWindow, vec![key(letter('n')).ctrl()]));
     for (command, shortcuts) in &expected {
         assert!(CommandId::ALL.contains(command), "{command:?}");
         assert_eq!(command.shortcuts(), shortcuts.as_slice(), "{command:?}");
     }
-    // S1의 14개와 탭·패널 명령이 전부다.
+    // S1의 14개와 탭·패널·창 명령이 전부다.
     assert_eq!(CommandId::ALL.len(), 14 + expected.len());
     assert_eq!(GoToTab(3).as_str(), "go-to-tab-3");
     assert_eq!(CommandId::from_id("go-to-tab-8"), Some(GoToTab(8)));
@@ -177,6 +180,13 @@ fn s2_탭_명령과_기본_단축키() {
     assert_eq!(find_by_shortcut(key(Key::Digit(9)).ctrl()), Some(LastTab));
     // 수식 키 없는 Tab은 활성 패널 바꾸기다. 수식 키 없는 숫자는 명령이 아니다(글자로 이동에 남긴다).
     assert_eq!(find_by_shortcut(key(Key::Tab)), Some(SwitchPanel));
+    // Ctrl+N은 새 창이다. 한글 모드의 N 키는 「ㅜ」를 낸다.
+    assert_eq!(find_by_shortcut(key(letter('n')).ctrl()), Some(NewWindow));
+    assert_eq!(
+        find_by_shortcut(key(Key::from_char('ㅜ').unwrap()).ctrl()),
+        Some(NewWindow)
+    );
+    assert_eq!(NewWindow.as_str(), "new-window");
     assert_eq!(find_by_shortcut(key(Key::Digit(1))), None);
     assert_eq!(find_by_shortcut(key(Key::Digit(0)).ctrl()), None);
 }

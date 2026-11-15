@@ -42,6 +42,7 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::ReopenClosedTab => "닫은 탭 되살리기",
         CommandId::TogglePanelSplit => "패널 나누기/합치기",
         CommandId::SwitchPanel => "활성 패널 바꾸기",
+        CommandId::NewWindow => "새 창",
     }
 }
 
