@@ -454,6 +454,15 @@ impl Control {
         !flags.cancelled
     }
 
+    /// 일시정지가 아니면 `f`를 부른다. 표지 잠금 안에서 부르므로, 일시정지를 세우고 보내는 일시정지 사건보다
+    /// `f`가 보낸 사건이 늘 먼저다(진행 사건이 일시정지 사건 뒤에 오지 않게).
+    fn unless_paused(&self, f: impl FnOnce()) {
+        let flags = lock(&self.flags);
+        if !flags.paused {
+            f();
+        }
+    }
+
     fn set_paused(&self, paused: bool) {
         lock(&self.flags).paused = paused;
         self.changed.notify_all();
@@ -852,11 +861,14 @@ impl JobQueue {
         let state = if slot.job.is_some() {
             JobState::Queued
         } else {
-            slot.control.set_paused(false);
             JobState::Running
         };
         slot.state = state;
         self.outbox.send(JobEvent::StateChanged { job, state });
+        // 상태 사건을 보낸 뒤에 푼다: 풀린 작업의 진행 사건이 이어 감 사건보다 먼저 오지 않게.
+        if state == JobState::Running {
+            slot.control.set_paused(false);
+        }
         drop(board);
         self.shared.changed.notify_all();
         true
