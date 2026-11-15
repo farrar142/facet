@@ -145,7 +145,7 @@ fn presented(weak: &slint::Weak<AppWindow>, state: &Mutex<State>) {
                 s.loads_seen = LOADS.load(Ordering::Acquire);
                 s.open_started = Some(Instant::now());
                 drop(s);
-                crate::with_view(|view| view.go(Location::file_system(open)));
+                crate::with_first_view(|view| view.go(Location::file_system(open)));
                 return;
             }
             if s.scroll_rows == 0 {
