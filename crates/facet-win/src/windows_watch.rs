@@ -190,7 +190,7 @@ pub(crate) fn watch(path: &Path, sink: Sink) -> io::Result<Watch> {
             let started = first.is_ok();
             let _ = ready_sender.send(first);
             if started {
-                run(state, &thread_stop, sink);
+                run(&mut state, &thread_stop, sink);
             }
         })?;
     let first = ready
@@ -206,7 +206,8 @@ pub(crate) fn watch(path: &Path, sink: Sink) -> io::Result<Watch> {
     })
 }
 
-fn run(mut state: Box<State>, stop: &OwnedHandle, mut sink: Sink) {
+/// 감시 스레드의 반복. `state`는 상자 안에 있어 읽기가 걸린 동안 움직이지 않는다.
+fn run(state: &mut State, stop: &OwnedHandle, mut sink: Sink) {
     loop {
         let handles = [state.io_event.0, stop.0];
         // SAFETY: 두 핸들 모두 이 함수가 끝날 때까지 열려 있다.
