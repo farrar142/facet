@@ -1,4 +1,4 @@
-//! NTFS 볼륨 핸들과 드라이브 문자 목록(Windows 전용).
+//! NTFS 볼륨 핸들, 드라이브 문자 목록, USN 저널 읽기(Windows 전용).
 
 use std::ffi::c_void;
 use std::fs::{self, File};
@@ -8,7 +8,8 @@ use std::path::Path;
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_ACCESS_DENIED, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_JOURNAL_NOT_ACTIVE, GENERIC_READ, GENERIC_WRITE,
+    HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Security::{
     GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
@@ -18,7 +19,11 @@ use windows_sys::Win32::Storage::FileSystem::{
     GetLogicalDrives, GetVolumeInformationW, OPEN_EXISTING, ReadFile,
 };
 use windows_sys::Win32::System::IO::{DeviceIoControl, OVERLAPPED};
-use windows_sys::Win32::System::Ioctl::{FSCTL_GET_NTFS_VOLUME_DATA, NTFS_VOLUME_DATA_BUFFER};
+use windows_sys::Win32::System::Ioctl::{
+    CREATE_USN_JOURNAL_DATA, FSCTL_CREATE_USN_JOURNAL, FSCTL_GET_NTFS_VOLUME_DATA,
+    FSCTL_QUERY_USN_JOURNAL, FSCTL_READ_USN_JOURNAL, NTFS_VOLUME_DATA_BUFFER,
+    READ_USN_JOURNAL_DATA_V0, USN_JOURNAL_DATA_V0,
+};
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use facet_index::{Index, MftReport};
@@ -26,6 +31,7 @@ use facet_index::{Index, MftReport};
 use crate::build;
 use crate::cli::DumpArgs;
 use crate::dump::{self, Geometry, ReadAt, Summary};
+use crate::follow;
 use crate::volumes::{self, Plan};
 
 /// 관리자 권한이 없을 때 알리는 말.
@@ -304,4 +310,174 @@ pub fn build_volume(drive: char) -> Result<(Index, MftReport), String> {
     // 저널로 따라간다).
     let _ = volume.flush();
     build::build_index(&mut volume, &geometry, &format!("{drive}:"))
+}
+
+/// 저널 읽기 버퍼 크기. 한 번에 이만큼의 레코드를 읽는다.
+const JOURNAL_BUFFER: usize = 64 * 1024;
+
+/// 저널이 없는 볼륨에 만드는 저널의 최대 크기와 늘리는 단위(Windows의 기본값과 같은 크기다).
+const NEW_JOURNAL_SIZE: u64 = 32 * 1024 * 1024;
+const NEW_JOURNAL_DELTA: u64 = 8 * 1024 * 1024;
+
+/// 실제 NTFS 볼륨(드라이브 문자 하나)을 읽는 [`follow::Source`]. 관리자(서비스는 LocalSystem)
+/// 권한이 필요하다.
+pub struct NtfsSource {
+    drive: char,
+    /// 저널을 읽는 볼륨 핸들. 처음 쓸 때 연다.
+    handle: Option<Handle>,
+    buffer: Vec<u8>,
+}
+
+impl NtfsSource {
+    /// 드라이브 `drive`(대문자)의 볼륨.
+    pub fn new(drive: char) -> Self {
+        Self {
+            drive,
+            handle: None,
+            buffer: vec![0; JOURNAL_BUFFER],
+        }
+    }
+
+    fn handle(&mut self) -> Result<&Handle, String> {
+        if self.handle.is_none() {
+            let handle = open_raw(self.drive, GENERIC_READ)
+                .map_err(|e| describe_open_error(self.drive, &e))?;
+            self.handle = Some(handle);
+        }
+        Ok(self.handle.as_ref().expect("방금 열었다"))
+    }
+
+    /// `FSCTL_QUERY_USN_JOURNAL`. 실패하면 OS 오류.
+    fn query(&mut self) -> Result<io::Result<USN_JOURNAL_DATA_V0>, String> {
+        let handle = self.handle()?.0;
+        let mut data = USN_JOURNAL_DATA_V0::default();
+        let mut returned = 0u32;
+        // SAFETY: 입력 버퍼는 없고, 출력 버퍼는 data 하나이며 그 크기를 함께 넘긴다. 동기 핸들이다.
+        let ok = unsafe {
+            DeviceIoControl(
+                handle,
+                FSCTL_QUERY_USN_JOURNAL,
+                null(),
+                0,
+                (&mut data as *mut USN_JOURNAL_DATA_V0).cast::<c_void>(),
+                size_of::<USN_JOURNAL_DATA_V0>() as u32,
+                &mut returned,
+                null_mut(),
+            )
+        };
+        Ok(if ok == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(data)
+        })
+    }
+
+    /// 볼륨에 USN 저널을 만든다(`FSCTL_CREATE_USN_JOURNAL`). 이미 있으면 그대로 둔다.
+    fn create_journal(&self) -> Result<(), String> {
+        let handle = open_raw(self.drive, GENERIC_READ | GENERIC_WRITE)
+            .map_err(|e| describe_open_error(self.drive, &e))?;
+        let create = CREATE_USN_JOURNAL_DATA {
+            MaximumSize: NEW_JOURNAL_SIZE,
+            AllocationDelta: NEW_JOURNAL_DELTA,
+        };
+        let mut returned = 0u32;
+        // SAFETY: 입력 버퍼는 create 하나이고 그 크기를 함께 넘긴다. 출력 버퍼는 없다. 동기 핸들이다.
+        let ok = unsafe {
+            DeviceIoControl(
+                handle.0,
+                FSCTL_CREATE_USN_JOURNAL,
+                (&create as *const CREATE_USN_JOURNAL_DATA).cast::<c_void>(),
+                size_of::<CREATE_USN_JOURNAL_DATA>() as u32,
+                null_mut(),
+                0,
+                &mut returned,
+                null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(format!(
+                "볼륨 {}:에 USN 저널을 만들지 못함: {}",
+                self.drive,
+                io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl follow::Source for NtfsSource {
+    fn journal(&mut self) -> Result<follow::JournalNow, String> {
+        let data = match self.query()? {
+            Ok(data) => data,
+            Err(e) if e.raw_os_error() == Some(ERROR_JOURNAL_NOT_ACTIVE as i32) => {
+                // 저널이 꺼진 볼륨이다. 변경을 따라가려면 저널이 있어야 하므로 만든다.
+                self.create_journal()?;
+                self.query()?
+                    .map_err(|e| format!("볼륨 {}:의 USN 저널을 읽지 못함: {e}", self.drive))?
+            }
+            Err(e) => {
+                // 핸들이 낡았을 수 있다(볼륨이 다시 붙음 등). 다음에는 새로 연다.
+                self.handle = None;
+                return Err(format!("볼륨 {}:의 USN 저널을 읽지 못함: {e}", self.drive));
+            }
+        };
+        Ok(follow::JournalNow {
+            journal_id: data.UsnJournalID,
+            first_usn: data.FirstUsn,
+            next_usn: data.NextUsn,
+        })
+    }
+
+    fn read(&mut self, journal_id: u64, start: i64) -> Result<follow::Records, String> {
+        let handle = self.handle()?.0;
+        let input = READ_USN_JOURNAL_DATA_V0 {
+            StartUsn: start,
+            ReasonMask: u32::MAX,
+            // 닫을 때만이 아니라 변경마다 받는다. 이름바꾸기의 옛 이름 레코드가 필요하다.
+            ReturnOnlyOnClose: 0,
+            // 기다리지 않는다.
+            Timeout: 0,
+            BytesToWaitFor: 0,
+            UsnJournalID: journal_id,
+        };
+        let mut returned = 0u32;
+        // SAFETY: 입력 버퍼는 input 하나, 출력 버퍼는 self.buffer이고 각 크기를 함께 넘긴다. 동기
+        // 핸들이라 호출이 끝나면 버퍼를 더 쓰지 않는다.
+        let ok = unsafe {
+            DeviceIoControl(
+                handle,
+                FSCTL_READ_USN_JOURNAL,
+                (&input as *const READ_USN_JOURNAL_DATA_V0).cast::<c_void>(),
+                size_of::<READ_USN_JOURNAL_DATA_V0>() as u32,
+                self.buffer.as_mut_ptr().cast::<c_void>(),
+                self.buffer.len() as u32,
+                &mut returned,
+                null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(format!(
+                "볼륨 {}:의 USN 저널 레코드를 읽지 못함: {}",
+                self.drive,
+                io::Error::last_os_error()
+            ));
+        }
+        // 앞 8바이트는 다음에 읽기 시작할 USN이고 그 뒤가 레코드다.
+        let got = &self.buffer[..(returned as usize).min(self.buffer.len())];
+        let Some((next, records)) = got.split_first_chunk::<8>() else {
+            return Err(format!(
+                "볼륨 {}:의 USN 저널 응답이 너무 짧음({}바이트)",
+                self.drive,
+                got.len()
+            ));
+        };
+        Ok(follow::Records {
+            next_usn: i64::from_le_bytes(*next),
+            bytes: records.to_vec(),
+        })
+    }
+
+    fn build(&mut self) -> Result<Index, String> {
+        build_volume(self.drive).map(|(index, _report)| index)
+    }
 }

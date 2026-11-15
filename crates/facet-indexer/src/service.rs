@@ -1,8 +1,8 @@
 //! Windows 서비스(Windows 전용): 서비스 관리자가 띄우는 본체, 개발용 설치·제거.
 //!
 //! - 본체([`run_service`]): 서비스 관리자에 붙어 질의 파이프 서버를 띄우고, 드라이브 문자가 있는
-//!   로컬 NTFS 볼륨마다 첫 인덱스를 만든다([`index_volumes`]). 멈추라는 제어가 오면 파이프 서버를
-//!   닫고 끝난다.
+//!   로컬 NTFS 볼륨마다 첫 인덱스를 만든 뒤 USN 저널을 따라간다([`index_volumes`]). 멈추라는
+//!   제어가 오면 따라가기에 멈추라고 알리고 파이프 서버를 닫고 끝난다.
 //! - 설치([`install`]): 이 실행 파일을 LocalSystem 계정의 자동 시작 서비스로 등록하고 시작한다.
 //! - 제거([`uninstall`]): 서비스를 멈추고 지운다.
 
@@ -32,6 +32,7 @@ use windows_sys::Win32::System::Services::{
     SetServiceStatus, StartServiceCtrlDispatcherW, StartServiceW,
 };
 
+use crate::follow::{self, Stop};
 use crate::pipe::PipeServer;
 use crate::volume::{self, NEED_ADMIN, is_elevated};
 use crate::volumes::{Plan, Volumes};
@@ -238,12 +239,19 @@ pub fn uninstall() -> Result<Uninstalled, String> {
     Ok(Uninstalled::Removed)
 }
 
-/// 볼륨들의 첫 인덱스를 만들기 시작한다. 인덱스를 만들 볼륨은 「만드는 중」으로 두고 볼륨마다
-/// 스레드 하나가 MFT를 읽는다. 다 만들면 「준비됨」, 실패하면 「인덱스 없음(만들지 못함)」이다.
-/// 인덱스를 만들지 않는 볼륨은 바로 「인덱스 없음(까닭)」이 된다.
+/// 볼륨들의 인덱스를 만들고 최신으로 유지하기 시작한다. 인덱스를 만들 볼륨은 「만드는 중」으로 두고
+/// 볼륨마다 스레드 하나가 MFT를 읽어 첫 인덱스를 만든 뒤 USN 저널을 따라간다([`follow::run`]).
+/// 저널을 따라갈 수 없게 되면 그 스레드가 인덱스를 다시 만든다. 만들지 못하면 「인덱스 없음(만들지
+/// 못함)」이다. 인덱스를 만들지 않는 볼륨은 바로 「인덱스 없음(까닭)」이 된다.
+///
+/// 스레드는 `stop`이 서면 끝난다(인덱스를 만드는 중이면 다 만든 뒤에).
 ///
 /// 볼륨마다 스레드를 따로 두는 것은, 큰 볼륨(C:)을 읽는 동안 작은 볼륨이 기다리지 않게 하려는 것이다.
-pub fn index_volumes(volumes: &Arc<Volumes>, targets: Vec<(String, Plan)>) -> Vec<JoinHandle<()>> {
+pub fn index_volumes(
+    volumes: &Arc<Volumes>,
+    targets: Vec<(String, Plan)>,
+    stop: &Stop,
+) -> Vec<JoinHandle<()>> {
     let mut threads = Vec::new();
     for (name, plan) in targets {
         match plan {
@@ -254,13 +262,12 @@ pub fn index_volumes(volumes: &Arc<Volumes>, targets: Vec<(String, Plan)>) -> Ve
                     continue;
                 };
                 let shared = Arc::clone(volumes);
+                let stop = stop.clone();
                 let spawned = thread::Builder::new()
                     .name(format!("facet-index-{drive}"))
-                    .spawn(move || match volume::build_volume(drive) {
-                        Ok((index, _report)) => shared.set_ready(&name, index),
-                        Err(message) => {
-                            shared.set_not_indexed(&name, NoIndexReason::Failed { message });
-                        }
+                    .spawn(move || {
+                        let mut source = volume::NtfsSource::new(drive);
+                        follow::run(&shared, &name, &mut source, &stop, follow::POLL);
                     });
                 match spawned {
                     Ok(t) => threads.push(t),
@@ -379,8 +386,9 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut windows_sys::core
             return;
         }
     };
-    // 인덱스는 뒤에서 만든다. 그동안 상태 질의는 「만드는 중」을 돌려준다.
-    let _builders = index_volumes(&volumes, volume::local_volumes());
+    // 인덱스는 뒤에서 만들고 따라간다. 그동안 상태 질의는 「만드는 중」을 돌려준다.
+    let followers = Stop::new();
+    let _threads = index_volumes(&volumes, volume::local_volumes(), &followers);
     report(SERVICE_RUNNING, NO_ERROR);
 
     let (lock, wake) = &STOP;
@@ -389,7 +397,9 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut windows_sys::core
         stop = wake.wait(stop).unwrap_or_else(|e| e.into_inner());
     }
     drop(stop);
+    followers.stop();
     drop(server);
-    // 아직 인덱스를 만드는 스레드는 기다리지 않는다. 멈춤을 알리면 프로세스가 끝나며 함께 끝난다.
+    // 따라가기 스레드는 기다리지 않는다(인덱스를 만드는 중이면 오래 걸린다). 멈춤을 알리면
+    // 프로세스가 끝나며 함께 끝난다.
     report(SERVICE_STOPPED, NO_ERROR);
 }

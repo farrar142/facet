@@ -219,6 +219,52 @@ fn replacing_an_index_makes_cursors_stale() {
 }
 
 #[test]
+fn updating_an_index_shows_changes_and_makes_cursors_stale() {
+    let volumes = two_volumes();
+    let page = volumes
+        .search(&query(".txt", None, Some(1)), &Cancel::new())
+        .unwrap();
+    let cursor = page.next.unwrap();
+
+    let updated = volumes.update("D:", |index| {
+        index
+            .insert(NewItem {
+                number: 300,
+                parent: 100,
+                name: "new.txt",
+                size: 7,
+                modified: 1,
+                attributes: 0x20,
+            })
+            .unwrap();
+        index.len()
+    });
+    assert_eq!(updated, Some(4));
+    let page = volumes
+        .search(&query("new.txt", None, None), &Cancel::new())
+        .unwrap();
+    assert_eq!(paths(&page.hits), [r"D:\폴더\new.txt"]);
+    assert_eq!(
+        volumes.status().volumes[1].state,
+        VolumeState::Ready { items: 4 }
+    );
+
+    // 바뀐 볼륨의 결과를 들고 있던 표지는 무효다.
+    let err = volumes.resume(cursor, 10).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::StaleCursor);
+}
+
+#[test]
+fn only_ready_volumes_are_updated() {
+    let volumes = two_volumes();
+    volumes.set_building("D:");
+    assert_eq!(volumes.update("D:", |_| ()), None);
+    assert_eq!(volumes.update("Q:", |_| ()), None);
+    volumes.set_not_indexed("C:", NoIndexReason::Network);
+    assert_eq!(volumes.update("C:", |_| ()), None);
+}
+
+#[test]
 fn not_indexed_volume_has_no_results() {
     let volumes = two_volumes();
     volumes.set_not_indexed(

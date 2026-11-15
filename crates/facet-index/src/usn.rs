@@ -35,7 +35,8 @@ const HEADER_LEN: usize = 60;
 pub struct JournalState {
     /// 저널 ID(`USN_JOURNAL_DATA.UsnJournalID`). 저널을 지우고 다시 만들면 바뀐다.
     pub journal_id: u64,
-    /// 마지막으로 처리한 레코드의 USN.
+    /// 처리한 자리: 이 USN 앞의 레코드는 모두 처리했다. [`Index::apply_usn`]은 마지막으로 적용한
+    /// 레코드의 USN까지 옮기고, 인덱서 서비스는 저널에서 다음에 읽을 USN을 넣는다.
     pub usn: i64,
 }
 
@@ -290,14 +291,16 @@ impl Index {
                 .pending_renames
                 .remove(&r.number)
                 .and_then(|parent| self.locate(r.number, parent));
-            let (size, modified) = old.map_or((0, r.timestamp), |at| {
+            // 옛 이름 레코드를 못 받았어도(또는 NTFS가 닫을 때 새 이름 레코드를 한 번 더 내면) 새
+            // 자리에 같은 항목이 있으면 그것을 새 이름으로 바꾼다. 크기·날짜는 그 항목의 값을 잇는다.
+            let present = self.locate(r.number, r.parent);
+            let (size, modified) = old.or(present).map_or((0, r.timestamp), |at| {
                 (self.records[at].size, self.records[at].modified)
             });
             if let Some(at) = old {
                 self.kill(at);
             }
-            // 옛 이름 레코드를 못 받았어도 새 자리에 같은 항목이 있으면 그것을 새 이름으로 바꾼다.
-            if let Some(at) = self.locate(r.number, r.parent) {
+            if let Some(at) = present {
                 self.kill(at);
             }
             self.add(r, size, modified)?;

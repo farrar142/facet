@@ -156,6 +156,28 @@ fn rename_in_place_keeps_size_and_date() {
     assert_eq!((hits[0].size, hits[0].modified), (10, 99));
 }
 
+/// NTFS는 이름바꾸기에 옛 이름, 새 이름, 그리고 닫을 때 새 이름(이유가 쌓인 것)을 한 번 더 낸다.
+#[test]
+fn repeated_new_name_record_keeps_size_and_date() {
+    let mut index = base();
+    let mut records = rename(50, (40, "report.txt"), (41, "moved.txt"), 1, FILE);
+    records.extend(record(
+        50,
+        41,
+        300,
+        USN_REASON_RENAME_OLD_NAME | USN_REASON_RENAME_NEW_NAME,
+        FILE,
+        "moved.txt",
+    ));
+    index.apply_usn(&records).unwrap();
+    let hits = index.query(&Query::name_contains("moved"));
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].path, r"C:\사진\moved.txt");
+    assert_eq!((hits[0].size, hits[0].modified), (10, 99));
+    assert!(paths(&index, "report").is_empty());
+    assert_eq!(index.len(), 3);
+}
+
 #[test]
 fn rename_split_across_calls_still_works() {
     let mut index = base();

@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 
 use facet_index::ATTRIBUTE_DIRECTORY;
 use facet_indexer::SERVICE_NAME;
+use facet_indexer::follow::Stop;
 use facet_indexer::service::index_volumes;
 use facet_indexer::session::Cancel;
 use facet_indexer::volume::local_volumes;
@@ -121,10 +122,9 @@ fn real_volume_first_index_matches_volume_contents() {
         .collect();
     assert_eq!(targets, [(volume.clone(), Plan::Index)]);
 
-    let volumes = Arc::new(Volumes::new());
-    for t in index_volumes(&volumes, targets) {
-        t.join().unwrap();
-    }
+    let following = Following::start(targets);
+    following.wait_ready(&volume);
+    let volumes = &following.volumes;
     let status = volumes.status();
     let [state] = &status.volumes[..] else {
         panic!("볼륨 상태가 하나가 아님: {status:?}")
@@ -166,6 +166,149 @@ fn real_volume_first_index_matches_volume_contents() {
         want.insert((scratch.0.join(folder).display().to_string(), None));
     }
     assert_eq!(got, want);
+    following.stop();
+}
+
+/// 서비스처럼 볼륨들의 인덱스를 만들고 따라가는 스레드들. 버릴 때 멈추라고 알린다.
+struct Following {
+    volumes: Arc<Volumes>,
+    stop: Stop,
+    threads: Vec<thread::JoinHandle<()>>,
+}
+
+impl Following {
+    fn start(targets: Vec<(String, Plan)>) -> Self {
+        let volumes = Arc::new(Volumes::new());
+        let stop = Stop::new();
+        let threads = index_volumes(&volumes, targets, &stop);
+        Self {
+            volumes,
+            stop,
+            threads,
+        }
+    }
+
+    /// `volume`이 「준비됨」이 될 때까지 기다린다.
+    fn wait_ready(&self, volume: &str) {
+        let deadline = Instant::now() + Duration::from_secs(300);
+        loop {
+            let status = self.volumes.status();
+            let state = status.volumes.iter().find(|v| v.volume == volume);
+            match state.map(|v| &v.state) {
+                Some(VolumeState::Ready { .. }) => return,
+                Some(VolumeState::Building { .. }) | None => {}
+                Some(other) => panic!("{volume}의 상태가 {other:?}"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{volume}의 인덱스가 300초 안에 준비되지 않음"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// 이름에 `part`가 든 항목의 경로들(정렬).
+    fn paths(&self, part: &str) -> Vec<String> {
+        let page = self
+            .volumes
+            .search(
+                &QueryMessage {
+                    condition: Condition::NameContains {
+                        part: part.to_owned(),
+                        case: Case::Insensitive,
+                    },
+                    sort: None,
+                    limit: None,
+                },
+                &Cancel::new(),
+            )
+            .unwrap();
+        let mut paths: Vec<String> = page.hits.into_iter().map(|h| h.path).collect();
+        paths.sort();
+        paths
+    }
+
+    /// 방금 한 변경이 1초 안에 질의 결과에 반영되는지 본다: 이름에 `part`가 든 항목의 경로들이
+    /// `want`(정렬)가 되어야 한다.
+    fn expect_within_a_second(&self, what: &str, part: &str, want: &[&Path]) {
+        let changed = Instant::now();
+        let mut want: Vec<String> = want.iter().map(|p| p.display().to_string()).collect();
+        want.sort();
+        loop {
+            let got = self.paths(part);
+            // 질의 자체의 시간도 넣어 잰다(반영을 본 시각이 기준 안이어야 한다).
+            let elapsed = changed.elapsed();
+            if got == want && elapsed < LIVE_UPDATE {
+                eprintln!("{what}: {}ms 만에 반영", elapsed.as_millis());
+                return;
+            }
+            assert!(
+                elapsed < LIVE_UPDATE,
+                "{what}: {}ms 안에 반영되지 않음(지금 결과 {got:?}, 기대 {want:?})",
+                LIVE_UPDATE.as_millis()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn stop(mut self) {
+        self.stop.stop();
+        for t in self.threads.drain(..) {
+            t.join().unwrap();
+        }
+    }
+}
+
+impl Drop for Following {
+    fn drop(&mut self) {
+        self.stop.stop();
+    }
+}
+
+/// 파일 변경이 질의 결과에 반영되어야 하는 시간(spec #22).
+const LIVE_UPDATE: Duration = Duration::from_secs(1);
+
+#[test]
+#[ignore = "실제 볼륨 테스트: 관리자 권한과 FACET_TEST_VOLUME이 필요하다(cargo xtask ci가 관리자일 때 돌린다)"]
+fn real_volume_usn_changes_show_up_within_a_second() {
+    let volume = volume_name();
+    let scratch = Scratch::new(&volume, "usn");
+    let tag = format!("usn{}", std::process::id());
+    let targets: Vec<(String, Plan)> = local_volumes()
+        .into_iter()
+        .filter(|(v, _)| *v == volume)
+        .collect();
+    let following = Following::start(targets);
+    following.wait_ready(&volume);
+
+    // 만들기
+    let created = scratch.0.join(format!("새 파일 {tag}.txt"));
+    fs::write(&created, b"hello").unwrap();
+    following.expect_within_a_second("만들기", &tag, &[&created]);
+
+    // 이름바꾸기
+    let renamed = scratch.0.join(format!("바꾼 이름 {tag}.txt"));
+    fs::rename(&created, &renamed).unwrap();
+    following.expect_within_a_second("이름바꾸기", &tag, &[&renamed]);
+
+    // 지우기
+    fs::remove_file(&renamed).unwrap();
+    following.expect_within_a_second("지우기", &tag, &[]);
+
+    // 폴더 이동: 옮긴 폴더 아래 항목의 경로도 바뀐다.
+    let into = scratch.0.join("받는 폴더");
+    fs::create_dir_all(&into).unwrap();
+    let from = scratch.0.join(format!("옮길 폴더 {tag}"));
+    fs::create_dir_all(&from).unwrap();
+    let deep = from.join(format!("깊은 파일 {tag}.txt"));
+    fs::write(&deep, b"x").unwrap();
+    following.expect_within_a_second("폴더와 그 안의 파일 만들기", &tag, &[&from, &deep]);
+    let moved = into.join(format!("옮길 폴더 {tag}"));
+    fs::rename(&from, &moved).unwrap();
+    let moved_deep = moved.join(format!("깊은 파일 {tag}.txt"));
+    following.expect_within_a_second("폴더 이동", &tag, &[&moved, &moved_deep]);
+
+    following.stop();
 }
 
 /// 설치한 서비스를 테스트가 끝날 때(실패해도) 지운다.
@@ -313,6 +456,28 @@ fn real_volume_service_install_index_query_uninstall() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success());
     assert!(stdout.contains(&format!("{volume}\t준비됨")), "{stdout}");
+
+    // 서비스가 USN 저널을 따라간다: 새로 만든 파일이 1초 안에 시험용 질의 명령의 결과에 나온다.
+    let fresh = format!("서비스 새 파일 {}.txt", std::process::id());
+    let fresh_path = scratch.file(&fresh, 7).display().to_string();
+    let changed = Instant::now();
+    loop {
+        let out = Command::new(&query)
+            .args(["search", &fresh])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let elapsed = changed.elapsed();
+        if stdout.contains(&fresh_path) && elapsed < LIVE_UPDATE {
+            eprintln!("서비스 반영: {}ms", elapsed.as_millis());
+            break;
+        }
+        assert!(
+            elapsed < LIVE_UPDATE,
+            "새 파일이 1초 안에 facet-query 결과에 나오지 않음:\n{stdout}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
 
     let removed = Command::new(env!("CARGO_BIN_EXE_facet-indexer"))
         .arg("uninstall")
