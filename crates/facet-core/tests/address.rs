@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use facet_core::details::Sort;
 use facet_core::tab::{Navigation, ReadOutcome, Tab};
+use facet_core::window::{App, Update};
 use facet_core::{FileSystemProvider, Location, Provider, ResolveError};
 use tempfile::TempDir;
 
@@ -250,5 +251,72 @@ fn 늦게_온_자동_완성_결과는_버린다() {
         .into_iter()
         .map(|c| c.name)
         .collect();
+    assert_eq!(names, ["beta"]);
+}
+
+const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn app_at(path: &Path) -> App {
+    let mut app = App::new(Some(loc(path)));
+    let (_, outcome) = app.wait(WAIT).expect("첫 읽기");
+    assert_eq!(outcome, ReadOutcome::Committed);
+    app
+}
+
+#[test]
+fn 앱에서_주소창_글자로_가면_파일이_든_폴더에서_그_파일을_고른다() {
+    let dir = tree();
+    let sub = dir.path().join("Alpha");
+    let mut app = app_at(&sub);
+    let file = dir.path().join("Alpha.txt");
+    assert!(app.go_to_text(file.to_str().unwrap()));
+    assert_eq!(app.wait(WAIT).unwrap().1, ReadOutcome::Committed);
+    let tab = app.active_tab();
+    assert_eq!(tab.location(), &loc(dir.path()));
+    assert_eq!(tab.selected_items().next().unwrap().name, "Alpha.txt");
+    assert_eq!(tab.cursor_item().unwrap().name, "Alpha.txt");
+}
+
+#[test]
+fn 앱에서_해석에_실패하면_읽지_않고_탭이_까닭을_갖는다() {
+    let dir = tree();
+    let mut app = app_at(dir.path());
+    let missing = dir.path().join("없음");
+    assert!(!app.go_to_text(missing.to_str().unwrap()));
+    assert!(matches!(
+        app.active_tab().address_error(),
+        Some(ResolveError::NotFound { .. })
+    ));
+    assert_eq!(app.active_tab().location(), &loc(dir.path()));
+    assert!(app.active_tab().pending_location().is_none());
+    assert!(!app.active_tab().can_go_back());
+}
+
+#[test]
+fn 앱은_자동_완성_후보를_일꾼_스레드에서_읽어_마지막_요청의_것만_넘긴다() {
+    let dir = tree();
+    let mut app = app_at(dir.path());
+    let base = format!("{}{}", dir.path().display(), sep());
+    let first = app.complete_address(&format!("{base}a"));
+    let second = app.complete_address(&format!("{base}b"));
+    assert_ne!(first, second);
+    let mut current = None;
+    let mut stale = 0;
+    while current.is_none() || stale == 0 {
+        match app.wait_update(WAIT).expect("자동 완성 결과") {
+            (_, Update::Completion { id, candidates }) => match candidates {
+                Some(found) => {
+                    assert_eq!(id, second);
+                    current = Some(found);
+                }
+                None => {
+                    assert_eq!(id, first);
+                    stale += 1;
+                }
+            },
+            (_, other) => panic!("자동 완성 결과가 아니다: {other:?}"),
+        }
+    }
+    let names: Vec<_> = current.unwrap().into_iter().map(|c| c.name).collect();
     assert_eq!(names, ["beta"]);
 }
