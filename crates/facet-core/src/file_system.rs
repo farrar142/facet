@@ -1,9 +1,11 @@
 //! 파일 시스템 공급자: 실제 폴더를 파일 시스템 API로 직접 읽는다(ADR-0004).
 
 use std::fs::{self, DirEntry, Metadata};
+use std::io;
 use std::path::{Component, Path, PathBuf, Prefix};
 
-use crate::provider::{PathSegment, Provider};
+use crate::provider::{Candidate, PathSegment, Provider, ResolveError, Resolved};
+use crate::selection::starts_with_folded;
 use crate::{Attributes, Item, ListError, Location};
 
 /// 로컬, 네트워크, 동기화 폴더 같은 실제 경로를 읽는 공급자.
@@ -83,6 +85,126 @@ impl Provider for FileSystemProvider {
         }
         segments
     }
+
+    /// 주소창 글자를 해석한다.
+    ///
+    /// 앞뒤 공백과 감싼 큰따옴표를 걷고 `%NAME%`을 환경 변수 값으로 펼친다. 끝 구분자는 있어도 없어도
+    /// 같다. 전체 경로여야 한다. 폴더면 그 폴더로, 파일이면 파일을 열지 않고 그 폴더로 가서 파일을 고르게 한다.
+    fn resolve(&self, text: &str) -> Result<Resolved, ResolveError> {
+        let path = parse_address(text)?;
+        let location = Location::file_system(&path);
+        let metadata = fs::metadata(&path).map_err(|source| match source.kind() {
+            io::ErrorKind::NotFound => ResolveError::NotFound {
+                location: location.clone(),
+            },
+            io::ErrorKind::PermissionDenied => ResolveError::PermissionDenied {
+                location: location.clone(),
+            },
+            _ => ResolveError::Io {
+                location: location.clone(),
+                source,
+            },
+        })?;
+        if !metadata.is_dir()
+            && let (Some(parent), Some(name)) = (path.parent(), path.file_name())
+        {
+            return Ok(Resolved {
+                location: Location::file_system(parent),
+                select: Some(name.to_os_string()),
+            });
+        }
+        Ok(Resolved {
+            location,
+            select: None,
+        })
+    }
+
+    /// 마지막 구분자 앞까지를 폴더로 보고, 그 하위 폴더 중 뒤쪽 글자로 시작하는 이름을 이름순으로 낸다.
+    /// 대소문자를 가리지 않는다. 폴더를 읽을 수 없거나 글자를 해석할 수 없으면 후보가 없다.
+    fn complete(&self, text: &str) -> Vec<Candidate> {
+        let text = text.trim_start();
+        let Some(split) = text.rfind(['\\', '/']) else {
+            return Vec::new();
+        };
+        let (dir_text, typed) = text.split_at(split + 1);
+        let Ok(dir) = parse_address(dir_text) else {
+            return Vec::new();
+        };
+        let prefix: Vec<char> = typed.chars().flat_map(char::to_lowercase).collect();
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut found: Vec<Candidate> = entries
+            .filter_map(Result::ok)
+            .filter(|entry| starts_with_folded(&entry.file_name(), &prefix))
+            .filter(|entry| match entry.file_type() {
+                Ok(kind) if kind.is_symlink() => {
+                    fs::metadata(entry.path()).is_ok_and(|m| m.is_dir())
+                }
+                Ok(kind) => kind.is_dir(),
+                Err(_) => false,
+            })
+            .map(|entry| Candidate {
+                name: entry.file_name(),
+                location: Location::file_system(entry.path()),
+            })
+            .collect();
+        found.sort_by_cached_key(|c| c.name.to_string_lossy().to_lowercase());
+        found
+    }
+}
+
+/// 주소창 글자를 경로로 바꾼다: 다듬고, 환경 변수를 펼치고, 글자를 검사하고, 끝 구분자를 없앤다.
+fn parse_address(text: &str) -> Result<PathBuf, ResolveError> {
+    let text = text.trim();
+    let text = text
+        .strip_prefix('"')
+        .and_then(|t| t.strip_suffix('"'))
+        .unwrap_or(text)
+        .trim();
+    if text.is_empty() {
+        return Err(ResolveError::Empty);
+    }
+    let expanded = expand_variables(text)?;
+    // 긴 경로 접두어(`\\?\`)의 물음표는 글자로 치지 않는다.
+    let body = expanded.strip_prefix(r"\\?\").unwrap_or(&expanded);
+    if let Some(character) = body
+        .chars()
+        .find(|c| matches!(c, '<' | '>' | '"' | '|' | '?' | '*') || c.is_control())
+    {
+        return Err(ResolveError::InvalidCharacter { character });
+    }
+    // 구성 요소로 다시 이어 끝 구분자와 겹친 구분자를 정리한다.
+    let normalized: PathBuf = Path::new(&expanded).components().collect();
+    if !normalized.is_absolute() {
+        return Err(ResolveError::NotAbsolute { text: expanded });
+    }
+    Ok(normalized)
+}
+
+/// `%NAME%`을 환경 변수 값으로 바꾼다. 짝이 없는 `%`는 그대로 둔다.
+fn expand_variables(text: &str) -> Result<String, ResolveError> {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('%') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('%') else {
+            break;
+        };
+        let name = &after[..end];
+        out.push_str(&rest[..start]);
+        if name.is_empty() {
+            out.push('%');
+        } else {
+            let value = std::env::var_os(name).ok_or_else(|| ResolveError::UndefinedVariable {
+                name: name.to_string(),
+            })?;
+            out.push_str(&value.to_string_lossy());
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
 }
 
 fn path_of(location: &Location) -> &Path {

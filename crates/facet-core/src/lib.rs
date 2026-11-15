@@ -16,7 +16,7 @@ pub mod window;
 
 pub use file_system::FileSystemProvider;
 pub use location::{Attributes, Item, ListError, Location};
-pub use provider::{PathSegment, Provider, provider_for};
+pub use provider::{Candidate, PathSegment, Provider, ResolveError, Resolved, provider_for};
 
 /// 코어 크레이트의 버전.
 pub fn version() -> &'static str {

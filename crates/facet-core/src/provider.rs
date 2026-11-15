@@ -23,6 +23,84 @@ pub trait Provider: Send + Sync {
 
     /// 주소창에 보일 경로 조각. 맨 위 조각부터 `location` 자신까지 차례로 담는다.
     fn segments(&self, location: &Location) -> Vec<PathSegment>;
+
+    /// 주소창에 친 글자를 위치로 해석한다. 파일 시스템에 한 번 묻지만 파일을 열지는 않는다.
+    ///
+    /// 실패하면 까닭이 담긴 오류다.
+    fn resolve(&self, text: &str) -> Result<Resolved, ResolveError>;
+
+    /// 고쳐 쓰는 글자의 자동 완성 후보. 하위 폴더만, 이름순으로 낸다. 폴더를 읽느라 막히므로
+    /// [`crate::tab::CompletionRequest`]로 UI 스레드 밖에서 부른다.
+    fn complete(&self, text: &str) -> Vec<Candidate>;
+}
+
+/// 주소창 글자를 해석한 결과.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolved {
+    /// 갈 위치. 파일 경로를 쳤으면 그 파일이 든 폴더다.
+    pub location: Location,
+    /// 파일 경로를 쳤으면 도착해서 선택할 파일의 이름.
+    pub select: Option<std::ffi::OsString>,
+}
+
+/// 자동 완성 후보 하나: 하위 폴더.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    /// 폴더 이름.
+    pub name: std::ffi::OsString,
+    /// 그 폴더의 위치.
+    pub location: Location,
+}
+
+/// 주소창 글자를 해석하지 못한 까닭.
+#[derive(Debug)]
+pub enum ResolveError {
+    /// 글자가 비었다.
+    Empty,
+    /// 경로에 쓸 수 없는 글자가 있다.
+    InvalidCharacter { character: char },
+    /// 환경 변수가 정의돼 있지 않다.
+    UndefinedVariable { name: String },
+    /// 전체 경로가 아니다.
+    NotAbsolute { text: String },
+    /// 경로가 없다.
+    NotFound { location: Location },
+    /// 경로를 확인할 권한이 없다.
+    PermissionDenied { location: Location },
+    /// 그 밖의 입출력 오류.
+    Io {
+        location: Location,
+        source: std::io::Error,
+    },
+}
+
+impl std::fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => write!(f, "주소가 비었습니다"),
+            Self::InvalidCharacter { character } => {
+                write!(f, "주소에 쓸 수 없는 글자가 있습니다: {character:?}")
+            }
+            Self::UndefinedVariable { name } => write!(f, "환경 변수가 없습니다: %{name}%"),
+            Self::NotAbsolute { text } => write!(f, "전체 경로가 아닙니다: {text}"),
+            Self::NotFound { location } => write!(f, "위치가 없습니다: {location}"),
+            Self::PermissionDenied { location } => {
+                write!(f, "위치를 확인할 권한이 없습니다: {location}")
+            }
+            Self::Io { location, source } => {
+                write!(f, "위치를 확인하지 못했습니다: {location}: {source}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ResolveError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            _ => None,
+        }
+    }
 }
 
 /// 주소창의 경로 조각 하나. 누르면 [`PathSegment::location`]으로 간다.
