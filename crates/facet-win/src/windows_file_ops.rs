@@ -56,7 +56,7 @@ const FOLDER_ATTRIBUTES: u32 = FILE_ATTRIBUTE_READONLY
 ///
 /// 확장 길이 경로는 Windows가 정리하지 않으므로 먼저 절대 경로로 정리한다(`.`·`..`·`/`). 이미 `\\?\`·`\\.\`로
 /// 시작하면 그대로 둔다.
-fn extended(path: &Path) -> FileOpResult<Vec<u16>> {
+pub(crate) fn extended(path: &Path) -> FileOpResult<Vec<u16>> {
     let absolute = std::path::absolute(path).map_err(from_io)?;
     let wide: Vec<u16> = absolute.as_os_str().encode_wide().collect();
     let starts = |prefix: &str| {
@@ -77,14 +77,14 @@ fn extended(path: &Path) -> FileOpResult<Vec<u16>> {
     Ok(out)
 }
 
-fn from_io(error: io::Error) -> FileOpError {
+pub(crate) fn from_io(error: io::Error) -> FileOpError {
     match error.raw_os_error() {
         Some(code) => FileOpError::from_win32(code as u32),
         None => FileOpError::new(FileOpErrorKind::Other, None),
     }
 }
 
-fn from_windows(error: &windows::core::Error) -> FileOpError {
+pub(crate) fn from_windows(error: &windows::core::Error) -> FileOpError {
     let hresult = error.code().0;
     match win32_from_hresult(hresult) {
         Some(code) => FileOpError::from_win32(code),
