@@ -65,7 +65,7 @@ mod with_server {
 
     use facet_indexer::pipe::PipeServer;
     use facet_indexer::sample::{SAMPLE_VOLUME, sample_index};
-    use facet_indexer::session::MemoryBackend;
+    use facet_indexer::volumes::Volumes;
 
     use super::*;
 
@@ -78,7 +78,7 @@ mod with_server {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         );
-        let backend = Arc::new(MemoryBackend::new(SAMPLE_VOLUME, sample_index(REPORTS)));
+        let backend = Arc::new(Volumes::with_index(SAMPLE_VOLUME, sample_index(REPORTS)));
         (PipeServer::start(&name, backend).unwrap(), name)
     }
 

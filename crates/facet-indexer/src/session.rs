@@ -13,12 +13,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
 
-use facet_index::{Cursor, Index, Page};
 use facet_protocol::{
-    ErrorKind, ErrorMessage, PageMessage, QueryMessage, ReadError, Request, Response,
-    StatusMessage, VolumeState, VolumeStatus, WriteError, answer_hello, read_message,
-    write_message,
+    ErrorKind, ErrorMessage, HitMessage, PageMessage, QueryMessage, ReadError, Request, Response,
+    StatusMessage, WriteError, answer_hello, read_message, write_message,
 };
+
+pub use crate::volumes::{Cursor, Page};
 
 /// 질의 하나의 취소 표시. 같은 연결에 새 질의가 오거나 연결이 끊기면 선다.
 #[derive(Debug, Clone, Default)]
@@ -41,7 +41,8 @@ impl Cancel {
     }
 }
 
-/// 파이프 서버가 질의에 답하는 데 쓰는 인덱스 쪽. 여러 연결이 함께 부른다.
+/// 파이프 서버가 질의에 답하는 데 쓰는 인덱스 쪽. 여러 연결이 함께 부른다. 인덱서 서비스는
+/// 볼륨 여럿의 인덱스([`crate::volumes::Volumes`])로 답한다.
 pub trait Backend: Send + Sync {
     /// 질의를 실행한다. 오래 걸리면 `cancel`을 보고 일찍 그만둬도 된다(그만둔 결과는 버린다).
     fn search(&self, query: &QueryMessage, cancel: &Cancel) -> Result<Page, ErrorMessage>;
@@ -49,43 +50,6 @@ pub trait Backend: Send + Sync {
     fn resume(&self, cursor: Cursor, limit: usize) -> Result<Page, ErrorMessage>;
     /// 상태 질의에 답한다.
     fn status(&self) -> StatusMessage;
-}
-
-/// 메모리에 든 볼륨 인덱스 하나로 답하는 [`Backend`]. 인덱스는 바뀌지 않는다.
-pub struct MemoryBackend {
-    volume: String,
-    index: Index,
-}
-
-impl MemoryBackend {
-    /// `volume`(예: `C:`)의 인덱스로 답한다.
-    pub fn new(volume: &str, index: Index) -> Self {
-        Self {
-            volume: volume.to_owned(),
-            index,
-        }
-    }
-}
-
-impl Backend for MemoryBackend {
-    fn search(&self, query: &QueryMessage, _cancel: &Cancel) -> Result<Page, ErrorMessage> {
-        Ok(self.index.search(&query.to_query()?))
-    }
-
-    fn resume(&self, cursor: Cursor, limit: usize) -> Result<Page, ErrorMessage> {
-        Ok(self.index.resume(cursor, limit)?)
-    }
-
-    fn status(&self) -> StatusMessage {
-        StatusMessage {
-            volumes: vec![VolumeStatus {
-                volume: self.volume.clone(),
-                state: VolumeState::Ready {
-                    items: self.index.len() as u64,
-                },
-            }],
-        }
-    }
 }
 
 /// 연결이 끝난 까닭.
@@ -192,12 +156,17 @@ fn answer<W: Write, B: Backend + ?Sized>(inbox: mpsc::Receiver<Job>, mut writer:
     let mut cursors: HashMap<u64, Cursor> = HashMap::new();
     let mut next_cursor = 1u64;
     let mut keep = |cursors: &mut HashMap<u64, Cursor>, page: Page| {
-        Response::Page(PageMessage::from_page(page, |c| {
-            let id = next_cursor;
-            next_cursor += 1;
-            cursors.insert(id, c);
-            id
-        }))
+        Response::Page(PageMessage {
+            hits: page.hits.into_iter().map(HitMessage::from).collect(),
+            total: page.total as u64,
+            next: page.next.map(|c| {
+                let id = next_cursor;
+                next_cursor += 1;
+                cursors.insert(id, c);
+                id
+            }),
+            building: page.building,
+        })
     };
 
     for job in inbox {

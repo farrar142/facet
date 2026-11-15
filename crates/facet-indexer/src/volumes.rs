@@ -1,0 +1,358 @@
+//! 볼륨 여럿의 인덱스를 들고 질의에 답하는 [`Backend`]. 플랫폼과 상관없는 코드다.
+//!
+//! 볼륨마다 상태가 하나 있다.
+//!
+//! - **만드는 중**: 인덱스를 (다시) 만들고 있다. 앞선 인덱스가 있으면 그것으로 답하고, 응답의
+//!   `building`에 그 볼륨을 적는다.
+//! - **준비됨**: 인덱스가 있다.
+//! - **인덱스 없음**: NTFS가 아니거나, 네트워크 볼륨이거나, 만들지 못했다. 까닭을 담는다.
+//!
+//! 질의는 인덱스가 있는 볼륨마다 실행해 결과를 합친다. 정렬을 주었으면 볼륨마다 정렬된 결과를
+//! 정렬 순서대로 섞고, 경로 정렬과 정렬 없음은 볼륨 이름 순서(`C:`, `D:`, ...)로 잇는다. 결과
+//! 수 제한은 합친 결과에 건다.
+
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::{Arc, RwLock};
+
+use facet_index::{self as index, Hit, Index, Order, SortKey};
+use facet_protocol::{
+    ErrorKind, ErrorMessage, NoIndexReason, QueryMessage, StatusMessage, VolumeState, VolumeStatus,
+};
+
+use crate::session::{Backend, Cancel};
+
+/// [`GetDriveTypeW`](https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-getdrivetypew)의
+/// 값 가운데 여기서 가르는 것.
+pub mod drive_type {
+    /// 종류를 알 수 없다.
+    pub const UNKNOWN: u32 = 0;
+    /// 루트 경로가 없다(드라이브 문자에 볼륨이 붙어 있지 않다).
+    pub const NO_ROOT_DIR: u32 = 1;
+    /// 네트워크 드라이브.
+    pub const REMOTE: u32 = 4;
+}
+
+/// 볼륨 하나를 어떻게 다룰지.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Plan {
+    /// 로컬 NTFS 볼륨: MFT를 읽어 인덱스를 만든다.
+    Index,
+    /// 인덱스를 만들지 않는다. 상태 질의에 이 까닭으로 보인다.
+    NotIndexed(NoIndexReason),
+}
+
+/// 드라이브 문자 하나의 종류(`GetDriveTypeW`)와 파일 시스템 이름(`GetVolumeInformationW`, 읽지
+/// 못했으면 `None`)으로 다룰 방법을 정한다. 목록에 넣지 않을 것(볼륨이 붙어 있지 않음, 매체가
+/// 없는 드라이브)은 `None`이다.
+///
+/// 네트워크 드라이브는 파일 시스템과 상관없이 「네트워크 볼륨」이다. 그 밖(고정·이동식·CD·RAM
+/// 디스크)은 로컬 볼륨이고, 파일 시스템이 NTFS면 인덱스를 만들고 아니면 「NTFS가 아님」이다.
+pub fn classify(drive_type: u32, filesystem: Option<&str>) -> Option<Plan> {
+    match drive_type {
+        drive_type::UNKNOWN | drive_type::NO_ROOT_DIR => None,
+        drive_type::REMOTE => Some(Plan::NotIndexed(NoIndexReason::Network)),
+        _ => match filesystem {
+            None => None,
+            Some(fs) if fs.eq_ignore_ascii_case("NTFS") => Some(Plan::Index),
+            Some(fs) => Some(Plan::NotIndexed(NoIndexReason::NotNtfs {
+                filesystem: fs.to_owned(),
+            })),
+        },
+    }
+}
+
+/// 볼륨 하나의 상태.
+#[derive(Debug, Clone)]
+enum Slot {
+    /// 만드는 중. 앞선 인덱스가 있으면 그것으로 답한다.
+    Building(Option<Arc<Index>>),
+    Ready(Arc<Index>),
+    NotIndexed(NoIndexReason),
+}
+
+impl Slot {
+    /// 질의에 쓸 인덱스.
+    fn index(&self) -> Option<&Arc<Index>> {
+        match self {
+            Self::Building(old) => old.as_ref(),
+            Self::Ready(index) => Some(index),
+            Self::NotIndexed(_) => None,
+        }
+    }
+}
+
+/// 볼륨 여럿의 인덱스. 여러 연결과 인덱스를 만드는 스레드가 함께 쓴다.
+#[derive(Debug, Default)]
+pub struct Volumes {
+    /// 볼륨 이름(예: `C:`) → 상태. 이름 순서다.
+    slots: RwLock<BTreeMap<String, Slot>>,
+}
+
+/// 질의나 이어 받기의 응답: 결과 조각, 전체 개수, 이어 받기 표지, 만드는 중인 볼륨.
+#[derive(Debug)]
+pub struct Page {
+    pub hits: Vec<Hit>,
+    /// 모든 볼륨에서 질의에 맞는 결과 전체의 개수. 이어 받아도 처음 질의의 값이다.
+    pub total: usize,
+    /// 남은 결과가 있으면 그것을 받을 표지.
+    pub next: Option<Cursor>,
+    /// 인덱스를 만드는 중이어서 앞선 인덱스로(또는 결과 없이) 답한 볼륨들.
+    pub building: Vec<String>,
+}
+
+/// 이어 받기 표지. 볼륨마다 아직 내보내지 않은 결과를 들고 있다.
+///
+/// 표지를 만든 뒤 어느 볼륨의 인덱스가 바뀌면(다시 만들어 바꿔 끼우면) 표지는 무효다.
+#[derive(Debug)]
+pub struct Cursor {
+    sort: Option<(SortKey, Order)>,
+    total: usize,
+    /// 볼륨 이름 순서.
+    parts: Vec<Part>,
+}
+
+/// 이어 받기 표지에서 볼륨 하나의 몫.
+#[derive(Debug)]
+struct Part {
+    volume: String,
+    index: Arc<Index>,
+    /// 꺼내 두었지만 아직 내보내지 않은 결과(그 볼륨 안에서는 정렬 순서).
+    buffered: VecDeque<Hit>,
+    /// 그 볼륨의 남은 결과.
+    next: Option<index::Cursor>,
+}
+
+impl Part {
+    /// 꺼내 둔 결과가 `limit`개가 되거나 남은 결과가 없을 때까지 채운다.
+    fn fill(&mut self, limit: usize) -> Result<(), ErrorMessage> {
+        while self.buffered.len() < limit {
+            let Some(cursor) = self.next.take() else {
+                break;
+            };
+            let page = self.index.resume(cursor, limit - self.buffered.len())?;
+            self.buffered.extend(page.hits);
+            self.next = page.next;
+        }
+        Ok(())
+    }
+
+    fn is_done(&self) -> bool {
+        self.buffered.is_empty() && self.next.is_none()
+    }
+}
+
+/// 인덱스의 이름 정렬과 같은 비교: 대소문자를 접은 이름, 같으면 원래 이름.
+fn compare_names(a: &str, b: &str) -> Ordering {
+    let folded = |s: &str| s.chars().flat_map(char::to_lowercase).collect::<Vec<_>>();
+    folded(a).cmp(&folded(b)).then_with(|| a.cmp(b))
+}
+
+fn compare(key: SortKey, a: &Hit, b: &Hit) -> Ordering {
+    match key {
+        SortKey::Size => a.size.cmp(&b.size),
+        SortKey::Modified => a.modified.cmp(&b.modified),
+        SortKey::Name | SortKey::Path => compare_names(&a.name, &b.name),
+    }
+}
+
+impl Cursor {
+    /// 볼륨들에서 다음 결과를 많아야 `limit`개 꺼낸다.
+    fn take(&mut self, limit: usize) -> Result<Vec<Hit>, ErrorMessage> {
+        for part in &mut self.parts {
+            part.fill(limit)?;
+        }
+        let mut hits = Vec::new();
+        while hits.len() < limit {
+            let mut fronts = self
+                .parts
+                .iter()
+                .enumerate()
+                .filter_map(|(i, p)| p.buffered.front().map(|h| (i, h)));
+            let pick = match self.sort {
+                // 볼륨 하나를 다 낸 뒤 다음 볼륨. 경로 내림차순은 뒤 볼륨부터.
+                None | Some((SortKey::Path, Order::Ascending)) => fronts.next(),
+                Some((SortKey::Path, Order::Descending)) => fronts.next_back(),
+                Some((key, order)) => fronts.reduce(|best, cand| {
+                    let ord = compare(key, cand.1, best.1);
+                    let ord = if order == Order::Descending {
+                        ord.reverse()
+                    } else {
+                        ord
+                    };
+                    // 같으면 앞 볼륨이 먼저다.
+                    if ord == Ordering::Less { cand } else { best }
+                }),
+            };
+            let Some((i, _)) = pick else { break };
+            let hit = self.parts[i]
+                .buffered
+                .pop_front()
+                .expect("고른 볼륨에 결과가 있다");
+            hits.push(hit);
+            // 꺼내 둔 것을 다 쓴 볼륨은 남은 결과에서 더 채운다. 그래야 다른 볼륨과 비교할 앞
+            // 결과가 늘 있다.
+            let part = &mut self.parts[i];
+            if part.buffered.is_empty() {
+                part.fill(limit - hits.len())?;
+            }
+        }
+        self.parts.retain(|p| !p.is_done());
+        Ok(hits)
+    }
+}
+
+impl Volumes {
+    /// 볼륨이 하나도 없는 빈 목록.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 인덱스가 준비된 볼륨 하나(`volume`, 예: `C:`)로 된 목록.
+    pub fn with_index(volume: &str, index: Index) -> Self {
+        let volumes = Self::new();
+        volumes.set_ready(volume, index);
+        volumes
+    }
+
+    fn slots_mut(&self) -> std::sync::RwLockWriteGuard<'_, BTreeMap<String, Slot>> {
+        // 잠근 채 패닉한 스레드가 있어도 상태 자체는 늘 온전하다(값을 통째로 바꾸기만 한다).
+        self.slots.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn slots(&self) -> std::sync::RwLockReadGuard<'_, BTreeMap<String, Slot>> {
+        self.slots.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// `volume`의 인덱스를 (다시) 만들기 시작한다. 앞선 인덱스가 있으면 다 만들 때까지 그것으로
+    /// 답한다.
+    pub fn set_building(&self, volume: &str) {
+        let mut slots = self.slots_mut();
+        let old = slots.get(volume).and_then(Slot::index).cloned();
+        slots.insert(volume.to_owned(), Slot::Building(old));
+    }
+
+    /// `volume`의 인덱스를 다 만들었다. 앞선 인덱스를 바꿔 끼운다(그 인덱스의 이어 받기 표지는
+    /// 무효가 된다).
+    pub fn set_ready(&self, volume: &str, index: Index) {
+        self.slots_mut()
+            .insert(volume.to_owned(), Slot::Ready(Arc::new(index)));
+    }
+
+    /// `volume`에는 인덱스가 없다. 앞선 인덱스가 있었으면 버린다.
+    pub fn set_not_indexed(&self, volume: &str, reason: NoIndexReason) {
+        self.slots_mut()
+            .insert(volume.to_owned(), Slot::NotIndexed(reason));
+    }
+
+    fn building(slots: &BTreeMap<String, Slot>) -> Vec<String> {
+        slots
+            .iter()
+            .filter(|(_, s)| matches!(s, Slot::Building(_)))
+            .map(|(v, _)| v.clone())
+            .collect()
+    }
+
+    /// 볼륨들의 상태.
+    pub fn status(&self) -> StatusMessage {
+        let volumes = self
+            .slots()
+            .iter()
+            .map(|(volume, slot)| VolumeStatus {
+                volume: volume.clone(),
+                state: match slot {
+                    Slot::Building(old) => VolumeState::Building {
+                        items: old.as_ref().map(|i| i.len() as u64),
+                    },
+                    Slot::Ready(index) => VolumeState::Ready {
+                        items: index.len() as u64,
+                    },
+                    Slot::NotIndexed(reason) => VolumeState::NotIndexed(reason.clone()),
+                },
+            })
+            .collect();
+        StatusMessage { volumes }
+    }
+
+    /// 질의를 인덱스가 있는 모든 볼륨에 실행한다.
+    pub fn search(&self, query: &QueryMessage, cancel: &Cancel) -> Result<Page, ErrorMessage> {
+        let q = query.to_query()?;
+        let limit = query.limit.map_or(usize::MAX, |n| n as usize);
+        let (snapshot, building) = {
+            let slots = self.slots();
+            let snapshot: Vec<(String, Arc<Index>)> = slots
+                .iter()
+                .filter_map(|(v, s)| s.index().map(|i| (v.clone(), Arc::clone(i))))
+                .collect();
+            (snapshot, Self::building(&slots))
+        };
+        let mut parts = Vec::with_capacity(snapshot.len());
+        let mut total = 0;
+        for (volume, index) in snapshot {
+            if cancel.is_cancelled() {
+                return Err(ErrorMessage {
+                    kind: ErrorKind::Cancelled,
+                    message: "질의가 취소됐습니다".to_owned(),
+                });
+            }
+            let page = index.search(&q);
+            total += page.total;
+            parts.push(Part {
+                volume,
+                index,
+                buffered: page.hits.into(),
+                next: page.next,
+            });
+        }
+        let mut cursor = Cursor {
+            sort: query.sort.map(|(k, o)| (k.into(), o.into())),
+            total,
+            parts,
+        };
+        let hits = cursor.take(limit)?;
+        Ok(Self::page(cursor, hits, building))
+    }
+
+    /// 이어 받기 표지로 다음 결과를 많아야 `limit`개 받는다. 표지를 만든 뒤 어느 볼륨의 인덱스가
+    /// 바뀌었으면 [`ErrorKind::StaleCursor`]다.
+    pub fn resume(&self, mut cursor: Cursor, limit: usize) -> Result<Page, ErrorMessage> {
+        let building = {
+            let slots = self.slots();
+            let fresh = cursor.parts.iter().all(|p| {
+                slots
+                    .get(&p.volume)
+                    .and_then(Slot::index)
+                    .is_some_and(|i| Arc::ptr_eq(i, &p.index))
+            });
+            if !fresh {
+                return Err(index::ResumeError::Stale.into());
+            }
+            Self::building(&slots)
+        };
+        let hits = cursor.take(limit)?;
+        Ok(Self::page(cursor, hits, building))
+    }
+
+    fn page(cursor: Cursor, hits: Vec<Hit>, building: Vec<String>) -> Page {
+        Page {
+            hits,
+            total: cursor.total,
+            next: (!cursor.parts.is_empty()).then_some(cursor),
+            building,
+        }
+    }
+}
+
+impl Backend for Volumes {
+    fn search(&self, query: &QueryMessage, cancel: &Cancel) -> Result<Page, ErrorMessage> {
+        Volumes::search(self, query, cancel)
+    }
+
+    fn resume(&self, cursor: Cursor, limit: usize) -> Result<Page, ErrorMessage> {
+        Volumes::resume(self, cursor, limit)
+    }
+
+    fn status(&self) -> StatusMessage {
+        Volumes::status(self)
+    }
+}

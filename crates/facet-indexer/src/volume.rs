@@ -1,4 +1,4 @@
-//! NTFS 볼륨 핸들(Windows 전용). 이 크레이트의 `unsafe`는 모두 여기 있다.
+//! NTFS 볼륨 핸들과 드라이브 문자 목록(Windows 전용).
 
 use std::ffi::c_void;
 use std::fs::{self, File};
@@ -14,14 +14,19 @@ use windows_sys::Win32::Security::{
     GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, FlushFileBuffers, OPEN_EXISTING, ReadFile,
+    CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, FlushFileBuffers, GetDriveTypeW,
+    GetLogicalDrives, GetVolumeInformationW, OPEN_EXISTING, ReadFile,
 };
 use windows_sys::Win32::System::IO::{DeviceIoControl, OVERLAPPED};
 use windows_sys::Win32::System::Ioctl::{FSCTL_GET_NTFS_VOLUME_DATA, NTFS_VOLUME_DATA_BUFFER};
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
+use facet_index::{Index, MftReport};
+
+use crate::build;
 use crate::cli::DumpArgs;
 use crate::dump::{self, Geometry, ReadAt, Summary};
+use crate::volumes::{self, Plan};
 
 /// 관리자 권한이 없을 때 알리는 말.
 pub const NEED_ADMIN: &str =
@@ -242,4 +247,61 @@ pub fn dump_to_file(args: &DumpArgs) -> Result<Summary, String> {
 
 fn remove_quietly(path: &Path) {
     let _ = fs::remove_file(path);
+}
+
+/// 드라이브 문자가 있는 볼륨들과 그 다룰 방법(드라이브 문자 순서). 볼륨 이름은 `C:` 꼴이다.
+///
+/// 볼륨이 붙어 있지 않거나 매체가 없는 드라이브(빈 카드 리더 등)는 빠진다. 네트워크 드라이브는
+/// 「네트워크 볼륨」, NTFS가 아닌 로컬 볼륨은 「NTFS가 아님」으로 든다([`volumes::classify`]).
+pub fn local_volumes() -> Vec<(String, Plan)> {
+    // SAFETY: 인자 없는 호출이다.
+    let mask = unsafe { GetLogicalDrives() };
+    ('A'..='Z')
+        .enumerate()
+        .filter(|(bit, _)| mask & (1 << bit) != 0)
+        .filter_map(|(_, letter)| {
+            let root = wide(&format!(r"{letter}:\"));
+            // SAFETY: root는 NUL로 끝나는 UTF-16 문자열이다.
+            let kind = unsafe { GetDriveTypeW(root.as_ptr()) };
+            let filesystem = (kind != volumes::drive_type::REMOTE)
+                .then(|| filesystem_name(&root))
+                .flatten();
+            volumes::classify(kind, filesystem.as_deref()).map(|plan| (format!("{letter}:"), plan))
+        })
+        .collect()
+}
+
+/// 볼륨 루트(`C:\`, NUL로 끝나는 UTF-16)의 파일 시스템 이름. 읽지 못하면 `None`.
+fn filesystem_name(root: &[u16]) -> Option<String> {
+    let mut name = [0u16; 64];
+    // SAFETY: root는 NUL로 끝나는 UTF-16 문자열이고, name은 그 길이를 함께 넘기는 버퍼다. 받지
+    // 않는 값은 모두 널이다.
+    let ok = unsafe {
+        GetVolumeInformationW(
+            root.as_ptr(),
+            null_mut(),
+            0,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            name.as_mut_ptr(),
+            name.len() as u32,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+    Some(String::from_utf16_lossy(&name[..len]))
+}
+
+/// 드라이브 `drive`(대문자)의 첫 인덱스를 만든다: 볼륨을 열고, 쓰기 버퍼를 비우고, MFT 전체를 큰
+/// 덩어리로 순서대로 읽는다. 관리자(서비스는 LocalSystem) 권한이 필요하다.
+pub fn build_volume(drive: char) -> Result<(Index, MftReport), String> {
+    let mut volume = Volume::open(drive)?;
+    let geometry = volume.geometry()?;
+    // 방금 바뀐 항목이 디스크의 MFT에 들어가게 한다. 못 해도 인덱스는 만든다(뒤의 변경은 USN
+    // 저널로 따라간다).
+    let _ = volume.flush();
+    build::build_index(&mut volume, &geometry, &format!("{drive}:"))
 }

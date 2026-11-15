@@ -11,13 +11,13 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use facet_index::{Cursor, Page};
 use facet_indexer::pipe::{
     CLIENT_ACCESS, FILE_ALL_ACCESS, FILE_CREATE_PIPE_INSTANCE, INTERACTIVE_SID, NETWORK_SID,
     PipeServer, current_user_sid,
 };
 use facet_indexer::sample::{SAMPLE_VOLUME, sample_index};
-use facet_indexer::session::{Backend, Cancel, MemoryBackend};
+use facet_indexer::session::{Backend, Cancel, Cursor, Page};
+use facet_indexer::volumes::Volumes;
 use facet_protocol::{
     Case, Condition, ErrorKind, ErrorMessage, MAX_FRAME_LEN, MAX_SUPPORTED_VERSION,
     MIN_SUPPORTED_VERSION, Order, PROTOCOL_VERSION, QueryMessage, ReadError, Request, Response,
@@ -40,7 +40,7 @@ fn unique_name() -> String {
 fn sample_server(name: &str) -> PipeServer {
     PipeServer::start(
         name,
-        Arc::new(MemoryBackend::new(SAMPLE_VOLUME, sample_index(REPORTS))),
+        Arc::new(Volumes::with_index(SAMPLE_VOLUME, sample_index(REPORTS))),
     )
     .unwrap()
 }
@@ -205,7 +205,7 @@ fn too_large_frame_disconnects_only_that_connection() {
 
 /// 「느린」을 찾는 질의는 취소될 때까지 붙잡고 있는 인덱스 쪽. 붙잡기 시작하면 알린다.
 struct SlowBackend {
-    inner: MemoryBackend,
+    inner: Volumes,
     entered: Mutex<Sender<()>>,
 }
 
@@ -234,7 +234,7 @@ impl Backend for SlowBackend {
 fn slow_server(name: &str) -> (PipeServer, Receiver<()>) {
     let (tx, rx) = mpsc::channel();
     let backend = SlowBackend {
-        inner: MemoryBackend::new(SAMPLE_VOLUME, sample_index(REPORTS)),
+        inner: Volumes::with_index(SAMPLE_VOLUME, sample_index(REPORTS)),
         entered: Mutex::new(tx),
     };
     (PipeServer::start(name, Arc::new(backend)).unwrap(), rx)
@@ -343,7 +343,7 @@ fn second_server_with_the_same_name_is_refused() {
     let _first = sample_server(&name);
     let second = PipeServer::start(
         &name,
-        Arc::new(MemoryBackend::new(SAMPLE_VOLUME, sample_index(1))),
+        Arc::new(Volumes::with_index(SAMPLE_VOLUME, sample_index(1))),
     );
     let err = second.err().expect("같은 이름의 둘째 서버가 시작됨");
     assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);

@@ -9,6 +9,7 @@
 //! - `measure [인자]`: 앱과 측정 도구를 릴리스 빌드해 화면 수치(콜드 스타트·스크롤 프레임)를 잰다.
 //! - `mft-fixture`: 시험 VHD에서 MFT 조각과 기대값 목록을 만든다(`mft_fixture` 모듈, 관리자).
 //! - `dist <label>`: release 빌드한 facet을 portable zip과 체크섬으로 묶는다(`dist` 모듈).
+//! - `indexer <install|uninstall>`: 인덱서 서비스를 release로 빌드해 개발 기계에 설치하거나 지운다(관리자).
 //!
 //! 벤치마크 상한과 그 근거는 `crates/facet-bench/src/lib.rs`의 `LIST_LIMIT`·`QUERY_LIMIT`·
 //! `INDEX_MEMORY_LIMIT`·`MFT_PARSE_LIMIT`에 있다.
@@ -41,7 +42,11 @@ const USAGE: &str = "\
                                  testdata/mft/에 조각과 기대값 목록을 쓴다
   dist <label>                   facet을 릴리스 빌드해 target/dist/에 facet-<label>-windows-x64.zip과
                                  그 .sha256을 만든다. label은 nightly나 태그 이름(예: v0.1.0)이고
-                                 영문자·숫자·`.`·`-`·`_`만 쓸 수 있다";
+                                 영문자·숫자·`.`·`-`·`_`만 쓸 수 있다
+  indexer <install|uninstall>    (관리자) install: facet-indexer를 릴리스 빌드하고 target/release의 실행 파일을
+                                 인덱서 서비스(LocalSystem, 자동 시작)로 등록해 시작한다.
+                                 uninstall: 서비스를 멈추고 지운다. 서비스가 도는 동안에는 실행 파일이 잠겨
+                                 다시 빌드하지 못하므로, 코드를 고친 뒤에는 uninstall 다음 install을 한다";
 
 /// 벤치마크 폴더의 항목 수.
 const BENCH_COUNT: &str = "100000";
@@ -68,6 +73,13 @@ fn main() -> ExitCode {
         },
         Some("dist") => match dist_label(&args[1..]) {
             Ok(label) => run_dist(label),
+            Err(e) => {
+                eprintln!("{e}\n\n{USAGE}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("indexer") => match indexer_action(&args[1..]) {
+            Ok(action) => run_indexer(action),
             Err(e) => {
                 eprintln!("{e}\n\n{USAGE}");
                 ExitCode::FAILURE
@@ -304,10 +316,7 @@ fn run_dist(label: &str) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let target_dir = env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .map(|p| if p.is_relative() { root.join(p) } else { p })
-        .unwrap_or_else(|| root.join("target"));
+    let target_dir = target_dir();
     let entries = [
         dist::Entry {
             name: "facet.exe",
@@ -331,6 +340,58 @@ fn run_dist(label: &str) -> ExitCode {
         }
         Err(e) => {
             eprintln!("xtask dist: 묶기 실패: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// 빌드 산출물 폴더(`CARGO_TARGET_DIR`, 없으면 `target/`).
+fn target_dir() -> PathBuf {
+    let root = workspace_root();
+    env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .map(|p| if p.is_relative() { root.join(p) } else { p })
+        .unwrap_or_else(|| root.join("target"))
+}
+
+/// `indexer`의 인자: `install` 또는 `uninstall` 하나.
+fn indexer_action(rest: &[String]) -> Result<&str, String> {
+    match rest {
+        [a] if a == "install" || a == "uninstall" => Ok(a.as_str()),
+        [other] => Err(format!(
+            "indexer 뒤에는 install이나 uninstall이 옵니다: {other}"
+        )),
+        [] => Err("indexer 뒤에 install이나 uninstall이 필요합니다".to_owned()),
+        [_, extra, ..] => Err(format!("알 수 없는 인자: {extra}")),
+    }
+}
+
+/// `indexer install`: facet-indexer를 release로 빌드하고 그 실행 파일의 `install`을 부른다.
+/// `indexer uninstall`: release 실행 파일의 `uninstall`을 부른다(실행 파일이 없을 때만 빌드한다.
+/// 서비스가 도는 동안에는 실행 파일이 잠겨 다시 빌드하지 못한다).
+fn run_indexer(action: &str) -> ExitCode {
+    let exe = target_dir()
+        .join("release")
+        .join(format!("facet-indexer{}", env::consts::EXE_SUFFIX));
+    if action == "install" || !exe.exists() {
+        let build = step(
+            "release 빌드",
+            &["build", "--release", "--locked", "-p", "facet-indexer"],
+        );
+        if run_steps("indexer", &[build]) != ExitCode::SUCCESS {
+            eprintln!(
+                "xtask indexer: 서비스가 이미 설치돼 돌고 있으면 실행 파일이 잠겨 빌드하지 못합니다. \
+                 cargo xtask indexer uninstall을 먼저 하십시오"
+            );
+            return ExitCode::FAILURE;
+        }
+    }
+    println!("\n=== xtask indexer: {} {action} ===", exe.display());
+    match Command::new(&exe).arg(action).status() {
+        Ok(s) if s.success() => ExitCode::SUCCESS,
+        Ok(_) => ExitCode::FAILURE,
+        Err(e) => {
+            eprintln!("xtask indexer: {}를 실행하지 못함: {e}", exe.display());
             ExitCode::FAILURE
         }
     }
@@ -468,7 +529,7 @@ fn measure_args(rest: &[String], root: &std::path::Path) -> Result<Vec<String>, 
 
 #[cfg(test)]
 mod tests {
-    use super::dist_label;
+    use super::{dist_label, indexer_action};
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| (*s).to_owned()).collect()
@@ -482,5 +543,14 @@ mod tests {
         assert!(dist_label(&args(&["a/b"])).is_err());
         assert!(dist_label(&args(&["a b"])).is_err());
         assert!(dist_label(&args(&["nightly", "extra"])).is_err());
+    }
+
+    #[test]
+    fn indexer_takes_install_or_uninstall() {
+        assert_eq!(indexer_action(&args(&["install"])), Ok("install"));
+        assert_eq!(indexer_action(&args(&["uninstall"])), Ok("uninstall"));
+        assert!(indexer_action(&args(&[])).is_err());
+        assert!(indexer_action(&args(&["start"])).is_err());
+        assert!(indexer_action(&args(&["install", "x"])).is_err());
     }
 }
