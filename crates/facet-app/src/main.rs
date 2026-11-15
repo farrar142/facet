@@ -7,7 +7,9 @@
 //!   이벤트 루프에서 [`App::poll`]로 받아 다시 그린다.
 //! - 행 문자열은 화면에 보이는 행만 그때그때 만든다([`TabRows`]).
 //! - 실행 인자로 받은 폴더(없으면 사용자 홈 폴더)를 연다.
-//! - 패널 위에 탭 줄을 그린다. 탭 연산(열기·닫기·오가기)은 코어가 하고, 앱은 탭을 누름·휠 클릭을 넘긴다.
+//! - 패널 위에 탭 줄을 그린다. 탭 연산(열기·닫기·오가기·옮기기)은 코어가 하고, 앱은 탭을 누름·휠 클릭·끌기를
+//!   넘긴다. 탭을 끌면(끌기 시작 문턱과 놓일 자리는 [`tab_drag`]) 같은 패널 안 순서를 바꾸거나 반대편 패널로 옮긴다
+//!   ([`App::move_tab`]).
 //! - 창이 나뉘었으면 두 패널을 나란히 그린다. 패널마다 탭 줄·주소창·자세히 보기·상태 표시줄을 갖고, 패널을 누르면
 //!   활성 패널이 바뀐다. 키 입력과 명령은 활성 패널의 활성 탭으로 간다. 패널 나누기·합치기·분할 비율은 코어가 한다.
 //! - 코어의 창마다 Slint 창을 하나씩 그린다(한 프로세스, 한 이벤트 루프). 창에서 일어난 입력은 먼저 그 창을 코어의
@@ -30,7 +32,9 @@ use facet_core::file_list;
 use facet_core::name_input::NameInput;
 use facet_core::selection::{CursorMove, Pick};
 use facet_core::tab::{AutoRefresh, Navigation, ReadOutcome, Relocation, Tab};
-use facet_core::window::{App, Execution, MAX_PANELS, Panel, TabId, Update, WindowId};
+use facet_core::window::{
+    App, Execution, MAX_PANELS, Panel, TabDestination, TabId, Update, WindowId,
+};
 use facet_core::{ListError, Location, OpenError, ResolveError, provider_for};
 use slint::winit_030::winit::event::WindowEvent;
 use slint::winit_030::{EventResult, WinitWindowAccessor};
@@ -41,12 +45,14 @@ use slint::{
 
 use crate::address::AddressEdit;
 use crate::palette::Palette;
+use crate::tab_drag::{Point, Strip, TabDrag};
 
 mod address;
 mod ime;
 mod keys;
 mod measure;
 mod palette;
+mod tab_drag;
 mod text;
 
 slint::include_modules!();
@@ -259,6 +265,16 @@ fn connect(ui: &AppWindow, w: WindowId) {
     ui.on_row_opened(move |row| with_view(w, |view| view.row_opened(row)));
     ui.on_row_middle_pressed(move |row| with_view(w, |view| view.row_middle_pressed(row)));
     ui.on_tab_pressed(move |index| with_view(w, |view| view.tab_pressed(index)));
+    ui.on_tab_drag_start(move |panel, index, x, y| {
+        with_view(w, |view| view.tab_drag_start(panel, index, Point { x, y }));
+    });
+    ui.on_tab_drag_move(move |x, y| with_view(w, |view| view.tab_drag_move(Point { x, y })));
+    ui.on_tab_drag_end(move |x, y| {
+        let mut clicked = false;
+        with_view(w, |view| clicked = view.tab_drag_end(Point { x, y }));
+        clicked
+    });
+    ui.on_tab_drag_cancel(move || with_view(w, View::tab_drag_cancel));
     ui.on_sort_by(move |column| {
         let column = match column {
             1 => Column::Modified,
@@ -327,6 +343,8 @@ struct View {
     palette_rows: Rc<VecModel<PaletteRow>>,
     /// 「읽는 중」을 드러낼 때 다시 그리는 타이머.
     reading_timer: Timer,
+    /// 누른 탭의 끌기 상태. 탭을 누르면 생기고 놓거나 끊기면 없어진다.
+    tab_drag: RefCell<Option<TabDrag>>,
 }
 
 /// 패널 하나의 화면 모델: 보이는 탭의 행, 탭 줄, 주소창 경로 조각. 탭 줄과 경로 조각은 바뀔 때만 고쳐 화면 요소를
@@ -371,6 +389,7 @@ impl View {
             palette: RefCell::default(),
             palette_rows,
             reading_timer: Timer::default(),
+            tab_drag: RefCell::default(),
         })
     }
 
@@ -723,6 +742,99 @@ impl View {
         self.remember_scroll();
         self.app.borrow_mut().activate_tab(id);
         self.tab_switched();
+    }
+
+    /// 패널 `panel`의 `index`번째 탭을 눌렀다: 끌기를 기다린다. 놓을 때까지 움직이지 않으면 누르기다.
+    fn tab_drag_start(&self, panel: i32, index: i32, at: Point) {
+        let (Ok(panel), Ok(index)) = (usize::try_from(panel), usize::try_from(index)) else {
+            return;
+        };
+        *self.tab_drag.borrow_mut() = Some(TabDrag::new(panel, index, at));
+    }
+
+    /// 누른 탭을 끌고 있다: 끌기 시작 문턱을 넘었으면 끄는 탭을 흐리게 하고 놓일 자리를 보인다.
+    fn tab_drag_move(&self, at: Point) {
+        let strips = self.tab_strips();
+        let shown = {
+            let mut drag = self.tab_drag.borrow_mut();
+            let Some(drag) = drag.as_mut() else { return };
+            drag.moved(at, &strips);
+            drag.is_dragging().then(|| drag.clone())
+        };
+        if let Some(drag) = shown {
+            self.show_tab_drag(Some(&drag));
+        }
+    }
+
+    /// 누른 탭을 놓았다. 끌기 시작 문턱을 넘지 않았으면 누르기라 참이다(화면이 그 탭으로 간다). 끌었으면 놓인 탭 줄
+    /// 자리로 탭을 옮기고(탭 줄 밖이면 그대로 둔다) 거짓이다.
+    fn tab_drag_end(&self, at: Point) -> bool {
+        let strips = self.tab_strips();
+        let Some(mut drag) = self.tab_drag.borrow_mut().take() else {
+            return true;
+        };
+        drag.moved(at, &strips);
+        self.show_tab_drag(None);
+        if !drag.is_dragging() {
+            return true;
+        }
+        if let Some((panel, slot)) = drag.target() {
+            self.move_tab(drag.panel, drag.index, panel, slot);
+        }
+        false
+    }
+
+    /// 끌기가 끊겼다(창이 마우스를 놓침 등): 아무것도 옮기지 않는다.
+    fn tab_drag_cancel(&self) {
+        if self.tab_drag.borrow_mut().take().is_some() {
+            self.show_tab_drag(None);
+        }
+    }
+
+    /// 끄는 탭(흐리게)과 놓일 자리(세로 선)를 화면에 넣는다. `None`이면 지운다.
+    fn show_tab_drag(&self, drag: Option<&TabDrag>) {
+        for panel in 0..MAX_PANELS {
+            let dragged = drag
+                .filter(|drag| drag.panel == panel)
+                .map_or(-1, |drag| count(drag.index));
+            let slot = drag
+                .and_then(TabDrag::target)
+                .filter(|(target, _)| *target == panel)
+                .map_or(-1, |(_, slot)| count(slot));
+            PanelUi::of(&self.ui, panel).set_tab_drag(dragged, slot);
+        }
+    }
+
+    /// 패널마다 탭 줄의 자리와 탭 수. 없는 패널(나뉘지 않음)은 `None`이다.
+    fn tab_strips(&self) -> [Option<Strip>; MAX_PANELS] {
+        let app = self.app.borrow();
+        let panels = app.window(self.window).map(|window| window.panels());
+        std::array::from_fn(|panel| {
+            let tabs = panels?.get(panel)?.len();
+            Some(PanelUi::of(&self.ui, panel).tab_strip(tabs))
+        })
+    }
+
+    /// 패널 `from`의 `index`번째 탭을 패널 `to`의 `slot` 자리로 옮긴다(코어의 탭 옮기기). 옮긴 탭이 그 패널의 활성
+    /// 탭, 그 패널이 활성 패널이 된다. 보이던 탭은 다시 읽지 않고 갖고 있던 목록을 그대로 보인다.
+    fn move_tab(&self, from: usize, index: usize, to: usize, slot: usize) {
+        let id = {
+            let app = self.app.borrow();
+            app.window(self.window)
+                .and_then(|window| window.panels().get(from))
+                .and_then(|panel| panel.tabs().nth(index))
+                .map(|(id, _)| id)
+        };
+        let Some(id) = id else { return };
+        self.remember_scroll();
+        let destination = TabDestination::Panel {
+            window: self.window,
+            panel: to,
+            slot,
+        };
+        if self.app.borrow_mut().move_tab(id, destination).is_some() {
+            self.tab_switched();
+        }
     }
 
     /// 행을 휠 클릭했다: 폴더면 새 탭에서 연다. 지금 탭은 그대로다.
@@ -1180,6 +1292,44 @@ impl<'a> PanelUi<'a> {
             self.ui.get_right_tab_strip_width()
         } else {
             self.ui.get_left_tab_strip_width()
+        }
+    }
+
+    /// 탭 줄의 창 기준 자리·크기와 넘긴 거리. 탭 수는 부르는 쪽이 준다.
+    fn tab_strip(&self, tabs: usize) -> Strip {
+        let ui = self.ui;
+        let (left, top, height) = if self.right {
+            (
+                ui.get_right_tab_strip_left(),
+                ui.get_right_tab_strip_top(),
+                ui.get_right_tab_strip_height(),
+            )
+        } else {
+            (
+                ui.get_left_tab_strip_left(),
+                ui.get_left_tab_strip_top(),
+                ui.get_left_tab_strip_height(),
+            )
+        };
+        Strip {
+            left,
+            top,
+            width: self.tab_strip_width(),
+            height,
+            tab_width: self.tab_width(),
+            scroll: -self.tab_strip_x(),
+            tabs,
+        }
+    }
+
+    /// 탭 끌기 표시: 끄는 탭과 놓일 자리(없으면 -1).
+    fn set_tab_drag(&self, dragged: i32, slot: i32) {
+        if self.right {
+            self.ui.set_right_dragged_tab(dragged);
+            self.ui.set_right_drop_slot(slot);
+        } else {
+            self.ui.set_left_dragged_tab(dragged);
+            self.ui.set_left_drop_slot(slot);
         }
     }
 }

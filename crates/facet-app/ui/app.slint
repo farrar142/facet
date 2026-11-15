@@ -234,6 +234,13 @@ component PanelView inherits Rectangle {
     out property <length> tab-width: clamp(tab-strip.width / max(1, root.tabs.length), 90px, 200px);
     in-out property <length> tab-strip-x <=> tab-flick.content-x;
     out property <length> tab-strip-width: tab-strip.width;
+    // 탭 줄의 자리(창 기준)와 높이. 탭을 끌 때 Rust가 끄는 점이 어느 패널 탭 줄 위인지 본다.
+    out property <length> tab-strip-left: tab-strip.absolute-position.x;
+    out property <length> tab-strip-top: tab-strip.absolute-position.y;
+    out property <length> tab-strip-height: tab-strip.height;
+    // 탭 끌기: 끄는 탭(이 패널의 것이면 그 번호, 아니면 -1)과 놓일 자리(이 패널 탭 줄 위면 탭 사이 틈 번호, 아니면 -1).
+    in property <int> dragged-tab: -1;
+    in property <int> drop-slot: -1;
     // 주소창의 자리(창 기준). 창이 자동 완성 후보를 그 아래에 놓는다.
     out property <length> address-x: address-bar.absolute-position.x;
     out property <length> address-y: address-bar.absolute-position.y + address-bar.height;
@@ -254,6 +261,12 @@ component PanelView inherits Rectangle {
     callback row-opened(int);
     callback row-middle-pressed(int);
     callback tab-pressed(int);
+    // 탭 끌기: 탭을 눌렀다(탭 번호, 창 기준 점), 누른 채 움직였다, 놓았다(누르기였으면 참: 그 탭으로 간다), 끌기가
+    // 끊겼다.
+    callback tab-drag-start(int, length, length);
+    callback tab-drag-move(length, length);
+    callback tab-drag-end(length, length) -> bool;
+    callback tab-drag-cancel();
     callback sort-by(int);
     callback confirm-rename(string);
     callback cancel-rename();
@@ -283,7 +296,9 @@ component PanelView inherits Rectangle {
         padding: root.split ? 4px : 0px;
         spacing: 4px;
 
-        // 탭 줄: 패널의 탭들. 활성 탭은 배경과 아래 선으로 보인다. 누르면 그 탭으로 간다.
+        // 탭 줄: 패널의 탭들. 활성 탭은 배경과 아래 선으로 보인다. 누르면 그 탭으로 간다. 끌면(끌기 시작 문턱을 넘으면)
+        // 순서를 바꾸거나 반대편 패널로 옮기고, 끄는 동안 놓일 자리를 세로 선으로 보인다. 마우스로 끌어 줄을 넘기지
+        // 않고(탭 끌기가 쓴다) 휠로 넘긴다.
         tab-strip := Rectangle {
             height: 30px;
             border-width: 1px;
@@ -292,17 +307,42 @@ component PanelView inherits Rectangle {
             tab-flick := Flickable {
                 content-width: max(self.width, root.tabs.length * root.tab-width);
                 content-height: self.height;
+                mouse-drag-pan-enabled: false;
                 for tab[i] in root.tabs: Rectangle {
                     x: i * root.tab-width;
                     width: root.tab-width;
                     height: tab-strip.height;
+                    opacity: i == root.dragged-tab ? 0.5 : 1;
                     background: tab.active ? Palette.background
                         : tab-touch.has-hover ? Palette.alternate-background : Palette.control-background;
                     tab-touch := TouchArea {
-                        clicked => {
-                            root.activate();
-                            root.tab-pressed(i);
-                            root.focus-list();
+                        pointer-event(event) => {
+                            if (event.kind == PointerEventKind.cancel) {
+                                root.tab-drag-cancel();
+                            } else if (event.button == PointerEventButton.left) {
+                                if (event.kind == PointerEventKind.down) {
+                                    root.tab-drag-start(i, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                                } else if (event.kind == PointerEventKind.up) {
+                                    if (root.tab-drag-end(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y)) {
+                                        root.activate();
+                                        root.tab-pressed(i);
+                                    }
+                                    root.focus-list();
+                                }
+                            }
+                        }
+                        moved => {
+                            if (self.pressed) {
+                                root.tab-drag-move(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                            }
+                        }
+                        // 세로 휠로 탭 줄을 가로로 넘긴다(넘칠 때만).
+                        scroll-event(event) => {
+                            if (event.delta-y != 0 && tab-flick.content-width > tab-flick.width) {
+                                root.tab-strip-x = clamp(root.tab-strip-x + event.delta-y, tab-flick.width - tab-flick.content-width, 0px);
+                                return accept;
+                            }
+                            reject
                         }
                         changed has-hover => {
                             if (self.has-hover) {
@@ -343,6 +383,13 @@ component PanelView inherits Rectangle {
                             color: Palette.foreground.transparentize(tab.active ? 0% : 25%);
                         }
                     }
+                }
+                // 끄는 탭이 놓일 자리: 탭 사이 틈의 세로 선.
+                if root.drop-slot >= 0: Rectangle {
+                    x: clamp(root.drop-slot * root.tab-width - 2px, 0px, max(0px, tab-flick.content-width - 4px));
+                    width: 4px;
+                    height: tab-strip.height;
+                    background: Palette.accent-background;
                 }
             }
         }
@@ -764,6 +811,18 @@ export component AppWindow inherits Window {
     out property <length> right-tab-width: right.tab-width;
     in-out property <length> right-tab-strip-x <=> right.tab-strip-x;
     out property <length> right-tab-strip-width: right.tab-strip-width;
+    // 패널마다 탭 줄의 자리(창 기준)와 높이: 탭을 끌 때 끄는 점이 어느 탭 줄 위인지 본다.
+    out property <length> left-tab-strip-left: left.tab-strip-left;
+    out property <length> left-tab-strip-top: left.tab-strip-top;
+    out property <length> left-tab-strip-height: left.tab-strip-height;
+    out property <length> right-tab-strip-left: right.tab-strip-left;
+    out property <length> right-tab-strip-top: right.tab-strip-top;
+    out property <length> right-tab-strip-height: right.tab-strip-height;
+    // 탭 끌기(Rust가 정한다): 패널마다 끄는 탭과 놓일 자리. 없으면 -1.
+    in property <int> left-dragged-tab: -1;
+    in property <int> left-drop-slot: -1;
+    in property <int> right-dragged-tab: -1;
+    in property <int> right-drop-slot: -1;
     // 주소창(활성 패널): 글자로 고쳐 쓰는 모드인가. 아니면 경로 조각 모드다.
     in property <bool> address-editing;
     // 고쳐 쓰는 글자. 모드를 열 때 Rust가 지금 위치를 채운다.
@@ -815,6 +874,12 @@ export component AppWindow inherits Window {
     callback row-middle-pressed(int);
     // 탭 줄의 탭을 눌렀다: 그 탭으로 간다.
     callback tab-pressed(int);
+    // 탭 끌기: 패널(0 왼쪽, 1 오른쪽)의 탭을 눌렀다(탭 번호, 창 기준 점), 누른 채 움직였다, 놓았다(누르기였으면
+    // 참), 끌기가 끊겼다. 끌기 시작 문턱과 놓일 자리는 Rust가 정한다.
+    callback tab-drag-start(int, int, length, length);
+    callback tab-drag-move(length, length);
+    callback tab-drag-end(length, length) -> bool;
+    callback tab-drag-cancel();
     // 열 머리글을 눌렀다: 열 번호.
     callback sort-by(int);
     // 마우스 뒤로(거짓)·앞로(참) 버튼.
@@ -986,6 +1051,20 @@ export component AppWindow inherits Window {
             tab-pressed(index) => {
                 root.tab-pressed(index);
             }
+            dragged-tab: root.left-dragged-tab;
+            drop-slot: root.left-drop-slot;
+            tab-drag-start(index, x, y) => {
+                root.tab-drag-start(0, index, x, y);
+            }
+            tab-drag-move(x, y) => {
+                root.tab-drag-move(x, y);
+            }
+            tab-drag-end(x, y) => {
+                root.tab-drag-end(x, y)
+            }
+            tab-drag-cancel => {
+                root.tab-drag-cancel();
+            }
             sort-by(column) => {
                 root.sort-by(column);
             }
@@ -1085,6 +1164,20 @@ export component AppWindow inherits Window {
             }
             tab-pressed(index) => {
                 root.tab-pressed(index);
+            }
+            dragged-tab: root.right-dragged-tab;
+            drop-slot: root.right-drop-slot;
+            tab-drag-start(index, x, y) => {
+                root.tab-drag-start(1, index, x, y);
+            }
+            tab-drag-move(x, y) => {
+                root.tab-drag-move(x, y);
+            }
+            tab-drag-end(x, y) => {
+                root.tab-drag-end(x, y)
+            }
+            tab-drag-cancel => {
+                root.tab-drag-cancel();
             }
             sort-by(column) => {
                 root.sort-by(column);
