@@ -11,6 +11,9 @@
 //!
 //! 명령([`crate::command::CommandId`])은 활성 탭에 듣는다([`App::execute`]). 파일 열기는 셸 일꾼 스레드
 //! ([`ShellWorker`], 처음 열 때 띄운다)가 하고, 그 결과도 같은 통로로 받아 탭에 넘긴다.
+//!
+//! 주소창: 친 글자로 가기([`App::go_to_text`])는 해석한 뒤 다른 이동처럼 일꾼 스레드에서 읽는다. 자동 완성 후보
+//! ([`App::complete_address`])는 폴더를 읽느라 막히므로 일꾼 스레드에서 읽고 같은 통로로 받는다.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -20,11 +23,14 @@ use std::time::{Duration, Instant};
 
 use facet_win::{OpenError, OpenResult, ShellWorker};
 
-use crate::Location;
 use crate::command::{self, CommandId};
 use crate::details::Sort;
-use crate::tab::{ChangeOutcome, Navigation, ReadOutcome, ReadRequest, ReadResult, Tab};
+use crate::tab::{
+    ChangeOutcome, CompletionId, CompletionResult, Navigation, ReadOutcome, ReadRequest,
+    ReadResult, Tab,
+};
 use crate::watch::ChangeBatch;
+use crate::{Candidate, Location};
 
 /// 앱 안의 탭 하나를 가리키는 번호. 탭을 다른 패널·창으로 옮겨도 바뀌지 않는다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -103,9 +109,22 @@ impl Window {
 
 /// 일꾼 스레드가 보내는 것: 읽기 결과나 묶은 변경.
 enum Message {
-    Read { tab: TabId, result: ReadResult },
-    Changes { tab: TabId, batch: ChangeBatch },
-    Opened { tab: TabId, result: OpenResult },
+    Read {
+        tab: TabId,
+        result: ReadResult,
+    },
+    Changes {
+        tab: TabId,
+        batch: ChangeBatch,
+    },
+    Opened {
+        tab: TabId,
+        result: OpenResult,
+    },
+    Completed {
+        tab: TabId,
+        result: CompletionResult,
+    },
 }
 
 /// 앱이 정한 깨우기([`App::set_waker`]).
@@ -132,7 +151,7 @@ impl Outbox {
 }
 
 /// 탭에 넘긴 결과 하나.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Update {
     /// 읽기 결과.
     Read(ReadOutcome),
@@ -140,6 +159,12 @@ pub enum Update {
     Changes(ChangeOutcome),
     /// 기본 프로그램으로 열기의 결과: 열었는가. 열지 못했으면 그 탭의 [`Tab::open_error`]에 까닭이 있다.
     Opened(bool),
+    /// 자동 완성 후보([`App::complete_address`]). 그 탭의 마지막 요청 결과면 후보를, 늦게 온 앞선 요청의
+    /// 결과면 `None`을 담는다.
+    Completion {
+        id: CompletionId,
+        candidates: Option<Vec<Candidate>>,
+    },
 }
 
 /// 명령을 실행한 결과.
@@ -347,6 +372,19 @@ impl App {
                 }
                 (id, Update::Opened(opened))
             }
+            Message::Completed { tab: id, result } => {
+                let completion = result.id();
+                let candidates = self
+                    .tab_mut(id)
+                    .and_then(|tab| tab.finish_completion(result));
+                (
+                    id,
+                    Update::Completion {
+                        id: completion,
+                        candidates,
+                    },
+                )
+            }
         }
     }
 
@@ -354,6 +392,38 @@ impl App {
         self.tabs_mut()
             .find(|(tab_id, _)| *tab_id == id)
             .map(|(_, tab)| tab)
+    }
+
+    /// 주소창에 친 글자로 활성 탭을 옮긴다([`Tab::go_to_text`]). 해석했으면 일꾼 스레드에서 읽기 시작하고
+    /// `true`다. 결과는 다른 이동처럼 [`App::poll`]로 받는다. 해석하지 못했으면 읽지 않고 `false`이며, 탭은
+    /// 원래 위치에 남고 [`Tab::address_error`]에 까닭이 있다.
+    pub fn go_to_text(&mut self, text: &str) -> bool {
+        let tab = self.active_tab_id();
+        match self.active_tab_mut().go_to_text(text) {
+            Some(request) => {
+                self.spawn_read(tab, request);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 주소창에 고쳐 쓰는 글자의 자동 완성 후보를 일꾼 스레드에서 읽기 시작한다. 막지 않고 곧바로 요청 번호를
+    /// 돌려준다. 후보는 [`Update::Completion`]으로 온다. 앞선 요청의 결과가 늦게 오면 후보 없이(`None`) 온다.
+    pub fn complete_address(&mut self, text: &str) -> CompletionId {
+        let tab = self.active_tab_id();
+        let request = self.active_tab_mut().complete(text);
+        let id = request.id();
+        let outbox = self.outbox.clone();
+        let read = move || {
+            let result = request.run();
+            outbox.send(Message::Completed { tab, result });
+        };
+        thread::Builder::new()
+            .name("facet-complete".into())
+            .spawn(read)
+            .expect("자동 완성 일꾼 스레드를 만들지 못했다");
+        id
     }
 
     /// 활성 탭의 정렬을 바꾼다. 다시 읽지 않는다.

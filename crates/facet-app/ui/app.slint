@@ -30,6 +30,14 @@ export enum Problem {
     path-too-long,
     open-unsupported,
     open-failed,
+    // 주소창 글자 해석
+    address-empty,
+    address-invalid-character,
+    address-undefined-variable,
+    address-not-absolute,
+    address-not-found,
+    address-permission-denied,
+    address-io,
 }
 
 // 상태 줄의 이름 입력란 알림. 문장은 화면이 `@tr()`로 만든다(ADR-0007).
@@ -131,14 +139,51 @@ component ItemIcon inherits Rectangle {
     }
 }
 
+// 주소창의 경로 조각 하나. 누르면 그 위치로 간다.
+component Segment inherits Rectangle {
+    in property <string> text;
+    callback pressed();
+
+    border-radius: 3px;
+    background: touch.has-hover ? Palette.alternate-background : transparent;
+    touch := TouchArea {
+        clicked => {
+            root.pressed();
+        }
+    }
+    HorizontalLayout {
+        padding-left: 5px;
+        padding-right: 5px;
+        Text {
+            text: root.text;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "facet";
     preferred-width: 900px;
     preferred-height: 600px;
     default-font-size: 13px;
 
-    // 탭의 위치.
-    in property <string> location;
+    // 주소창: 경로 조각(맨 위부터 지금 위치까지)의 이름.
+    in property <[string]> segments;
+    // 글자로 고쳐 쓰는 모드인가. 아니면 경로 조각 모드다.
+    in property <bool> address-editing;
+    // 고쳐 쓰는 글자. 모드를 열 때 Rust가 지금 위치를 채운다.
+    in-out property <string> address-text;
+    // 자동 완성 후보(하위 폴더 이름)와 Tab·화살표로 고른 후보의 번호(없으면 -1).
+    in property <[string]> candidates;
+    in property <int> candidate-highlight: -1;
+    out property <length> candidate-row-height: 22px;
+    in-out property <length> candidate-content-y <=> candidate-list.content-y;
+    out property <length> candidate-view-height: candidate-list.visible-height;
+    // 마지막 주소창 글자를 해석하지 못한 까닭과 값(글자·환경 변수 이름·경로)·자세한 내용. 탭은 원래 위치에 남는다.
+    in property <Problem> address-problem: Problem.none;
+    in property <string> address-problem-value;
+    in property <string> address-problem-detail;
     // 「읽는 중」을 드러내는가. 코어가 읽기를 시작하고 100ms가 지나면 참이다.
     in property <bool> reading;
     // 마지막 이동(또는 새로 고침)이 실패한 까닭과 그 위치·자세한 내용. 탭은 원래 위치에 남는다.
@@ -196,8 +241,31 @@ export component AppWindow inherits Window {
     callback confirm-rename(string);
     // Esc: 입력을 취소한다.
     callback cancel-rename();
+    // 경로 조각을 눌렀다: 조각 번호.
+    callback segment-pressed(int);
+    // 주소창의 빈 곳을 눌렀다: 고쳐 쓰는 모드로 바꾼다.
+    callback begin-address-edit();
+    // 고쳐 쓰는 글자가 바뀌었다: 자동 완성 후보를 새로 읽는다.
+    callback address-edited(string);
+    // Tab·↓(1)이나 Shift+Tab·↑(-1)로 후보를 골랐다. Rust가 `address-text`를 그 후보로 바꾸고, 입력 커서를 둘
+    // 글자 끝의 바이트 위치를 돌려준다. 고를 후보가 없으면 -1이다.
+    callback address-step(int) -> int;
+    // Enter: 고쳐 쓴 글자로 간다. 해석해서 가기 시작했으면 참(고쳐 쓰는 모드를 닫았다), 해석하지 못했으면 거짓이다.
+    callback address-go(string) -> bool;
+    // 자동 완성 후보를 눌렀다: 그 폴더로 간다.
+    callback candidate-pressed(int);
+    // Esc 등: 고쳐 쓰는 모드를 닫고 경로 조각 모드로 돌아간다.
+    callback cancel-address-edit();
 
     forward-focus: keys;
+
+    // 목록으로 키보드를 돌린다. 주소창을 고쳐 쓰던 중이면 그만둔다.
+    function focus-list() {
+        if (root.address-editing) {
+            root.cancel-address-edit();
+        }
+        keys.focus();
+    }
 
     // 마우스 뒤로·앞으로 버튼은 어디를 눌러도 명령을 부른다.
     function history-button(event: PointerEvent) {
@@ -270,10 +338,95 @@ export component AppWindow inherits Window {
         padding: 8px;
         spacing: 4px;
 
-        Text {
-            text: root.location;
-            overflow: elide;
-            font-weight: 600;
+        // 주소창. 평소에는 경로 조각을 누르는 모드이고, 빈 곳을 누르거나 주소창 고쳐 쓰기 명령(Alt+D·Ctrl+L·F4)이면
+        // 글자로 고쳐 쓰는 모드가 된다.
+        address-bar := Rectangle {
+            height: 28px;
+            background: Palette.background;
+            border-width: 1px;
+            border-radius: 3px;
+            border-color: root.address-editing ? Palette.accent-background : Palette.border;
+            clip: true;
+
+            if !root.address-editing: Rectangle {
+                // 조각 사이나 조각 뒤의 빈 곳을 누르면 고쳐 쓴다.
+                TouchArea {
+                    mouse-cursor: text;
+                    clicked => {
+                        root.begin-address-edit();
+                    }
+                }
+                HorizontalLayout {
+                    padding: 2px;
+                    alignment: start;
+                    for segment[i] in root.segments: HorizontalLayout {
+                        Segment {
+                            text: segment;
+                            pressed => {
+                                root.segment-pressed(i);
+                                root.focus-list();
+                            }
+                        }
+                        if i < root.segments.length - 1: Text {
+                            text: "›";
+                            vertical-alignment: center;
+                            color: Palette.foreground.transparentize(40%);
+                        }
+                    }
+                }
+            }
+
+            // 고쳐 쓰는 입력란. 한글 IME의 조합 글자와 후보 창은 TextInput이 처리한다.
+            if root.address-editing: TextInput {
+                x: 6px;
+                width: parent.width - 12px;
+                single-line: true;
+                vertical-alignment: center;
+                color: Palette.foreground;
+                text <=> root.address-text;
+                init => {
+                    self.focus();
+                    self.select-all();
+                }
+                edited => {
+                    root.address-edited(self.text);
+                }
+                accepted => {
+                    if (root.address-go(self.text)) {
+                        keys.focus();
+                    }
+                }
+                key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.cancel-address-edit();
+                        keys.focus();
+                        return accept;
+                    }
+                    if (event.text == Key.Tab || event.text == Key.Backtab || event.text == Key.DownArrow
+                        || event.text == Key.UpArrow) {
+                        let backward = event.text == Key.Backtab || event.text == Key.UpArrow
+                            || (event.text == Key.Tab && event.modifiers.shift);
+                        let end = root.address-step(backward ? -1 : 1);
+                        if (end >= 0) {
+                            self.set-selection-offsets(end, end);
+                        }
+                        return accept;
+                    }
+                    reject
+                }
+            }
+        }
+
+        if root.address-problem != Problem.none: Text {
+            text: root.address-problem == Problem.address-empty ? @tr("주소를 입력하세요")
+                : root.address-problem == Problem.address-invalid-character ? @tr("주소에 쓸 수 없는 글자가 있습니다: {}", root.address-problem-value)
+                : root.address-problem == Problem.address-undefined-variable ? @tr("환경 변수가 없습니다: {}", root.address-problem-value)
+                : root.address-problem == Problem.address-not-absolute ? @tr("전체 경로가 아닙니다: {}", root.address-problem-value)
+                : root.address-problem == Problem.address-not-found ? @tr("위치가 없습니다: {}", root.address-problem-value)
+                : root.address-problem == Problem.address-permission-denied ? @tr("위치를 확인할 권한이 없습니다: {}", root.address-problem-value)
+                : @tr("위치를 확인하지 못했습니다: {}: {}", root.address-problem-value, root.address-problem-detail);
+            wrap: word-wrap;
+            color: #c42b1c;
         }
 
         if root.list-problem != Problem.none: Text {
@@ -304,7 +457,7 @@ export component AppWindow inherits Window {
                 descending: root.sort-descending;
                 sort => {
                     root.sort-by(0);
-                    keys.focus();
+                    root.focus-list();
                 }
             }
             Header {
@@ -314,7 +467,7 @@ export component AppWindow inherits Window {
                 descending: root.sort-descending;
                 sort => {
                     root.sort-by(1);
-                    keys.focus();
+                    root.focus-list();
                 }
             }
             Header {
@@ -324,7 +477,7 @@ export component AppWindow inherits Window {
                 descending: root.sort-descending;
                 sort => {
                     root.sort-by(2);
-                    keys.focus();
+                    root.focus-list();
                 }
             }
             Header {
@@ -335,7 +488,7 @@ export component AppWindow inherits Window {
                 descending: root.sort-descending;
                 sort => {
                     root.sort-by(3);
-                    keys.focus();
+                    root.focus-list();
                 }
             }
             Rectangle { }
@@ -371,13 +524,13 @@ export component AppWindow inherits Window {
                                     root.confirm-rename(root.edit-text);
                                 }
                                 root.row-pressed(i, event.modifiers.control, event.modifiers.shift);
-                                keys.focus();
+                                root.focus-list();
                             }
                         }
                         double-clicked => {
                             if (i != root.editing) {
                                 root.row-opened(i);
-                                keys.focus();
+                                root.focus-list();
                             }
                         }
                     }
@@ -498,6 +651,56 @@ export component AppWindow inherits Window {
                 horizontal-stretch: 1;
                 overflow: elide;
                 color: Palette.foreground.transparentize(40%);
+            }
+        }
+    }
+
+    // 주소창 자동 완성 후보. 목록 위에 겹쳐 그리도록 창 전체를 덮는 층에 두고 주소창 바로 아래에 놓는다.
+    Rectangle {
+        Rectangle {
+            visible: root.address-editing && root.candidates.length > 0;
+            x: address-bar.absolute-position.x - parent.absolute-position.x;
+            y: address-bar.absolute-position.y - parent.absolute-position.y + address-bar.height;
+            width: address-bar.width;
+            height: min(root.candidates.length, 10) * root.candidate-row-height + 2px;
+            background: Palette.background;
+            border-width: 1px;
+            border-color: Palette.border;
+            drop-shadow-blur: 6px;
+            drop-shadow-color: #00000040;
+            candidate-list := ListView {
+                x: 1px;
+                y: 1px;
+                width: parent.width - 2px;
+                height: parent.height - 2px;
+                for candidate[i] in root.candidates: Rectangle {
+                    height: root.candidate-row-height;
+                    background: i == root.candidate-highlight ? Palette.selection-background
+                        : candidate-touch.has-hover ? Palette.alternate-background : transparent;
+                    candidate-touch := TouchArea {
+                        clicked => {
+                            root.candidate-pressed(i);
+                            keys.focus();
+                        }
+                    }
+                    HorizontalLayout {
+                        padding-left: 6px;
+                        padding-right: 6px;
+                        spacing: 6px;
+                        VerticalLayout {
+                            alignment: center;
+                            ItemIcon {
+                                folder: true;
+                            }
+                        }
+                        Text {
+                            text: candidate;
+                            overflow: elide;
+                            vertical-alignment: center;
+                            color: i == root.candidate-highlight ? Palette.selection-foreground : Palette.foreground;
+                        }
+                    }
+                }
             }
         }
     }
