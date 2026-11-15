@@ -497,3 +497,134 @@ fn attrib_long_readonly(path: &Path) {
     permissions.set_readonly(true);
     fs::set_permissions(path, permissions).unwrap();
 }
+
+/// `mklink`로 링크를 만든다(`/J` 정션, `/D` 폴더 심볼릭 링크, 없으면 파일 심볼릭 링크). 성공했는지 돌려준다.
+fn mklink(flag: Option<&str>, link: &Path, target: &Path) -> bool {
+    let mut command = Command::new("cmd");
+    command.arg("/c").arg("mklink");
+    if let Some(flag) = flag {
+        command.arg(flag);
+    }
+    command
+        .arg(link)
+        .arg(target)
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
+#[test]
+fn 정션을_읽고_같은_대상의_정션을_만들고_지운다() {
+    let dir = TempDir::new().unwrap();
+    let pointee = dir.path().join("가리킬 폴더 🌏");
+    fs::create_dir(&pointee).unwrap();
+    fs::write(pointee.join("안.txt"), "안").unwrap();
+    let junction = dir.path().join("정션");
+    assert!(mklink(Some("/J"), &junction, &pointee), "mklink /J");
+
+    let link = file_ops::read_link(&junction).unwrap();
+    assert_eq!(link.kind, file_ops::LinkKind::Junction);
+    assert_eq!(link.target, pointee);
+    assert!(!link.relative);
+
+    let copy = dir.path().join("복사한 정션");
+    file_ops::create_link(&copy, &link).unwrap();
+    assert!(
+        fs::symlink_metadata(&copy)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(file_ops::read_link(&copy).unwrap(), link);
+    // std도 같은 곳을 가리킨다고 읽고, 그 안이 보인다.
+    assert_eq!(fs::read_to_string(copy.join("안.txt")).unwrap(), "안");
+
+    // 이미 있으면 대상 있음이다.
+    let again = file_ops::create_link(&copy, &link).unwrap_err();
+    assert_eq!(again.kind(), FileOpErrorKind::TargetExists);
+
+    // 링크 자체만 지운다.
+    file_ops::remove_link(&copy).unwrap();
+    assert!(fs::symlink_metadata(&copy).is_err());
+    assert!(pointee.join("안.txt").is_file());
+    fs::remove_dir(&junction).unwrap();
+}
+
+#[test]
+fn 링크가_아니면_읽기는_그_밖이다() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("보통.txt");
+    fs::write(&file, "x").unwrap();
+    assert_eq!(
+        file_ops::read_link(&file).unwrap_err().kind(),
+        FileOpErrorKind::Other
+    );
+    assert_eq!(
+        file_ops::read_link(dir.path()).unwrap_err().kind(),
+        FileOpErrorKind::Other
+    );
+    assert_eq!(
+        file_ops::read_link(&dir.path().join("없음"))
+            .unwrap_err()
+            .kind(),
+        FileOpErrorKind::SourceMissing
+    );
+}
+
+#[test]
+fn 정션은_상대_경로를_가리킬_수_없다() {
+    let dir = TempDir::new().unwrap();
+    let link = file_ops::Link {
+        kind: file_ops::LinkKind::Junction,
+        target: PathBuf::from(r"..\옆"),
+        relative: true,
+    };
+    let path = dir.path().join("정션");
+    assert_eq!(
+        file_ops::create_link(&path, &link).unwrap_err().kind(),
+        FileOpErrorKind::Other
+    );
+    assert!(fs::symlink_metadata(&path).is_err());
+}
+
+#[test]
+fn 심볼릭_링크를_읽고_만든다_개발자_모드에서만() {
+    let dir = TempDir::new().unwrap();
+    let pointee = dir.path().join("폴더");
+    fs::create_dir(&pointee).unwrap();
+    let file = dir.path().join("파일.txt");
+    fs::write(&file, "내용").unwrap();
+    let folder_link = dir.path().join("폴더 링크");
+    if !mklink(Some("/D"), &folder_link, &pointee) {
+        println!("건너뜀: 이 환경은 심볼릭 링크를 만들 수 없다(관리자도 개발자 모드도 아님)");
+        return;
+    }
+    let file_link = dir.path().join("파일 링크");
+    assert!(mklink(None, &file_link, Path::new(r"파일.txt")), "mklink");
+
+    let folder = file_ops::read_link(&folder_link).unwrap();
+    assert_eq!(folder.kind, file_ops::LinkKind::FolderSymlink);
+    assert_eq!(folder.target, pointee);
+    assert!(!folder.relative);
+    let relative = file_ops::read_link(&file_link).unwrap();
+    assert_eq!(relative.kind, file_ops::LinkKind::FileSymlink);
+    assert_eq!(relative.target, PathBuf::from("파일.txt"));
+    assert!(relative.relative);
+
+    let sub = dir.path().join("하위");
+    fs::create_dir(&sub).unwrap();
+    for (name, link) in [("폴더 링크", &folder), ("파일 링크", &relative)] {
+        let copy = sub.join(name);
+        file_ops::create_link(&copy, link).unwrap();
+        assert_eq!(&file_ops::read_link(&copy).unwrap(), link);
+        assert_eq!(fs::read_link(&copy).unwrap(), link.target);
+    }
+    // 상대 링크는 복사본 자리 기준이라 하위 폴더에서는 가리키는 것이 없다.
+    assert!(fs::metadata(sub.join("파일 링크")).is_err());
+
+    // 링크 자체만 지운다.
+    file_ops::remove_link(&sub.join("폴더 링크")).unwrap();
+    file_ops::remove_link(&sub.join("파일 링크")).unwrap();
+    assert!(pointee.is_dir());
+    assert!(file.is_file());
+    assert_eq!(fs::read_dir(&sub).unwrap().count(), 0);
+}
