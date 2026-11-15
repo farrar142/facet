@@ -90,11 +90,21 @@ pub enum CommandId {
     /// 새 폴더: 활성 탭 위치에 폴더를 만든다([`crate::window::Execution::NewFolder`] →
     /// [`crate::window::App::new_folder`]). 위치가 실제 폴더일 때 켜진다.
     NewFolder,
+    /// 실행취소: 작업 기록의 마지막 작업을 되돌린다([`crate::window::App::undo`]). 기록이 없거나 다른 실행취소·다시
+    /// 실행이 도는 중이면 꺼진다(작업 기록은 앱 상태라 [`crate::window::App::can_execute`]가 본다). 마지막 기록이
+    /// 되돌릴 수 없는 작업이면 켜져 있고, 실행하면 까닭을 돌려준다.
+    Undo,
+    /// 다시 실행: 실행취소한 작업을 다시 한다([`crate::window::App::redo`]). 다시 실행 목록이 비었거나 도는 중이면
+    /// 꺼진다.
+    Redo,
+    /// 작업 기록 보기: 작업 기록을 읽기 전용 목록으로 연다([`crate::window::Execution::ShowHistory`]). 기록이 없으면
+    /// 꺼진다.
+    ShowHistory,
 }
 
 impl CommandId {
     /// 모든 명령. 명령 팔레트는 검색어가 없으면 이 순서로 보인다.
-    pub const ALL: [CommandId; 38] = [
+    pub const ALL: [CommandId; 41] = [
         CommandId::Open,
         CommandId::Back,
         CommandId::Forward,
@@ -133,6 +143,9 @@ impl CommandId {
         CommandId::MoveTo,
         CommandId::Rename,
         CommandId::NewFolder,
+        CommandId::Undo,
+        CommandId::Redo,
+        CommandId::ShowHistory,
     ];
 
     /// 바뀌지 않는 ID 글자. 화면 문장이 아니다.
@@ -178,6 +191,9 @@ impl CommandId {
             CommandId::MoveTo => "move-to",
             CommandId::Rename => "rename",
             CommandId::NewFolder => "new-folder",
+            CommandId::Undo => "undo",
+            CommandId::Redo => "redo",
+            CommandId::ShowHistory => "show-history",
         }
     }
 
@@ -271,6 +287,9 @@ impl CommandId {
             CommandId::CopyTo | CommandId::MoveTo => &[],
             CommandId::Rename => const { &[key(Key::Function(2))] },
             CommandId::NewFolder => const { &[key(letter('N')).ctrl().shift()] },
+            CommandId::Undo => const { &[key(letter('Z')).ctrl()] },
+            CommandId::Redo => const { &[key(letter('Y')).ctrl()] },
+            CommandId::ShowHistory => &[],
         }
     }
 
@@ -286,7 +305,8 @@ impl CommandId {
     /// - 나머지는 늘 켜져 있다. 다음·이전·n번째 탭은 탭 하나만 보아서는 모르므로 켜져 있다고 하고, 패널의 탭
     ///   수는 [`CommandId::is_enabled_in`]이 본다. 닫은 탭 되살리기도 켜져 있다고 하고, 닫은 탭 목록은
     ///   [`crate::window::App::can_execute`]가 본다. 패널 나누기/합치기와 활성 패널 바꾸기도 켜져 있다고 하고, 창의
-    ///   패널 수는 [`CommandId::is_enabled_in_window`]가 본다.
+    ///   패널 수는 [`CommandId::is_enabled_in_window`]가 본다. 실행취소·다시 실행·작업 기록 보기도 켜져 있다고 하고,
+    ///   작업 기록은 [`crate::window::App::can_execute`]가 본다.
     pub fn is_enabled(self, tab: &Tab) -> bool {
         match self {
             CommandId::Open | CommandId::ToggleCursorSelection => tab.cursor_item().is_some(),
@@ -320,7 +340,10 @@ impl CommandId {
             | CommandId::ReopenClosedTab
             | CommandId::TogglePanelSplit
             | CommandId::SwitchPanel
-            | CommandId::NewWindow => true,
+            | CommandId::NewWindow
+            | CommandId::Undo
+            | CommandId::Redo
+            | CommandId::ShowHistory => true,
         }
     }
 

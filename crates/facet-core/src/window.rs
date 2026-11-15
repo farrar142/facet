@@ -62,8 +62,10 @@ use facet_win::{OpenError, OpenResult, ShellWorker};
 use crate::command::{self, CommandId, CommandState};
 use crate::details::Sort;
 use crate::edit::{self, EditError, Edited};
+use crate::history::{History, Outcomes, Record, RecordId, Reversal, UndoError};
 use crate::job::{
-    AnswerError, ConflictAnswer, CopyRejection, ErrorAnswer, JobId, JobKind, JobQueue,
+    AnswerError, ConflictAnswer, CopyRejection, ErrorAnswer, JobEvent, JobId, JobKind, JobQueue,
+    RevertJob,
 };
 use crate::launch::LaunchTarget;
 use crate::placement::Placement;
@@ -341,6 +343,8 @@ enum Message {
     Edited {
         tab: TabId,
         result: Result<Edited, EditError>,
+        /// 새 폴더 직후의 이름 입력란 확정이라 새 폴더 기록에 묶는다([`App::rename_new_folder`]).
+        merge: bool,
     },
 }
 
@@ -413,6 +417,11 @@ pub enum Execution {
     /// 화면이 할 일: 활성 탭 위치에 새 폴더를 만든다. 처음 이름(바탕 이름)은 화면 문장이라 화면이 정해
     /// [`App::new_folder`]에 넘긴다.
     NewFolder,
+    /// 실행취소·다시 실행을 시작하지 않았다: 마지막 기록이 되돌릴 수 없는 작업이다
+    /// ([`UndoError::NotUndoable`]). 화면은 그 까닭을 보인다. 그 앞 기록은 되돌리지 않았다.
+    UndoRefused(UndoError),
+    /// 화면이 할 일: 작업 기록([`App::history`])을 읽기 전용 목록으로 연다.
+    ShowHistory,
 }
 
 /// 대상 선택 창에 보일 내용([`App::transfer_choice`]).
@@ -486,6 +495,8 @@ pub struct App {
     jobs: JobQueue,
     /// 작업 영역에 보일 작업들. 모든 창이 같은 것을 그린다.
     work_area: WorkArea,
+    /// 작업 기록과 다시 실행 목록. 앱 전체에 하나이고 메모리에만 있다.
+    history: History,
     outbox: Outbox,
     receiver: Receiver<Message>,
 }
@@ -683,6 +694,7 @@ impl App {
             shell: None,
             jobs: JobQueue::new(),
             work_area: WorkArea::new(),
+            history: History::new(),
             outbox: Outbox {
                 sender,
                 waker: Arc::default(),
@@ -1314,9 +1326,16 @@ impl App {
                 }
                 (id, Update::Opened(opened))
             }
-            Message::Edited { tab: id, result } => {
-                if let (Ok(edited), Some(tab)) = (&result, self.tab_mut(id)) {
-                    tab.apply_edit(edited);
+            Message::Edited {
+                tab: id,
+                result,
+                merge,
+            } => {
+                if let Ok(edited) = &result {
+                    self.record_edit(edited, merge);
+                    if let Some(tab) = self.tab_mut(id) {
+                        tab.apply_edit(edited);
+                    }
                 }
                 (id, Update::Edited(result))
             }
@@ -1390,6 +1409,9 @@ impl App {
         }
         match command {
             CommandId::ReopenClosedTab => !self.closed.is_empty(),
+            CommandId::Undo => self.history.undo_target().is_some(),
+            CommandId::Redo => self.history.redo_target().is_some(),
+            CommandId::ShowHistory => !self.history.is_empty(),
             command => command.is_enabled_in_window(self.active_window()),
         }
     }
@@ -1493,6 +1515,19 @@ impl App {
             }
             CommandId::Rename => return Execution::Rename,
             CommandId::NewFolder => return Execution::NewFolder,
+            CommandId::Undo | CommandId::Redo => {
+                let result = if command == CommandId::Undo {
+                    self.undo()
+                } else {
+                    self.redo()
+                };
+                return match result {
+                    Ok(_) => Execution::Done,
+                    Err(UndoError::Nothing | UndoError::Busy) => Execution::Disabled,
+                    Err(error) => Execution::UndoRefused(error),
+                };
+            }
+            CommandId::ShowHistory => return Execution::ShowHistory,
             CommandId::NewWindow => {
                 let location = if !self.has_windows() {
                     home_location()
@@ -1598,6 +1633,26 @@ impl App {
     /// 바꾼 뒤 목록이 다시 정렬돼도 새 이름의 항목이 선택·커서로 남는다(결과를 받을 때 곧바로 반영,
     /// [`Update::Edited`]).
     pub fn rename(&mut self, original: &std::ffi::OsStr, new_name: &str) -> Result<(), EditError> {
+        self.rename_with(original, new_name, false)
+    }
+
+    /// 새 폴더([`App::new_folder`]) 직후 열린 이름 입력란의 확정: [`App::rename`]과 같되, 끝나면 그 이름바꾸기를
+    /// 새 폴더 기록에 묶어 작업 기록에는 「새 폴더」 작업 하나로 남는다(실행취소하면 바꾼 이름의 폴더가 비어 있으면
+    /// 지워진다). 그 사이 다른 작업이 기록됐으면 묶지 못하고 이름바꾸기로 따로 남는다.
+    pub fn rename_new_folder(
+        &mut self,
+        original: &std::ffi::OsStr,
+        new_name: &str,
+    ) -> Result<(), EditError> {
+        self.rename_with(original, new_name, true)
+    }
+
+    fn rename_with(
+        &mut self,
+        original: &std::ffi::OsStr,
+        new_name: &str,
+        merge: bool,
+    ) -> Result<(), EditError> {
         if !self.has_windows() {
             return Err(EditError::Unavailable);
         }
@@ -1619,7 +1674,7 @@ impl App {
         }
         let original = original.to_os_string();
         let new_name = new_name.to_string();
-        self.spawn_edit("facet-rename", move || {
+        self.spawn_edit("facet-rename", merge, move || {
             edit::rename(&folder, &original, &new_name)
         });
         Ok(())
@@ -1642,7 +1697,9 @@ impl App {
             .ok_or(EditError::Unavailable)?
             .to_path_buf();
         let base = base.to_string();
-        self.spawn_edit("facet-new-folder", move || edit::new_folder(&folder, &base));
+        self.spawn_edit("facet-new-folder", false, move || {
+            edit::new_folder(&folder, &base)
+        });
         Ok(())
     }
 
@@ -1650,6 +1707,7 @@ impl App {
     fn spawn_edit(
         &self,
         name: &str,
+        merge: bool,
         run: impl FnOnce() -> Result<Edited, EditError> + Send + 'static,
     ) {
         let tab = self.active_tab_id();
@@ -1658,7 +1716,7 @@ impl App {
             .name(name.into())
             .spawn(move || {
                 let result = run();
-                outbox.send(Message::Edited { tab, result });
+                outbox.send(Message::Edited { tab, result, merge });
             })
             .expect("이름바꾸기·새 폴더 일꾼 스레드를 만들지 못했다");
     }
@@ -1687,6 +1745,8 @@ impl App {
         let command = match kind {
             JobKind::Copy => CommandId::CopyTo,
             JobKind::Move => CommandId::MoveTo,
+            // 실행취소·다시 실행은 원본을 골라 넣는 작업이 아니다.
+            JobKind::Undo | JobKind::Redo => return None,
         };
         if !self.can_execute(command) {
             return None;
@@ -1773,9 +1833,87 @@ impl App {
     pub fn poll_jobs(&mut self) -> bool {
         let mut changed = false;
         for event in self.jobs.poll() {
+            if let JobEvent::Finished { job, .. } = &event {
+                self.history.finish(*job);
+            }
             changed |= self.work_area.apply(&event);
         }
         changed
+    }
+
+    /// 끝난 이름바꾸기·새 폴더를 작업 기록에 남긴다.
+    fn record_edit(&mut self, edited: &Edited, merge: bool) {
+        if merge
+            && let Some(from) = &edited.original
+            && self.history.merge_new_folder_rename(
+                from,
+                &edited.path,
+                crate::history::Stamp {
+                    is_folder: edited.is_folder,
+                    size: edited.size,
+                    modified: edited.modified,
+                },
+            )
+        {
+            return;
+        }
+        self.history.record(Record::from_edit(edited));
+    }
+
+    /// 작업 기록: 끝난 작업의 기록과 다시 실행 목록. 앱 전체에 하나이고 메모리에만 있다(디스크에 남기지 않는다).
+    pub fn history(&self) -> &History {
+        &self.history
+    }
+
+    /// 끝난 작업을 작업 기록에 남긴다(다시 실행 목록을 비운다). 이름바꾸기·새 폴더는 앱이 결과를 받을 때 스스로
+    /// 남기고, 뒤에 들어올 작업(삭제·복사·이동 등)과 시험이 이것으로 남긴다.
+    pub fn record_operation(&mut self, record: Record) -> RecordId {
+        self.history.record(record)
+    }
+
+    /// **실행취소**: 작업 기록의 마지막 기록을 되돌리는 작업을 작업 대기열에 넣고 곧바로 시작한다
+    /// ([`JobKind::Undo`], 작업 영역에도 더한다). 진행·항목별 오류 질문·취소·끝남은 다른 작업과 같고
+    /// [`App::poll_jobs`]가 받는다.
+    ///
+    /// 되돌리는 방법: 이름바꾸기는 되바꾸고, 새 폴더는 비어 있으면 지운다(묶인 새 폴더+이름바꾸기도 그 폴더를). 밖에서
+    /// 바뀐 항목(없음·바뀜·그 자리에 같은 이름·새 폴더가 비어 있지 않음)은 건너뛰고 까닭을 결과
+    /// ([`crate::job::Summary::not_reverted`])에 담는다. 아무것도 덮어쓰거나 지우지 않는다.
+    ///
+    /// 끝나면 되돌린 항목은 다시 실행 목록으로 가고, 되돌리지 못한 항목은 기록에 남는다. 시작하지 않으면 까닭:
+    /// 기록이 없음([`UndoError::Nothing`]), 다른 실행취소·다시 실행이 도는 중([`UndoError::Busy`]), 마지막 기록이
+    /// 되돌릴 수 없는 작업([`UndoError::NotUndoable`], 그 앞 기록으로 넘어가지 않는다).
+    pub fn undo(&mut self) -> Result<JobId, UndoError> {
+        self.start_reversal(Reversal::Undo)
+    }
+
+    /// **다시 실행**: 다시 실행 목록의 마지막(가장 최근에 실행취소한 작업)을 다시 하는 작업을 넣고 곧바로 시작한다
+    /// ([`JobKind::Redo`]). 밖의 변경은 실행취소와 같은 규칙으로 건너뛴다. 끝나면 다시 한 항목은 작업 기록으로
+    /// 돌아간다. 새 작업이 기록되면 다시 실행 목록은 빈다.
+    pub fn redo(&mut self) -> Result<JobId, UndoError> {
+        self.start_reversal(Reversal::Redo)
+    }
+
+    fn start_reversal(&mut self, reversal: Reversal) -> Result<JobId, UndoError> {
+        let record = self.history.check(reversal)?;
+        let steps = History::steps_for(record, reversal);
+        let target = steps
+            .first()
+            .and_then(|step| step.path().parent())
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        let count = steps.len();
+        let outcomes = Outcomes::default();
+        let job = self
+            .jobs
+            .revert(RevertJob::new(reversal, steps, Arc::clone(&outcomes)));
+        self.history.begin(reversal, job, outcomes);
+        let kind = match reversal {
+            Reversal::Undo => JobKind::Undo,
+            Reversal::Redo => JobKind::Redo,
+        };
+        self.work_area.add(job, kind, target, count);
+        self.poll_jobs();
+        Ok(job)
     }
 
     /// 작업 영역: 넣은 작업들의 진행·상태·결과. 앱 전체에 하나라 모든 창에 같은 것이 보인다.
