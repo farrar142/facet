@@ -258,6 +258,8 @@ export component AppWindow inherits Window {
     callback confirm-rename(string);
     // Esc: 입력을 취소한다.
     callback cancel-rename();
+    // 글자에서 선택(앵커·커서 바이트 위치)을 지운 글자. 한글 조합이 시작될 때 쓴다.
+    pure callback remove-selection(string, int, int) -> string;
     // 경로 조각을 눌렀다: 조각 번호.
     callback segment-pressed(int);
     // 주소창의 빈 곳을 눌렀다: 고쳐 쓰는 모드로 바꾼다.
@@ -609,6 +611,16 @@ export component AppWindow inherits Window {
                                     init => {
                                         self.focus();
                                         self.select-all();
+                                    }
+                                    // Slint는 선택이 있어도 조합 글자를 커서 자리에 끼워 넣기만 한다.
+                                    // 조합이 시작될 때 선택을 먼저 지워 첫 글자에서 바뀌게 한다.
+                                    changed preedit-text => {
+                                        if (self.preedit-text != ""
+                                            && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
+                                            let start = min(self.anchor-position-byte-offset, self.cursor-position-byte-offset);
+                                            root.edit-text = root.remove-selection(self.text, self.anchor-position-byte-offset, self.cursor-position-byte-offset);
+                                            self.set-selection-offsets(start, start);
+                                        }
                                     }
                                     accepted => {
                                         root.confirm-rename(self.text);

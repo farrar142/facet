@@ -34,6 +34,7 @@ use crate::address::AddressEdit;
 use crate::palette::Palette;
 
 mod address;
+mod ime;
 mod keys;
 mod measure;
 mod palette;
@@ -118,6 +119,9 @@ fn connect(ui: &AppWindow) {
     ui.on_begin_rename(|| with_view(View::begin_rename));
     ui.on_confirm_rename(|text| with_view(|view| view.confirm_rename(&text)));
     ui.on_cancel_rename(|| with_view(View::cancel_rename));
+    ui.on_remove_selection(|text, anchor, cursor| {
+        ime::remove_selection(&text, anchor, cursor).0.into()
+    });
     ui.on_segment_pressed(|index| with_view(|view| view.segment_pressed(index)));
     ui.on_begin_address_edit(|| with_view(View::begin_address_edit));
     ui.on_address_edited(|text| with_view(|view| view.address_edited(&text)));
