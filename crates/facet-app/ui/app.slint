@@ -116,6 +116,15 @@ export enum ErrorReason { locked, access-denied, disk-full, source-missing, othe
 export enum ConflictChoice { overwrite, overwrite-if-newer, keep-both, skip }
 export enum ErrorChoice { retry, skip, skip-all, cancel-job }
 
+// 작업 기록 보기의 줄 하나: 작업 이름, 끝낸·건너뛴 항목 수, 되돌릴 수 없으면 그 까닭(되돌릴 수 있으면 비어 있음).
+// 글자는 Rust의 문장 모듈이 만든다.
+export struct HistoryRow {
+    name: string,
+    completed: int,
+    skipped: int,
+    not-undoable: string,
+}
+
 // 작업 영역의 작업 하나: **진행 표시**에 그릴 값. 수치 글자(바이트·속도·남은 시간)는 Rust가 만든다.
 export struct JobRow {
     // 작업 번호(단추를 누르면 Rust에 돌려준다).
@@ -146,6 +155,9 @@ export struct JobRow {
     completed: int,
     skipped: int,
     left: int,
+    // 끝난 작업이 하지 못한 항목들(경로와 까닭, Rust의 문장 모듈이 만든다). 없으면 비어 있고, 있으면 결과 아래에 한
+    // 줄 더 보인다(실행취소·다시 실행이 밖의 변경으로 되돌리지 못한 항목 등).
+    not-done: string,
     // 답을 기다리는 질문(코어의 `JobQuestion`). 있으면 진행 표시 아래에 질문 대화가 붙는다.
     ask: JobAsk,
     // 이름 충돌: 두 항목, 어느 쪽이 더 새것·더 큰지, 덮어쓰기를 고를 수 있는지, 덮어쓰면 되살릴 수 없는지.
@@ -658,9 +670,16 @@ component JobView inherits Rectangle {
             }
         }
         if root.job.finished: Text {
-            text: @tr("끝낸 항목 {} · 건너뛴 항목 {} · 남은 항목 {}", root.job.completed, root.job.skipped, root.job.left);
+            text: root.job.reverting == 1 ? @tr("되돌린 항목 {} · 못 한 항목 {} · 남은 항목 {}", root.job.completed, root.job.skipped, root.job.left)
+                : root.job.reverting == 2 ? @tr("다시 한 항목 {} · 못 한 항목 {} · 남은 항목 {}", root.job.completed, root.job.skipped, root.job.left)
+                : @tr("끝낸 항목 {} · 건너뛴 항목 {} · 남은 항목 {}", root.job.completed, root.job.skipped, root.job.left);
             overflow: elide;
             color: Palette.foreground.transparentize(30%);
+        }
+        if root.job.not-done != "": Text {
+            text: @tr("못 한 항목: {}", root.job.not-done);
+            overflow: elide;
+            color: #c42b1c;
         }
         if root.job.ask == JobAsk.conflict: ConflictQuestion {
             vertical-stretch: 1;
@@ -1547,10 +1566,18 @@ export component AppWindow inherits Window {
     // 질문 대화가 붙은 진행 표시가 더 차지하는 높이와, 질문을 기다리는 작업 수(Rust가 넣는다).
     out property <length> question-height: 120px;
     in property <int> job-questions;
+    // 못 한 항목 줄이 붙은 진행 표시가 더 차지하는 높이와, 그런 작업 수(Rust가 넣는다).
+    out property <length> report-height: 18px;
+    in property <int> job-reports;
     // 작업 영역의 높이: 진행 표시 세 개(질문 대화는 두 개)까지 보이고 넘으면 넘겨 본다.
     property <length> work-height: root.jobs.length == 0 ? 0px
-        : min(root.jobs.length * root.job-height + root.job-questions * root.question-height,
-            min(root.jobs.length, 3) * root.job-height + min(root.job-questions, 2) * root.question-height) + 4px;
+        : min(root.jobs.length * root.job-height + root.job-questions * root.question-height + root.job-reports * root.report-height,
+            min(root.jobs.length, 3) * root.job-height + min(root.job-questions, 2) * root.question-height
+                + min(root.job-reports, 3) * root.report-height) + 4px;
+    // 작업 기록 보기: 열려 있는가, 줄(최근 것부터). 읽기 전용이고 Esc·바깥 누르기로 닫는다(`history-close`).
+    in property <bool> history-open;
+    in property <[HistoryRow]> history-rows;
+    callback history-close();
     // 반대편 패널로 복사·이동의 확인 줄: 열려 있는가, 이동인가, 대상 폴더, 항목 수, 시작 전에 막힌 까닭과 그 경로.
     in property <bool> confirm-open;
     in property <bool> confirm-moving;
@@ -1717,6 +1744,12 @@ export component AppWindow inherits Window {
             if (root.show-about) {
                 if (event.text == Key.Escape) {
                     root.show-about = false;
+                }
+                return accept;
+            }
+            if (root.history-open) {
+                if (event.text == Key.Escape) {
+                    root.history-close();
                 }
                 return accept;
             }
@@ -2073,13 +2106,14 @@ export component AppWindow inherits Window {
         height: root.work-height - 4px;
         ListView {
             for job in root.jobs: Rectangle {
-                height: job.ask == JobAsk.none ? root.job-height : root.job-height + root.question-height;
+                height: (job.ask == JobAsk.none ? root.job-height : root.job-height + root.question-height)
+                    + (job.not-done == "" ? 0px : root.report-height);
                 JobView {
                     y: 0px;
                     height: parent.height - 4px;
                     job: job;
                     // 다른 입력(이름 입력란, 주소창, 팔레트, 확인 줄, 정보 화면)이 열려 있으면 키보드를 뺏지 않는다.
-                    autofocus: root.editing < 0 && !root.address-editing && !root.palette-open && !root.target-open && !root.confirm-open && !root.show-about;
+                    autofocus: root.editing < 0 && !root.address-editing && !root.palette-open && !root.target-open && !root.confirm-open && !root.show-about && !root.history-open;
                     answer-conflict(choice, rest) => {
                         root.job-answer-conflict(job.id, choice, rest);
                         keys.focus();
@@ -2419,6 +2453,77 @@ export component AppWindow inherits Window {
         }
     }
 
+    // 작업 기록 보기: 창 위에 겹쳐 그리는 읽기 전용 목록. 키보드는 키 입력란에 남아 Esc로 닫는다.
+    if root.history-open: Rectangle {
+        background: #00000040;
+        TouchArea {
+            clicked => {
+                root.history-close();
+                keys.focus();
+            }
+        }
+        Rectangle {
+            y: 48px;
+            width: min(parent.width - 32px, 560px);
+            height: min(parent.height - 96px, 44px + max(root.history-rows.length, 1) * 44px);
+            background: Palette.background;
+            border-width: 1px;
+            border-color: Palette.border;
+            border-radius: 6px;
+            drop-shadow-blur: 8px;
+            drop-shadow-color: #00000060;
+            TouchArea { }
+            Text {
+                x: 14px;
+                y: 8px;
+                height: 28px;
+                text: @tr("작업 기록");
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+            if root.history-rows.length == 0: Text {
+                x: 14px;
+                y: 44px;
+                height: 28px;
+                text: @tr("끝난 작업이 없습니다");
+                vertical-alignment: center;
+                color: Palette.foreground.transparentize(40%);
+            }
+            ListView {
+                x: 0px;
+                y: 40px;
+                width: parent.width;
+                height: parent.height - 44px;
+                for row in root.history-rows: Rectangle {
+                    height: 44px;
+                    VerticalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        padding-top: 4px;
+                        padding-bottom: 4px;
+                        Text {
+                            text: row.name;
+                            overflow: elide;
+                        }
+                        HorizontalLayout {
+                            spacing: 14px;
+                            Text {
+                                text: @tr("끝낸 항목 {} · 건너뛴 항목 {}", row.completed, row.skipped);
+                                color: Palette.foreground.transparentize(40%);
+                            }
+                            Text {
+                                text: row.not-undoable == "" ? @tr("되돌릴 수 있음") : row.not-undoable;
+                                horizontal-stretch: 1;
+                                overflow: elide;
+                                color: row.not-undoable == "" ? Palette.foreground.transparentize(40%) : #c42b1c;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // 정보 화면: Slint 로열티 프리 라이선스의 표시 의무(ADR-0002)로 AboutSlint를 보인다.
     if root.show-about: Rectangle {
         background: #00000080;
@@ -2471,6 +2576,7 @@ export component ProgressWindow inherits Window {
     in property <[JobRow]> jobs;
     out property <length> job-height: 56px;
     out property <length> question-height: 120px;
+    out property <length> report-height: 18px;
     // 사용자가 닫기 단추를 눌렀다: 닫지 않은 까닭을 강조한다.
     in property <bool> close-refused;
 
@@ -2522,7 +2628,8 @@ export component ProgressWindow inherits Window {
             ListView {
                 vertical-stretch: 1;
                 for job in root.jobs: Rectangle {
-                    height: job.ask == JobAsk.none ? root.job-height : root.job-height + root.question-height;
+                    height: (job.ask == JobAsk.none ? root.job-height : root.job-height + root.question-height)
+                        + (job.not-done == "" ? 0px : root.report-height);
                     JobView {
                         y: 0px;
                         height: parent.height - 4px;

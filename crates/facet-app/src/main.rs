@@ -56,6 +56,7 @@ use facet_core::command::{self, CommandId, Key};
 use facet_core::details::{self, Column, Direction};
 use facet_core::edit::{EditError, EditKind, Edited};
 use facet_core::file_list;
+use facet_core::history::UndoError;
 use facet_core::job::{
     ConflictAnswer, CopyRejection, ErrorAnswer, JobId, JobKind, JobState, Remaining,
 };
@@ -84,6 +85,7 @@ use crate::tab_drag::{Frame, Hover, Point, ScreenPoint, Strip, TabDrag, Target};
 use crate::target::{Section, TargetChooser};
 
 mod address;
+mod history_view;
 mod ime;
 mod instance;
 mod keys;
@@ -643,6 +645,7 @@ fn connect(ui: &AppWindow, w: WindowId) {
         ran
     });
     ui.on_palette_close(move || with_view(w, View::close_palette));
+    ui.on_history_close(move || with_view(w, View::close_history));
     ui.on_target_edited(move |text| with_view(w, |view| view.target_edited(&text)));
     ui.on_target_step(move |step| {
         let mut end = -1;
@@ -753,24 +756,26 @@ fn refresh_jobs() {
 /// 작업 영역의 작업들을 진행 표시 모델에 넣는다(보통 창의 작업 영역과 진행 창이 함께 쓴다). 같은 작업들이면 바뀐
 /// 줄만 고쳐 단추 같은 화면 요소를 다시 만들지 않는다. 질문을 기다리는 작업 수를 돌려준다. 앱을 빌리지 못하면
 /// `None`이다.
-fn render_job_rows(app: &RefCell<App>, jobs: &VecModel<JobRow>) -> Option<usize> {
+/// 작업 영역의 줄을 고친다. 질문 대화가 붙은 작업 수와 못 한 항목 줄이 붙은 작업 수를 돌려준다.
+fn render_job_rows(app: &RefCell<App>, jobs: &VecModel<JobRow>) -> Option<(usize, usize)> {
     let rows: Vec<JobRow> = {
         let app = app.try_borrow().ok()?;
         app.work_area().entries().iter().map(job_row).collect()
     };
     let questions = rows.iter().filter(|row| row.ask != JobAsk::None).count();
+    let reports = rows.iter().filter(|row| !row.not_done.is_empty()).count();
     let same =
         jobs.row_count() == rows.len() && jobs.iter().zip(&rows).all(|(old, new)| old.id == new.id);
     if !same {
         jobs.set_vec(rows);
-        return Some(questions);
+        return Some((questions, reports));
     }
     for (i, row) in rows.into_iter().enumerate() {
         if jobs.row_data(i).as_ref() != Some(&row) {
             jobs.set_row_data(i, row);
         }
     }
-    Some(questions)
+    Some((questions, reports))
 }
 
 /// 진행 창: 보통 창이 하나도 없는데 끝나지 않은 작업이 남아 있을 때만 떠 있는 작은 창([`App::shows_progress_window`]).
@@ -934,6 +939,7 @@ fn job_row(entry: &JobEntry) -> JobRow {
         completed: summary.map_or(0, |s| count64(s.items_completed())),
         skipped: summary.map_or(0, |s| count64(s.items_skipped())),
         left: summary.map_or(0, |s| count64(s.items_remaining)),
+        not_done: summary.map(text::not_done_text).unwrap_or_default().into(),
         ask: asked.ask,
         source: asked.source,
         target_item: asked.target,
@@ -1062,8 +1068,9 @@ impl View {
 
     /// 작업 영역을 그린다. 같은 작업들이면 바뀐 줄만 고쳐 단추 같은 화면 요소를 다시 만들지 않는다.
     fn render_jobs(&self) {
-        if let Some(questions) = render_job_rows(&self.app, &self.jobs) {
+        if let Some((questions, reports)) = render_job_rows(&self.app, &self.jobs) {
             self.ui.set_job_questions(count(questions));
+            self.ui.set_job_reports(count(reports));
         }
     }
 
@@ -1610,6 +1617,8 @@ impl View {
     fn execute(&self, command: CommandId) {
         self.remember_scroll();
         let before = self.app.borrow().active_tab_id();
+        // 실행취소·다시 실행은 시작하기 전에 대상 작업의 이름을 정해 둔다(시작하면 대상 기록이 목록에서 빠진다).
+        let reversal = self.reversal_notice(command);
         let execution = self.app.borrow_mut().execute(command);
         // 창이 생기거나 닫혔으면 화면을 맞추고(창이 남지 않았으면 앱을 끝낸다), 다른 창도 다시 그린다(숨김 항목
         // 보이기처럼 앱 전체에 듣는 명령이 있다).
@@ -1654,10 +1663,61 @@ impl View {
                         .set_notice(text::new_folder_error_text(error).into()),
                 }
             }
-            // 실행취소할 수 없는 까닭과 작업 기록 목록을 보이는 것은 앱 티켓이 한다.
-            Execution::UndoRefused(_) | Execution::ShowHistory => {}
-            Execution::Done | Execution::Disabled | Execution::WindowClosed => {}
+            Execution::UndoRefused(UndoError::NotUndoable(_)) | Execution::Done => {
+                if let Some(notice) = reversal.and_then(|(started, refused)| match execution {
+                    Execution::Done => Some(started),
+                    _ => refused,
+                }) {
+                    self.ui.set_notice(notice.into());
+                }
+            }
+            Execution::ShowHistory => self.open_history(),
+            Execution::UndoRefused(_) | Execution::Disabled | Execution::WindowClosed => {}
         }
+    }
+
+    /// 실행취소·다시 실행이면 상태 줄 글자: 시작하면 보일 「〈작업 이름〉 실행취소」와, 마지막 작업이 되돌릴 수 없어
+    /// 거절되면 보일 까닭. 다른 명령이거나 대상이 없으면 `None`.
+    fn reversal_notice(&self, command: CommandId) -> Option<(String, Option<String>)> {
+        let app = self.app.borrow();
+        let history = app.history();
+        match command {
+            CommandId::Undo => history.undo_target().map(|record| {
+                (
+                    text::undo_notice(record),
+                    record
+                        .not_undoable_reason()
+                        .map(|reason| text::undo_refused_text(record, reason)),
+                )
+            }),
+            CommandId::Redo => history
+                .redo_target()
+                .map(|record| (text::redo_notice(record), None)),
+            _ => None,
+        }
+    }
+
+    /// 작업 기록 보기를 연다: 지금 작업 기록의 줄(최근 것부터)을 창 위에 겹쳐 보인다. 열 때의 기록을 보인다.
+    fn open_history(&self) {
+        self.close_rename();
+        self.close_address_edit();
+        let rows: Vec<HistoryRow> = history_view::lines(self.app.borrow().history())
+            .into_iter()
+            .map(|line| HistoryRow {
+                name: line.name.into(),
+                completed: count64(line.completed),
+                skipped: count64(line.skipped),
+                not_undoable: line.not_undoable.unwrap_or_default().into(),
+            })
+            .collect();
+        self.ui
+            .set_history_rows(ModelRc::from(Rc::new(VecModel::from(rows))));
+        self.ui.set_history_open(true);
+    }
+
+    /// 작업 기록 보기를 닫는다.
+    fn close_history(&self) {
+        self.ui.set_history_open(false);
     }
 
     /// 활성 탭이 바뀌었다(탭 바꾸기·열기·닫기, 패널 나누기·합치기): 이름 입력란·주소창 고쳐 쓰기를 닫고, 패널마다

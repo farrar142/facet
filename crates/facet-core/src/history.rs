@@ -126,6 +126,7 @@ pub struct Record {
     kind: OperationKind,
     steps: Vec<Step>,
     not_undoable: Option<NotUndoable>,
+    skipped: u64,
 }
 
 impl Record {
@@ -136,7 +137,15 @@ impl Record {
             kind,
             steps,
             not_undoable: None,
+            skipped: 0,
         }
+    }
+
+    /// 작업이 건너뛴 항목 수를 더한 기록(작업 기록 보기의 결과에 보인다). 건너뛴 항목은 한 일이 없어 항목별 결과
+    /// ([`Step`])에 들지 않는다. 이름바꾸기·새 폴더는 늘 0이다.
+    pub fn with_skipped(mut self, skipped: u64) -> Record {
+        self.skipped = skipped;
+        self
     }
 
     /// 되돌릴 수 없는 기록(영구 삭제 등). 실행취소는 `reason`을 돌려주고 이 앞 기록으로 넘어가지 않는다.
@@ -191,6 +200,16 @@ impl Record {
     /// 되돌릴 수 없으면 그 까닭.
     pub fn not_undoable_reason(&self) -> Option<NotUndoable> {
         self.not_undoable
+    }
+
+    /// 끝낸 항목 수: 항목별 결과의 수.
+    pub fn items_completed(&self) -> u64 {
+        self.steps.len() as u64
+    }
+
+    /// 건너뛴 항목 수([`Record::with_skipped`]).
+    pub fn items_skipped(&self) -> u64 {
+        self.skipped
     }
 
     /// 되돌릴 수 있는가.
@@ -500,5 +519,13 @@ mod tests {
             Err(UndoError::NotUndoable(NotUndoable::PermanentDelete))
         );
         assert_eq!(history.records().len(), 2);
+    }
+
+    #[test]
+    fn 기록은_끝낸_항목과_건너뛴_항목_수를_갖는다() {
+        let record = rename(1);
+        assert_eq!((record.items_completed(), record.items_skipped()), (1, 0));
+        let record = rename(1).with_skipped(3);
+        assert_eq!((record.items_completed(), record.items_skipped()), (1, 3));
     }
 }
