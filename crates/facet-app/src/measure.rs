@@ -1,10 +1,12 @@
 //! 화면 수치 측정용 계측(`cargo xtask measure`가 켠다).
 //!
 //! 환경 변수 [`ENV_OUT`]이 없는 평소 실행에서는 [`install`]이 아무것도 걸지 않고,
-//! [`mark_loaded`]는 원자 변수에 값 하나를 쓸 뿐이다. 그래서 평소 실행 경로의 속도는 달라지지 않는다.
+//! [`mark_loaded`]는 원자 변수 둘에 값을 쓸 뿐이다. 그래서 평소 실행 경로의 속도는 달라지지 않는다.
 //!
 //! 측정 모드에서는 목록이 창에 들어간 뒤 처음 그려진 프레임이 화면에 나갈 때까지의 시간을 재고,
-//! [`ENV_SCROLL_ROWS`]가 있으면 프레임마다 그 수만큼의 행씩 목록 끝까지 스크롤하며
+//! [`ENV_OPEN`]이 있으면 그 뒤 이미 떠 있는 창에서 그 폴더로 이동해(주소창이나 경로 조각으로 갈 때와 같은
+//! 길) 그 목록이 든 첫 프레임이 화면에 나갈 때까지를 잰다(폴더 열기부터 첫 화면까지).
+//! 그렇지 않고 [`ENV_SCROLL_ROWS`]가 있으면 프레임마다 그 수만큼의 행씩 목록 끝까지 스크롤하며
 //! 프레임 사이의 시간을 모은다. 끝나면 결과를 파일에 쓰고 이벤트 루프를 끝낸다.
 //!
 //! 프레임은 렌더러의 그리기 알림이 아니라 winit의 「다시 그려라」 이벤트로 센다. Slint의 winit 백엔드는
@@ -12,33 +14,41 @@
 //! 일을 하나 맡겨 두면, 그 일은 그 프레임을 내보낸 뒤에 돈다. 그리기 알림을 부르지 않는 skia(D3D)나
 //! 그리기 알림이 없는 software 렌더러에서도 femtovg와 같은 구간(내보내고 이벤트 루프로 돌아온 때)을 잰다.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use facet_core::measure::{ENV_OUT, ENV_SCROLL_ROWS, ENV_START_US, ScreenReport};
+use facet_core::Location;
+use facet_core::measure::{ENV_OPEN, ENV_OUT, ENV_SCROLL_ROWS, ENV_START_US, ScreenReport};
 use slint::winit_030::winit::event::WindowEvent;
 use slint::winit_030::{EventResult, WinitWindowAccessor};
 use slint::{ComponentHandle, Model};
 
 use crate::AppWindow;
 
-/// 목록(또는 읽기 오류)이 창에 들어갔는가.
-static LOADED: AtomicBool = AtomicBool::new(false);
+/// 목록(또는 읽기 오류)이 창에 들어간 횟수.
+static LOADS: AtomicUsize = AtomicUsize::new(0);
 
-/// 창에 들어간 항목 수.
+/// 마지막으로 창에 들어간 항목 수.
 static ROWS: AtomicUsize = AtomicUsize::new(0);
 
-/// 목록이 창에 들어갔음을 알린다. 읽기 오류였으면 `rows`는 0이다.
+/// 목록(또는 읽기 오류)이 창에 들어갔음을 알린다. 이동한 위치를 읽을 때마다 부른다.
 pub fn mark_loaded(rows: usize) {
     ROWS.store(rows, Ordering::Relaxed);
-    LOADED.store(true, Ordering::Release);
+    LOADS.fetch_add(1, Ordering::Release);
 }
 
 struct State {
     out: String,
     start_us: u64,
     scroll_rows: usize,
+    /// 첫 화면 뒤에 이동할 폴더.
+    open: Option<PathBuf>,
+    /// 폴더로 이동을 시작한 때.
+    open_started: Option<Instant>,
+    /// 이 횟수보다 많이 목록이 들어온 뒤의 프레임만 센다. 이동한 폴더의 목록을 기다릴 때 쓴다.
+    loads_seen: usize,
     report: ScreenReport,
     last_frame: Option<Instant>,
     /// 그리는 프레임이 있어, 그것을 내보낸 뒤의 시각을 기다리는 중이다.
@@ -82,6 +92,11 @@ pub fn install(ui: &AppWindow) {
         out,
         start_us: env_number(ENV_START_US),
         scroll_rows: env_number(ENV_SCROLL_ROWS) as usize,
+        open: std::env::var_os(ENV_OPEN)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from),
+        open_started: None,
+        loads_seen: 0,
         report: ScreenReport::default(),
         last_frame: None,
         pending: false,
@@ -91,10 +106,11 @@ pub fn install(ui: &AppWindow) {
 
     let weak = ui.as_weak();
     ui.window().on_winit_window_event(move |_, event| {
-        if !matches!(event, WindowEvent::RedrawRequested) || !LOADED.load(Ordering::Acquire) {
+        if !matches!(event, WindowEvent::RedrawRequested) {
             return EventResult::Propagate;
         }
         if let Ok(mut s) = state.lock()
+            && LOADS.load(Ordering::Acquire) > s.loads_seen
             && !s.finished
             && !s.pending
         {
@@ -110,7 +126,8 @@ pub fn install(ui: &AppWindow) {
 
 /// 목록이 든 프레임을 화면에 내보낸 뒤마다 한 번.
 ///
-/// 첫 번째면 첫 화면 시각을 적는다. 스크롤을 잴 거면 앞 프레임과의 간격을 모으고 한 걸음 더 내린다.
+/// 첫 번째면 첫 화면 시각을 적는다. 폴더 열기를 잴 거면 그 폴더로 이동을 시작하고, 이동한 폴더의 목록이
+/// 든 첫 프레임에서 그 시간을 적고 끝낸다. 스크롤을 잴 거면 앞 프레임과의 간격을 모으고 한 걸음 더 내린다.
 /// 스크롤 프레임은 첫 화면 뒤부터 재어, 창이 처음 뜨는 비용이 섞이지 않게 한다.
 fn presented(weak: &slint::Weak<AppWindow>, state: &Mutex<State>) {
     {
@@ -124,10 +141,23 @@ fn presented(weak: &slint::Weak<AppWindow>, state: &Mutex<State>) {
             let elapsed_us = now_us().saturating_sub(s.start_us);
             s.report.first_frame = Some(Duration::from_micros(elapsed_us));
             s.report.rows = ROWS.load(Ordering::Relaxed);
+            if let Some(open) = s.open.clone() {
+                // 이동한 폴더의 목록이 들어오기 전의 프레임(「읽는 중」 등)은 세지 않는다.
+                s.loads_seen = LOADS.load(Ordering::Acquire);
+                s.open_started = Some(Instant::now());
+                drop(s);
+                crate::with_view(|view| view.go(Location::file_system(open)));
+                return;
+            }
             if s.scroll_rows == 0 {
                 s.finish();
                 return;
             }
+        } else if let Some(started) = s.open_started {
+            s.report.open_frame = Some(now - started);
+            s.report.rows = ROWS.load(Ordering::Relaxed);
+            s.finish();
+            return;
         } else if let Some(last) = s.last_frame {
             s.report.frames.push(now - last);
         }

@@ -284,7 +284,7 @@ mod screen {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use facet_bench::screen::{COLD_START_LIMIT, ScreenResult, SystemSpec};
+    use facet_bench::screen::{COLD_START_LIMIT, OPEN_LIMIT, ScreenResult, SystemSpec};
 
     fn ms(n: u64) -> Duration {
         Duration::from_millis(n)
@@ -296,6 +296,7 @@ mod screen {
             item_count: 100_000,
             scroll_rows: 50,
             cold_starts: cold.iter().map(|n| ms(*n)).collect(),
+            opens: vec![ms(100)],
             frames: frames.iter().map(|n| ms(*n)).collect(),
             scroll_runs: 1,
             spec: SystemSpec {
@@ -323,6 +324,75 @@ mod screen {
         );
         assert!(!result(&[200], &[16], Some(60.0)).verdict().cold_pass);
         assert_eq!(COLD_START_LIMIT, ms(200));
+    }
+
+    fn with_opens(mut r: ScreenResult, opens: &[u64]) -> ScreenResult {
+        r.opens = opens.iter().map(|n| ms(*n)).collect();
+        r
+    }
+
+    #[test]
+    fn 폴더_열기_첫_화면은_중앙값이_150ms_미만일_때만_통과한다() {
+        let base = || result(&[100], &[16], Some(60.0));
+        assert!(with_opens(base(), &[90, 140, 600]).verdict().open_pass);
+        assert!(!with_opens(base(), &[90, 160, 170]).verdict().open_pass);
+        assert!(!with_opens(base(), &[150]).verdict().open_pass);
+        assert!(!with_opens(base(), &[]).verdict().open_pass);
+        assert!(!with_opens(base(), &[160]).verdict().pass());
+        assert_eq!(OPEN_LIMIT, ms(150));
+    }
+
+    #[test]
+    fn 콜드_스타트와_폴더_열기의_중앙값과_최악값이_나온다() {
+        let r = with_opens(result(&[120, 100, 180], &[16], Some(60.0)), &[40, 70, 50]);
+        let v = r.verdict();
+        assert_eq!(v.cold_median, ms(120));
+        assert_eq!(v.cold_worst, ms(180));
+        assert_eq!(v.open_median, ms(50));
+        assert_eq!(v.open_worst, ms(70));
+        let t = r.to_table();
+        for want in [
+            "콜드 스타트 중앙값",
+            "콜드 스타트 최악값",
+            "180.0ms",
+            "폴더 열기 첫 화면 중앙값",
+            "폴더 열기 첫 화면 최악값",
+            "50.0ms",
+            "70.0ms",
+            "150ms",
+        ] {
+            assert!(
+                t.contains(want),
+                "{want}가 없다:
+{t}"
+            );
+        }
+        let j = r.to_json();
+        for want in [
+            "\"worst_ms\": 180.000",
+            "\"folder_open\": {",
+            "\"runs_ms\": [40.000, 70.000, 50.000]",
+            "\"median_ms\": 50.000",
+            "\"worst_ms\": 70.000",
+            "\"limit_ms\": 150",
+        ] {
+            assert!(
+                j.contains(want),
+                "{want}가 없다:
+{j}"
+            );
+        }
+    }
+
+    #[test]
+    fn 폴더_열기는_시험_폴더의_상위에서_시작한다() {
+        use facet_bench::screen::open_start;
+        use std::path::Path;
+        assert_eq!(
+            open_start(Path::new(r"C:\Temp\facet-test-folders\items-100000")),
+            Some(PathBuf::from(r"C:\Temp\facet-test-folders"))
+        );
+        assert_eq!(open_start(Path::new(r"C:\")), None);
     }
 
     #[test]

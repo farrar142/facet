@@ -1,4 +1,4 @@
-//! 화면 수치 측정: 앱을 측정 모드로 띄워 콜드 스타트와 스크롤 프레임 시간을 잰다.
+//! 화면 수치 측정: 앱을 측정 모드로 띄워 콜드 스타트, 폴더 열기부터 첫 화면까지, 스크롤 프레임 시간을 잰다.
 //!
 //! 이 수치는 CI가 지키지 않는다. 사람이 자기 기계에서 `cargo xtask measure`로 재어 기록한다
 //! (`docs/roadmap.md`의 「화면 수치는 사람이 잰다」). 앱과 주고받는 약속은
@@ -11,10 +11,14 @@ use std::process::{Command, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use facet_core::measure::{ENV_OUT, ENV_SCROLL_ROWS, ENV_START_US, ScreenReport};
+use facet_core::measure::{ENV_OPEN, ENV_OUT, ENV_SCROLL_ROWS, ENV_START_US, ScreenReport};
 
 /// 콜드 스타트 통과 기준: 중앙값이 이보다 짧아야 한다.
 pub const COLD_START_LIMIT: Duration = Duration::from_millis(200);
+
+/// 「폴더 열기부터 첫 화면까지」 통과 기준: 중앙값이 이보다 짧아야 한다(spec #16).
+/// 이미 떠 있는 창에서 그 폴더로 이동을 시작한 때부터 목록이 든 첫 프레임이 나올 때까지다.
+pub const OPEN_LIMIT: Duration = Duration::from_millis(150);
 
 /// 프레임 시간 통과 기준: 최악값이 한 프레임 시간의 이 배수 이하여야 한다.
 pub const FRAME_WORST_FACTOR: f64 = 2.0;
@@ -38,6 +42,12 @@ pub fn median(values: &[Duration]) -> Duration {
 /// 가장 큰 값. 비었으면 0.
 pub fn worst(values: &[Duration]) -> Duration {
     values.iter().max().copied().unwrap_or_default()
+}
+
+/// 「폴더 열기」를 잴 때 앱을 처음 띄울 폴더: 시험 폴더의 상위. 사용자가 상위 폴더에서
+/// 시험 폴더로 들어가는 것과 같다. 상위가 없으면(드라이브 루트) `None`.
+pub fn open_start(folder: &Path) -> Option<PathBuf> {
+    folder.parent().map(Path::to_path_buf)
 }
 
 /// 측정 기계의 사양. 알아내지 못한 항목은 `None`이다.
@@ -140,6 +150,8 @@ pub struct ScreenResult {
     pub item_count: usize,
     pub scroll_rows: usize,
     pub cold_starts: Vec<Duration>,
+    /// 이미 떠 있는 창에서 폴더로 이동해 첫 화면이 나올 때까지(회차마다 하나).
+    pub opens: Vec<Duration>,
     /// 스크롤하는 동안의 프레임 시간들(스크롤 회차 전체).
     pub frames: Vec<Duration>,
     pub scroll_runs: usize,
@@ -151,7 +163,11 @@ pub struct ScreenResult {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Verdict {
     pub cold_median: Duration,
+    pub cold_worst: Duration,
     pub cold_pass: bool,
+    pub open_median: Duration,
+    pub open_worst: Duration,
+    pub open_pass: bool,
     pub frame_median: Duration,
     pub frame_worst: Duration,
     /// 프레임 최악값의 상한(한 프레임의 두 배).
@@ -165,19 +181,24 @@ pub struct Verdict {
 
 impl Verdict {
     pub fn pass(&self) -> bool {
-        self.cold_pass && self.frame_pass
+        self.cold_pass && self.open_pass && self.frame_pass
     }
 }
 
 impl ScreenResult {
-    /// 통과 기준과 견준다. 프레임이 하나도 없으면 통과하지 못한다.
+    /// 통과 기준과 견준다. 잰 값(콜드 스타트, 폴더 열기, 프레임)이 하나도 없으면 그 항목은 통과하지 못한다.
     pub fn verdict(&self) -> Verdict {
         let cold_median = median(&self.cold_starts);
+        let open_median = median(&self.opens);
         let frame_worst = worst(&self.frames);
         let frame_worst_limit = frame_budget(self.spec.refresh_hz).mul_f64(FRAME_WORST_FACTOR);
         Verdict {
             cold_median,
+            cold_worst: worst(&self.cold_starts),
             cold_pass: !self.cold_starts.is_empty() && cold_median < COLD_START_LIMIT,
+            open_median,
+            open_worst: worst(&self.opens),
+            open_pass: !self.opens.is_empty() && open_median < OPEN_LIMIT,
             frame_median: median(&self.frames),
             frame_worst,
             frame_worst_limit,
@@ -250,6 +271,24 @@ impl ScreenResult {
         );
         let _ = writeln!(
             t,
+            "콜드 스타트 최악값        {:<10}  (참고)",
+            ms(v.cold_worst)
+        );
+        let _ = writeln!(
+            t,
+            "폴더 열기 첫 화면 중앙값 ({}회)  {:<10}  < {}ms                   {}",
+            self.opens.len(),
+            ms(v.open_median),
+            OPEN_LIMIT.as_millis(),
+            mark(v.open_pass)
+        );
+        let _ = writeln!(
+            t,
+            "폴더 열기 첫 화면 최악값  {:<10}  (참고)",
+            ms(v.open_worst)
+        );
+        let _ = writeln!(
+            t,
             "프레임 시간 중앙값        {:<10}  (참고: 한 프레임 {})",
             ms(v.frame_median),
             ms(frame_budget(self.spec.refresh_hz))
@@ -310,8 +349,16 @@ impl ScreenResult {
         let _ = writeln!(j, "  \"cold_start\": {{");
         let _ = writeln!(j, "    \"runs_ms\": [{}],", list(&self.cold_starts));
         let _ = writeln!(j, "    \"median_ms\": {},", ms(v.cold_median));
+        let _ = writeln!(j, "    \"worst_ms\": {},", ms(v.cold_worst));
         let _ = writeln!(j, "    \"limit_ms\": {},", COLD_START_LIMIT.as_millis());
         let _ = writeln!(j, "    \"pass\": {}", v.cold_pass);
+        let _ = writeln!(j, "  }},");
+        let _ = writeln!(j, "  \"folder_open\": {{");
+        let _ = writeln!(j, "    \"runs_ms\": [{}],", list(&self.opens));
+        let _ = writeln!(j, "    \"median_ms\": {},", ms(v.open_median));
+        let _ = writeln!(j, "    \"worst_ms\": {},", ms(v.open_worst));
+        let _ = writeln!(j, "    \"limit_ms\": {},", OPEN_LIMIT.as_millis());
+        let _ = writeln!(j, "    \"pass\": {}", v.open_pass);
         let _ = writeln!(j, "  }},");
         let _ = writeln!(j, "  \"scroll\": {{");
         let _ = writeln!(j, "    \"rows_per_frame\": {},", self.scroll_rows);
@@ -354,9 +401,11 @@ pub fn json_string(s: &str) -> String {
 }
 
 /// 앱을 측정 모드로 한 번 띄워 결과를 받는다. `scroll_rows`가 0이면 첫 화면만 잰다.
+/// `open`을 주면 첫 화면 뒤에 그 폴더로 이동해 첫 화면이 나올 때까지를 잰다(스크롤은 하지 않는다).
 pub fn run_app(
     app: &Path,
     folder: &Path,
+    open: Option<&Path>,
     scroll_rows: usize,
     timeout: Duration,
 ) -> io::Result<ScreenReport> {
@@ -365,13 +414,18 @@ pub fn run_app(
     let start_us = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_micros() as u64);
-    let mut child = Command::new(app)
+    let mut command = Command::new(app);
+    command
         .arg(folder)
         .env(ENV_OUT, &out)
         .env(ENV_START_US, start_us.to_string())
         .env(ENV_SCROLL_ROWS, scroll_rows.to_string())
-        .stdin(Stdio::null())
-        .spawn()?;
+        .env_remove(ENV_OPEN)
+        .stdin(Stdio::null());
+    if let Some(open) = open {
+        command.env(ENV_OPEN, open);
+    }
+    let mut child = command.spawn()?;
     let deadline = Instant::now() + timeout;
     let status = loop {
         if let Some(status) = child.try_wait()? {
@@ -402,7 +456,7 @@ pub struct Plan<'a> {
     pub app: &'a Path,
     pub folder: &'a Path,
     pub item_count: usize,
-    /// 콜드 스타트를 잴 횟수.
+    /// 콜드 스타트와 폴더 열기를 각각 잴 횟수.
     pub runs: usize,
     /// 스크롤을 잴 횟수.
     pub scroll_runs: usize,
@@ -411,7 +465,8 @@ pub struct Plan<'a> {
     pub refresh_hz: Option<f64>,
 }
 
-/// 앱을 `runs`번 띄워 콜드 스타트를, `scroll_runs`번 띄워 스크롤 프레임을 잰다.
+/// 앱을 `runs`번 띄워 콜드 스타트를, 시험 폴더의 상위로 `runs`번 띄워 그 안의 시험 폴더로 이동하는
+/// 폴더 열기를, `scroll_runs`번 띄워 스크롤 프레임을 잰다.
 pub fn measure(plan: &Plan<'_>) -> Result<ScreenResult, String> {
     let check_rows = |r: &ScreenReport| {
         if r.rows == plan.item_count {
@@ -426,17 +481,35 @@ pub fn measure(plan: &Plan<'_>) -> Result<ScreenResult, String> {
     let mut cold_starts = Vec::new();
     for n in 1..=plan.runs {
         eprintln!("콜드 스타트 {n}/{}…", plan.runs);
-        let r = run_app(plan.app, plan.folder, 0, RUN_TIMEOUT).map_err(|e| e.to_string())?;
+        let r = run_app(plan.app, plan.folder, None, 0, RUN_TIMEOUT).map_err(|e| e.to_string())?;
         check_rows(&r)?;
         cold_starts.push(
             r.first_frame
                 .ok_or("앱이 첫 화면 시각을 알리지 않았습니다")?,
         );
     }
+    let folder = std::path::absolute(plan.folder).map_err(|e| e.to_string())?;
+    let start = open_start(&folder).ok_or_else(|| {
+        format!(
+            "{}의 상위 폴더가 없어 폴더 열기를 잴 수 없습니다",
+            folder.display()
+        )
+    })?;
+    let mut opens = Vec::new();
+    for n in 1..=plan.runs {
+        eprintln!("폴더 열기 {n}/{}…", plan.runs);
+        let r =
+            run_app(plan.app, &start, Some(&folder), 0, RUN_TIMEOUT).map_err(|e| e.to_string())?;
+        check_rows(&r)?;
+        opens.push(
+            r.open_frame
+                .ok_or("앱이 폴더 열기 첫 화면 시각을 알리지 않았습니다")?,
+        );
+    }
     let mut frames = Vec::new();
     for n in 1..=plan.scroll_runs {
         eprintln!("스크롤 {n}/{}…", plan.scroll_runs);
-        let r = run_app(plan.app, plan.folder, plan.scroll_rows, RUN_TIMEOUT)
+        let r = run_app(plan.app, plan.folder, None, plan.scroll_rows, RUN_TIMEOUT)
             .map_err(|e| e.to_string())?;
         check_rows(&r)?;
         frames.extend(r.frames);
@@ -450,6 +523,7 @@ pub fn measure(plan: &Plan<'_>) -> Result<ScreenResult, String> {
         item_count: plan.item_count,
         scroll_rows: plan.scroll_rows,
         cold_starts,
+        opens,
         frames,
         scroll_runs: plan.scroll_runs,
         spec,

@@ -6,7 +6,7 @@
 //! - `test-folder`: 시험 폴더를 만든다(`facet-bench make-folder`).
 //! - `bench`: 벤치마크만 돌린다(`facet-bench list`·`facet-bench index`·`facet-bench mft`, 릴리스 빌드).
 //!
-//! - `measure [인자]`: 앱과 측정 도구를 릴리스 빌드해 화면 수치(콜드 스타트·스크롤 프레임)를 잰다.
+//! - `measure [인자]`: 앱과 측정 도구를 릴리스 빌드해 화면 수치(콜드 스타트·폴더 열기 첫 화면·스크롤 프레임)를 잰다.
 //! - `mft-fixture`: 시험 VHD에서 MFT 조각과 기대값 목록을 만든다(`mft_fixture` 모듈, 관리자).
 //! - `dist <label>`: release 빌드한 facet을 portable zip과 체크섬으로 묶는다(`dist` 모듈).
 //! - `indexer <install|uninstall>`: 인덱서 서비스를 release로 빌드해 개발 기계에 설치하거나 지운다(관리자).
@@ -35,8 +35,8 @@ const USAGE: &str = "\
                                  합성 인덱스 100만 개의 메모리와 부분 일치 질의를 재고, MFT 조각을
                                  되풀이한 레코드 100만 개를 인덱스로 만드는 시간을 잰다(릴리스 빌드)
   measure [--count N] [--runs N] [--scroll-runs N] [--scroll-rows N] [--refresh-hz N] [--json 파일] [경로]
-                                 앱을 릴리스 빌드하고 시험 폴더(기본 10만 항목)를 열어 콜드 스타트 중앙값과
-                                 스크롤 프레임 시간을 잰다. 표와 JSON(기본 target/measure.json)을 내고,
+                                 앱을 릴리스 빌드하고 시험 폴더(기본 10만 항목)를 열어 콜드 스타트, 떠 있는 창에서
+                                 그 폴더로 이동한 폴더 열기 첫 화면(중앙값·최악값), 스크롤 프레임 시간을 잰다. 표와 JSON(기본 target/measure.json)을 내고,
                                  통과 기준을 못 맞추면 실패한다. CI는 부르지 않는다(사람이 잰다)
   mft-fixture                    (관리자) 시험 VHD에 정해진 항목을 만들고 MFT를 떠서
                                  testdata/mft/에 조각과 기대값 목록을 쓴다
