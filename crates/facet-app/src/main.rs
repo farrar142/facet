@@ -47,7 +47,9 @@ use std::time::{Duration, Instant};
 use facet_core::command::{self, CommandId, Key};
 use facet_core::details::{self, Column, Direction};
 use facet_core::file_list;
-use facet_core::job::{CopyRejection, JobId, JobKind, JobState, Remaining};
+use facet_core::job::{
+    ConflictAnswer, CopyRejection, ErrorAnswer, JobId, JobKind, JobState, Remaining,
+};
 use facet_core::launch::{LaunchTarget, resolve_launch};
 use facet_core::name_input::NameInput;
 use facet_core::placement::{self, Monitor, Rect, WindowState};
@@ -76,6 +78,7 @@ mod instance;
 mod keys;
 mod measure;
 mod palette;
+mod question;
 mod tab_drag;
 mod text;
 
@@ -605,6 +608,15 @@ fn connect(ui: &AppWindow, w: WindowId) {
     ui.on_job_cancel(move |id| job_action(id, JobAction::Cancel));
     ui.on_job_start_now(move |id| job_action(id, JobAction::StartNow));
     ui.on_job_dismiss(move |id| job_action(id, JobAction::Dismiss));
+    ui.on_job_answer_conflict(move |id, choice, rest| {
+        job_action(
+            id,
+            JobAction::AnswerConflict(question::conflict_answer(choice, rest)),
+        );
+    });
+    ui.on_job_answer_error(move |id, choice| {
+        job_action(id, JobAction::AnswerError(question::error_answer(choice)));
+    });
 }
 
 /// 진행 표시의 단추.
@@ -615,6 +627,9 @@ enum JobAction {
     Cancel,
     StartNow,
     Dismiss,
+    /// 질문 대화의 답. 다른 창에서 먼저 답했으면 코어가 받지 않는다(한 번만 적용).
+    AnswerConflict(ConflictAnswer),
+    AnswerError(ErrorAnswer),
 }
 
 /// 진행 표시의 단추를 눌렀다: 화면에 넘긴 작업 번호로 작업을 찾아 코어의 작업 대기열을 부르고, 모든 창의 작업 영역을
@@ -650,6 +665,13 @@ fn job_action(id: i32, action: JobAction) {
             JobAction::Dismiss => {
                 app.dismiss_job(job);
             }
+            // 이미 답한 질문(다른 창)이나 고를 수 없는 답이면 받지 않고 질문이 그대로 남는다.
+            JobAction::AnswerConflict(answer) => {
+                let _ = app.answer_conflict(job, answer);
+            }
+            JobAction::AnswerError(answer) => {
+                let _ = app.answer_error(job, answer);
+            }
         }
     }
     refresh_jobs();
@@ -681,6 +703,7 @@ fn count64(n: u64) -> i32 {
 fn job_row(entry: &JobEntry) -> JobRow {
     let progress = entry.progress.as_ref();
     let summary = entry.summary.as_ref();
+    let asked = question::view(entry.question.as_ref());
     let remaining = match progress.map(|p| p.remaining) {
         Some(Remaining::Known(left)) => text::remaining_text(left),
         Some(Remaining::Calculating) | None => String::new(),
@@ -720,6 +743,15 @@ fn job_row(entry: &JobEntry) -> JobRow {
         completed: summary.map_or(0, |s| count64(s.items_completed())),
         skipped: summary.map_or(0, |s| count64(s.items_skipped())),
         left: summary.map_or(0, |s| count64(s.items_remaining)),
+        ask: asked.ask,
+        source: asked.source,
+        target_item: asked.target,
+        newer: asked.newer,
+        larger: asked.larger,
+        can_overwrite: asked.can_overwrite,
+        overwrite_permanent: asked.overwrite_permanent,
+        error_path: asked.error_path.into(),
+        error_reason: asked.error_reason,
     }
 }
 
@@ -834,6 +866,8 @@ impl View {
             };
             app.work_area().entries().iter().map(job_row).collect()
         };
+        let questions = rows.iter().filter(|row| row.ask != JobAsk::None).count();
+        self.ui.set_job_questions(count(questions));
         let same = self.jobs.row_count() == rows.len()
             && self
                 .jobs

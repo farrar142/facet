@@ -86,6 +86,28 @@ export struct PanelData {
 // 작업의 상태(코어의 `JobState`). 문장은 화면이 `@tr()`로 만든다.
 export enum JobStatus { queued, running, paused, awaiting-answer, finished, failed, cancelled }
 
+// 답을 기다리는 질문의 종류.
+export enum JobAsk { none, conflict, error }
+
+// 이름 충돌의 한 쪽 항목. 크기·수정 시각 글자는 자세히 보기와 같은 서식으로 Rust가 만든다(폴더면 크기는 비어 있다,
+// 시각을 읽지 못했으면 비어 있다).
+export struct ConflictSide {
+    path: string,
+    folder: bool,
+    size: string,
+    modified: string,
+}
+
+// 두 항목의 비교: 모름(값이 없거나 폴더), 같음, 원본 쪽, 대상 쪽.
+export enum Compare { unknown, same, source, target }
+
+// 항목별 오류의 까닭(코어의 `FileOpErrorKind`). 문장은 화면이 `@tr()`로 만든다.
+export enum ErrorReason { locked, access-denied, disk-full, source-missing, other }
+
+// 이름 충돌·항목별 오류 질문의 답.
+export enum ConflictChoice { overwrite, overwrite-if-newer, keep-both, skip }
+export enum ErrorChoice { retry, skip, skip-all, cancel-job }
+
 // 작업 영역의 작업 하나: **진행 표시**에 그릴 값. 수치 글자(바이트·속도·남은 시간)는 Rust가 만든다.
 export struct JobRow {
     // 작업 번호(단추를 누르면 Rust에 돌려준다).
@@ -114,6 +136,18 @@ export struct JobRow {
     completed: int,
     skipped: int,
     left: int,
+    // 답을 기다리는 질문(코어의 `JobQuestion`). 있으면 진행 표시 아래에 질문 대화가 붙는다.
+    ask: JobAsk,
+    // 이름 충돌: 두 항목, 어느 쪽이 더 새것·더 큰지, 덮어쓰기를 고를 수 있는지, 덮어쓰면 되살릴 수 없는지.
+    source: ConflictSide,
+    target-item: ConflictSide,
+    newer: Compare,
+    larger: Compare,
+    can-overwrite: bool,
+    overwrite-permanent: bool,
+    // 항목별 오류: 원본 경로와 까닭.
+    error-path: string,
+    error-reason: ErrorReason,
 }
 
 // 복사·이동 확인 줄에서 시작 전에 막힌 까닭(코어의 `CopyRejection`). 문장은 화면이 `@tr()`로 만든다.
@@ -146,6 +180,371 @@ component SmallButton inherits Rectangle {
     }
 }
 
+// 질문 대화의 선택지 단추. 키보드로 고른 선택지(`current`)는 강조 테두리로 드러난다. 꺼져 있으면 흐리고 눌리지 않는다.
+component ChoiceButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <bool> current;
+    callback clicked();
+    width: label.preferred-width + 20px;
+    height: 24px;
+    border-radius: 3px;
+    border-width: root.current ? 2px : 1px;
+    border-color: root.current ? Palette.accent-background : Palette.border;
+    background: !root.enabled ? Palette.alternate-background
+        : touch.pressed ? Palette.selection-background
+        : touch.has-hover ? Palette.alternate-background : Palette.control-background;
+    label := Text {
+        text: root.text;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        color: root.enabled ? Palette.foreground : Palette.foreground.transparentize(65%);
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// 질문 대화의 확인란(「나머지에도 적용」 등).
+component ChoiceCheck inherits Rectangle {
+    in property <string> text;
+    in property <bool> checked;
+    in property <bool> current;
+    callback toggled();
+    width: box.width + label.preferred-width + 14px;
+    height: 24px;
+    border-radius: 3px;
+    border-width: root.current ? 2px : 0px;
+    border-color: Palette.accent-background;
+    box := Rectangle {
+        x: 4px;
+        width: 14px;
+        height: 14px;
+        border-radius: 2px;
+        border-width: 1px;
+        border-color: root.checked ? Palette.accent-background : Palette.border;
+        background: root.checked ? Palette.accent-background : Palette.control-background;
+        Text {
+            text: root.checked ? "✓" : "";
+            color: Palette.accent-foreground;
+            font-size: 10px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    label := Text {
+        x: box.x + box.width + 6px;
+        text: root.text;
+        vertical-alignment: center;
+        color: Palette.foreground;
+    }
+    TouchArea {
+        clicked => {
+            root.toggled();
+        }
+    }
+}
+
+// 질문 대화의 키보드 도움말.
+component QuestionHint inherits Text {
+    text: @tr("Tab·←→로 고르고 Enter, Esc는 목록으로");
+    horizontal-stretch: 1;
+    horizontal-alignment: right;
+    vertical-alignment: center;
+    overflow: elide;
+    color: Palette.foreground.transparentize(45%);
+}
+
+// **이름 충돌 질문 대화**: 원본과 대상의 경로·크기·수정 시각을 나란히 보이고(더 새것·더 큰 쪽을 드러냄) 덮어쓰기·더 새것만
+// 덮어쓰기·둘 다 유지·건너뛰기와 「나머지에도 적용」으로 답한다. 덮어쓰기 선택지 위에 되살릴 수 없다는 경고가 늘 보인다.
+// 파일과 폴더가 부딪히면 덮어쓰기 계열은 꺼져 있다.
+//
+// 키보드: 대화에 포커스가 있으면 Tab·Shift+Tab·←→로 선택지를 고르고 Enter·Space로 누른다. Esc는 아무 답도 하지 않고
+// 목록으로 키보드를 돌린다(`leave`). 처음 고른 선택지는 잃는 것이 없는 「건너뛰기」다.
+component ConflictQuestion inherits FocusScope {
+    in property <JobRow> job;
+    // 생길 때 키보드 포커스를 가져갈지(다른 입력란이 열려 있지 않을 때).
+    in property <bool> autofocus;
+    callback answer(ConflictChoice, bool);
+    callback leave();
+    // 「나머지에도 적용」.
+    in-out property <bool> rest;
+    // 키보드로 고른 선택지: 0 덮어쓰기, 1 더 새것만 덮어쓰기, 2 둘 다 유지, 3 건너뛰기, 4 나머지에도 적용.
+    in-out property <int> choice: 3;
+
+    function usable(i: int) -> bool {
+        return i >= 2 || root.job.can-overwrite;
+    }
+    // 꺼진 선택지(0·1)를 건너뛰며 `d` 방향으로 하나 옮긴다.
+    function step(d: int) {
+        let a = Math.mod(root.choice + d + 5, 5);
+        let b = root.usable(a) ? a : Math.mod(a + d + 5, 5);
+        root.choice = root.usable(b) ? b : Math.mod(b + d + 5, 5);
+    }
+    function press(i: int) {
+        if (i == 4) {
+            root.rest = !root.rest;
+        } else if (root.usable(i)) {
+            root.answer(
+                i == 0 ? ConflictChoice.overwrite
+                    : i == 1 ? ConflictChoice.overwrite-if-newer
+                    : i == 2 ? ConflictChoice.keep-both : ConflictChoice.skip,
+                root.rest);
+        }
+    }
+
+    init => {
+        if (root.autofocus) {
+            self.focus();
+        }
+    }
+    key-pressed(event) => {
+        if (event.text == Key.Escape) {
+            root.leave();
+        } else if (event.text == Key.Backtab || event.text == Key.LeftArrow
+            || (event.text == Key.Tab && event.modifiers.shift)) {
+            root.step(-1);
+        } else if (event.text == Key.Tab || event.text == Key.RightArrow) {
+            root.step(1);
+        } else if (event.text == Key.Return || event.text == " ") {
+            root.press(root.choice);
+        }
+        accept
+    }
+
+    Rectangle {
+        border-width: 1px;
+        border-radius: 3px;
+        border-color: root.has-focus ? Palette.accent-background : #c42b1c;
+        background: #fde7e9.transparentize(40%);
+        TouchArea {
+            clicked => {
+                root.focus();
+            }
+        }
+        VerticalLayout {
+            padding: 6px;
+            spacing: 3px;
+            Text {
+                text: root.job.can-overwrite ? @tr("이름 충돌: 대상 폴더에 같은 이름의 항목이 있습니다")
+                    : @tr("이름 충돌: 같은 이름의 파일과 폴더가 부딪힙니다(덮어쓸 수 없습니다)");
+                font-weight: 700;
+                overflow: elide;
+            }
+            GridLayout {
+                spacing-horizontal: 12px;
+                spacing-vertical: 1px;
+                Row {
+                    Text {
+                        text: @tr("원본");
+                        color: Palette.foreground.transparentize(30%);
+                    }
+                    Text {
+                        text: root.job.source.path;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: root.job.source.folder ? @tr("폴더") : root.job.source.size;
+                        horizontal-alignment: right;
+                        font-weight: root.job.larger == Compare.source ? 700 : 400;
+                    }
+                    Text {
+                        text: root.job.source.modified;
+                        font-weight: root.job.newer == Compare.source ? 700 : 400;
+                    }
+                    Text {
+                        text: root.job.newer == Compare.source && root.job.larger == Compare.source ? @tr("더 새것 · 더 큼")
+                            : root.job.newer == Compare.source ? @tr("더 새것")
+                            : root.job.larger == Compare.source ? @tr("더 큼") : "";
+                        color: Palette.accent-background;
+                    }
+                }
+                Row {
+                    Text {
+                        text: @tr("대상");
+                        color: Palette.foreground.transparentize(30%);
+                    }
+                    Text {
+                        text: root.job.target-item.path;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: root.job.target-item.folder ? @tr("폴더") : root.job.target-item.size;
+                        horizontal-alignment: right;
+                        font-weight: root.job.larger == Compare.target ? 700 : 400;
+                    }
+                    Text {
+                        text: root.job.target-item.modified;
+                        font-weight: root.job.newer == Compare.target ? 700 : 400;
+                    }
+                    Text {
+                        text: root.job.newer == Compare.target && root.job.larger == Compare.target ? @tr("더 새것 · 더 큼")
+                            : root.job.newer == Compare.target ? @tr("더 새것")
+                            : root.job.larger == Compare.target ? @tr("더 큼") : "";
+                        color: Palette.accent-background;
+                    }
+                }
+            }
+            Text {
+                text: !root.job.can-overwrite ? @tr("파일과 폴더는 서로 덮어쓸 수 없습니다. 둘 다 유지나 건너뛰기로 답하세요")
+                    : root.job.overwrite-permanent ? @tr("덮어쓰기: 덮어쓴 대상 파일은 되살릴 수 없습니다(영구 삭제)")
+                    : "";
+                color: #c42b1c;
+                overflow: elide;
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                ChoiceButton {
+                    text: @tr("덮어쓰기");
+                    enabled: root.job.can-overwrite;
+                    current: root.has-focus && root.choice == 0;
+                    clicked => {
+                        root.press(0);
+                    }
+                }
+                ChoiceButton {
+                    text: @tr("더 새것만 덮어쓰기");
+                    enabled: root.job.can-overwrite;
+                    current: root.has-focus && root.choice == 1;
+                    clicked => {
+                        root.press(1);
+                    }
+                }
+                ChoiceButton {
+                    text: @tr("둘 다 유지");
+                    current: root.has-focus && root.choice == 2;
+                    clicked => {
+                        root.press(2);
+                    }
+                }
+                ChoiceButton {
+                    text: @tr("건너뛰기");
+                    current: root.has-focus && root.choice == 3;
+                    clicked => {
+                        root.press(3);
+                    }
+                }
+                ChoiceCheck {
+                    text: @tr("나머지에도 적용");
+                    checked: root.rest;
+                    current: root.has-focus && root.choice == 4;
+                    toggled => {
+                        root.rest = !root.rest;
+                        root.focus();
+                    }
+                }
+                QuestionHint { }
+            }
+        }
+    }
+}
+
+// **항목별 오류 질문 대화**: 항목별 오류의 원본 경로와 까닭(디스크 가득 참이면 공간을 비운 뒤 다시 시도하라는 안내)을 보이고 다시
+// 시도·건너뛰기·나머지 오류도 건너뛰기·작업 취소로 답한다. 키보드는 이름 충돌 질문 대화와 같다. 처음 고른 선택지는 「다시
+// 시도」다.
+component ErrorQuestion inherits FocusScope {
+    in property <JobRow> job;
+    in property <bool> autofocus;
+    callback answer(ErrorChoice);
+    callback leave();
+    // 키보드로 고른 선택지: 0 다시 시도, 1 건너뛰기, 2 나머지 오류도 건너뛰기, 3 작업 취소.
+    in-out property <int> choice: 0;
+
+    function press(i: int) {
+        root.answer(i == 0 ? ErrorChoice.retry : i == 1 ? ErrorChoice.skip : i == 2 ? ErrorChoice.skip-all : ErrorChoice.cancel-job);
+    }
+
+    init => {
+        if (root.autofocus) {
+            self.focus();
+        }
+    }
+    key-pressed(event) => {
+        if (event.text == Key.Escape) {
+            root.leave();
+        } else if (event.text == Key.Backtab || event.text == Key.LeftArrow
+            || (event.text == Key.Tab && event.modifiers.shift)) {
+            root.choice = Math.mod(root.choice + 3, 4);
+        } else if (event.text == Key.Tab || event.text == Key.RightArrow) {
+            root.choice = Math.mod(root.choice + 1, 4);
+        } else if (event.text == Key.Return || event.text == " ") {
+            root.press(root.choice);
+        }
+        accept
+    }
+
+    Rectangle {
+        border-width: 1px;
+        border-radius: 3px;
+        border-color: root.has-focus ? Palette.accent-background : #c42b1c;
+        background: #fde7e9.transparentize(40%);
+        TouchArea {
+            clicked => {
+                root.focus();
+            }
+        }
+        VerticalLayout {
+            padding: 6px;
+            spacing: 3px;
+            Text {
+                text: root.job.error-reason == ErrorReason.locked ? @tr("오류: 다른 프로그램이 이 항목을 쓰고 있습니다(잠김)")
+                    : root.job.error-reason == ErrorReason.access-denied ? @tr("오류: 접근이 거부되었습니다")
+                    : root.job.error-reason == ErrorReason.disk-full ? @tr("오류: 디스크가 가득 찼습니다")
+                    : root.job.error-reason == ErrorReason.source-missing ? @tr("오류: 원본이 없습니다")
+                    : @tr("오류: 이 항목을 처리하지 못했습니다");
+                font-weight: 700;
+                overflow: elide;
+            }
+            Text {
+                text: root.job.error-path;
+                overflow: elide;
+            }
+            Text {
+                text: root.job.error-reason == ErrorReason.disk-full ? @tr("공간을 비운 뒤 다시 시도하면 이 항목부터 이어 갑니다") : "";
+                color: Palette.foreground.transparentize(30%);
+                overflow: elide;
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                ChoiceButton {
+                    text: @tr("다시 시도");
+                    current: root.has-focus && root.choice == 0;
+                    clicked => {
+                        root.press(0);
+                    }
+                }
+                ChoiceButton {
+                    text: @tr("건너뛰기");
+                    current: root.has-focus && root.choice == 1;
+                    clicked => {
+                        root.press(1);
+                    }
+                }
+                ChoiceButton {
+                    text: @tr("나머지 오류도 건너뛰기");
+                    current: root.has-focus && root.choice == 2;
+                    clicked => {
+                        root.press(2);
+                    }
+                }
+                ChoiceButton {
+                    text: @tr("작업 취소");
+                    current: root.has-focus && root.choice == 3;
+                    clicked => {
+                        root.press(3);
+                    }
+                }
+                QuestionHint { }
+            }
+        }
+    }
+}
+
 // **진행 표시**: 작업 영역의 작업 하나. 종류·대상·상태와 단추, 그 아래 항목 수·바이트·속도·남은 시간·지금 파일,
 // 끝났으면 결과(끝낸·건너뛴·남은 항목 수).
 component JobView inherits Rectangle {
@@ -155,6 +554,11 @@ component JobView inherits Rectangle {
     callback cancel();
     callback start-now();
     callback dismiss();
+    // 질문 대화: 생길 때 포커스를 가져갈지, 답, Esc.
+    in property <bool> autofocus;
+    callback answer-conflict(ConflictChoice, bool);
+    callback answer-error(ErrorChoice);
+    callback leave();
 
     border-width: 1px;
     border-radius: 4px;
@@ -248,6 +652,28 @@ component JobView inherits Rectangle {
             text: @tr("끝낸 항목 {} · 건너뛴 항목 {} · 남은 항목 {}", root.job.completed, root.job.skipped, root.job.left);
             overflow: elide;
             color: Palette.foreground.transparentize(30%);
+        }
+        if root.job.ask == JobAsk.conflict: ConflictQuestion {
+            vertical-stretch: 1;
+            job: root.job;
+            autofocus: root.autofocus;
+            answer(choice, rest) => {
+                root.answer-conflict(choice, rest);
+            }
+            leave => {
+                root.leave();
+            }
+        }
+        if root.job.ask == JobAsk.error: ErrorQuestion {
+            vertical-stretch: 1;
+            job: root.job;
+            autofocus: root.autofocus;
+            answer(choice) => {
+                root.answer-error(choice);
+            }
+            leave => {
+                root.leave();
+            }
         }
     }
 }
@@ -1027,7 +1453,13 @@ export component AppWindow inherits Window {
     // 작업 영역: 작업 대기열의 작업들(모든 창에 같은 것). 작업이 없으면 자리를 차지하지 않는다.
     in property <[JobRow]> jobs;
     out property <length> job-height: 56px;
-    property <length> work-height: root.jobs.length == 0 ? 0px : min(root.jobs.length, 3) * root.job-height + 4px;
+    // 질문 대화가 붙은 진행 표시가 더 차지하는 높이와, 질문을 기다리는 작업 수(Rust가 넣는다).
+    out property <length> question-height: 120px;
+    in property <int> job-questions;
+    // 작업 영역의 높이: 진행 표시 세 개(질문 대화는 두 개)까지 보이고 넘으면 넘겨 본다.
+    property <length> work-height: root.jobs.length == 0 ? 0px
+        : min(root.jobs.length * root.job-height + root.job-questions * root.question-height,
+            min(root.jobs.length, 3) * root.job-height + min(root.job-questions, 2) * root.question-height) + 4px;
     // 반대편 패널로 복사·이동의 확인 줄: 열려 있는가, 이동인가, 대상 폴더, 항목 수, 시작 전에 막힌 까닭과 그 경로.
     in property <bool> confirm-open;
     in property <bool> confirm-moving;
@@ -1111,6 +1543,9 @@ export component AppWindow inherits Window {
     callback job-cancel(int);
     callback job-start-now(int);
     callback job-dismiss(int);
+    // 질문 대화의 답: 작업 번호와 답(이름 충돌은 「나머지에도 적용」도). 어느 창에서 답해도 한 번만 적용된다.
+    callback job-answer-conflict(int, ConflictChoice, bool);
+    callback job-answer-error(int, ErrorChoice);
 
     forward-focus: keys;
 
@@ -1517,11 +1952,24 @@ export component AppWindow inherits Window {
         height: root.work-height - 4px;
         ListView {
             for job in root.jobs: Rectangle {
-                height: root.job-height;
+                height: job.ask == JobAsk.none ? root.job-height : root.job-height + root.question-height;
                 JobView {
                     y: 0px;
-                    height: root.job-height - 4px;
+                    height: parent.height - 4px;
                     job: job;
+                    // 다른 입력(이름 입력란, 주소창, 팔레트, 확인 줄, 정보 화면)이 열려 있으면 키보드를 뺏지 않는다.
+                    autofocus: root.editing < 0 && !root.address-editing && !root.palette-open && !root.confirm-open && !root.show-about;
+                    answer-conflict(choice, rest) => {
+                        root.job-answer-conflict(job.id, choice, rest);
+                        keys.focus();
+                    }
+                    answer-error(choice) => {
+                        root.job-answer-error(job.id, choice);
+                        keys.focus();
+                    }
+                    leave => {
+                        keys.focus();
+                    }
                     pause => {
                         root.job-pause(job.id);
                         keys.focus();
