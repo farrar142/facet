@@ -10,6 +10,8 @@
 //!   ([`App::restore`]). 파일이 없으면 기본 창으로, 깨졌으면 기본 창으로 뜨고 첫 창 위에 그 사실과 남긴 파일 자리를
 //!   보인다. 상태가 바뀌면 코어의 [`Saver`]에 넘기고(디스크는 일꾼 스레드가 2초를 묶어 쓴다), 끝낼 때 한 번 더 쓴다.
 //!   측정 모드는 `FACET_SESSION_PATH`가 없으면 세션 파일을 읽지도 쓰지도 않는다.
+//!   창을 옮기거나 크기를 바꾸거나 최대화하면 그 자리를 코어 창에 알려 세션에 남기고, 되살린 창은 그 자리·크기로
+//!   띄워 최대화를 되살린다. 놓였던 모니터가 없으면 주 모니터 안으로 옮긴다([`facet_core::placement::fit`]).
 //! - 실행 인자로 받은 경로마다 탭 하나를 연다: 되살린 세션이 있으면 마지막 활성 창의 활성 패널에 더하고, 없으면 그
 //!   탭들로(없으면 사용자 홈 폴더) 창을 연다. 해석은 코어가 한다
 //!   ([`facet_core::launch::resolve_launch`], 상대 경로는 작업 폴더 기준).
@@ -32,7 +34,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -41,6 +43,7 @@ use facet_core::details::{self, Column, Direction};
 use facet_core::file_list;
 use facet_core::launch::{LaunchTarget, resolve_launch};
 use facet_core::name_input::NameInput;
+use facet_core::placement::{self, Monitor, Rect, WindowState};
 use facet_core::selection::{CursorMove, Pick};
 use facet_core::session::{self, Loaded, SAVE_DELAY, Saver};
 use facet_core::tab::{AutoRefresh, Navigation, ReadOutcome, Relocation, Tab};
@@ -112,6 +115,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
     let first = app.borrow().active_window_id();
     let view = open_view(&app, first, true)?;
+    restore_placement(&view);
     if let Some(kept) = broken {
         view.ui.set_session_broken(true);
         let kept = kept.map(|path| path.display().to_string());
@@ -193,6 +197,84 @@ struct Placement {
     size: PhysicalSize,
 }
 
+/// 되살린 창을 세션에 남은 자리에 놓는다(띄우기 전에 부른다). 지금 모니터들에서 보이지 않는 자리면 주 모니터
+/// 안으로 고친다([`placement::fit`]). 최대화한 창은 보통 자리에 놓고 최대화한다: 그 모니터에서 최대화되고, 최대화를
+/// 풀면 보통 자리로 돌아간다. 자리를 모르는 창(새 창)은 Windows가 정한 자리에 뜬다.
+///
+/// 자리와 크기는 물리 픽셀이다(좌표 단위는 [`facet_core::placement`]). Slint는 물리 크기를 그대로 winit에 넘기고,
+/// 배율이 다른 모니터로 옮겨지며 배율이 바뀌어도 그 물리 크기를 지킨다.
+fn restore_placement(view: &View) {
+    let Some(saved) = view
+        .app
+        .borrow()
+        .window(view.window)
+        .and_then(|window| window.placement())
+    else {
+        return;
+    };
+    let rect = placement::fit(saved.normal, &monitors());
+    let window = view.ui.window();
+    window.set_size(PhysicalSize::new(rect.width, rect.height));
+    window.set_position(PhysicalPosition::new(rect.x, rect.y));
+    if saved.maximized {
+        window.set_maximized(true);
+    }
+}
+
+/// 지금 붙어 있는 모니터들의 작업 영역(Windows 호출은 `facet_win`에 있다).
+fn monitors() -> Vec<Monitor> {
+    facet_win::monitors()
+        .into_iter()
+        .filter_map(|m| {
+            let width = u32::try_from(m.right.checked_sub(m.left)?).ok()?;
+            let height = u32::try_from(m.bottom.checked_sub(m.top)?).ok()?;
+            Some(Monitor {
+                work_area: Rect::new(m.left, m.top, width, height),
+                primary: m.primary,
+            })
+        })
+        .collect()
+}
+
+/// 창 `window`의 지금 자리를 코어에 알리고 세션 저장에 넘긴다. 최대화한 창은 최대화를 풀었을 때의 자리를 그대로
+/// 두고, 최소화한 창의 자리는 남기지 않는다([`placement::Placement::observe`]).
+fn note_placement(window: WindowId) {
+    let Some(view) = view_of(window) else { return };
+    let Some((rect, state)) = view
+        .ui
+        .window()
+        .with_winit_window(|winit| {
+            let position = winit.outer_position().ok()?;
+            let size = winit.inner_size();
+            let state = if winit.is_minimized() == Some(true) {
+                WindowState::Minimized
+            } else if winit.is_maximized() {
+                WindowState::Maximized
+            } else {
+                WindowState::Normal
+            };
+            Some((
+                Rect::new(position.x, position.y, size.width, size.height),
+                state,
+            ))
+        })
+        .flatten()
+    else {
+        return;
+    };
+    {
+        let Ok(mut app) = view.app.try_borrow_mut() else {
+            return;
+        };
+        let Some(core) = app.window_mut(window) else {
+            return;
+        };
+        let placement = placement::Placement::observe(core.placement(), rect, state);
+        core.set_placement(placement);
+    }
+    save_session();
+}
+
 /// 열린 창의 화면 상태들. 부르는 동안 목록을 빌려 두지 않도록 복사해 준다.
 fn views() -> Vec<Rc<View>> {
     VIEWS.with(|slot| slot.borrow().clone())
@@ -219,6 +301,9 @@ fn open_view(
         None
     };
     let hook_app = Rc::downgrade(app);
+    // 창을 옮기거나 크기를 바꾸면(최대화·최소화 포함) 이벤트를 다 처리한 뒤 그 자리를 코어에 알린다. 끄는 동안 이벤트가
+    // 잇달아 와도 한 번만 맡긴다.
+    let placement_pending = Rc::new(Cell::new(false));
     ui.window().on_winit_window_event(move |_, event| {
         keys::note_window_event(event);
         if let WindowEvent::Focused(true) = event
@@ -226,6 +311,15 @@ fn open_view(
             && let Ok(mut app) = app.try_borrow_mut()
         {
             app.activate_window(window);
+        }
+        if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_))
+            && !placement_pending.replace(true)
+        {
+            let pending = Rc::clone(&placement_pending);
+            Timer::single_shot(Duration::ZERO, move || {
+                pending.set(false);
+                note_placement(window);
+            });
         }
         if let Some(frames) = frames.as_mut() {
             frames(event);
@@ -332,6 +426,8 @@ fn sync_windows() {
                         placement.origin.x.round() as i32,
                         placement.origin.y.round() as i32,
                     ));
+                } else {
+                    restore_placement(&view);
                 }
                 let _ = view.ui.show();
             }
