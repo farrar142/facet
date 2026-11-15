@@ -16,6 +16,8 @@
 //! - [`file_ops`]: 복사·이동 엔진의 파일 하나·이름 하나 단위 연산. 파일 복사(`CopyFile2`, 진행·멈춤·취소, 시각·속성·
 //!   대체 데이터 스트림 보존), 폴더 만들기·시각·속성 맞추기, 같은 볼륨 이름 바꾸기, 바꿔치기, 지우기, 파일 ID, 오류
 //!   종류. Windows가 아니면 「지원하지 않음」이다.
+//! - [`shell_copy`]: **측정 전용** 셸 복사(`IFileOperation`, 전용 스레드의 COM, 대화 없음). 탐색기 비교 측정만 부르고
+//!   앱은 부르지 않는다. Windows가 아니면 「지원하지 않음」이다.
 
 use std::fmt;
 use std::io;
@@ -24,6 +26,7 @@ use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 
 pub mod file_ops;
+pub mod shell_copy;
 pub mod single_instance;
 mod watch;
 #[cfg(windows)]
@@ -34,6 +37,8 @@ mod windows_impl;
 mod windows_instance;
 #[cfg(windows)]
 mod windows_screen;
+#[cfg(windows)]
+mod windows_shell_copy;
 #[cfg(windows)]
 mod windows_watch;
 

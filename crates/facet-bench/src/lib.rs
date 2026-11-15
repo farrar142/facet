@@ -13,7 +13,11 @@
 //!   시간([`MFT_PARSE_LIMIT`])을 잰다. `cargo xtask ci`가 이것도 부른다.
 //! - 세션 벤치마크: 탭 100개 세션 파일을 읽고 해석하는 시간([`SESSION_PARSE_LIMIT`])을 잰다
 //!   ([`measure_session`]). `cargo xtask ci`가 이것도 부른다.
+//! - 복사 벤치마크: 작업 대기열의 복사 작업으로 1GiB 파일 하나의 처리량([`copy::COPY_THROUGHPUT_LIMIT`])과
+//!   4KiB 파일 1만 개가 든 폴더의 복사 시간([`copy::COPY_SMALL_LIMIT`])을 잰다. `cargo xtask ci`가 이것도 부른다.
+//!   같은 복사를 셸의 `IFileOperation`으로도 해 견주는 탐색기 비교 측정([`copy::compare`])은 사람이 잰다.
 
+pub mod copy;
 pub mod screen;
 
 use std::collections::BTreeMap;

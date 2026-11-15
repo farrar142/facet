@@ -568,7 +568,7 @@ impl<'a> Copier<'a> {
     fn handle(&mut self, entry: Entry) {
         if self.skip_depth > 0 {
             self.skip(entry);
-            self.reporter.maybe_emit();
+            self.reporter.maybe_emit(self.context.control);
             return;
         }
         match entry {
@@ -626,7 +626,7 @@ impl<'a> Copier<'a> {
                 kind,
             } => self.scan_failed(source, target, kind),
         }
-        self.reporter.maybe_emit();
+        self.reporter.maybe_emit(self.context.control);
     }
 
     /// 안의 항목을 다 쓴 폴더의 시각·속성을 원본과 맞춘다(들어가기 전에 읽어 둔 `snapshot`이 있으면 그 값으로).
@@ -1079,7 +1079,7 @@ impl<'a> Copier<'a> {
         let result = file_ops::copy_file(source, target, &mut |progress| {
             // 훑은 뒤 파일이 커졌거나 대체 데이터 스트림이 있어도 센 크기를 넘지 않게 한다.
             reporter.bytes_done = base + progress.copied.min(size);
-            reporter.maybe_emit();
+            reporter.maybe_emit(control);
             // 일시정지면 여기서(덩어리 사이) 기다린다.
             if control.proceed() {
                 CopyStep::Continue
@@ -1152,14 +1152,17 @@ impl Reporter {
 
     /// 앞 사건에서 간격이 지났으면 보낸다. 첫 사건은 바이트를 처음 옮긴 때(빠르면 시작하자마자 복사가 보이게)나
     /// 시작에서 간격이 지난 때 보낸다. 폴더만 만든 뒤 곧바로 보내면 다음 사건까지 간격을 기다려야 한다.
-    pub(super) fn maybe_emit(&mut self) {
+    ///
+    /// 일시정지 중이면 보내지 않는다(`control`의 표지 잠금 안에서 보아, 일시정지 사건 뒤에 진행 사건이 오지 않는다).
+    /// 이어 가면 다음 부름에서 보낸다.
+    pub(super) fn maybe_emit(&mut self, control: &Control) {
         let now = Instant::now();
         let due = match self.last {
             Some(last) => now.duration_since(last) >= PROGRESS_INTERVAL,
             None => self.bytes_done > 0 || now.duration_since(self.start) >= PROGRESS_INTERVAL,
         };
         if due {
-            self.emit(now);
+            control.unless_paused(|| self.emit(now));
         }
     }
 
