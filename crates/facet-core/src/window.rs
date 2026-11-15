@@ -6,8 +6,9 @@
 //! 창 연산: 만들기([`App::open_window`], 「새 창」 명령은 활성 탭의 위치로), 닫기([`App::close_window`]: 그 창의
 //! 탭들이 닫은 탭 목록에 들어간다), 활성 창 바꾸기([`App::activate_window`]). 창은 바뀌지 않는 번호
 //! ([`WindowId`])로 가리킨다. 명령은 활성 창의 활성 패널의 활성 탭에 듣는다. 창마다 패널의 보이는 탭이 보이므로,
-//! 활성 창을 바꿔도 다른 창의 탭은 숨지 않는다. 창이 하나도 남지 않으면 앱이 끝난다([`App::is_finished`]: 프로세스를
-//! 끝낼지 정하는 한 곳).
+//! 활성 창을 바꿔도 다른 창의 탭은 숨지 않는다. 창이 하나도 남지 않고 끝나지 않은 작업도 없으면 앱이 끝난다
+//! ([`App::is_finished`]: 프로세스를 끝낼지 정하는 한 곳). 창이 없는데 작업이 남아 있으면 화면은 진행 창을 띄운다
+//! ([`App::shows_progress_window`]).
 //!
 //! 패널 연산: 나누기([`App::split_panel`]: 새 오른쪽 패널이 활성 탭과 같은 위치의 탭 하나로 시작해 활성이 된다),
 //! 합치기([`App::merge_panels`]: 오른쪽 패널의 탭이 왼쪽 패널 탭 끝에 순서대로 붙는다), 활성 패널 바꾸기
@@ -525,7 +526,7 @@ impl App {
             }
             app.push_session(session);
         }
-        if app.is_finished() {
+        if !app.has_windows() {
             app.open_launch_window(launch);
         } else {
             app.open_launch_tabs(launch);
@@ -589,9 +590,10 @@ impl App {
         }
     }
 
-    /// 지금 화면 상태를 세션으로([`crate::session::save`]로 저장한다). 창이 하나도 없으면(앱이 끝남) `None`이다.
+    /// 지금 화면 상태를 세션으로([`crate::session::save`]로 저장한다). 보통 창이 하나도 없으면(앱이 끝남, 진행 창만 남음)
+    /// `None`이다. 그래서 진행 창이 떠 있는 동안 저장한 세션은 마지막 보통 창 상태 그대로다.
     pub fn session(&self) -> Option<Session> {
-        if self.is_finished() {
+        if !self.has_windows() {
             return None;
         }
         let windows = self
@@ -630,7 +632,7 @@ impl App {
     /// 못한 인자의 탭은 읽지 않고 까닭을 보인다. 정렬은 활성 탭을 따른다. 탭이 없거나 앱이 끝났으면 아무것도 하지
     /// 않는다. 세션을 되살린 첫 실행이 경로 인자를 받았을 때 쓴다.
     pub fn open_launch_tabs(&mut self, targets: Vec<LaunchTarget>) {
-        if targets.is_empty() || self.is_finished() {
+        if targets.is_empty() || !self.has_windows() {
             return;
         }
         let sort = self.active_tab().sort();
@@ -682,7 +684,7 @@ impl App {
     /// 인자의 탭은 읽지 않고 까닭([`Tab::address_error`])을 보인다. 정렬은 활성 탭을 따르고(창이 없으면 기본 정렬)
     /// 기록은 비어 있다. 창이 하나도 없는 앱(마지막 창을 닫은 뒤)에서도 연다.
     pub fn open_launch_window(&mut self, targets: Vec<LaunchTarget>) -> WindowId {
-        let sort = if self.is_finished() {
+        let sort = if !self.has_windows() {
             Sort::default()
         } else {
             self.active_tab().sort()
@@ -713,7 +715,7 @@ impl App {
     /// `location`을 보일 탭 하나로 새 창을 열어 활성 창으로 하고, 그 위치를 일꾼 스레드에서 읽는다. 정렬은 활성
     /// 탭을 따르고(창이 없으면 기본 정렬) 기록은 비어 있다. 다른 창의 보이는 탭은 그대로 보인다.
     pub fn open_window(&mut self, location: Location) -> WindowId {
-        let sort = if self.is_finished() {
+        let sort = if !self.has_windows() {
             Sort::default()
         } else {
             self.active_tab().sort()
@@ -825,11 +827,25 @@ impl App {
         &self.windows
     }
 
-    /// 앱이 끝났는가: 프로세스를 끝낼지 정하는 한 곳이다. 지금은 창이 하나도 남지 않으면 끝난다. 작업 대기열이
-    /// 생기면 작업이 남아 있는 동안은 창이 없어도 끝나지 않게 여기서 함께 본다. 끝난 앱에서는 활성 창·탭을 묻지
-    /// 않는다(창이 없다). 「새 창」 명령은 끝난 앱에서도 실행할 수 있다.
+    /// 앱이 끝났는가: 프로세스를 끝낼지 정하는 한 곳이다. 창 목록과 작업 대기열을 함께 본다: 창이 하나도 남지 않고
+    /// 작업 대기열에 끝나지 않은 작업(대기·실행 중·일시정지·답 기다림, [`JobQueue::has_unfinished`])도 없으면
+    /// 끝난다. 창이 없어도 작업이 남아 있으면 끝나지 않고 화면은 진행 창을 띄운다([`App::shows_progress_window`]).
+    /// 그 작업이 모두 끝나면(끝남·실패·취소) 끝난다.
     pub fn is_finished(&self) -> bool {
-        self.windows.is_empty()
+        !self.has_windows() && !self.jobs.has_unfinished()
+    }
+
+    /// 보통 창이 하나라도 있는가. 없으면 활성 창·탭을 묻지 않는다. 「새 창」 명령과 실행 인자로 창 열기
+    /// ([`App::open_launch_window`])는 창이 없어도 된다.
+    pub fn has_windows(&self) -> bool {
+        !self.windows.is_empty()
+    }
+
+    /// 화면이 진행 창(작업 영역만 담은 작은 창)을 띄워야 하는가: 보통 창이 하나도 없는데 끝나지 않은 작업이 남아
+    /// 있다. 보통 창이 다시 생기거나 작업이 모두 끝나면 `false`다. 진행 창은 코어의 창이 아니어서 창 목록·세션에
+    /// 들지 않는다(세션은 마지막 보통 창 상태를 남긴다, [`App::session`]이 `None`).
+    pub fn shows_progress_window(&self) -> bool {
+        !self.has_windows() && self.jobs.has_unfinished()
     }
 
     /// 사용자가 보고 있는 창.
@@ -1112,7 +1128,7 @@ impl App {
     /// 활성 탭 바로 뒤에 열어 활성으로 하고(앞서 보이던 탭은 숨는다), 그 위치를 일꾼 스레드에서 다시 읽는다.
     /// 닫은 탭이 없거나 앱이 끝났으면 `None`이다.
     pub fn reopen_closed_tab(&mut self) -> Option<TabId> {
-        if self.is_finished() {
+        if !self.has_windows() {
             return None;
         }
         let closed = self.closed.pop_back()?;
@@ -1131,7 +1147,7 @@ impl App {
     /// 시작해 활성 패널이 되고, 그 위치를 일꾼 스레드에서 읽는다. 왼쪽 패널의 활성 탭은 그대로 보인다. 이미 둘이면
     /// ([`MAX_PANELS`]) 아무것도 하지 않고 `None`이다.
     pub fn split_panel(&mut self) -> Option<TabId> {
-        if self.is_finished() || self.active_window().panels.len() >= MAX_PANELS {
+        if !self.has_windows() || self.active_window().panels.len() >= MAX_PANELS {
             return None;
         }
         let id = self.new_tab_id();
@@ -1147,7 +1163,7 @@ impl App {
     /// 활성 창의 두 패널을 하나로 합친다: 오른쪽 패널의 탭들이 왼쪽 패널 탭 끝에 순서대로 붙는다. 활성 패널의 활성
     /// 탭이 그대로 활성 탭이고, 다른 패널에서 보이던 탭은 숨는다. 분할 비율은 남는다. 패널이 하나면 `false`다.
     pub fn merge_panels(&mut self) -> bool {
-        if self.is_finished() || !self.active_window().is_split() {
+        if !self.has_windows() || !self.active_window().is_split() {
             return false;
         }
         let window = self.active_window_mut();
@@ -1170,7 +1186,7 @@ impl App {
     /// 활성 창의 `index`번째 패널(0이 왼쪽)을 활성 패널로 한다. 두 패널의 보이는 탭은 그대로 보인다. 없는 패널이면
     /// `false`다.
     pub fn activate_panel(&mut self, index: usize) -> bool {
-        if self.is_finished() || index >= self.active_window().panels.len() {
+        if !self.has_windows() || index >= self.active_window().panels.len() {
             return false;
         }
         self.active_window_mut().active = index;
@@ -1179,7 +1195,7 @@ impl App {
 
     /// 활성 패널을 반대편 패널로 바꾼다(Tab). 패널이 하나면 아무것도 하지 않고 `false`다.
     pub fn switch_panel(&mut self) -> bool {
-        if self.is_finished() || !self.active_window().is_split() {
+        if !self.has_windows() || !self.active_window().is_split() {
             return false;
         }
         let window = self.active_window_mut();
@@ -1349,7 +1365,7 @@ impl App {
         if command == CommandId::NewWindow {
             return true;
         }
-        if self.is_finished() {
+        if !self.has_windows() {
             return false;
         }
         match command {
@@ -1456,7 +1472,7 @@ impl App {
                 return Execution::ChooseTransferTarget(kind);
             }
             CommandId::NewWindow => {
-                let location = if self.is_finished() {
+                let location = if !self.has_windows() {
                     home_location()
                 } else {
                     self.active_tab().location().clone()
