@@ -6,6 +6,8 @@
 use facet_core::command::{CommandId, Key, Shortcut};
 use facet_core::details::FileType;
 use facet_core::edit::EditError;
+use facet_core::history::{NotUndoable, OperationKind, Record, RevertSkip};
+use facet_core::job::Summary;
 use facet_core::name_input::{MAX_NAME_UNITS, NameError};
 use facet_win::file_ops::FileOpErrorKind;
 
@@ -122,6 +124,95 @@ pub fn new_folder_error_text(error: EditError) -> String {
 /// 이름바꾸기가 실패했는데 입력란을 다시 열 수 없을 때(항목이 사라짐, 그 사이 입력란을 닫음, 상태 줄).
 pub fn rename_error_text(error: EditError) -> String {
     format!("이름을 바꾸지 못했습니다: {}", edit_error_text(error))
+}
+
+/// 기록한 작업의 이름: 상태 줄의 「〈작업 이름〉 실행취소」와 작업 기록 보기의 줄에 쓴다. 항목이 하나면 그
+/// 이름(작업 뒤 이름), 여럿이면 수를 넣는다.
+pub fn operation_name(record: &Record) -> String {
+    let steps = record.steps();
+    let single = match steps {
+        [step] => step
+            .path()
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned()),
+        _ => None,
+    };
+    let n = steps.len();
+    match (record.kind(), single) {
+        (OperationKind::Rename, Some(name)) => format!("「{name}」 이름 바꾸기"),
+        (OperationKind::Rename, None) => format!("항목 {n}개 이름 바꾸기"),
+        (OperationKind::NewFolder, Some(name)) => format!("새 폴더 「{name}」 만들기"),
+        (OperationKind::NewFolder, None) => format!("새 폴더 {n}개 만들기"),
+    }
+}
+
+/// 실행취소를 시작하기 전에 상태 줄에 보일 글자.
+pub fn undo_notice(record: &Record) -> String {
+    format!("{} 실행취소", operation_name(record))
+}
+
+/// 다시 실행을 시작하기 전에 상태 줄에 보일 글자.
+pub fn redo_notice(record: &Record) -> String {
+    format!("{} 다시 실행", operation_name(record))
+}
+
+/// 되돌릴 수 없는 까닭(작업 기록 보기의 줄).
+pub fn not_undoable_text(reason: NotUndoable) -> String {
+    match reason {
+        NotUndoable::PermanentDelete => "되돌릴 수 없음: 영구 삭제".to_owned(),
+    }
+}
+
+/// 마지막 작업이 되돌릴 수 없어 실행취소하지 않았다(상태 줄). 그 앞 작업도 되돌리지 않았다.
+pub fn undo_refused_text(record: &Record, reason: NotUndoable) -> String {
+    let why = match reason {
+        NotUndoable::PermanentDelete => "영구 삭제한 항목은 되살릴 수 없습니다",
+    };
+    format!("{}: 실행취소할 수 없습니다. {why}", operation_name(record))
+}
+
+/// 밖의 변경으로 되돌리지 못한 까닭.
+pub fn revert_skip_text(reason: RevertSkip) -> &'static str {
+    match reason {
+        RevertSkip::Missing => "항목이 없습니다",
+        RevertSkip::Changed => "그 뒤 바뀌었습니다",
+        RevertSkip::NameTaken => "그 자리에 같은 이름의 항목이 있습니다",
+        RevertSkip::NotEmpty => "폴더가 비어 있지 않습니다",
+    }
+}
+
+/// 항목별 오류로 건너뛴 까닭.
+pub fn item_error_text(kind: FileOpErrorKind) -> &'static str {
+    match kind {
+        FileOpErrorKind::AccessDenied => "권한이 없습니다",
+        FileOpErrorKind::SourceMissing => "항목이 없습니다",
+        FileOpErrorKind::TargetExists => "같은 이름의 항목이 이미 있습니다",
+        FileOpErrorKind::Locked => "다른 프로그램이 쓰고 있습니다",
+        FileOpErrorKind::DiskFull => "디스크가 가득 찼습니다",
+        FileOpErrorKind::Unsupported => "이 환경에서는 할 수 없습니다",
+        FileOpErrorKind::CrossVolume
+        | FileOpErrorKind::Cancelled
+        | FileOpErrorKind::TimedOut
+        | FileOpErrorKind::Other => "오류가 났습니다",
+    }
+}
+
+/// 끝난 작업이 하지 못한 항목들(밖의 변경으로 되돌리지 못함, 항목별 오류로 건너뜀): `경로 (까닭) · 경로 (까닭)`.
+/// 없으면 빈 글자. 경로는 번역하지 않는다.
+pub fn not_done_text(summary: &Summary) -> String {
+    let skipped = summary
+        .not_reverted
+        .iter()
+        .map(|item| (&item.path, revert_skip_text(item.reason)));
+    let failed = summary
+        .failures
+        .iter()
+        .map(|item| (&item.source, item_error_text(item.kind)));
+    skipped
+        .chain(failed)
+        .map(|(path, why)| format!("{} ({why})", path.display()))
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 /// 단축키의 글자: `Ctrl+Shift+P`, `Alt+←`. 키 이름은 번역하지 않는다.
@@ -257,6 +348,70 @@ mod tests {
         assert_eq!(
             edit_error_text(EditError::File(FileOpErrorKind::AccessDenied)),
             "권한이 없습니다"
+        );
+    }
+
+    fn stamp() -> facet_core::history::Stamp {
+        facet_core::history::Stamp {
+            is_folder: false,
+            size: 0,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    fn renamed(from: &str, to: &str) -> facet_core::history::Step {
+        facet_core::history::Step::Renamed {
+            from: std::path::PathBuf::from(from),
+            to: std::path::PathBuf::from(to),
+            stamp: stamp(),
+        }
+    }
+
+    #[test]
+    fn 작업_이름은_항목이_하나면_이름_여럿이면_수다() {
+        let one = Record::new(
+            OperationKind::Rename,
+            vec![renamed(r"C:\a\옛.txt", r"C:\a\새.txt")],
+        );
+        assert_eq!(operation_name(&one), "「새.txt」 이름 바꾸기");
+        assert_eq!(undo_notice(&one), "「새.txt」 이름 바꾸기 실행취소");
+        assert_eq!(redo_notice(&one), "「새.txt」 이름 바꾸기 다시 실행");
+        let many = Record::new(
+            OperationKind::Rename,
+            vec![renamed(r"C:\a\1", r"C:\a\2"), renamed(r"C:\a\3", r"C:\a\4")],
+        );
+        assert_eq!(operation_name(&many), "항목 2개 이름 바꾸기");
+        let folder = Record::new(
+            OperationKind::NewFolder,
+            vec![facet_core::history::Step::CreatedFolder {
+                path: std::path::PathBuf::from(r"C:\a\사진"),
+                stamp: stamp(),
+            }],
+        );
+        assert_eq!(operation_name(&folder), "새 폴더 「사진」 만들기");
+        assert_eq!(
+            undo_refused_text(&one, NotUndoable::PermanentDelete),
+            "「새.txt」 이름 바꾸기: 실행취소할 수 없습니다. 영구 삭제한 항목은 되살릴 수 없습니다"
+        );
+    }
+
+    #[test]
+    fn 못_한_항목은_경로와_까닭이다() {
+        use facet_core::history::NotReverted;
+        use facet_core::job::ItemFailure;
+        let mut summary = Summary::default();
+        assert_eq!(not_done_text(&summary), "");
+        summary.not_reverted.push(NotReverted {
+            path: std::path::PathBuf::from(r"C:\a\새.txt"),
+            reason: RevertSkip::NameTaken,
+        });
+        summary.failures.push(ItemFailure {
+            source: std::path::PathBuf::from(r"C:\a\b"),
+            kind: FileOpErrorKind::Locked,
+        });
+        assert_eq!(
+            not_done_text(&summary),
+            r"C:\a\새.txt (그 자리에 같은 이름의 항목이 있습니다) · C:\a\b (다른 프로그램이 쓰고 있습니다)"
         );
     }
 
