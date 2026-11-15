@@ -22,7 +22,7 @@ use facet_core::details::{self, Column, Direction};
 use facet_core::file_list;
 use facet_core::name_input::NameInput;
 use facet_core::selection::{CursorMove, Pick};
-use facet_core::tab::{Navigation, ReadOutcome};
+use facet_core::tab::{AutoRefresh, Navigation, ReadOutcome, Relocation};
 use facet_core::window::{App, Execution, Update};
 use facet_core::{ListError, Location, OpenError, ResolveError, provider_for};
 use slint::{
@@ -280,6 +280,15 @@ impl View {
             };
             ui.set_open_problem(problem);
             ui.set_open_problem_detail(detail.into());
+
+            ui.set_auto_refresh_off(matches!(tab.auto_refresh(), AutoRefresh::Off(_)));
+            let (relocation, vanished) = match tab.relocation() {
+                Some(Relocation::ToParent { vanished }) => (1, vanished.to_string()),
+                Some(Relocation::ToHome { vanished }) => (2, vanished.to_string()),
+                None => (0, String::new()),
+            };
+            ui.set_relocation(relocation);
+            ui.set_relocation_vanished(vanished.into());
 
             let sort = tab.sort();
             ui.set_sort_column(match sort.column {

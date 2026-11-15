@@ -200,6 +200,11 @@ export component AppWindow inherits Window {
     // 마지막으로 파일을 기본 프로그램으로 열지 못한 까닭.
     in property <Problem> open-problem: Problem.none;
     in property <string> open-problem-detail;
+    // 「자동 새로 고침 안 됨」: 지금 위치에 변경 감시를 걸 수 없었다. F5로 새로 고친다.
+    in property <bool> auto-refresh-off;
+    // 보던 위치가 사라져 옮겨 온 까닭: 0 없음, 1 상위 폴더로, 2 홈 폴더로. 사라진 위치도 함께 온다.
+    in property <int> relocation;
+    in property <string> relocation-vanished;
     in property <[Row]> rows;
     // 정렬: 열(0 이름, 1 수정한 날짜, 2 유형, 3 크기)과 방향.
     in property <int> sort-column;
@@ -467,6 +472,19 @@ export component AppWindow inherits Window {
                 : @tr("파일을 열지 못했습니다: {}", root.open-problem-detail);
             wrap: word-wrap;
             color: #c42b1c;
+        }
+
+        if root.relocation != 0: Text {
+            text: root.relocation == 1 ? @tr("보던 위치가 사라져 상위 폴더로 옮겼습니다: {}", root.relocation-vanished)
+                : @tr("보던 위치가 사라져 홈 폴더로 옮겼습니다: {}", root.relocation-vanished);
+            wrap: word-wrap;
+            color: #c42b1c;
+        }
+
+        if root.auto-refresh-off: Text {
+            text: @tr("자동 새로 고침 안 됨 (F5로 새로 고침)");
+            wrap: word-wrap;
+            color: #8a6d00;
         }
 
         // 열 머리글
