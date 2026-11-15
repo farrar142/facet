@@ -13,6 +13,9 @@
 //! - [`single_instance`]: 단일 실행. 주인 되기([`single_instance::claim`], 사용자 로그온 세션 범위 뮤텍스),
 //!   받기([`single_instance::Owner::listen`], 같은 사용자만 여는 파이프의 수신기 스레드),
 //!   넘기기([`single_instance::forward`], 인자와 작업 폴더). Windows가 아니면 늘 주인이 된다.
+//! - [`file_ops`]: 복사·이동 엔진의 파일 하나·이름 하나 단위 연산. 파일 복사(`CopyFile2`, 진행·멈춤·취소, 시각·속성·
+//!   대체 데이터 스트림 보존), 폴더 만들기·시각·속성 맞추기, 같은 볼륨 이름 바꾸기, 바꿔치기, 지우기, 파일 ID, 오류
+//!   종류. Windows가 아니면 「지원하지 않음」이다.
 
 use std::fmt;
 use std::io;
@@ -20,8 +23,11 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 
+pub mod file_ops;
 pub mod single_instance;
 mod watch;
+#[cfg(windows)]
+mod windows_file_ops;
 #[cfg(windows)]
 mod windows_impl;
 #[cfg(windows)]
