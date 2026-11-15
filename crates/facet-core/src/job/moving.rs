@@ -24,7 +24,7 @@ use super::{Context, CopyRejection, Resolution, Summary};
 
 /// 넣기 전에 확인을 마친 이동 작업. 시작 전에 막는 경우는 복사와 같다.
 pub(super) struct MoveJob {
-    plan: CopyJob,
+    pub(super) plan: CopyJob,
 }
 
 /// 항목 하나를 한 번 해 본 결과.
@@ -59,6 +59,7 @@ impl MoveJob {
         let mut mover = Mover {
             copier: Copier::new(context, true),
         };
+        mover.copier.journal = self.plan.journal.clone();
         let totals = std::sync::Arc::clone(&mover.copier.reporter.totals);
         totals
             .items
@@ -192,6 +193,7 @@ impl Mover<'_> {
         match file_ops::rename(source, target) {
             Ok(()) => {
                 self.copier.summary.items_renamed += 1;
+                self.copier.note_item(source, target, false);
                 Outcome::Done
             }
             Err(error) if error.kind() == FileOpErrorKind::CrossVolume => {
@@ -210,6 +212,7 @@ impl Mover<'_> {
                 Ok(()) => {
                     self.copier.summary.items_renamed += 1;
                     self.copier.summary.files_overwritten += 1;
+                    self.copier.note_item(source, target, true);
                     Outcome::Done
                 }
                 Err(error) => {
@@ -264,6 +267,7 @@ impl Mover<'_> {
             Err(error) => return Outcome::Failed(error_kind(&error)),
         };
         self.copier.summary.folders_merged += 1;
+        self.copier.note_folder(source, target, false);
         self.copier.reporter.items_done += 1;
         self.copier
             .reporter

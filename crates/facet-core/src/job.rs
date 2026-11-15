@@ -22,7 +22,8 @@
 //! 잡은 작업과 나란히). 답을 기다리는 작업도 취소할 수 있다. **항목별 오류**([`JobEvent::ItemError`],
 //! [`JobQueue::answer_error`])도 같은 규칙을 따른다.
 //!
-//! 지금 있는 작업은 **복사**([`JobQueue::copy`])와 **이동**([`JobQueue::move_items`]), 그리고 작업 기록을 되돌리는
+//! 지금 있는 작업은 **복사**([`JobQueue::copy`])와 **이동**([`JobQueue::move_items`]), 그리고 작업 기록(복사·이동도
+//! 남는다, [`crate::window::App::start_transfer`])을 되돌리는
 //! **실행취소**·**다시 실행**([`crate::window::App::undo`]·[`crate::window::App::redo`])이다. 진행·이름 충돌·오류
 //! 처리의 자세한 규칙은 그 문서에 있다.
 
@@ -53,6 +54,12 @@ impl JobId {
     /// 번호 값(기록·디버그용).
     pub fn get(self) -> u64 {
         self.0
+    }
+
+    /// 시험용 번호.
+    #[cfg(test)]
+    pub(crate) fn for_test(n: u64) -> Self {
+        JobId(n)
     }
 }
 
@@ -181,6 +188,9 @@ pub struct Summary {
     /// 건너뛴 항목과 그 까닭. 아무것도 덮어쓰거나 지우지 않았다. 하나라도 있으면 작업은 [`JobState::Failed`]로
     /// 끝난다. 복사·이동은 늘 비어 있다.
     pub not_reverted: Vec<crate::history::NotReverted>,
+    /// 복사의 실행취소가 휴지통으로 보낸 항목(원래 경로·휴지통 안 경로). 폴더를 통째로 보냈으면 그 폴더 하나다. 다른
+    /// 작업은 늘 비어 있다.
+    pub recycled: Vec<facet_win::recycle::RecycledItem>,
 }
 
 impl Summary {
@@ -404,6 +414,23 @@ impl Job {
         }
     }
 }
+
+/// 복사·이동이 실제로 한 일: 작업 기록에 남길 항목별 결과(한 차례대로)와 덮어쓴 것이 있는지. 작업 스레드가
+/// 항목을 하나 끝낼 때마다 적고, 작업이 끝나면 앱이 꺼내 기록([`crate::history::Record`])으로 바꾼다.
+///
+/// 항목 하나가 경로 둘과 모습(크기·수정 시각) 하나라 1만 항목이면 수 MB다(경로 100자 기준 항목당 약 300바이트).
+/// 실행취소가 「그 사본만」 남기려면 항목마다 그때의 모습이 있어야 해서 줄이지 않는다. 작업 기록이 100개까지라 전체도
+/// 그 배수로 묶이고, 적는 비용은 이미 한 파일 연산 하나에 메타데이터 읽기 하나를 더하는 것이다.
+#[derive(Debug, Default)]
+pub(crate) struct Journal {
+    /// 항목별 결과.
+    pub(crate) steps: Vec<crate::history::Step>,
+    /// 이름 충돌에서 대상을 덮어썼다(그 작업은 되돌릴 수 없다).
+    pub(crate) overwrote: bool,
+}
+
+/// 작업 스레드가 [`Journal`]을 적는 곳.
+pub(crate) type JournalSink = Arc<Mutex<Journal>>;
 
 /// 깨우기.
 type Waker = Arc<dyn Fn() + Send + Sync>;
@@ -803,11 +830,37 @@ impl JobQueue {
         }
     }
 
+    /// 복사·이동 작업을 넣고([`JobQueue::submit`]과 같다) 그 작업이 한 일을 적을 곳을 함께 돌려준다(작업 기록에
+    /// 남길 작업). 작업이 끝난 뒤([`JobEvent::Finished`]) 꺼내 쓴다.
+    pub(crate) fn submit_recorded(
+        &mut self,
+        kind: JobKind,
+        sources: Vec<PathBuf>,
+        target: PathBuf,
+    ) -> Result<(JobId, JournalSink), CopyRejection> {
+        let journal = JournalSink::default();
+        let job = match kind {
+            JobKind::Copy => {
+                let mut job = copy::CopyJob::prepare(sources, target)?;
+                job.journal = Some(Arc::clone(&journal));
+                Job::Copy(job)
+            }
+            JobKind::Move => {
+                let mut job = moving::MoveJob::prepare(sources, target)?;
+                job.plan.journal = Some(Arc::clone(&journal));
+                Job::Move(job)
+            }
+            JobKind::Undo | JobKind::Redo => return Err(CopyRejection::NoSources),
+        };
+        Ok((self.enqueue(job), journal))
+    }
+
     /// 실행취소·다시 실행 작업을 넣고 차례를 기다리지 않고 곧바로 시작한다([`JobQueue::start_now`]와 같다).
     ///
     /// 곧바로 시작하는 까닭: 실행취소는 사용자가 방금 한 일을 바로잡으려는 것이라, 앞에 큰 복사가 돌고 있다고
-    /// 그 뒤로 미루면 무엇이 되돌아갔는지 알 수 없는 채 기다리게 된다. 지금 되돌리는 이름바꾸기·새 폴더는 순간에
-    /// 끝나 다른 작업의 디스크를 거의 쓰지 않는다. 사건·일시정지·취소·항목별 오류 질문은 다른 작업과 같다.
+    /// 그 뒤로 미루면 무엇이 되돌아갔는지 알 수 없는 채 기다리게 된다. 이름바꾸기·새 폴더·같은 볼륨 이동의 되돌리기는
+    /// 순간에 끝나고 복사의 되돌리기는 휴지통으로 보내기(같은 볼륨 안 이름 바꾸기)라 다른 작업의 디스크를 거의 쓰지
+    /// 않는다. 볼륨을 넘는 이동의 되돌리기는 다시 복사하지만, 그것도 사용자가 곧바로 되돌리기를 바란 것이다. 사건·일시정지·취소·항목별 오류 질문은 다른 작업과 같다.
     pub(crate) fn revert(&mut self, job: RevertJob) -> JobId {
         let id = self.enqueue(Job::Revert(job));
         self.start_now(id);
