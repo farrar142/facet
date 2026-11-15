@@ -28,6 +28,8 @@ use crate::details::{DetailsList, Sort};
 use crate::selection::{CursorMove, StatusSummary, TypeAhead, ViewState, starts_with_folded};
 use crate::watch::{self, ChangeBatch, ChangeSink, Watch, WatchError};
 use crate::window::home_location;
+use facet_win::OpenError;
+
 use crate::{Candidate, Item, ListError, Location, ResolveError, provider_for};
 
 /// 읽기가 이만큼 넘게 걸리면 탭이 「읽는 중」을 드러낸다([`Tab::is_reading`]).
@@ -327,6 +329,8 @@ pub struct Tab {
     watch_error: Option<WatchError>,
     /// 보던 위치가 사라져 옮긴 까닭. 다음 이동을 시작하면 지운다.
     relocation: Option<Relocation>,
+    /// 마지막으로 파일을 기본 프로그램으로 열지 못한 까닭.
+    open_error: Option<OpenError>,
 }
 
 impl Tab {
@@ -357,6 +361,7 @@ impl Tab {
             watching: None,
             watch_error: None,
             relocation: None,
+            open_error: None,
         }
     }
 
@@ -415,6 +420,16 @@ impl Tab {
     /// 보던 위치가 사라져 다른 위치로 옮겼으면 그 까닭. 다음 이동을 시작하면 지운다.
     pub fn relocation(&self) -> Option<&Relocation> {
         self.relocation.as_ref()
+    }
+
+    /// 마지막으로 파일을 기본 프로그램으로 열지 못한 까닭(연결된 프로그램 없음 등). 다음 이동이나 다음 열기를
+    /// 시작하면 지운다. 여는 일은 [`crate::window::App::execute`]가 한다.
+    pub fn open_error(&self) -> Option<&OpenError> {
+        self.open_error.as_ref()
+    }
+
+    pub(crate) fn set_open_error(&mut self, error: Option<OpenError>) {
+        self.open_error = error;
     }
 
     /// 자동 새로 고침 상태. 감시를 걸 수 없는 위치면 [`AutoRefresh::Off`]다.
@@ -498,6 +513,7 @@ impl Tab {
         };
         self.address_error = None;
         self.relocation = None;
+        self.open_error = None;
         Some(self.request(location, kind, reselect))
     }
 

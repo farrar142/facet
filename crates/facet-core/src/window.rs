@@ -8,13 +8,19 @@
 //! 읽을 때 위치의 변경 감시도 함께 걸어, 묶은 변경을 같은 통로로 받아 탭에 반영한다. 알림을 잃었거나 위치가
 //! 사라졌으면 그 탭을 다시 읽는다([`crate::tab::Tab::reload`]).
 //! 숨김 항목 보이기/감추기는 앱 전체에 하나인 상태다. 기본은 감춤이고 저장하지 않는다.
+//!
+//! 명령([`crate::command::CommandId`])은 활성 탭에 듣는다([`App::execute`]). 파일 열기는 셸 일꾼 스레드
+//! ([`ShellWorker`], 처음 열 때 띄운다)가 하고, 그 결과도 같은 통로로 받아 탭에 넘긴다.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use facet_win::{OpenError, OpenResult, ShellWorker};
+
 use crate::Location;
+use crate::command::{self, CommandId};
 use crate::details::Sort;
 use crate::tab::{ChangeOutcome, Navigation, ReadOutcome, ReadRequest, ReadResult, Tab};
 use crate::watch::ChangeBatch;
@@ -98,6 +104,7 @@ impl Window {
 enum Message {
     Read { tab: TabId, result: ReadResult },
     Changes { tab: TabId, batch: ChangeBatch },
+    Opened { tab: TabId, result: OpenResult },
 }
 
 /// 탭에 넘긴 결과 하나.
@@ -107,6 +114,21 @@ pub enum Update {
     Read(ReadOutcome),
     /// 묶은 변경. [`ChangeOutcome::Reload`]였으면 앱이 이미 다시 읽기를 시작했다.
     Changes(ChangeOutcome),
+    /// 기본 프로그램으로 열기의 결과: 열었는가. 열지 못했으면 그 탭의 [`Tab::open_error`]에 까닭이 있다.
+    Opened(bool),
+}
+
+/// 명령을 실행한 결과.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Execution {
+    /// 실행했다. 이동·열기처럼 결과가 나중에 오는 것은 [`App::poll`]·[`App::wait_update`]로 받는다.
+    Done,
+    /// 지금 실행할 수 없는 명령이라 아무것도 하지 않았다([`CommandId::is_enabled`]).
+    Disabled,
+    /// 화면이 할 일: 주소창을 글자로 고쳐 쓰는 모드로 바꾸고 전체 경로를 선택한다.
+    EditAddress,
+    /// 화면이 할 일: 명령 팔레트를 연다.
+    ShowCommandPalette,
 }
 
 /// 앱 전체의 화면 상태: 창 목록과 앱 전체에 하나인 설정(숨김 항목 보이기).
@@ -115,6 +137,8 @@ pub struct App {
     active: usize,
     show_hidden: bool,
     next_tab: u64,
+    /// 셸 일꾼 스레드. 콜드 스타트를 늦추지 않도록 처음 파일을 열 때 띄운다.
+    shell: Option<ShellWorker>,
     sender: Sender<Message>,
     receiver: Receiver<Message>,
 }
@@ -142,6 +166,7 @@ impl App {
             active: 0,
             show_hidden: false,
             next_tab: 0,
+            shell: None,
             sender,
             receiver,
         };
@@ -279,6 +304,13 @@ impl App {
                 }
                 (id, Update::Changes(outcome))
             }
+            Message::Opened { tab: id, result } => {
+                let opened = result.is_ok();
+                if let Some(tab) = self.tab_mut(id) {
+                    tab.set_open_error(result.err());
+                }
+                (id, Update::Opened(opened))
+            }
         }
     }
 
@@ -291,6 +323,117 @@ impl App {
     /// 활성 탭의 정렬을 바꾼다. 다시 읽지 않는다.
     pub fn set_sort(&mut self, sort: Sort) {
         self.active_tab_mut().set_sort(sort);
+    }
+
+    /// 명령을 활성 탭에서 지금 실행할 수 있는가([`CommandId::is_enabled`]).
+    pub fn can_execute(&self, command: CommandId) -> bool {
+        command.is_enabled(self.active_tab())
+    }
+
+    /// 명령 팔레트 검색: 앱이 주는 명령 이름에서 찾고, 실행 가능 여부는 활성 탭을 따른다([`command::search`]).
+    pub fn search_commands<S: AsRef<str>>(
+        &self,
+        query: &str,
+        name: impl Fn(CommandId) -> S,
+    ) -> Vec<command::PaletteEntry> {
+        command::search(query, name, self.active_tab())
+    }
+
+    /// 명령을 활성 탭에서 실행한다. 지금 실행할 수 없으면 아무것도 하지 않고 [`Execution::Disabled`]다.
+    ///
+    /// 열기는 커서 항목이 폴더면 그 안으로 가고, 파일이면 셸 일꾼 스레드에서 기본 프로그램으로 연다. 여는 결과는
+    /// [`Update::Opened`]로 오고, 실패하면 탭의 [`Tab::open_error`]에 까닭이 남는다. 막지 않는다.
+    pub fn execute(&mut self, command: CommandId) -> Execution {
+        if !self.can_execute(command) {
+            return Execution::Disabled;
+        }
+        let navigation = match command {
+            CommandId::Open => return self.open_cursor_item(),
+            CommandId::Back => Navigation::Back,
+            CommandId::Forward => Navigation::Forward,
+            CommandId::Up => Navigation::Up,
+            CommandId::Refresh => Navigation::Refresh,
+            CommandId::SelectAll => {
+                self.active_tab_mut().select_all();
+                return Execution::Done;
+            }
+            CommandId::ToggleCursorSelection => {
+                self.active_tab_mut().toggle_cursor_selection();
+                return Execution::Done;
+            }
+            CommandId::EditAddress => return Execution::EditAddress,
+            CommandId::ToggleHidden => {
+                self.set_show_hidden(!self.show_hidden);
+                return Execution::Done;
+            }
+            CommandId::CommandPalette => return Execution::ShowCommandPalette,
+            CommandId::SortByName
+            | CommandId::SortByModified
+            | CommandId::SortByType
+            | CommandId::SortBySize => {
+                if let Some(column) = command.sort_column() {
+                    let sort = command::sort_toggled(self.active_tab().sort(), column);
+                    self.set_sort(sort);
+                }
+                return Execution::Done;
+            }
+        };
+        if self.navigate(navigation) {
+            Execution::Done
+        } else {
+            Execution::Disabled
+        }
+    }
+
+    fn open_cursor_item(&mut self) -> Execution {
+        let tab = self.active_tab();
+        let Some(item) = tab.cursor_item() else {
+            return Execution::Disabled;
+        };
+        if item.is_folder {
+            let name = item.name.clone();
+            self.navigate(Navigation::Open(name));
+            return Execution::Done;
+        }
+        let path = tab
+            .location()
+            .file_system_path()
+            .map(|folder| folder.join(&item.name));
+        let id = self.active_tab_id();
+        self.active_tab_mut().set_open_error(None);
+        let Some(path) = path else {
+            // 실제 폴더 경로가 없는 위치(가상 폴더 등)의 파일은 아직 열 수 없다.
+            self.active_tab_mut()
+                .set_open_error(Some(OpenError::Unsupported));
+            return Execution::Done;
+        };
+        if self.shell.is_none() {
+            match ShellWorker::spawn() {
+                Ok(worker) => self.shell = Some(worker),
+                Err(error) => {
+                    self.active_tab_mut().set_open_error(Some(OpenError::Other {
+                        code: 0,
+                        message: error.to_string(),
+                    }));
+                    return Execution::Done;
+                }
+            }
+        }
+        let Some(shell) = &self.shell else {
+            return Execution::Done;
+        };
+        let reply = shell.open_with_default_program(path);
+        let sender = self.sender.clone();
+        let forward = move || {
+            if let Ok(result) = reply.recv() {
+                let _ = sender.send(Message::Opened { tab: id, result });
+            }
+        };
+        thread::Builder::new()
+            .name("facet-open".into())
+            .spawn(forward)
+            .expect("열기 결과를 기다리는 스레드를 만들지 못했다");
+        Execution::Done
     }
 
     /// 숨김 항목을 보이는가. 앱 전체에 하나다.
