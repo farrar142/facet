@@ -4,6 +4,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+use facet_bench::copy::{
+    self, COPY_BIG_SIZE, COPY_SMALL_COUNT, COPY_SMALL_LIMIT, COPY_SMALL_SIZE, COPY_SMALL_TARGET,
+    COPY_THROUGHPUT_LIMIT, COPY_THROUGHPUT_TARGET, ComparePlan, CopyFixture, Engine,
+};
 use facet_bench::screen::{self, DEFAULT_SCROLL_ROWS, Plan};
 use facet_bench::{
     BENCH_QUERY, BENCH_RESULT_LIMIT, BENCH_SORT, BENCH_SORTED_QUERY, BenchCaller, DEFAULT_COUNT,
@@ -36,6 +40,15 @@ const USAGE: &str = "\
   facet-bench session [--runs N] [--limit-ms N]
       탭 100개 세션 파일(창 다섯 개, 패널 둘, 긴 경로와 한글 경로 섞임)을 읽고 해석하는 시간을
       N회(기본 5) 재어 중앙값이 상한(기본 50ms)을 넘으면 실패한다.
+  facet-bench copy [--size-mb N] [--count N] [--runs N]
+      임시 폴더에 큰 파일 하나(기본 1024MiB)와 4KiB 파일 N개(기본 10000)가 든 폴더를 만들고, 작업 대기열의
+      복사 작업으로 각각 N회(기본 5) 복사해(한 번 데운 뒤, 대상은 매번 지움) 큰 파일 처리량 중앙값이 하한
+      (40MB/s)보다 낮거나 작은 파일 복사 시간 중앙값이 상한(50000ms)을 넘으면 실패한다. Windows가 아니면 건너뛴다.
+  facet-bench compare-copy <원본 폴더> <대상 폴더> [--size-mb N] [--count N] [--runs N] [--json <파일>]
+      원본 폴더에 큰 파일 하나와 작은 파일 N개를 만들고 대상 폴더로 facet 엔진과 탐색기(IFileOperation)가
+      번갈아 N회(기본 5)씩 복사해 시간·처리량을 표로 내고, --json이면 JSON도 쓴다. 큰 파일 처리량이 탐색기의
+      90% 이상, 작은 파일 시간이 탐색기보다 길지 않아야 통과하고, 못 맞추면 실패한다. 만든 파일은 끝나면 지운다.
+      Windows가 아니면 그렇다고 알리고 실패한다. 보통 `cargo xtask measure-copy`로 부른다.
   facet-bench screen <경로> --app <facet 실행 파일> [--count N] [--runs N] [--scroll-runs N]
                      [--scroll-rows N] [--refresh-hz N] [--json <파일>]
       시험 폴더를 만들거나 확인한 뒤 앱을 측정 모드로 띄워 콜드 스타트(--runs회, 기본 5),
@@ -48,7 +61,10 @@ const DEFAULT_RUNS: usize = 5;
 struct Args {
     command: String,
     path: Option<PathBuf>,
+    /// 두 번째 경로(`compare-copy`의 대상 폴더).
+    second: Option<PathBuf>,
     count: Option<usize>,
+    size_mb: Option<u64>,
     runs: usize,
     limit: Option<Duration>,
     app: Option<PathBuf>,
@@ -69,7 +85,9 @@ impl Args {
 fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     let command = it.next().ok_or("명령이 없습니다")?;
     let mut path = None;
+    let mut second = None;
     let mut count = None;
+    let mut size_mb = None;
     let mut runs = DEFAULT_RUNS;
     let mut limit = None;
     let mut app = None;
@@ -107,18 +125,24 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         };
         match arg.as_str() {
             "--count" => count = Some(number("--count")? as usize),
+            "--size-mb" => size_mb = Some(number("--size-mb")?.max(1)),
             "--runs" => runs = (number("--runs")? as usize).max(1),
             "--scroll-runs" => scroll_runs = number("--scroll-runs")? as usize,
             "--scroll-rows" => scroll_rows = (number("--scroll-rows")? as usize).max(1),
             "--limit-ms" => limit = Some(Duration::from_millis(number("--limit-ms")?)),
             _ if path.is_none() && !arg.starts_with("--") => path = Some(PathBuf::from(arg)),
+            _ if command == "compare-copy" && second.is_none() && !arg.starts_with("--") => {
+                second = Some(PathBuf::from(arg));
+            }
             _ => return Err(format!("알 수 없는 인자: {arg}")),
         }
     }
     Ok(Args {
         command,
         path,
+        second,
         count,
+        size_mb,
         runs,
         limit,
         app,
@@ -143,6 +167,8 @@ fn main() -> ExitCode {
         "index" => index(&args),
         "mft" => mft(&args),
         "session" => session(&args),
+        "copy" => copy_bench(&args),
+        "compare-copy" => compare_copy(&args),
         "screen" => make_folder(&args).and_then(|()| screen(&args)),
         other => Err(format!("알 수 없는 명령: {other}\n\n{USAGE}")),
     };
@@ -489,6 +515,108 @@ fn screen(args: &Args) -> Result<(), String> {
 {}",
         result.to_table()
     );
+    if let Some(json) = &args.json {
+        std::fs::write(json, result.to_json())
+            .map_err(|e| format!("{}를 쓰지 못함: {e}", json.display()))?;
+        println!("JSON: {}", json.display());
+    }
+    if result.verdict().pass() {
+        Ok(())
+    } else {
+        Err("통과 기준을 맞추지 못했습니다".to_owned())
+    }
+}
+
+/// 큰 파일 크기(`--size-mb`, MiB).
+fn big_size(args: &Args) -> u64 {
+    args.size_mb.map_or(COPY_BIG_SIZE, |mb| mb << 20)
+}
+
+/// 복사 벤치마크: 작업 대기열의 복사 작업으로 큰 파일 처리량과 작은 파일들의 복사 시간을 잰다.
+fn copy_bench(args: &Args) -> Result<(), String> {
+    if args.path.is_some() {
+        return Err(format!("copy 명령은 경로를 받지 않습니다\n\n{USAGE}"));
+    }
+    if !cfg!(windows) {
+        println!("복사 벤치마크: Windows가 아니므로 건너뜀(복사 엔진은 Windows 전용)");
+        return Ok(());
+    }
+    warn_debug();
+    let size = big_size(args);
+    let count = args.count.unwrap_or(COPY_SMALL_COUNT);
+    let root = std::env::temp_dir().join(format!("facet-bench-copy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let start = Instant::now();
+    let fixture = CopyFixture::create(&root.join("원본"), size, count, COPY_SMALL_SIZE)
+        .map_err(|e| format!("{}: {e}", root.display()))?;
+    println!(
+        "복사 원본 만듦: {} ({:.1}s)",
+        fixture.root.display(),
+        start.elapsed().as_secs_f64()
+    );
+    let target = root.join("대상");
+    let result = (|| {
+        let m = copy::measure_copy(
+            Engine::Facet,
+            std::slice::from_ref(&fixture.big),
+            &target,
+            fixture.big_items(),
+            args.runs,
+        )?;
+        println!(
+            "복사 큰 파일 하나 ({:.1}MB, 작업 대기열, {}회):",
+            size as f64 / 1e6,
+            m.times.len()
+        );
+        print_times(&m);
+        println!(
+            "  중앙값 {:.1}ms ({:.1}MB/s), 최악 {:.1}ms ({:.1}MB/s) / 로컬 기준 {:.0}MB/s, CI 하한 {:.0}MB/s",
+            ms(m.median()),
+            copy::throughput(size, m.median()) / 1e6,
+            ms(m.max()),
+            copy::throughput(size, m.max()) / 1e6,
+            COPY_THROUGHPUT_TARGET as f64 / 1e6,
+            COPY_THROUGHPUT_LIMIT as f64 / 1e6
+        );
+        copy::check_throughput(&m, size, COPY_THROUGHPUT_LIMIT)?;
+        println!("  하한 위: 통과");
+
+        let m = copy::measure_copy(
+            Engine::Facet,
+            std::slice::from_ref(&fixture.small),
+            &target,
+            fixture.small_items(),
+            args.runs,
+        )?;
+        println!(
+            "복사 작은 파일 {count}개 ({}바이트씩, 폴더 하나, 작업 대기열, {}회):",
+            COPY_SMALL_SIZE,
+            m.times.len()
+        );
+        report_median("작은 파일 복사", &m, COPY_SMALL_TARGET, COPY_SMALL_LIMIT)
+    })();
+    let _ = std::fs::remove_dir_all(&root);
+    result
+}
+
+/// 탐색기 비교 측정: 같은 복사를 facet 엔진과 `IFileOperation`으로 잰다.
+fn compare_copy(args: &Args) -> Result<(), String> {
+    let source = args.path.as_ref().ok_or("원본 폴더가 없습니다")?;
+    let target = args.second.as_ref().ok_or("대상 폴더가 없습니다")?;
+    if !cfg!(windows) {
+        return Err("탐색기 비교 측정은 Windows에서만 잴 수 있습니다(IFileOperation)".into());
+    }
+    warn_debug();
+    let plan = ComparePlan {
+        source,
+        target,
+        big_size: big_size(args),
+        small_count: args.count.unwrap_or(COPY_SMALL_COUNT),
+        small_size: COPY_SMALL_SIZE,
+        runs: args.runs,
+    };
+    let result = copy::compare(&plan)?;
+    println!("\n{}", result.to_table());
     if let Some(json) = &args.json {
         std::fs::write(json, result.to_json())
             .map_err(|e| format!("{}를 쓰지 못함: {e}", json.display()))?;
