@@ -77,7 +77,10 @@ impl MoveJob {
                 // 이름이 없는 원본(드라이브 루트 등)은 옮길 수 없다.
                 None => mover.fail_without_retry(&root.source),
             }
-            mover.copier.reporter.maybe_emit(mover.copier.context.control);
+            mover
+                .copier
+                .reporter
+                .maybe_emit(mover.copier.context.control);
         }
         if !mover.copier.cancelled {
             totals.counted.store(true, Ordering::Release);
