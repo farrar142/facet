@@ -10,7 +10,7 @@ use facet_index::{
     ATTRIBUTE_DIRECTORY, Index, NewItem, USN_REASON_FILE_CREATE, USN_REASON_FILE_DELETE,
     USN_REASON_RENAME_NEW_NAME, USN_REASON_RENAME_OLD_NAME,
 };
-use facet_indexer::follow::{self, JournalNow, Records, Source, Stop};
+use facet_indexer::follow::{self, IndexFile, JournalNow, Records, SavePolicy, Source, Stop};
 use facet_indexer::session::Cancel;
 use facet_indexer::volumes::Volumes;
 use facet_protocol::{Case, Condition, ErrorKind, NoIndexReason, QueryMessage, VolumeState};
@@ -136,16 +136,41 @@ struct Harness {
     thread: Option<JoinHandle<()>>,
 }
 
+/// 저널 끝에 레코드 하나를 덧붙인다.
+fn push_to(
+    journal: &Mutex<Journal>,
+    number: u64,
+    parent: u64,
+    reason: u32,
+    attributes: u32,
+    name: &str,
+) {
+    let mut j = journal.lock().unwrap();
+    let usn = j.next_usn;
+    j.records
+        .push((usn, record(number, parent, usn, reason, attributes, name)));
+    j.next_usn += 100;
+}
+
+fn new_journal() -> Arc<Mutex<Journal>> {
+    Arc::new(Mutex::new(Journal {
+        journal_id: 7,
+        first_usn: 0,
+        records: Vec::new(),
+        next_usn: 1000,
+        broken: false,
+    }))
+}
+
 impl Harness {
     fn start() -> Self {
+        Self::start_with(new_journal(), None)
+    }
+
+    /// 저널 `journal`(서비스가 꺼졌다 다시 떠도 볼륨의 저널은 그대로다)과 인덱스 파일 `file`로
+    /// 따라가기를 시작한다.
+    fn start_with(journal: Arc<Mutex<Journal>>, file: Option<IndexFile>) -> Self {
         let volumes = Arc::new(Volumes::new());
-        let journal = Arc::new(Mutex::new(Journal {
-            journal_id: 7,
-            first_usn: 0,
-            records: Vec::new(),
-            next_usn: 1000,
-            broken: false,
-        }));
         let (builds, builds_rx) = mpsc::channel();
         let (started_tx, started) = mpsc::channel();
         let stop = Stop::new();
@@ -157,7 +182,9 @@ impl Harness {
         let thread = {
             let volumes = volumes.clone();
             let stop = stop.clone();
-            thread::spawn(move || follow::run(&volumes, VOLUME, &mut fake, &stop, POLL))
+            thread::spawn(move || {
+                follow::run(&volumes, VOLUME, &mut fake, &stop, POLL, file.as_ref())
+            })
         };
         Self {
             volumes,
@@ -206,11 +233,7 @@ impl Harness {
 
     /// 저널 끝에 레코드 하나를 덧붙인다.
     fn push(&self, number: u64, parent: u64, reason: u32, attributes: u32, name: &str) {
-        let mut j = self.journal.lock().unwrap();
-        let usn = j.next_usn;
-        j.records
-            .push((usn, record(number, parent, usn, reason, attributes, name)));
-        j.next_usn += 100;
+        push_to(&self.journal, number, parent, reason, attributes, name);
     }
 
     fn paths(&self, part: &str) -> Vec<String> {
@@ -415,5 +438,225 @@ fn idle_polls_keep_cursors_alive() {
     thread::sleep(POLL * 20);
     let page = h.volumes.resume(cursor, 10).unwrap();
     assert_eq!(page.hits.len(), 1);
+    h.stop();
+}
+
+// --- 인덱스 파일: 저장과 다시 뜬 뒤 따라잡기 ---
+
+/// 저장 주기가 테스트 동안 오지 않는 정책(멈출 때와 만든 직후에만 저장한다).
+const NEVER: SavePolicy = SavePolicy {
+    changes: usize::MAX,
+    interval: Duration::from_secs(3600),
+};
+
+fn index_file(dir: &tempfile::TempDir, policy: SavePolicy) -> IndexFile {
+    IndexFile::in_dir(dir.path(), VOLUME, policy)
+}
+
+/// 파일에 저장된 인덱스에서 이름에 `part`가 든 항목의 경로들(정렬). 읽지 못하면 `None`.
+fn saved_paths(file: &IndexFile, part: &str) -> Option<Vec<String>> {
+    let index = Index::load(&file.path).ok()?;
+    let volumes = Volumes::with_index(VOLUME, index);
+    let page = volumes.search(&query(part, None), &Cancel::new()).ok()?;
+    let mut paths: Vec<String> = page.hits.into_iter().map(|h| h.path).collect();
+    paths.sort();
+    Some(paths)
+}
+
+fn wait_saved(file: &IndexFile, part: &str, want: &[&str]) {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let got = saved_paths(file, part);
+        if got.as_deref().is_some_and(|g| g == want) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "저장된 인덱스에서 {part} → {want:?}가 되지 않음(지금 {got:?})"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn file_name_is_per_volume() {
+    assert_eq!(follow::file_name("C:"), "C.facetidx");
+    assert_eq!(follow::file_name(r"D:\"), "D.facetidx");
+    assert_ne!(follow::file_name("C:"), follow::file_name("D:"));
+}
+
+#[test]
+fn a_fresh_index_is_saved_right_after_it_is_built() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = index_file(&dir, NEVER);
+    let h = Harness::start_with(new_journal(), Some(file.clone()));
+    h.finish_build(Ok(index(&["a.txt"])));
+    h.wait_ready();
+    wait_saved(&file, "a.txt", &[r"T:\문서\a.txt"]);
+    let saved = Index::load(&file.path).unwrap();
+    assert_eq!(saved.journal().unwrap().journal_id, 7);
+    h.stop();
+}
+
+#[test]
+fn restart_uses_the_saved_index_and_catches_up_on_changes_made_while_stopped() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = index_file(&dir, NEVER);
+    let journal = new_journal();
+
+    let first = Harness::start_with(journal.clone(), Some(file.clone()));
+    first.finish_build(Ok(index(&["a.txt"])));
+    first.wait_ready();
+    // 따라가는 동안의 변경도 멈출 때 저장된다.
+    first.push(60, 41, USN_REASON_FILE_CREATE, FILE, "켜진 동안.txt");
+    first.wait_paths("켜진 동안", &[r"T:\사진\켜진 동안.txt"]);
+    first.stop();
+    wait_saved(&file, "켜진 동안", &[r"T:\사진\켜진 동안.txt"]);
+
+    // 서비스가 꺼져 있는 동안의 변경.
+    push_to(
+        &journal,
+        61,
+        40,
+        USN_REASON_FILE_CREATE,
+        FILE,
+        "꺼진 동안.txt",
+    );
+    push_to(&journal, 50, 40, USN_REASON_FILE_DELETE, FILE, "a.txt");
+
+    let second = Harness::start_with(journal, Some(file));
+    second.wait_ready();
+    second.wait_paths("꺼진 동안", &[r"T:\문서\꺼진 동안.txt"]);
+    second.wait_paths("a.txt", &[]);
+    assert_eq!(second.paths("켜진 동안"), [r"T:\사진\켜진 동안.txt"]);
+    // MFT로 다시 만들지 않았다.
+    assert!(
+        second.started.try_recv().is_err(),
+        "저장한 인덱스를 두고 다시 만듦"
+    );
+    second.stop();
+}
+
+#[test]
+fn journal_changed_or_overflowed_while_stopped_rebuilds_answering_from_the_saved_index() {
+    for overflow in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let file = index_file(&dir, NEVER);
+        let journal = new_journal();
+        let first = Harness::start_with(journal.clone(), Some(file.clone()));
+        first.finish_build(Ok(index(&["old.txt"])));
+        first.wait_ready();
+        first.stop();
+        wait_saved(&file, "old", &[r"T:\문서\old.txt"]);
+
+        {
+            let mut j = journal.lock().unwrap();
+            if overflow {
+                // 저장한 USN(1000) 뒤의 레코드가 밀려났다.
+                j.next_usn = 9000;
+                j.first_usn = 8000;
+            } else {
+                j.journal_id = 8;
+            }
+        }
+        let second = Harness::start_with(journal, Some(file.clone()));
+        second
+            .started
+            .recv_timeout(PATIENCE)
+            .unwrap_or_else(|_| panic!("다시 만들지 않음(overflow={overflow})"));
+        // 다시 만드는 동안 저장한 인덱스로 답한다.
+        assert_eq!(
+            second.state(),
+            Some(VolumeState::Building { items: Some(3) })
+        );
+        assert_eq!(second.paths("old"), [r"T:\문서\old.txt"]);
+        second.builds.send(Ok(index(&["new.txt"]))).unwrap();
+        second.wait_ready();
+        assert!(second.paths("old").is_empty());
+        // 새로 만든 인덱스를 저장했다.
+        wait_saved(&file, "new", &[r"T:\문서\new.txt"]);
+        second.stop();
+    }
+}
+
+#[test]
+fn broken_or_other_version_index_files_are_discarded_and_rebuilt() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = index_file(&dir, NEVER);
+    index(&["good.txt"]).save(&file.path).unwrap();
+    let good = std::fs::read(&file.path).unwrap();
+
+    let mut checksum = good.clone();
+    let last = checksum.len() - 1;
+    checksum[last] ^= 0xFF;
+    let mut version = good.clone();
+    version[8..12].copy_from_slice(&(facet_index::FORMAT_VERSION + 1).to_le_bytes());
+    let cases: [(&str, Vec<u8>); 5] = [
+        ("검사 값 틀림", checksum),
+        ("본문 잘림", good[..good.len() - 10].to_vec()),
+        ("머리 잘림", good[..10].to_vec()),
+        ("형식 버전 다름", version),
+        ("인덱스 파일이 아님", b"not an index file at all".to_vec()),
+    ];
+    for (what, bytes) in cases {
+        std::fs::write(&file.path, &bytes).unwrap();
+        let h = Harness::start_with(new_journal(), Some(file.clone()));
+        h.started
+            .recv_timeout(PATIENCE)
+            .unwrap_or_else(|_| panic!("{what}: 다시 만들지 않음"));
+        // 깨진 파일은 쓰지 않는다: 만드는 동안 답할 앞선 인덱스가 없다.
+        assert_eq!(
+            h.state(),
+            Some(VolumeState::Building { items: None }),
+            "{what}"
+        );
+        h.builds.send(Ok(index(&["rebuilt.txt"]))).unwrap();
+        h.wait_ready();
+        wait_saved(&file, "rebuilt", &[r"T:\문서\rebuilt.txt"]);
+        h.stop();
+    }
+}
+
+#[test]
+fn saves_after_enough_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = index_file(
+        &dir,
+        SavePolicy {
+            changes: 2,
+            interval: Duration::from_secs(3600),
+        },
+    );
+    let h = Harness::start_with(new_journal(), Some(file.clone()));
+    h.finish_build(Ok(index(&[])));
+    h.wait_ready();
+    wait_saved(&file, ".txt", &[]);
+
+    h.push(60, 40, USN_REASON_FILE_CREATE, FILE, "one.txt");
+    h.wait_paths("one", &[r"T:\문서\one.txt"]);
+    // 하나로는 저장하지 않는다.
+    thread::sleep(POLL * 20);
+    assert_eq!(saved_paths(&file, ".txt").unwrap(), Vec::<String>::new());
+
+    h.push(61, 40, USN_REASON_FILE_CREATE, FILE, "two.txt");
+    wait_saved(&file, ".txt", &[r"T:\문서\one.txt", r"T:\문서\two.txt"]);
+    h.stop();
+}
+
+#[test]
+fn saves_after_the_interval_when_something_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = index_file(
+        &dir,
+        SavePolicy {
+            changes: usize::MAX,
+            interval: Duration::from_millis(50),
+        },
+    );
+    let h = Harness::start_with(new_journal(), Some(file.clone()));
+    h.finish_build(Ok(index(&[])));
+    h.wait_ready();
+    h.push(60, 40, USN_REASON_FILE_CREATE, FILE, "later.txt");
+    wait_saved(&file, "later", &[r"T:\문서\later.txt"]);
     h.stop();
 }
