@@ -270,6 +270,26 @@ impl Volumes {
         slots.insert(volume.to_owned(), Slot::Building(old));
     }
 
+    /// `volume`의 인덱스를 다시 만들기 시작한다. 다 만들 때까지 `previous`(예: 디스크에서 읽은
+    /// 앞선 인덱스)로 답한다.
+    pub fn set_building_from(&self, volume: &str, previous: Index) {
+        self.slots_mut().insert(
+            volume.to_owned(),
+            Slot::Building(Some(Arc::new(Shared::new(previous)))),
+        );
+    }
+
+    /// 준비된 볼륨 `volume`의 인덱스를 읽기 잠금을 쥐고 `read`에 넘긴다(예: 파일로 저장). 그동안
+    /// 질의는 함께 돌고 변경 적용은 기다린다. 준비된 볼륨이 아니면 `None`.
+    pub fn read_ready<R>(&self, volume: &str, read: impl FnOnce(&Index) -> R) -> Option<R> {
+        let shared = match self.slots().get(volume) {
+            Some(Slot::Ready(shared)) => Arc::clone(shared),
+            _ => return None,
+        };
+        let index = shared.read();
+        Some(read(&index))
+    }
+
     /// `volume`의 인덱스를 다 만들었다. 앞선 인덱스를 바꿔 끼운다(그 인덱스의 이어 받기 표지는
     /// 무효가 된다).
     pub fn set_ready(&self, volume: &str, index: Index) {

@@ -16,9 +16,23 @@
 //!
 //! 저널을 읽지 못하거나 레코드가 깨졌으면 인덱스를 믿을 수 없으므로 다시 만든다. 인덱스를
 //! 만들지 못하면 「인덱스 없음(만들지 못함)」으로 두고 그 볼륨은 그만 따라간다.
+//!
+//! 인덱스 파일([`IndexFile`])을 주면 인덱스를 디스크에 저장해 다시 뜬 뒤에 쓴다.
+//!
+//! - 시작할 때 그 파일을 먼저 읽는다. 저장한 저널 상태가 지금 저널과 맞으면([`Freshness::Current`])
+//!   바로 「준비됨」으로 두고 저장한 USN부터 따라가 꺼져 있던 동안의 변경을 따라잡는다. 저널 ID가
+//!   바뀌었거나 넘쳤으면 읽은 인덱스로 답하며 「만드는 중」으로 두고 다시 만든다.
+//! - 파일이 깨졌거나(검사 값 틀림, 잘림, 인덱스 파일이 아님) 형식 버전이 다르면 지우고 다시 만든다.
+//! - 인덱스를 (다시) 만들면 바로 저장한다. 따라가는 동안에는 적용한 레코드 수와 지난 시간으로
+//!   저장하고([`SavePolicy`]), 멈추라는 신호를 받으면 저장하지 않은 변경이 있을 때 한 번 더 저장한다.
+//!   저장한 인덱스와 저장한 USN은 늘 짝이 맞으므로, 저장이 늦어도 다시 뜬 뒤 따라잡을 레코드가
+//!   늘어날 뿐이다. 저장에 실패하면 따라가기는 그대로 하고 다음 주기에 다시 저장한다.
 
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use facet_index::{Freshness, Index, JournalInfo, JournalState};
 use facet_protocol::NoIndexReason;
@@ -41,6 +55,56 @@ pub struct JournalNow {
     pub first_usn: i64,
     /// 다음에 쓰일 레코드의 USN.
     pub next_usn: i64,
+}
+
+/// 따라가는 동안 인덱스 파일을 저장하는 주기. 저장하지 않은 변경이 있고 둘 가운데 하나를 넘으면
+/// 저장한다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SavePolicy {
+    /// 마지막 저장 뒤 적용한 USN 레코드 수가 이만큼이 되면 저장한다.
+    pub changes: usize,
+    /// 마지막 저장 뒤 이만큼 지났으면 저장한다.
+    pub interval: Duration,
+}
+
+/// 서비스의 저장 주기: 레코드 2만 개 또는 5분.
+///
+/// 저장은 인덱스 전체를 다시 쓰므로(항목 100만 개면 수십 MB) 자주 하지 않는다. 그렇다고 너무 드물면
+/// 갑자기 꺼진 뒤(멈출 때 저장하지 못함) 따라잡을 레코드가 많아지고, 그 사이 저널이 넘치면 다시
+/// 만들어야 한다. 기본 크기의 저널(32MB)은 레코드 수십만 개를 담으므로 2만 개와 5분은 넉넉히 안쪽이다.
+pub const SAVE_POLICY: SavePolicy = SavePolicy {
+    changes: 20_000,
+    interval: Duration::from_secs(300),
+};
+
+/// 볼륨 하나의 인덱스 파일.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexFile {
+    /// 파일 경로.
+    pub path: PathBuf,
+    /// 따라가는 동안 저장하는 주기.
+    pub policy: SavePolicy,
+}
+
+impl IndexFile {
+    /// 폴더 `dir` 안의 볼륨 `volume`(예: `C:`) 인덱스 파일([`file_name`]).
+    pub fn in_dir(dir: &Path, volume: &str, policy: SavePolicy) -> Self {
+        Self {
+            path: dir.join(file_name(volume)),
+            policy,
+        }
+    }
+}
+
+/// 볼륨 `volume`(예: `C:`)의 인덱스 파일 이름(예: `C.facetidx`). 영문자·숫자가 아닌 글자는 `_`로
+/// 바꾼다.
+pub fn file_name(volume: &str) -> String {
+    let stem: String = volume
+        .trim_end_matches(['\\', '/', ':'])
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    format!("{stem}.facetidx")
 }
 
 /// 저널에서 읽은 레코드 묶음.
@@ -105,27 +169,141 @@ enum Next {
 }
 
 /// 볼륨 `volume`의 인덱스를 만들고 `stop`이 설 때까지 따라간다. `poll`마다 저널을 확인한다
-/// (서비스는 [`POLL`]).
+/// (서비스는 [`POLL`]). `file`을 주면 인덱스를 그 파일에 저장하고, 시작할 때 그 파일이 쓸 만하면
+/// 다시 만들지 않고 쓴다(모듈 문서).
 ///
 /// 인덱스를 만들지 못하면 「인덱스 없음(만들지 못함)」으로 두고 돌아온다. 인덱스를 만드는 도중에는
 /// 멈추라는 신호를 보지 않는다(다 만든 뒤에 본다).
-pub fn run(volumes: &Volumes, volume: &str, source: &mut impl Source, stop: &Stop, poll: Duration) {
+pub fn run(
+    volumes: &Volumes,
+    volume: &str,
+    source: &mut impl Source,
+    stop: &Stop,
+    poll: Duration,
+    file: Option<&IndexFile>,
+) {
+    let mut loaded = file.and_then(|f| load(volumes, volume, source, f));
     loop {
-        volumes.set_building(volume);
-        let state = match build(source) {
-            Ok((index, state)) => {
-                volumes.set_ready(volume, index);
-                state
-            }
-            Err(message) => {
-                volumes.set_not_indexed(volume, NoIndexReason::Failed { message });
-                return;
+        let state = match loaded.take() {
+            Some(state) => state,
+            None => {
+                volumes.set_building(volume);
+                match build(source) {
+                    Ok((index, state)) => {
+                        volumes.set_ready(volume, index);
+                        if let Some(f) = file {
+                            let _ = save(volumes, volume, f);
+                        }
+                        state
+                    }
+                    Err(message) => {
+                        volumes.set_not_indexed(volume, NoIndexReason::Failed { message });
+                        return;
+                    }
+                }
             }
         };
-        match follow(volumes, volume, source, stop, poll, state) {
+        let mut saver = file.map(Saver::new);
+        let next = follow(volumes, volume, source, stop, poll, state, saver.as_mut());
+        if next.is_none()
+            && let Some(saver) = &mut saver
+        {
+            // 멈출 때 한 번 더 저장한다.
+            saver.flush(volumes, volume);
+        }
+        match next {
             None | Some(Next::Gone) => return,
             Some(Next::Rebuild) => {}
         }
+    }
+}
+
+/// 저장한 인덱스 파일을 읽는다. 지금 저널과 맞으면 「준비됨」으로 두고 그 저널 상태를 돌려준다.
+/// 저널이 바뀌었거나 넘쳤으면 읽은 인덱스로 답하는 「만드는 중」으로 두고 `None`(다시 만든다).
+/// 파일이 없으면 `None`, 깨졌거나 형식 버전이 다르면 지우고 `None`.
+fn load(
+    volumes: &Volumes,
+    volume: &str,
+    source: &mut impl Source,
+    file: &IndexFile,
+) -> Option<JournalState> {
+    let index = match Index::load(&file.path) {
+        Ok(index) => index,
+        Err(facet_index::StoreError::Io(io::ErrorKind::NotFound, _)) => return None,
+        Err(_) => {
+            // 버리고 다시 만든다. 다시 만들면 새 파일로 바꿔치기하지만, 만들지 못해도 깨진 파일을
+            // 남기지 않는다.
+            let _ = fs::remove_file(&file.path);
+            return None;
+        }
+    };
+    let fresh = source.journal().ok().is_some_and(|now| {
+        index.check_journal(JournalInfo {
+            journal_id: now.journal_id,
+            first_usn: now.first_usn,
+        }) == Freshness::Current
+    });
+    match index.journal() {
+        Some(saved) if fresh => {
+            volumes.set_ready(volume, index);
+            Some(saved)
+        }
+        _ => {
+            volumes.set_building_from(volume, index);
+            None
+        }
+    }
+}
+
+/// 준비된 볼륨의 인덱스를 파일에 저장한다. 저장했으면 `true`.
+fn save(volumes: &Volumes, volume: &str, file: &IndexFile) -> bool {
+    volumes
+        .read_ready(volume, |index| index.save(&file.path).is_ok())
+        .unwrap_or(false)
+}
+
+/// 따라가는 동안의 저장 주기를 센다.
+struct Saver<'a> {
+    file: &'a IndexFile,
+    /// 마지막 저장 뒤 적용한 레코드 수.
+    pending: usize,
+    /// 마지막 저장(또는 저장 시도) 시각.
+    since: Instant,
+}
+
+impl<'a> Saver<'a> {
+    fn new(file: &'a IndexFile) -> Self {
+        Self {
+            file,
+            pending: 0,
+            since: Instant::now(),
+        }
+    }
+
+    /// 레코드 `records`개를 적용했다.
+    fn applied(&mut self, records: usize) {
+        // 해석한 레코드가 없는 묶음도 저널 상태는 바꿨으므로 적어도 하나로 센다.
+        self.pending = self.pending.saturating_add(records.max(1));
+    }
+
+    /// 주기가 됐으면 저장한다.
+    fn tick(&mut self, volumes: &Volumes, volume: &str) {
+        let due = self.pending >= self.file.policy.changes
+            || (self.pending > 0 && self.since.elapsed() >= self.file.policy.interval);
+        if due {
+            self.flush(volumes, volume);
+        }
+    }
+
+    /// 저장하지 않은 변경이 있으면 저장한다. 실패하면 다음 주기에 다시 한다.
+    fn flush(&mut self, volumes: &Volumes, volume: &str) {
+        if self.pending == 0 {
+            return;
+        }
+        if save(volumes, volume, self.file) {
+            self.pending = 0;
+        }
+        self.since = Instant::now();
     }
 }
 
@@ -156,8 +334,12 @@ fn follow(
     stop: &Stop,
     poll: Duration,
     mut state: JournalState,
+    mut saver: Option<&mut Saver<'_>>,
 ) -> Option<Next> {
     loop {
+        if let Some(saver) = saver.as_deref_mut() {
+            saver.tick(volumes, volume);
+        }
         if stop.wait(poll) {
             return None;
         }
@@ -198,7 +380,11 @@ fn follow(
             match applied {
                 None => return Some(Next::Gone),
                 Some(Err(_)) => return Some(Next::Rebuild),
-                Some(Ok(_)) => {}
+                Some(Ok(outcome)) => {
+                    if let Some(saver) = saver.as_deref_mut() {
+                        saver.applied(outcome.records);
+                    }
+                }
             }
             state = next;
             if stop.is_stopped() {

@@ -42,23 +42,41 @@ impl TestVhd {
             fs::remove_file(&file)
                 .map_err(|e| format!("남은 {}를 지우지 못함: {e}", file.display()))?;
         }
-        let letter = free_letter().ok_or("쓸 수 있는 드라이브 문자가 없음")?;
         let script = format!(
             "create vdisk file=\"{f}\" maximum={SIZE_MB} type=expandable\n\
              select vdisk file=\"{f}\"\n\
              attach vdisk\n\
              create partition primary\n\
-             format fs=ntfs quick label={LABEL}\n\
-             assign letter={letter}\n",
+             format fs=ntfs quick label={LABEL}\n",
             f = file.display()
         );
-        let vhd = Self { file, letter };
+        let mut vhd = Self { file, letter: '?' };
         // 중간에 실패해도 Drop이 떼고 지운다.
         diskpart(&script)?;
-        if !Path::new(&vhd.root()).exists() {
-            return Err(format!("시험 VHD를 {letter}:에 붙였지만 보이지 않음"));
+        // 루트 경로가 없어도 드라이브 문자가 아직 잡혀 있을 수 있다(앞서 뗀 볼륨의 문자를 마운트
+        // 관리자가 늦게 놓는 경우 등). diskpart가 「문자가 비어 있지 않음」으로 거절하면 다음 문자로
+        // 해 본다.
+        let mut refused = Vec::new();
+        for letter in free_letters() {
+            let assign = format!(
+                "select vdisk file=\"{f}\"\nselect partition 1\nassign letter={letter}\n",
+                f = vhd.file.display()
+            );
+            match diskpart(&assign) {
+                Ok(()) => {
+                    vhd.letter = letter;
+                    if !Path::new(&vhd.root()).exists() {
+                        return Err(format!("시험 VHD를 {letter}:에 붙였지만 보이지 않음"));
+                    }
+                    return Ok(vhd);
+                }
+                Err(e) => refused.push(format!("{letter}: {e}")),
+            }
         }
-        Ok(vhd)
+        Err(format!(
+            "시험 VHD에 드라이브 문자를 붙이지 못함:\n{}",
+            refused.join("\n")
+        ))
     }
 
     /// 볼륨 루트 경로(예: `T:\`).
@@ -92,11 +110,11 @@ fn long_path(path: &Path) -> Result<PathBuf, String> {
     Ok(text.strip_prefix(r"\\?\").map_or(full, PathBuf::from))
 }
 
-/// 비어 있는 드라이브 문자 하나(Z부터 거꾸로).
-fn free_letter() -> Option<char> {
+/// 비어 보이는(루트 경로가 없는) 드라이브 문자들(Z부터 거꾸로).
+fn free_letters() -> impl Iterator<Item = char> {
     ('G'..='Z')
         .rev()
-        .find(|c| !Path::new(&format!("{c}:\\")).exists())
+        .filter(|c| !Path::new(&format!("{c}:\\")).exists())
 }
 
 /// `diskpart /s`로 스크립트를 돌린다. 실패하면 diskpart의 출력을 담은 오류를 낸다.
