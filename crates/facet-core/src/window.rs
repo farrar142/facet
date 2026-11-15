@@ -20,6 +20,10 @@
 //! [`App::switch_tab`]: 다음·이전은 끝에서 처음으로 돈다). 패널에서 활성 탭만 보이고, 나머지는 숨어 변경 감시를
 //! 놓는다([`Tab::hide`]). 다시 보이면 갖고 있던 목록을 먼저 보이며 다시 읽고 감시를 다시 건다([`Tab::show`]).
 //!
+//! 탭 옮기기([`App::move_tab`])는 연산 하나로 같은 패널 안 순서 바꾸기, 반대편 패널로, 다른 창으로, 새 창으로를
+//! 모두 한다([`TabDestination`]). 옮긴 탭은 목적지 패널의 활성 탭이 되고 그 패널·창이 활성이 된다. 떠난 패널·창이
+//! 비면 닫힌다. 탭의 기록·선택·정렬·읽은 목록은 함께 따라간다.
+//!
 //! 닫은 탭은 앱 전체에 하나인 닫은 탭 목록에 최근 [`CLOSED_TABS_LIMIT`]개까지 남는다([`App::closed_tabs`]). 탭을
 //! 닫으면 들어가고, 여러 탭을 한 번에 넣을 수도 있다([`App::remember_closed_tabs`], 창 닫기가 쓴다). 되살리기
 //! ([`App::reopen_closed_tab`])는 마지막에 넣은 탭부터 위치·기록·정렬을 그대로 활성 창의 활성 패널에 활성 탭으로
@@ -172,6 +176,30 @@ pub struct Closed {
     pub panel: bool,
     /// 창의 마지막 패널이라 창이 닫혔다.
     pub window: bool,
+}
+
+/// 탭을 어디로 옮기는가([`App::move_tab`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabDestination {
+    /// 창 `window`의 `panel`번째 패널(0이 왼쪽)의 `slot`번째 자리. 자리는 옮기기 전 그 패널의 탭 사이 틈이다:
+    /// 0은 첫 탭 앞, `n`은 `n`번째 탭(0부터) 앞, 탭 수 이상이면 끝이다. 같은 패널 안이면 옮기는 탭 바로 앞뒤
+    /// 자리(`t`, `t + 1`)는 순서를 바꾸지 않는다.
+    Panel {
+        window: WindowId,
+        panel: usize,
+        slot: usize,
+    },
+    /// 그 탭 하나로 새 창을 연다(창 밖으로 끌어 놓음).
+    NewWindow,
+}
+
+/// 탭을 옮긴 결과([`App::move_tab`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Moved {
+    /// 탭이 옮겨 간 창. 새 창으로 옮겼으면 그 새 창이다.
+    pub window: WindowId,
+    /// 떠난 패널·창이 비어 닫혔는가.
+    pub closed: Closed,
 }
 
 /// facet의 최상위 화면 하나. 패널을 하나 또는 둘(좌우) 갖는다.
@@ -387,13 +415,19 @@ impl App {
     }
 
     fn push_window(&mut self, location: Location, sort: Sort) -> WindowId {
-        let id = WindowId(self.next_window);
-        self.next_window += 1;
         let tab_id = self.new_tab_id();
         let tab = Tab::new(location, sort, self.show_hidden);
+        let id = self.push_window_with(tab_id, tab);
+        self.navigate(Navigation::Refresh);
+        id
+    }
+
+    /// 탭 하나로 새 창을 목록 끝에 더해 활성 창으로 한다. 읽기는 시작하지 않는다.
+    fn push_window_with(&mut self, tab_id: TabId, tab: Tab) -> WindowId {
+        let id = WindowId(self.next_window);
+        self.next_window += 1;
         self.windows.push(Window::new(id, Panel::new(tab_id, tab)));
         self.active = self.windows.len() - 1;
-        self.navigate(Navigation::Refresh);
         id
     }
 
@@ -607,8 +641,16 @@ impl App {
     /// 닫은 탭의 감시는 풀리고, 그 탭에 늦게 온 결과는 버린다.
     pub fn close_tab(&mut self, id: TabId) -> Option<Closed> {
         let (w, p, t) = self.find(id)?;
-        let (_, tab) = self.windows[w].panels[p].tabs.remove(t);
+        let (tab, closed) = self.take_tab(w, p, t);
         self.remember_closed(tab);
+        Some(closed)
+    }
+
+    /// `w`번째 창의 `p`번째 패널에서 `t`번째 탭을 빼낸다. 그 탭이 패널의 활성 탭이면 오른쪽 이웃(끝이었으면 왼쪽
+    /// 이웃)이 활성이 되어 다시 보인다. 패널에 탭이 남지 않으면 패널이, 창에 패널이 남지 않으면 창이 닫힌다.
+    /// 빼낸 탭은 보이던 그대로(감시도 그대로) 돌려준다.
+    fn take_tab(&mut self, w: usize, p: usize, t: usize) -> (Tab, Closed) {
+        let (_, tab) = self.windows[w].panels[p].tabs.remove(t);
         let window = &mut self.windows[w];
         let panel = &mut window.panels[p];
         if panel.tabs.is_empty() {
@@ -619,25 +661,119 @@ impl App {
             } else if window.active >= p && window.active > 0 {
                 window.active -= 1;
             }
-            return Some(Closed {
+            let closed = Closed {
                 panel: true,
                 window: window_closed,
-            });
+            };
+            return (tab, closed);
         }
         if t < panel.active {
             panel.active -= 1;
         } else if t == panel.active {
             panel.active = panel.active.min(panel.tabs.len() - 1);
-            let (next_id, tab) = &mut panel.tabs[panel.active];
+            let (next_id, next) = &mut panel.tabs[panel.active];
             let next_id = *next_id;
-            if let Some(request) = tab.show() {
+            if let Some(request) = next.show() {
                 self.spawn_read(next_id, request);
             }
         }
-        Some(Closed {
+        let closed = Closed {
             panel: false,
             window: false,
-        })
+        };
+        (tab, closed)
+    }
+
+    /// 탭 `id`를 옮긴다: 같은 패널 안의 다른 자리(순서 바꾸기), 다른 패널(반대편 패널), 다른 창의 패널, 새 창
+    /// ([`TabDestination`]). 탭 번호는 그대로이고, 위치·선택·커서·스크롤·기록·정렬·읽은 목록이 함께 따라간다.
+    ///
+    /// 옮긴 탭은 목적지 패널의 활성 탭이 되고, 그 패널이 활성 패널, 그 창이 활성 창이 된다. 목적지 패널에서 보이던
+    /// 탭은 숨는다. 보이던 탭은 다시 읽지 않고 감시도 그대로 갖는다. 숨어 있던 탭은 갖고 있던 목록을 그대로 보이며
+    /// 다시 읽어 감시를 다시 건다([`Tab::show`]). 떠난 패널에서는 [`App::close_tab`]처럼 이웃이 활성이 되고,
+    /// 탭이 남지 않으면 그 패널이, 창에 탭이 남지 않으면 그 창이 닫힌다(창이 하나도 남지 않을 수는 없다: 탭이
+    /// 어딘가로 간다).
+    ///
+    /// 없는 탭, 닫힌 창, 없는 패널이면 아무것도 하지 않고 `None`이다.
+    pub fn move_tab(&mut self, id: TabId, to: TabDestination) -> Option<Moved> {
+        let (w, p, t) = self.find(id)?;
+        let target = match to {
+            TabDestination::Panel {
+                window,
+                panel,
+                slot,
+            } => {
+                let wd = self.windows.iter().position(|x| x.id == window)?;
+                if panel >= self.windows[wd].panels.len() {
+                    return None;
+                }
+                Some((wd, panel, slot))
+            }
+            TabDestination::NewWindow => None,
+        };
+        let not_closed = Closed {
+            panel: false,
+            window: false,
+        };
+        if let Some((wd, pd, slot)) = target
+            && (wd, pd) == (w, p)
+        {
+            self.reorder_tab(w, p, t, slot);
+            self.show_active_tab();
+            return Some(Moved {
+                window: self.windows[w].id,
+                closed: not_closed,
+            });
+        }
+        let (tab, closed) = self.take_tab(w, p, t);
+        let window = match target {
+            Some((mut wd, mut pd, slot)) => {
+                if closed.window && wd > w {
+                    wd -= 1;
+                } else if closed.panel && wd == w && pd > p {
+                    pd -= 1;
+                }
+                let window = &mut self.windows[wd];
+                let panel = &mut window.panels[pd];
+                panel.tabs[panel.active].1.hide();
+                let at = slot.min(panel.tabs.len());
+                panel.tabs.insert(at, (id, tab));
+                panel.active = at;
+                window.active = pd;
+                self.active = wd;
+                window.id
+            }
+            None => self.push_window_with(id, tab),
+        };
+        self.show_active_tab();
+        Some(Moved { window, closed })
+    }
+
+    /// `w`번째 창의 `p`번째 패널에서 `t`번째 탭을 `slot` 자리로 옮겨 활성 탭으로 하고, 그 패널·창을 활성으로 한다.
+    /// 앞서 보이던 탭은 숨는다.
+    fn reorder_tab(&mut self, w: usize, p: usize, t: usize, slot: usize) {
+        let window = &mut self.windows[w];
+        let panel = &mut window.panels[p];
+        let previous = panel.tabs[panel.active].0;
+        let slot = slot.min(panel.tabs.len());
+        let to = if slot > t { slot - 1 } else { slot };
+        let entry = panel.tabs.remove(t);
+        panel.tabs.insert(to, entry);
+        panel.active = to;
+        if let Some(index) = panel.position(previous)
+            && index != to
+        {
+            panel.tabs[index].1.hide();
+        }
+        window.active = p;
+        self.active = w;
+    }
+
+    /// 활성 탭이 숨어 있으면 다시 보인다(갖고 있던 목록을 두고 다시 읽어 감시를 다시 건다).
+    fn show_active_tab(&mut self) {
+        let id = self.active_tab_id();
+        if let Some(request) = self.active_tab_mut().show() {
+            self.spawn_read(id, request);
+        }
     }
 
     /// 닫은 탭 목록: 먼저 되살아날 것(가장 최근에 넣은 것)부터.
