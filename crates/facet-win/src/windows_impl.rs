@@ -35,7 +35,7 @@ pub fn compare_names_like_explorer(a: &str, b: &str) -> Ordering {
 }
 
 /// NUL로 끝나는 UTF-16 문자열로 바꾼다.
-fn to_wide(text: &OsStr) -> Vec<u16> {
+pub(crate) fn to_wide(text: &OsStr) -> Vec<u16> {
     text.encode_wide().chain(std::iter::once(0)).collect()
 }
 
