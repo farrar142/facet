@@ -1,4 +1,4 @@
-//! MFT 떠 내기의 절차. 볼륨 읽기를 [`ReadAt`]로 받으므로 플랫폼과 상관없이 테스트한다.
+//! MFT 읽기와 떠 내기의 절차. 볼륨 읽기를 [`ReadAt`]로 받으므로 플랫폼과 상관없이 테스트한다.
 //! 실제 볼륨은 [`crate::volume`]이 이 트레이트를 구현한다.
 
 use std::io::{self, Write};
@@ -42,12 +42,8 @@ pub fn dump_mft(
     count: Option<u64>,
     out: &mut impl Write,
 ) -> Result<Summary, String> {
+    check_geometry(geometry)?;
     let rs = u64::from(geometry.bytes_per_record);
-    let cs = u64::from(geometry.bytes_per_cluster);
-    let ss = u64::from(geometry.bytes_per_sector);
-    if rs == 0 || cs == 0 || ss == 0 || !rs.is_multiple_of(ss) {
-        return Err(format!("지원하지 않는 볼륨 기하 정보: {geometry:?}"));
-    }
     let extents = read_extents(volume, geometry)?;
 
     let total_records = geometry.mft_valid_data_length / rs;
@@ -66,7 +62,68 @@ pub fn dump_mft(
         None => total_records - start,
     };
 
-    let reads = layout::plan_reads(&extents, cs, start * rs, (start + records) * rs, CHUNK)?;
+    let mut write = |bytes: &[u8]| {
+        out.write_all(bytes)
+            .map_err(|e| format!("출력 파일에 쓰지 못함: {e}"))
+    };
+    read_records(
+        volume,
+        geometry,
+        &extents,
+        start * rs,
+        (start + records) * rs,
+        &mut write,
+    )?;
+    out.flush()
+        .map_err(|e| format!("출력 파일에 쓰지 못함: {e}"))?;
+    Ok(Summary {
+        start,
+        records,
+        bytes_per_record: geometry.bytes_per_record,
+        total_records,
+    })
+}
+
+/// MFT의 유효 데이터 전체를 처음부터 순서대로 [`CHUNK`] 크기 이하의 덩어리로 읽어 `sink`에 넘긴다.
+/// 덩어리는 MFT 순서로 이어지고, 다 이으면 레코드 0부터 유효 데이터 끝까지의 바이트다.
+/// 레코드 경계와 덩어리 경계는 맞지 않을 수 있다(클러스터가 레코드보다 작을 때).
+///
+/// 돌려주는 값은 읽은 레코드 수다.
+pub fn read_mft(
+    volume: &mut impl ReadAt,
+    geometry: &Geometry,
+    sink: &mut dyn FnMut(&[u8]) -> Result<(), String>,
+) -> Result<u64, String> {
+    check_geometry(geometry)?;
+    let extents = read_extents(volume, geometry)?;
+    let rs = u64::from(geometry.bytes_per_record);
+    let records = geometry.mft_valid_data_length / rs;
+    read_records(volume, geometry, &extents, 0, records * rs, sink)?;
+    Ok(records)
+}
+
+fn check_geometry(geometry: &Geometry) -> Result<(), String> {
+    let rs = u64::from(geometry.bytes_per_record);
+    let cs = u64::from(geometry.bytes_per_cluster);
+    let ss = u64::from(geometry.bytes_per_sector);
+    if rs == 0 || cs == 0 || ss == 0 || !rs.is_multiple_of(ss) {
+        return Err(format!("지원하지 않는 볼륨 기하 정보: {geometry:?}"));
+    }
+    Ok(())
+}
+
+/// MFT 안의 바이트 범위 `[from, to)`를 덩어리로 읽어 차례로 `sink`에 넘긴다.
+fn read_records(
+    volume: &mut impl ReadAt,
+    geometry: &Geometry,
+    extents: &[Extent],
+    from: u64,
+    to: u64,
+    sink: &mut dyn FnMut(&[u8]) -> Result<(), String>,
+) -> Result<(), String> {
+    let cs = u64::from(geometry.bytes_per_cluster);
+    let ss = u64::from(geometry.bytes_per_sector);
+    let reads = layout::plan_reads(extents, cs, from, to, CHUNK)?;
     let mut buf = vec![0u8; CHUNK];
     for read in reads {
         if !read.offset.is_multiple_of(ss) || !(read.len as u64).is_multiple_of(ss) {
@@ -76,17 +133,9 @@ pub fn dump_mft(
         volume
             .read_exact_at(read.offset, chunk)
             .map_err(|e| format!("볼륨의 {}바이트 위치를 읽지 못함: {e}", read.offset))?;
-        out.write_all(chunk)
-            .map_err(|e| format!("출력 파일에 쓰지 못함: {e}"))?;
+        sink(chunk)?;
     }
-    out.flush()
-        .map_err(|e| format!("출력 파일에 쓰지 못함: {e}"))?;
-    Ok(Summary {
-        start,
-        records,
-        bytes_per_record: geometry.bytes_per_record,
-        total_records,
-    })
+    Ok(())
 }
 
 /// 레코드 0(`$MFT`)을 읽어 MFT의 위치 목록을 얻는다.

@@ -6,6 +6,14 @@ pub const USAGE: &str = "\
 사용법: facet-indexer <명령>
 
 명령:
+  install
+      (개발용, 관리자 권한) 이 실행 파일을 인덱서 서비스(facet-indexer, LocalSystem, 자동 시작)로
+      등록하고 시작한다. 서비스는 드라이브 문자가 있는 로컬 NTFS 볼륨마다 첫 인덱스를 만들고
+      파이프로 질의에 답한다. 실행 파일은 등록한 자리에 그대로 있어야 한다
+  uninstall
+      (개발용, 관리자 권한) 인덱서 서비스를 멈추고 지운다
+  service
+      서비스 관리자가 서비스를 띄울 때 쓰는 명령. 직접 부르지 않는다
   dump-mft <볼륨> <출력 파일> [--start N] [--count N]
       (개발용, 관리자 권한) NTFS 볼륨의 MFT 원시 레코드를 덩어리째 읽어 파일로 떠 낸다.
       <볼륨>은 드라이브 문자(예: D: 또는 D). 레코드는 고정값(fixup)을 되돌리지 않은 디스크 그대로다.
@@ -23,6 +31,9 @@ pub const USAGE: &str = "\
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
     Help,
+    Install,
+    Uninstall,
+    Service,
     DumpMft(DumpArgs),
     ServeSample(ServeArgs),
 }
@@ -48,6 +59,16 @@ pub struct DumpArgs {
 pub fn parse(args: &[String]) -> Result<Command, String> {
     match args.first().map(String::as_str) {
         None | Some("help" | "--help" | "-h") => Ok(Command::Help),
+        Some(cmd @ ("install" | "uninstall" | "service")) => {
+            if let Some(extra) = args.get(1) {
+                return Err(format!("알 수 없는 인자: {extra}"));
+            }
+            Ok(match cmd {
+                "install" => Command::Install,
+                "uninstall" => Command::Uninstall,
+                _ => Command::Service,
+            })
+        }
         Some("dump-mft") => parse_dump(&args[1..]).map(Command::DumpMft),
         Some("serve-sample") => parse_serve(&args[1..]).map(Command::ServeSample),
         Some(other) => Err(format!("알 수 없는 명령: {other}")),
@@ -126,6 +147,15 @@ mod tests {
     fn no_command_or_help_is_help() {
         assert_eq!(parse(&args(&[])), Ok(Command::Help));
         assert_eq!(parse(&args(&["help"])), Ok(Command::Help));
+    }
+
+    #[test]
+    fn service_commands_take_no_arguments() {
+        assert_eq!(parse(&args(&["install"])), Ok(Command::Install));
+        assert_eq!(parse(&args(&["uninstall"])), Ok(Command::Uninstall));
+        assert_eq!(parse(&args(&["service"])), Ok(Command::Service));
+        assert!(parse(&args(&["install", "x"])).is_err());
+        assert!(parse(&args(&["uninstall", "--force"])).is_err());
     }
 
     #[test]

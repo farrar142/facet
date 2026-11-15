@@ -8,11 +8,32 @@
 //!   `cargo test --workspace -- --ignored real_volume_`으로 이 테스트들만 돌린 뒤 VHD를 뗀다.
 //!   관리자가 아니면 건너뛴다고 출력한다.
 //! - 손으로 돌리기: 관리자 터미널에서 시험 볼륨을 붙이고
-//!   `FACET_TEST_VOLUME=T: cargo test -p facet-indexer -- --ignored real_volume_`.
+//!   `FACET_TEST_VOLUME=T: cargo test --workspace -- --ignored real_volume_`(서비스 테스트는
+//!   시험용 질의 명령 `facet-query`도 부르므로 작업 공간 전체로 빌드한다).
+//! - 서비스 테스트는 인덱서 서비스를 실제로 설치했다가 지운다. 이미 설치돼 있으면 건드리지 않고
+//!   건너뛴다.
 #![cfg(windows)]
 
+use std::collections::BTreeSet;
 use std::env;
+use std::fs::{self, OpenOptions};
+use std::os::windows::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use facet_index::ATTRIBUTE_DIRECTORY;
+use facet_indexer::SERVICE_NAME;
+use facet_indexer::service::index_volumes;
+use facet_indexer::session::Cancel;
+use facet_indexer::volume::local_volumes;
+use facet_indexer::volumes::{Plan, Volumes};
+use facet_protocol::{
+    Case, Condition, PIPE_CLIENT_ACCESS, PIPE_NAME, PROTOCOL_VERSION, QueryMessage, Request,
+    Response, VolumeState, read_message, write_message,
+};
 
 const VOLUME_VAR: &str = "FACET_TEST_VOLUME";
 
@@ -46,4 +67,265 @@ fn real_volume_dump_mft_reads_file_records() {
     for (n, record) in records.iter().take(16).enumerate() {
         assert_eq!(&record[0..4], b"FILE", "레코드 {n}의 서명이 FILE이 아님");
     }
+}
+
+/// `FACET_TEST_VOLUME`을 `T:` 꼴로.
+fn volume_name() -> String {
+    test_volume().trim_end_matches(['\\', '/']).to_uppercase()
+}
+
+/// 시험 볼륨 루트 아래 이 테스트만 쓰는 새 폴더. 버릴 때 지운다.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new(volume: &str, tag: &str) -> Self {
+        let dir = PathBuf::from(format!(r"{volume}\facet-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+
+    fn file(&self, relative: &str, size: usize) -> PathBuf {
+        let path = self.0.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, vec![b'x'; size]).unwrap();
+        path
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+#[ignore = "실제 볼륨 테스트: 관리자 권한과 FACET_TEST_VOLUME이 필요하다(cargo xtask ci가 관리자일 때 돌린다)"]
+fn real_volume_first_index_matches_volume_contents() {
+    let volume = volume_name();
+    let scratch = Scratch::new(&volume, "first-index");
+    let files = [
+        (r"보고서 1.txt", 100),
+        (r"사진\여름 바다.jpg", 2000),
+        (r"사진\깊은\이모지 😀🎉.txt", 0),
+        (r"큰 파일.bin", 100_000),
+    ];
+    for (name, size) in files {
+        scratch.file(name, size);
+    }
+
+    // 시험 볼륨은 로컬 NTFS 볼륨으로 목록에 든다.
+    let targets: Vec<(String, Plan)> = local_volumes()
+        .into_iter()
+        .filter(|(v, _)| *v == volume)
+        .collect();
+    assert_eq!(targets, [(volume.clone(), Plan::Index)]);
+
+    let volumes = Arc::new(Volumes::new());
+    for t in index_volumes(&volumes, targets) {
+        t.join().unwrap();
+    }
+    let status = volumes.status();
+    let [state] = &status.volumes[..] else {
+        panic!("볼륨 상태가 하나가 아님: {status:?}")
+    };
+    assert!(
+        matches!(state.state, VolumeState::Ready { items } if items as usize >= files.len()),
+        "{state:?}"
+    );
+
+    let page = volumes
+        .search(
+            &QueryMessage {
+                condition: Condition::Under {
+                    folder: scratch.0.display().to_string(),
+                },
+                sort: None,
+                limit: None,
+            },
+            &Cancel::new(),
+        )
+        .unwrap();
+    // (경로, 파일이면 크기)
+    let got: BTreeSet<(String, Option<u64>)> = page
+        .hits
+        .iter()
+        .map(|h| {
+            let size = (h.attributes & ATTRIBUTE_DIRECTORY == 0).then_some(h.size);
+            (h.path.clone(), size)
+        })
+        .collect();
+    let mut want: BTreeSet<(String, Option<u64>)> = files
+        .iter()
+        .map(|(name, size)| {
+            let path = scratch.0.join(name).display().to_string();
+            (path, Some(*size as u64))
+        })
+        .collect();
+    for folder in [r"사진", r"사진\깊은"] {
+        want.insert((scratch.0.join(folder).display().to_string(), None));
+    }
+    assert_eq!(got, want);
+}
+
+/// 설치한 서비스를 테스트가 끝날 때(실패해도) 지운다.
+struct Installed;
+
+impl Drop for Installed {
+    fn drop(&mut self) {
+        let _ = Command::new(env!("CARGO_BIN_EXE_facet-indexer"))
+            .arg("uninstall")
+            .status();
+    }
+}
+
+fn service_exists() -> bool {
+    Command::new("sc.exe")
+        .args(["query", SERVICE_NAME])
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+fn ask(pipe: &mut fs::File, request: &Request) -> Response {
+    write_message(pipe, request).unwrap();
+    read_message(pipe).unwrap()
+}
+
+/// 시험용 질의 명령(`facet-query`). `cargo test --workspace`가 이 테스트가 부르는 `facet-indexer`와
+/// 같은 폴더에 빌드한다.
+fn facet_query() -> PathBuf {
+    let exe = Path::new(env!("CARGO_BIN_EXE_facet-indexer")).with_file_name("facet-query.exe");
+    assert!(
+        exe.exists(),
+        "{}가 없습니다. cargo test --workspace로 돌리거나 cargo build -p facet-query를 먼저 하십시오",
+        exe.display()
+    );
+    exe
+}
+
+#[test]
+#[ignore = "실제 볼륨 테스트: 관리자 권한과 FACET_TEST_VOLUME이 필요하다(cargo xtask ci가 관리자일 때 돌린다)"]
+fn real_volume_service_install_index_query_uninstall() {
+    let volume = volume_name();
+    if service_exists() {
+        eprintln!("서비스 {SERVICE_NAME}가 이미 설치돼 있어 이 테스트를 건너뜁니다(지우지 않음)");
+        return;
+    }
+    let query = facet_query();
+    let scratch = Scratch::new(&volume, "service");
+    let unique = format!("서비스 찾기 {}.txt", std::process::id());
+    let file = scratch.file(&unique, 123);
+    let file_path = file.display().to_string();
+
+    let installed = Command::new(env!("CARGO_BIN_EXE_facet-indexer"))
+        .arg("install")
+        .status()
+        .unwrap();
+    let guard = Installed;
+    assert!(installed.success(), "install 실패: {installed}");
+    assert!(service_exists());
+
+    // 일반 클라이언트처럼(읽기와 데이터 쓰기만 청해) 붙고, 시험 볼륨이 준비될 때까지 상태 질의를
+    // 되풀이한다. 다른 볼륨(C: 등)은 아직 만드는 중이어도 된다.
+    let deadline = Instant::now() + Duration::from_secs(300);
+    let mut pipe = loop {
+        match OpenOptions::new()
+            .access_mode(PIPE_CLIENT_ACCESS)
+            .open(PIPE_NAME)
+        {
+            Ok(p) => break p,
+            Err(e) if Instant::now() < deadline => {
+                eprintln!("파이프를 기다림: {e}");
+                thread::sleep(Duration::from_millis(200));
+            }
+            Err(e) => panic!("서비스 파이프에 붙지 못함: {e}"),
+        }
+    };
+    assert!(matches!(
+        ask(
+            &mut pipe,
+            &Request::Hello {
+                version: PROTOCOL_VERSION
+            }
+        ),
+        Response::HelloAccepted { .. }
+    ));
+    loop {
+        let Response::Status(status) = ask(&mut pipe, &Request::Status) else {
+            panic!("상태 응답이 아님")
+        };
+        let state = status
+            .volumes
+            .iter()
+            .find(|v| v.volume == volume)
+            .unwrap_or_else(|| panic!("상태에 {volume}이 없음: {status:?}"))
+            .state
+            .clone();
+        match state {
+            VolumeState::Ready { items } => {
+                assert!(items > 0);
+                break;
+            }
+            VolumeState::Building { .. } => {}
+            other => panic!("{volume}의 상태가 {other:?}"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{volume}의 인덱스가 300초 안에 준비되지 않음"
+        );
+        thread::sleep(Duration::from_millis(200));
+    }
+
+    let Response::Page(page) = ask(
+        &mut pipe,
+        &Request::Query(QueryMessage {
+            condition: Condition::NameContains {
+                part: unique.clone(),
+                case: Case::Insensitive,
+            },
+            sort: None,
+            limit: Some(10),
+        }),
+    ) else {
+        panic!("결과 조각이 아님")
+    };
+    let paths: Vec<&str> = page.hits.iter().map(|h| h.path.as_str()).collect();
+    assert_eq!(paths, [file_path.as_str()]);
+    assert_eq!(page.hits[0].size, 123);
+    drop(pipe);
+
+    // 시험용 질의 명령으로도 찾는다.
+    let out = Command::new(&query)
+        .args(["search", &unique])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "facet-query 실패: {stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains(&format!("{file_path}\t123")),
+        "facet-query 출력에 결과가 없음:\n{stdout}"
+    );
+    let out = Command::new(&query).arg("status").output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success());
+    assert!(stdout.contains(&format!("{volume}\t준비됨")), "{stdout}");
+
+    let removed = Command::new(env!("CARGO_BIN_EXE_facet-indexer"))
+        .arg("uninstall")
+        .status()
+        .unwrap();
+    assert!(removed.success(), "uninstall 실패: {removed}");
+    assert!(!service_exists(), "제거한 뒤에도 서비스가 남아 있음");
+    // 서비스가 멈췄으므로 파이프도 없다.
+    let out = Command::new(&query).arg("status").output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "서비스가 없다는 종료 코드가 아님"
+    );
+    drop(guard);
 }
