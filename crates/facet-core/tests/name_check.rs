@@ -119,15 +119,24 @@ fn initial_selection_ranges() {
     assert_eq!(initial_selection("", false), (0, 0));
 }
 
+/// 255단위 이름 확인의 로컬 기준은 1ms 미만(실제로는 수 마이크로초)이다. 공유 러너에서 한 번 튄 값으로 떨어지지
+/// 않도록 21회의 중앙값을 기준의 10배(10ms)와 견준다. 확인이 한 단계 느려지는 실수만 잡는다
+/// (`docs/roadmap.md`의 「속도는 두 군데서 지킨다」).
 #[test]
-fn validating_a_255_unit_name_takes_under_1ms() {
+fn validating_a_255_unit_name_median_is_under_10ms() {
     let name = "가".repeat(254) + "a";
     assert_eq!(validate_name(&name), Ok(()));
-    let mut worst = Duration::ZERO;
-    for _ in 0..20 {
-        let t = Instant::now();
-        assert_eq!(validate_name(std::hint::black_box(&name)), Ok(()));
-        worst = worst.max(t.elapsed());
-    }
-    assert!(worst < Duration::from_millis(1), "{worst:?}");
+    let mut times: Vec<Duration> = (0..21)
+        .map(|_| {
+            let t = Instant::now();
+            assert_eq!(validate_name(std::hint::black_box(&name)), Ok(()));
+            t.elapsed()
+        })
+        .collect();
+    times.sort();
+    let median = times[times.len() / 2];
+    assert!(
+        median < Duration::from_millis(10),
+        "중앙값 {median:?} (전체 {times:?})"
+    );
 }

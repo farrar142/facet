@@ -4,15 +4,17 @@ use std::time::Duration;
 
 use facet_bench::Measurement;
 use facet_bench::copy::{
-    COPY_SMALL_LIMIT, COPY_SMALL_TARGET, COPY_THROUGHPUT_LIMIT, COPY_THROUGHPUT_TARGET,
-    CompareResult, Comparison, EXPLORER_THROUGHPUT_RATIO, check_throughput,
+    COPY_BENCH_BIG_SIZE, COPY_SMALL_LIMIT, COPY_SMALL_TARGET, COPY_THROUGHPUT_LIMIT,
+    COPY_THROUGHPUT_TARGET, CompareResult, Comparison, EXPLORER_THROUGHPUT_RATIO, check_throughput,
 };
 use facet_bench::screen::SystemSpec;
 
 #[test]
-fn 한도는_로컬_기준의_10배이고_처리량은_10분의_1이다() {
-    assert_eq!(COPY_SMALL_LIMIT, COPY_SMALL_TARGET * 10);
-    assert_eq!(COPY_THROUGHPUT_LIMIT * 10, COPY_THROUGHPUT_TARGET);
+fn 한도는_러너_편차를_견디게_로컬_기준의_20배이고_처리량은_40분의_1이다() {
+    assert_eq!(COPY_SMALL_LIMIT, COPY_SMALL_TARGET * 20);
+    assert_eq!(COPY_THROUGHPUT_LIMIT * 40, COPY_THROUGHPUT_TARGET);
+    // CI 크기는 무버퍼 입출력 문턱 이상이라 탐색기 비교 측정의 1GiB와 같은 경로를 탄다.
+    const { assert!(COPY_BENCH_BIG_SIZE >= facet_win::file_ops::UNBUFFERED_COPY_THRESHOLD) };
 }
 
 #[test]

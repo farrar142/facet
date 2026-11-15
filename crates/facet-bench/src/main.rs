@@ -5,8 +5,9 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use facet_bench::copy::{
-    self, COPY_BIG_SIZE, COPY_SMALL_COUNT, COPY_SMALL_LIMIT, COPY_SMALL_SIZE, COPY_SMALL_TARGET,
-    COPY_THROUGHPUT_LIMIT, COPY_THROUGHPUT_TARGET, ComparePlan, CopyFixture, Engine,
+    self, COPY_BENCH_BIG_SIZE, COPY_BENCH_RUNS, COPY_BENCH_SMALL_COUNT, COPY_BIG_SIZE,
+    COPY_SMALL_COUNT, COPY_SMALL_LIMIT, COPY_SMALL_SIZE, COPY_SMALL_TARGET, COPY_THROUGHPUT_LIMIT,
+    COPY_THROUGHPUT_TARGET, ComparePlan, CopyFixture, Engine,
 };
 use facet_bench::screen::{self, DEFAULT_SCROLL_ROWS, Plan};
 use facet_bench::{
@@ -41,9 +42,9 @@ const USAGE: &str = "\
       탭 100개 세션 파일(창 다섯 개, 패널 둘, 긴 경로와 한글 경로 섞임)을 읽고 해석하는 시간을
       N회(기본 5) 재어 중앙값이 상한(기본 50ms)을 넘으면 실패한다.
   facet-bench copy [--size-mb N] [--count N] [--runs N]
-      임시 폴더에 큰 파일 하나(기본 1024MiB)와 4KiB 파일 N개(기본 10000)가 든 폴더를 만들고, 작업 대기열의
-      복사 작업으로 각각 N회(기본 5) 복사해(한 번 데운 뒤, 대상은 매번 지움) 큰 파일 처리량 중앙값이 하한
-      (40MB/s)보다 낮거나 작은 파일 복사 시간 중앙값이 상한(50000ms)을 넘으면 실패한다. Windows가 아니면 건너뛴다.
+      임시 폴더에 큰 파일 하나(기본 256MiB)와 4KiB 파일 N개(기본 2000)가 든 폴더를 만들고, 작업 대기열의
+      복사 작업으로 각각 N회(기본 3) 복사해(한 번 데운 뒤, 대상은 매번 지움) 큰 파일 처리량 중앙값이 하한
+      (10MB/s)보다 낮거나 작은 파일 복사 시간 중앙값이 상한(20000ms)을 넘으면 실패한다. Windows가 아니면 건너뛴다.
   facet-bench compare-copy <원본 폴더> <대상 폴더> [--size-mb N] [--count N] [--runs N] [--json <파일>]
       원본 폴더에 큰 파일 하나와 작은 파일 N개를 만들고 대상 폴더로 facet 엔진과 탐색기(IFileOperation)가
       번갈아 N회(기본 5)씩 복사해 시간·처리량을 표로 내고, --json이면 JSON도 쓴다. 큰 파일 처리량이 탐색기의
@@ -65,7 +66,8 @@ struct Args {
     second: Option<PathBuf>,
     count: Option<usize>,
     size_mb: Option<u64>,
-    runs: usize,
+    /// `--runs`. 빼면 명령마다의 기본값([`Args::runs`], 복사 벤치마크는 `COPY_BENCH_RUNS`).
+    runs: Option<usize>,
     limit: Option<Duration>,
     app: Option<PathBuf>,
     scroll_runs: usize,
@@ -75,6 +77,11 @@ struct Args {
 }
 
 impl Args {
+    /// 잴 횟수: `--runs`, 빼면 [`DEFAULT_RUNS`].
+    fn runs(&self) -> usize {
+        self.runs.unwrap_or(DEFAULT_RUNS)
+    }
+
     fn path(&self) -> Result<&PathBuf, String> {
         self.path
             .as_ref()
@@ -88,7 +95,7 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut second = None;
     let mut count = None;
     let mut size_mb = None;
-    let mut runs = DEFAULT_RUNS;
+    let mut runs = None;
     let mut limit = None;
     let mut app = None;
     let mut scroll_runs = 1;
@@ -126,7 +133,7 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         match arg.as_str() {
             "--count" => count = Some(number("--count")? as usize),
             "--size-mb" => size_mb = Some(number("--size-mb")?.max(1)),
-            "--runs" => runs = (number("--runs")? as usize).max(1),
+            "--runs" => runs = Some((number("--runs")? as usize).max(1)),
             "--scroll-runs" => scroll_runs = number("--scroll-runs")? as usize,
             "--scroll-rows" => scroll_rows = (number("--scroll-rows")? as usize).max(1),
             "--limit-ms" => limit = Some(Duration::from_millis(number("--limit-ms")?)),
@@ -216,7 +223,7 @@ fn list(args: &Args) -> Result<(), String> {
     warn_debug();
     let count = args.count.unwrap_or(DEFAULT_COUNT);
     let limit = args.limit.unwrap_or(LIST_LIMIT);
-    let m = measure_list(args.path()?, args.runs).map_err(|e| e.to_string())?;
+    let m = measure_list(args.path()?, args.runs()).map_err(|e| e.to_string())?;
     if m.item_count != count {
         return Err(format!(
             "항목 수가 다릅니다: {}개를 기대했지만 {}개를 읽었습니다",
@@ -240,7 +247,7 @@ fn list(args: &Args) -> Result<(), String> {
     println!("  상한 안: 통과");
 
     let path = args.path()?;
-    let m = measure_list_sorted(path, args.runs).map_err(|e| e.to_string())?;
+    let m = measure_list_sorted(path, args.runs()).map_err(|e| e.to_string())?;
     println!(
         "코어 읽기+정렬 ({}항목, 이름 오름차순, {}회):",
         m.item_count,
@@ -248,7 +255,7 @@ fn list(args: &Args) -> Result<(), String> {
     );
     report_median("읽기+정렬", &m, LIST_SORT_TARGET, LIST_SORT_LIMIT)?;
 
-    let m = measure_resort(path, args.runs).map_err(|e| e.to_string())?;
+    let m = measure_resort(path, args.runs()).map_err(|e| e.to_string())?;
     println!(
         "코어 정렬 바꾸기 ({}항목, 열·방향을 차례로 바꿈, {}회):",
         m.item_count,
@@ -296,10 +303,10 @@ fn index(args: &Args) -> Result<(), String> {
         INDEX_MEMORY_LIMIT as f64 / 1e6
     );
     check_memory(bytes, INDEX_MEMORY_LIMIT)?;
-    report_store(&index, args.runs)?;
+    report_store(&index, args.runs())?;
 
     let query = facet_index::Query::name_contains(BENCH_QUERY).limit(BENCH_RESULT_LIMIT);
-    let m = measure_query(&index, &query, args.runs);
+    let m = measure_query(&index, &query, args.runs());
     println!(
         "인덱스 부분 일치 질의 (\"{BENCH_QUERY}\", 결과 {}개 제한, {}개 나옴, {}회):",
         BENCH_RESULT_LIMIT,
@@ -313,7 +320,7 @@ fn index(args: &Args) -> Result<(), String> {
         .sort(key, order)
         .limit(BENCH_RESULT_LIMIT);
     let total = index.search(&query).total;
-    let m = measure_query(&index, &query, args.runs);
+    let m = measure_query(&index, &query, args.runs());
     println!(
         "인덱스 정렬 질의 (\"{BENCH_SORTED_QUERY}\", {key:?} {order:?}, 결과 {}개 제한, 전체 {total}개 중 {}개 나옴, {}회):",
         BENCH_RESULT_LIMIT,
@@ -321,7 +328,7 @@ fn index(args: &Args) -> Result<(), String> {
         m.times.len()
     );
     report_query(&m, limit)?;
-    report_filtered(index, args.runs, limit)
+    report_filtered(index, args.runs(), limit)
 }
 
 /// 폴더 권한으로 거르는 질의(인덱서 서비스가 파이프로 받는 질의)를 권한 검사 기억이 찬 상태로
@@ -389,7 +396,7 @@ fn mft(args: &Args) -> Result<(), String> {
     let records = args.count.unwrap_or(MFT_RECORDS);
     let limit = args.limit.unwrap_or(MFT_PARSE_LIMIT);
     let image = mft_image(records);
-    let m = measure_mft(&image, args.runs)?;
+    let m = measure_mft(&image, args.runs())?;
     let mb = image.len() as f64 / 1e6;
     println!(
         "MFT 파싱 (조각을 되풀이한 레코드 {records}개, {mb:.1}MB → 항목 {}개, {}회):",
@@ -479,7 +486,7 @@ fn session(args: &Args) -> Result<(), String> {
     }
     warn_debug();
     let limit = args.limit.unwrap_or(SESSION_PARSE_LIMIT);
-    let m = measure_session(args.runs)?;
+    let m = measure_session(args.runs())?;
     println!(
         "세션 읽기·해석 (탭 {}개, 기대 {SESSION_TABS}개, {}회):",
         m.item_count,
@@ -504,7 +511,7 @@ fn screen(args: &Args) -> Result<(), String> {
         app,
         folder: args.path()?,
         item_count: args.count.unwrap_or(DEFAULT_COUNT),
-        runs: args.runs,
+        runs: args.runs(),
         scroll_runs: args.scroll_runs,
         scroll_rows: args.scroll_rows,
         refresh_hz: args.refresh_hz,
@@ -527,9 +534,9 @@ fn screen(args: &Args) -> Result<(), String> {
     }
 }
 
-/// 큰 파일 크기(`--size-mb`, MiB).
-fn big_size(args: &Args) -> u64 {
-    args.size_mb.map_or(COPY_BIG_SIZE, |mb| mb << 20)
+/// 큰 파일 크기(`--size-mb`, MiB). 빼면 `default`.
+fn big_size(args: &Args, default: u64) -> u64 {
+    args.size_mb.map_or(default, |mb| mb << 20)
 }
 
 /// 복사 벤치마크: 작업 대기열의 복사 작업으로 큰 파일 처리량과 작은 파일들의 복사 시간을 잰다.
@@ -542,8 +549,9 @@ fn copy_bench(args: &Args) -> Result<(), String> {
         return Ok(());
     }
     warn_debug();
-    let size = big_size(args);
-    let count = args.count.unwrap_or(COPY_SMALL_COUNT);
+    let size = big_size(args, COPY_BENCH_BIG_SIZE);
+    let runs = args.runs.unwrap_or(COPY_BENCH_RUNS);
+    let count = args.count.unwrap_or(COPY_BENCH_SMALL_COUNT);
     let root = std::env::temp_dir().join(format!("facet-bench-copy-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let start = Instant::now();
@@ -561,7 +569,7 @@ fn copy_bench(args: &Args) -> Result<(), String> {
             std::slice::from_ref(&fixture.big),
             &target,
             fixture.big_items(),
-            args.runs,
+            runs,
         )?;
         println!(
             "복사 큰 파일 하나 ({:.1}MB, 작업 대기열, {}회):",
@@ -586,7 +594,7 @@ fn copy_bench(args: &Args) -> Result<(), String> {
             std::slice::from_ref(&fixture.small),
             &target,
             fixture.small_items(),
-            args.runs,
+            runs,
         )?;
         println!(
             "복사 작은 파일 {count}개 ({}바이트씩, 폴더 하나, 작업 대기열, {}회):",
@@ -610,10 +618,10 @@ fn compare_copy(args: &Args) -> Result<(), String> {
     let plan = ComparePlan {
         source,
         target,
-        big_size: big_size(args),
+        big_size: big_size(args, COPY_BIG_SIZE),
         small_count: args.count.unwrap_or(COPY_SMALL_COUNT),
         small_size: COPY_SMALL_SIZE,
-        runs: args.runs,
+        runs: args.runs(),
     };
     let result = copy::compare(&plan)?;
     println!("\n{}", result.to_table());
