@@ -40,6 +40,8 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::LastTab => "마지막 탭",
         CommandId::OpenInNewTab => "새 탭에서 열기",
         CommandId::ReopenClosedTab => "닫은 탭 되살리기",
+        CommandId::TogglePanelSplit => "패널 나누기/합치기",
+        CommandId::SwitchPanel => "활성 패널 바꾸기",
     }
 }
 
@@ -64,6 +66,8 @@ pub fn shortcut_text(shortcut: &Shortcut) -> String {
         Key::End => "End".to_owned(),
         Key::PageUp => "PageUp".to_owned(),
         Key::PageDown => "PageDown".to_owned(),
+        // 한국어 배열에서는 같은 키가 「₩」로 보인다.
+        Key::Backslash => "\\".to_owned(),
     };
     let mut text = String::new();
     for (on, name) in [
@@ -128,6 +132,10 @@ mod tests {
         );
         assert_eq!(shortcut_text(&Shortcut::new(Key::Left).alt()), "Alt+←");
         assert_eq!(shortcut_text(&Shortcut::new(Key::Function(5))), "F5");
+        assert_eq!(
+            shortcut_text(&Shortcut::new(Key::Backslash).ctrl()),
+            "Ctrl+\\"
+        );
     }
 
     #[test]

@@ -4,14 +4,17 @@
 //!   명령 이름은 앱이 주고, 명령 팔레트 검색([`search`])은 앱이 넘긴 이름에서 찾는다.
 //! - 명령마다 기본 단축키가 있다([`CommandId::shortcuts`]). 키 조합으로 명령을 찾는 것은 [`find_by_shortcut`]이다.
 //! - 지금 실행할 수 있는지는 탭 상태에서 나온다([`CommandId::is_enabled`]). 탭 명령(n번째 탭 등)은 패널의 탭
-//!   수도 본다([`CommandId::is_enabled_in`]). 실행은 [`crate::window::App::execute`].
+//!   수도 본다([`CommandId::is_enabled_in`]). 패널 명령(활성 패널 바꾸기)은 창의 패널 수를 본다
+//!   ([`CommandId::is_enabled_in_window`]). 실행은 [`crate::window::App::execute`].
 //!
 //! 단축키는 입력한 글자가 아니라 키로 맞춘다. 한글 IME가 한글 모드여서 H 키가 「ㅗ」를 내도 Ctrl+H는 Ctrl+H다.
 //! 앱은 키 이벤트의 글자를 [`Key::from_char`]로 키로 바꾼다. 두벌식 자모는 그 자모를 내는 영문 키로 바뀐다.
+//! 백슬래시 키([`Key::Backslash`])는 배열마다 내는 글자가 달라(한국어 「₩」, 독일어 「#」) 앱이 키 위치를 알면
+//! 위치로 정한다. 글자로만 알 때는 「\」·「₩」·「￦」를 그 키로 본다.
 
 use crate::details::{Column, Direction, Sort};
 use crate::tab::Tab;
-use crate::window::Panel;
+use crate::window::{Panel, Window};
 
 /// 명령의 ID. 이 이름과 [`CommandId::as_str`]의 글자는 바뀌지 않는다(설정·단축키 바꾸기가 이것으로 명령을 가리킨다).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -61,11 +64,16 @@ pub enum CommandId {
     /// 닫은 탭 되살리기: 마지막에 닫은 탭을 활성 패널에 활성 탭으로 되살린다. 닫은 탭이 없으면 꺼진다
     /// (닫은 탭 목록은 앱 전체에 하나라 [`crate::window::App::can_execute`]가 본다).
     ReopenClosedTab,
+    /// 패널 나누기/합치기: 패널이 하나면 좌우로 나누고(새 오른쪽 패널이 활성 탭과 같은 위치의 탭 하나로 시작해
+    /// 활성이 된다), 둘이면 오른쪽 패널의 탭을 왼쪽 패널 탭 끝에 붙여 합친다.
+    TogglePanelSplit,
+    /// 활성 패널 바꾸기: 반대편 패널을 활성 패널로 한다. 패널이 하나면 꺼진다.
+    SwitchPanel,
 }
 
 impl CommandId {
     /// 모든 명령. 명령 팔레트는 검색어가 없으면 이 순서로 보인다.
-    pub const ALL: [CommandId; 29] = [
+    pub const ALL: [CommandId; 31] = [
         CommandId::Open,
         CommandId::Back,
         CommandId::Forward,
@@ -95,6 +103,8 @@ impl CommandId {
         CommandId::LastTab,
         CommandId::OpenInNewTab,
         CommandId::ReopenClosedTab,
+        CommandId::TogglePanelSplit,
+        CommandId::SwitchPanel,
     ];
 
     /// 바뀌지 않는 ID 글자. 화면 문장이 아니다.
@@ -131,6 +141,8 @@ impl CommandId {
             CommandId::LastTab => "last-tab",
             CommandId::OpenInNewTab => "open-in-new-tab",
             CommandId::ReopenClosedTab => "reopen-closed-tab",
+            CommandId::TogglePanelSplit => "toggle-panel-split",
+            CommandId::SwitchPanel => "switch-panel",
         }
     }
 
@@ -207,6 +219,8 @@ impl CommandId {
             CommandId::GoToTab(_) => &[],
             CommandId::LastTab => const { &[key(Key::Digit(9)).ctrl()] },
             CommandId::ReopenClosedTab => const { &[key(letter('T')).ctrl().shift()] },
+            CommandId::TogglePanelSplit => const { &[key(Key::Backslash).ctrl()] },
+            CommandId::SwitchPanel => const { &[key(Key::Tab)] },
         }
     }
 
@@ -218,7 +232,8 @@ impl CommandId {
     /// - 새 탭에서 열기: 커서 항목이 폴더일 때.
     /// - 나머지는 늘 켜져 있다. 다음·이전·n번째 탭은 탭 하나만 보아서는 모르므로 켜져 있다고 하고, 패널의 탭
     ///   수는 [`CommandId::is_enabled_in`]이 본다. 닫은 탭 되살리기도 켜져 있다고 하고, 닫은 탭 목록은
-    ///   [`crate::window::App::can_execute`]가 본다.
+    ///   [`crate::window::App::can_execute`]가 본다. 패널 나누기/합치기와 활성 패널 바꾸기도 켜져 있다고 하고, 창의
+    ///   패널 수는 [`CommandId::is_enabled_in_window`]가 본다.
     pub fn is_enabled(self, tab: &Tab) -> bool {
         match self {
             CommandId::Open | CommandId::ToggleCursorSelection => tab.cursor_item().is_some(),
@@ -241,7 +256,9 @@ impl CommandId {
             | CommandId::PreviousTab
             | CommandId::GoToTab(_)
             | CommandId::LastTab
-            | CommandId::ReopenClosedTab => true,
+            | CommandId::ReopenClosedTab
+            | CommandId::TogglePanelSplit
+            | CommandId::SwitchPanel => true,
         }
     }
 
@@ -257,9 +274,22 @@ impl CommandId {
             command => command.is_enabled(panel.active_tab()),
         }
     }
+
+    /// 창 상태에서 지금 실행할 수 있는가. 패널 명령은 창의 패널 수를 보고, 나머지는 활성 패널을 따른다
+    /// ([`CommandId::is_enabled_in`]).
+    ///
+    /// - 활성 패널 바꾸기: 패널이 둘일 때.
+    /// - 패널 나누기/합치기: 늘 켜져 있다(하나면 나누고 둘이면 합친다).
+    pub fn is_enabled_in_window(self, window: &Window) -> bool {
+        match self {
+            CommandId::SwitchPanel => window.is_split(),
+            command => command.is_enabled_in(window.active_panel()),
+        }
+    }
 }
 
 /// 명령의 실행 가능 여부를 정하는 상태: 탭 하나([`CommandId::is_enabled`]), 패널([`CommandId::is_enabled_in`]),
+/// 창([`CommandId::is_enabled_in_window`]),
 /// 앱 전체([`crate::window::App::can_execute`], 닫은 탭 목록까지 본다).
 pub trait CommandState {
     /// `command`를 지금 실행할 수 있는가.
@@ -275,6 +305,12 @@ impl CommandState for Tab {
 impl CommandState for Panel {
     fn is_enabled(&self, command: CommandId) -> bool {
         command.is_enabled_in(self)
+    }
+}
+
+impl CommandState for Window {
+    fn is_enabled(&self, command: CommandId) -> bool {
+        command.is_enabled_in_window(self)
     }
 }
 
@@ -311,11 +347,14 @@ pub enum Key {
     End,
     PageUp,
     PageDown,
+    /// 백슬래시 키: US 배열에서 「\」를 내는 자리(한국어 배열의 「₩」 키, 독일어 배열의 「#」 키).
+    Backslash,
 }
 
 impl Key {
-    /// 키 이벤트가 낸 글자 하나에서 키를 찾는다. 영문자(대소문자), 숫자, 공백, 그리고 한글 IME가 한글 모드일 때
-    /// 영문 키가 내는 두벌식 자모(Shift 쪽 쌍자음·ㅒ·ㅖ 포함)를 키로 바꾼다. 그 밖의 글자는 `None`이다.
+    /// 키 이벤트가 낸 글자 하나에서 키를 찾는다. 영문자(대소문자), 숫자, 공백, 백슬래시(「₩」 포함), 그리고 한글
+    /// IME가 한글 모드일 때 영문 키가 내는 두벌식 자모(Shift 쪽 쌍자음·ㅒ·ㅖ 포함)를 키로 바꾼다. 그 밖의 글자는
+    /// `None`이다.
     ///
     /// Enter·화살표·기능 키처럼 글자가 없는 키는 앱이 자기 키 이벤트에서 직접 [`Key`]로 바꾼다.
     pub fn from_char(c: char) -> Option<Key> {
@@ -323,6 +362,9 @@ impl Key {
             'a'..='z' | 'A'..='Z' => Some(Key::Letter(c.to_ascii_uppercase())),
             '0'..='9' => Some(Key::Digit(c as u8 - b'0')),
             ' ' => Some(Key::Space),
+            // 한국어 글꼴·IME에서는 백슬래시가 「₩」로 보이거나 그 글자(U+20A9, 전각 U+FFE6)로 온다. U+001C는 Ctrl과
+            // 함께 누른 백슬래시 키의 제어 글자다.
+            '\\' | '\u{20a9}' | '\u{ffe6}' | '\u{1c}' => Some(Key::Backslash),
             _ => dubeolsik_key(c).map(Key::Letter),
         }
     }

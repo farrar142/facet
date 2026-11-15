@@ -1,7 +1,12 @@
 //! 화면 상태: 앱 > 창 > 패널 > 탭.
 //!
-//! 창은 패널 목록을, 패널은 탭 목록을 갖고, 앱은 창 목록을 갖는다. 지금은 창·패널이 하나씩이고 패널에 탭이
-//! 여럿이다. 패널 둘·창 여러 개는 목록에 더하고 활성 번호를 옮기는 것으로 늘린다.
+//! 창은 패널 목록을, 패널은 탭 목록을 갖고, 앱은 창 목록을 갖는다. 지금은 창이 하나이고 패널은 하나나 둘(좌우),
+//! 패널마다 탭이 여럿이다. 창 여러 개는 목록에 더하고 활성 번호를 옮기는 것으로 늘린다.
+//!
+//! 패널 연산: 나누기([`App::split_panel`]: 새 오른쪽 패널이 활성 탭과 같은 위치의 탭 하나로 시작해 활성이 된다),
+//! 합치기([`App::merge_panels`]: 오른쪽 패널의 탭이 왼쪽 패널 탭 끝에 순서대로 붙는다), 활성 패널 바꾸기
+//! ([`App::activate_panel`], [`App::switch_panel`]). 분할 비율(왼쪽 패널이 차지하는 몫)은 창의 상태다
+//! ([`Window::split_ratio`], 한도 [`SPLIT_RATIO_MIN`]..[`SPLIT_RATIO_MAX`] 안으로 자른다).
 //!
 //! 탭 연산은 이 상태 모델에서 하고 앱은 결과를 그린다: 탭 열기([`App::open_tab`], 휠 클릭은
 //! [`App::open_in_new_tab`]), 닫기([`App::close_tab`]: 패널의 마지막 탭이면 패널이, 창의 마지막 패널이면 창이
@@ -46,6 +51,18 @@ use crate::{Candidate, Location, provider_for};
 
 /// 닫은 탭 목록에 남기는 최근 탭 수. 넘으면 가장 오래된 탭이 빠진다.
 pub const CLOSED_TABS_LIMIT: usize = 20;
+
+/// 창이 가질 수 있는 패널 수(좌우 둘).
+pub const MAX_PANELS: usize = 2;
+
+/// 분할 비율의 기본값이자 반반으로 맞출 때의 값([`Window::reset_split_ratio`]).
+pub const SPLIT_RATIO_DEFAULT: f32 = 0.5;
+
+/// 분할 비율의 하한. 왼쪽 패널이 창 너비의 이만큼보다 좁아지지 않는다.
+pub const SPLIT_RATIO_MIN: f32 = 0.2;
+
+/// 분할 비율의 상한. 오른쪽 패널이 창 너비의 `1 - SPLIT_RATIO_MAX`보다 좁아지지 않는다.
+pub const SPLIT_RATIO_MAX: f32 = 0.8;
 
 /// 앱 안의 탭 하나를 가리키는 번호. 탭을 다른 패널·창으로 옮겨도 바뀌지 않는다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -147,11 +164,13 @@ pub struct Closed {
     pub window: bool,
 }
 
-/// facet의 최상위 화면 하나. 패널을 하나 또는 둘 갖는다(지금은 하나).
+/// facet의 최상위 화면 하나. 패널을 하나 또는 둘(좌우) 갖는다.
 #[derive(Debug)]
 pub struct Window {
     panels: Vec<Panel>,
     active: usize,
+    /// 분할 비율: 패널이 둘일 때 왼쪽 패널이 차지하는 몫(0..1). 합쳐도 남아 다시 나누면 그대로 쓴다.
+    split_ratio: f32,
 }
 
 impl Window {
@@ -159,12 +178,18 @@ impl Window {
         Window {
             panels: vec![panel],
             active: 0,
+            split_ratio: SPLIT_RATIO_DEFAULT,
         }
     }
 
-    /// 패널들을 차례로.
+    /// 패널들을 차례로(왼쪽부터).
     pub fn panels(&self) -> &[Panel] {
         &self.panels
+    }
+
+    /// 패널이 둘로 나뉘어 있는가.
+    pub fn is_split(&self) -> bool {
+        self.panels.len() > 1
     }
 
     /// 활성 패널: 키보드 입력을 받는 패널.
@@ -175,6 +200,35 @@ impl Window {
     /// 활성 패널.
     pub fn active_panel_mut(&mut self) -> &mut Panel {
         &mut self.panels[self.active]
+    }
+
+    /// `index`번째 패널(0이 왼쪽). 없으면 `None`이다.
+    pub fn panel_mut(&mut self, index: usize) -> Option<&mut Panel> {
+        self.panels.get_mut(index)
+    }
+
+    /// 활성 패널이 몇 번째인가(0이 왼쪽).
+    pub fn active_panel_index(&self) -> usize {
+        self.active
+    }
+
+    /// 분할 비율: 패널이 둘일 때 왼쪽 패널이 창 너비에서 차지하는 몫.
+    pub fn split_ratio(&self) -> f32 {
+        self.split_ratio
+    }
+
+    /// 분할 비율을 정한다. 어느 패널도 너무 좁아지지 않게 [`SPLIT_RATIO_MIN`]..[`SPLIT_RATIO_MAX`] 안으로
+    /// 자르고, 숫자가 아니면(NaN) 바꾸지 않는다. 정해진 비율을 돌려준다.
+    pub fn set_split_ratio(&mut self, ratio: f32) -> f32 {
+        if !ratio.is_nan() {
+            self.split_ratio = ratio.clamp(SPLIT_RATIO_MIN, SPLIT_RATIO_MAX);
+        }
+        self.split_ratio
+    }
+
+    /// 분할 비율을 반반([`SPLIT_RATIO_DEFAULT`])으로 맞춘다(경계를 두 번 누름).
+    pub fn reset_split_ratio(&mut self) {
+        self.split_ratio = SPLIT_RATIO_DEFAULT;
     }
 }
 
@@ -528,6 +582,66 @@ impl App {
         Some(id)
     }
 
+    /// 활성 창을 좌우 두 패널로 나눈다. 새 오른쪽 패널은 활성 탭과 같은 위치·정렬의 탭 하나(기록은 비어 있음)로
+    /// 시작해 활성 패널이 되고, 그 위치를 일꾼 스레드에서 읽는다. 왼쪽 패널의 활성 탭은 그대로 보인다. 이미 둘이면
+    /// ([`MAX_PANELS`]) 아무것도 하지 않고 `None`이다.
+    pub fn split_panel(&mut self) -> Option<TabId> {
+        if self.is_finished() || self.active_window().panels.len() >= MAX_PANELS {
+            return None;
+        }
+        let id = self.new_tab_id();
+        let active = self.active_tab();
+        let tab = Tab::new(active.location().clone(), active.sort(), self.show_hidden);
+        let window = self.active_window_mut();
+        window.panels.push(Panel::new(id, tab));
+        window.active = window.panels.len() - 1;
+        self.navigate(Navigation::Refresh);
+        Some(id)
+    }
+
+    /// 활성 창의 두 패널을 하나로 합친다: 오른쪽 패널의 탭들이 왼쪽 패널 탭 끝에 순서대로 붙는다. 활성 패널의 활성
+    /// 탭이 그대로 활성 탭이고, 다른 패널에서 보이던 탭은 숨는다. 분할 비율은 남는다. 패널이 하나면 `false`다.
+    pub fn merge_panels(&mut self) -> bool {
+        if self.is_finished() || !self.active_window().is_split() {
+            return false;
+        }
+        let window = self.active_window_mut();
+        let right = window.panels.remove(1);
+        let left = &mut window.panels[0];
+        let offset = left.tabs.len();
+        if window.active == 0 {
+            let mut right = right;
+            right.tabs[right.active].1.hide();
+            left.tabs.extend(right.tabs);
+        } else {
+            left.tabs[left.active].1.hide();
+            left.active = offset + right.active;
+            left.tabs.extend(right.tabs);
+        }
+        window.active = 0;
+        true
+    }
+
+    /// 활성 창의 `index`번째 패널(0이 왼쪽)을 활성 패널로 한다. 두 패널의 보이는 탭은 그대로 보인다. 없는 패널이면
+    /// `false`다.
+    pub fn activate_panel(&mut self, index: usize) -> bool {
+        if self.is_finished() || index >= self.active_window().panels.len() {
+            return false;
+        }
+        self.active_window_mut().active = index;
+        true
+    }
+
+    /// 활성 패널을 반대편 패널로 바꾼다(Tab). 패널이 하나면 아무것도 하지 않고 `false`다.
+    pub fn switch_panel(&mut self) -> bool {
+        if self.is_finished() || !self.active_window().is_split() {
+            return false;
+        }
+        let window = self.active_window_mut();
+        window.active = (window.active + 1) % window.panels.len();
+        true
+    }
+
     fn tabs_mut(&mut self) -> impl Iterator<Item = (TabId, &mut Tab)> + '_ {
         self.windows
             .iter_mut()
@@ -684,7 +798,7 @@ impl App {
         self.active_tab_mut().set_sort(sort);
     }
 
-    /// 명령을 활성 패널·탭에서 지금 실행할 수 있는가([`CommandId::is_enabled_in`]). 앱이 끝났으면 아무 명령도
+    /// 명령을 활성 창·패널·탭에서 지금 실행할 수 있는가([`CommandId::is_enabled_in_window`]). 앱이 끝났으면 아무 명령도
     /// 실행할 수 없다.
     pub fn can_execute(&self, command: CommandId) -> bool {
         if self.is_finished() {
@@ -692,7 +806,7 @@ impl App {
         }
         match command {
             CommandId::ReopenClosedTab => !self.closed.is_empty(),
-            command => command.is_enabled_in(self.active_window().active_panel()),
+            command => command.is_enabled_in_window(self.active_window()),
         }
     }
 
@@ -771,6 +885,21 @@ impl App {
                 return match self.reopen_closed_tab() {
                     Some(_) => Execution::Done,
                     None => Execution::Disabled,
+                };
+            }
+            CommandId::TogglePanelSplit => {
+                if self.active_window().is_split() {
+                    self.merge_panels();
+                } else {
+                    self.split_panel();
+                }
+                return Execution::Done;
+            }
+            CommandId::SwitchPanel => {
+                return if self.switch_panel() {
+                    Execution::Done
+                } else {
+                    Execution::Disabled
                 };
             }
             CommandId::NextTab

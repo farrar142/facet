@@ -1,6 +1,6 @@
 //! 화면 수치 측정용 계측(`cargo xtask measure`가 켠다).
 //!
-//! 환경 변수 [`ENV_OUT`]이 없는 평소 실행에서는 [`install`]이 아무것도 걸지 않고,
+//! 환경 변수 [`ENV_OUT`]이 없는 평소 실행에서는 [`frame_counter`]가 아무것도 돌려주지 않고,
 //! [`mark_loaded`]는 원자 변수 둘에 값을 쓸 뿐이다. 그래서 평소 실행 경로의 속도는 달라지지 않는다.
 //!
 //! 측정 모드에서는 목록이 창에 들어간 뒤 처음 그려진 프레임이 화면에 나갈 때까지의 시간을 재고,
@@ -22,7 +22,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use facet_core::Location;
 use facet_core::measure::{ENV_OPEN, ENV_OUT, ENV_SCROLL_ROWS, ENV_START_US, ScreenReport};
 use slint::winit_030::winit::event::WindowEvent;
-use slint::winit_030::{EventResult, WinitWindowAccessor};
 use slint::{ComponentHandle, Model};
 
 use crate::AppWindow;
@@ -77,11 +76,12 @@ fn now_us() -> u64 {
         .map_or(0, |d| d.as_micros() as u64)
 }
 
-/// 측정 모드이면 창에 프레임 세기를 건다. 아니면 아무것도 하지 않는다.
-pub fn install(ui: &AppWindow) {
-    let Some(out) = std::env::var(ENV_OUT).ok().filter(|v| !v.is_empty()) else {
-        return;
-    };
+/// 측정 모드이면 프레임 세기(창의 winit 이벤트마다 부를 것)를 돌려준다. 아니면 `None`이다.
+///
+/// Slint는 창마다 winit 이벤트 훅을 하나만 두므로 훅은 `main`이 걸고, 키 위치 적기([`crate::keys`])와 이것을
+/// 차례로 부른다.
+pub fn frame_counter(ui: &AppWindow) -> Option<impl FnMut(&WindowEvent) + 'static> {
+    let out = std::env::var(ENV_OUT).ok().filter(|v| !v.is_empty())?;
     let env_number = |name: &str| {
         std::env::var(name)
             .ok()
@@ -105,9 +105,9 @@ pub fn install(ui: &AppWindow) {
     }));
 
     let weak = ui.as_weak();
-    ui.window().on_winit_window_event(move |_, event| {
+    Some(move |event: &WindowEvent| {
         if !matches!(event, WindowEvent::RedrawRequested) {
-            return EventResult::Propagate;
+            return;
         }
         if let Ok(mut s) = state.lock()
             && LOADS.load(Ordering::Acquire) > s.loads_seen
@@ -120,8 +120,7 @@ pub fn install(ui: &AppWindow) {
             let state = Arc::clone(&state);
             let _ = slint::invoke_from_event_loop(move || presented(&weak, &state));
         }
-        EventResult::Propagate
-    });
+    })
 }
 
 /// 목록이 든 프레임을 화면에 내보낸 뒤마다 한 번.
@@ -175,10 +174,11 @@ fn presented(weak: &slint::Weak<AppWindow>, state: &Mutex<State>) {
 /// 목록을 `scroll_rows`행 내린다. 더 내릴 곳이 없으면 측정을 끝낸다.
 fn step(ui: &AppWindow, state: &Mutex<State>) {
     let Ok(mut s) = state.lock() else { return };
-    let count = ui.get_rows().row_count();
+    // 측정은 패널 하나(왼쪽)로 한다.
+    let count = ui.get_left_rows().row_count();
     let row_height = ui.get_row_height();
-    let max_offset = (count as f32 * row_height - ui.get_view_height()).max(0.0);
-    let current = -ui.get_content_y();
+    let max_offset = (count as f32 * row_height - ui.get_left_view_height()).max(0.0);
+    let current = -ui.get_left_content_y();
     let next = (current + s.scroll_rows as f32 * row_height).min(max_offset);
     if next <= current {
         // 움직일 곳이 없으면 다시 그려지지 않으므로 여기서 끝낸다.
@@ -186,5 +186,5 @@ fn step(ui: &AppWindow, state: &Mutex<State>) {
         return;
     }
     s.at_end = next >= max_offset;
-    ui.set_content_y(-next);
+    ui.set_left_content_y(-next);
 }
