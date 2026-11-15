@@ -7,6 +7,8 @@
 //!   이벤트 루프에서 [`App::poll`]로 받아 다시 그린다.
 //! - 행 문자열은 화면에 보이는 행만 그때그때 만든다([`TabRows`]).
 //! - 실행 인자로 받은 폴더(없으면 사용자 홈 폴더)를 연다.
+//! - 주소창은 코어의 경로 조각([`facet_core::Provider::segments`]), 글자 해석([`App::go_to_text`]), 자동 완성
+//!   ([`App::complete_address`], 일꾼 스레드)을 그리기만 한다.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -20,11 +22,17 @@ use facet_core::details::{self, Column, Direction};
 use facet_core::file_list;
 use facet_core::name_input::NameInput;
 use facet_core::selection::{CursorMove, Pick};
-use facet_core::tab::ReadOutcome;
-use facet_core::window::{App, Update};
-use facet_core::{ListError, Location, OpenError};
-use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, Timer, TimerMode};
+use facet_core::tab::{Navigation, ReadOutcome};
+use facet_core::window::{App, Execution, Update};
+use facet_core::{ListError, Location, OpenError, ResolveError, provider_for};
+use slint::{
+    ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, Timer, TimerMode,
+    VecModel,
+};
 
+use crate::address::AddressEdit;
+
+mod address;
 mod keys;
 mod measure;
 mod text;
@@ -108,6 +116,21 @@ fn connect(ui: &AppWindow) {
     ui.on_begin_rename(|| with_view(View::begin_rename));
     ui.on_confirm_rename(|text| with_view(|view| view.confirm_rename(&text)));
     ui.on_cancel_rename(|| with_view(View::cancel_rename));
+    ui.on_segment_pressed(|index| with_view(|view| view.segment_pressed(index)));
+    ui.on_begin_address_edit(|| with_view(View::begin_address_edit));
+    ui.on_address_edited(|text| with_view(|view| view.address_edited(&text)));
+    ui.on_address_step(|step| {
+        let mut end = -1;
+        with_view(|view| end = view.address_step(step >= 0));
+        end
+    });
+    ui.on_address_go(|text| {
+        let mut went = false;
+        with_view(|view| went = view.address_go(&text));
+        went
+    });
+    ui.on_candidate_pressed(|index| with_view(|view| view.candidate_pressed(index)));
+    ui.on_cancel_address_edit(|| with_view(View::close_address_edit));
 }
 
 /// UI 스레드의 화면 상태: 코어의 앱과 창.
@@ -117,6 +140,12 @@ struct View {
     rows: Rc<TabRows>,
     /// 열려 있는 이름 입력란. 화면의 `editing`과 함께 바뀐다.
     name_input: RefCell<Option<NameInput>>,
+    /// 주소창 경로 조각의 이름. 바뀔 때만 고쳐 화면 요소를 다시 만들지 않는다.
+    segments: Rc<VecModel<SharedString>>,
+    /// 주소창을 고쳐 쓰는 중이면 그 상태. 화면의 `address-editing`과 함께 바뀐다.
+    address: RefCell<Option<AddressEdit>>,
+    /// 자동 완성 후보의 이름.
+    candidates: Rc<VecModel<SharedString>>,
     /// 「읽는 중」을 드러낼 때 다시 그리는 타이머.
     reading_timer: Timer,
     /// 첫 목록(또는 읽기 오류)이 창에 들어갔는가. 측정 모드가 쓴다.
@@ -131,11 +160,18 @@ impl View {
             notify: ModelNotify::default(),
         });
         ui.set_rows(ModelRc::from(Rc::clone(&rows)));
+        let segments = Rc::new(VecModel::default());
+        ui.set_segments(ModelRc::from(Rc::clone(&segments)));
+        let candidates = Rc::new(VecModel::default());
+        ui.set_candidates(ModelRc::from(Rc::clone(&candidates)));
         Rc::new(View {
             ui: ui.as_weak(),
             app,
             rows,
             name_input: RefCell::default(),
+            segments,
+            address: RefCell::default(),
+            candidates,
             reading_timer: Timer::default(),
             loaded: Cell::new(false),
         })
@@ -161,6 +197,7 @@ impl View {
             match update {
                 Update::Read(ReadOutcome::Committed) => committed = true,
                 Update::Read(ReadOutcome::Failed) => self.mark_loaded(),
+                Update::Completion { id, candidates } => self.receive_candidates(id, candidates),
                 _ => {}
             }
         }
@@ -187,7 +224,22 @@ impl View {
         {
             let app = self.app.borrow();
             let tab = app.active_tab();
-            ui.set_location(tab.location().to_string().into());
+            let labels: Vec<SharedString> = provider_for(tab.location())
+                .segments(tab.location())
+                .into_iter()
+                .map(|segment| segment.label.into())
+                .collect();
+            if !self.segments.iter().eq(labels.iter().cloned()) {
+                self.segments.set_vec(labels);
+            }
+
+            let (problem, value, detail) = match tab.address_error() {
+                Some(error) => address_problem(error),
+                None => (Problem::None, String::new(), String::new()),
+            };
+            ui.set_address_problem(problem);
+            ui.set_address_problem_value(value.into());
+            ui.set_address_problem_detail(detail.into());
 
             let now = Instant::now();
             ui.set_reading(tab.is_reading(now));
@@ -276,9 +328,159 @@ impl View {
     /// 명령을 활성 탭에서 실행한다.
     fn execute(&self, command: CommandId) {
         self.remember_scroll();
-        // 주소창 고쳐 쓰기(#59)와 명령 팔레트(#60)는 아직 화면이 없다.
-        let _ = self.app.borrow_mut().execute(command);
+        let execution = self.app.borrow_mut().execute(command);
         self.render();
+        match execution {
+            Execution::EditAddress => self.begin_address_edit(),
+            // 명령 팔레트(#60)는 아직 화면이 없다.
+            Execution::ShowCommandPalette | Execution::Done | Execution::Disabled => {}
+        }
+    }
+
+    /// 활성 탭을 `location`으로 옮기기 시작한다.
+    fn go(&self, location: Location) {
+        self.remember_scroll();
+        self.app.borrow_mut().navigate(Navigation::Go(location));
+        self.render();
+    }
+
+    /// 경로 조각을 눌렀다: 그 위치로 간다.
+    fn segment_pressed(&self, index: i32) {
+        let location = {
+            let app = self.app.borrow();
+            let location = app.active_tab().location();
+            let segments = provider_for(location).segments(location);
+            usize::try_from(index)
+                .ok()
+                .and_then(|index| segments.into_iter().nth(index))
+                .map(|segment| segment.location)
+        };
+        if let Some(location) = location {
+            self.go(location);
+        }
+    }
+
+    /// 주소창을 글자로 고쳐 쓰는 모드로 바꾼다. 지금 위치를 채우고, 화면이 전체를 선택한다.
+    fn begin_address_edit(&self) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        // 이름 입력란과 함께 열지 않는다.
+        self.close_rename();
+        let text = self.app.borrow().active_tab().location().to_string();
+        *self.address.borrow_mut() = Some(AddressEdit::default());
+        self.show_candidates();
+        ui.set_address_text(text.into());
+        ui.set_address_editing(true);
+    }
+
+    /// 고쳐 쓰는 모드를 닫고 경로 조각 모드로 돌아간다.
+    fn close_address_edit(&self) {
+        self.address.borrow_mut().take();
+        self.show_candidates();
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_address_editing(false);
+        }
+    }
+
+    /// 고쳐 쓰는 글자가 바뀌었다: 자동 완성 후보를 일꾼 스레드에서 새로 읽는다.
+    fn address_edited(&self, text: &str) {
+        {
+            let mut address = self.address.borrow_mut();
+            let Some(address) = address.as_mut() else {
+                return;
+            };
+            let id = self.app.borrow_mut().complete_address(text);
+            address.request(id);
+        }
+        self.show_candidates();
+    }
+
+    fn receive_candidates(
+        &self,
+        id: facet_core::tab::CompletionId,
+        candidates: Option<Vec<facet_core::Candidate>>,
+    ) {
+        let received = self
+            .address
+            .borrow_mut()
+            .as_mut()
+            .is_some_and(|address| address.receive(id, candidates));
+        if received {
+            self.show_candidates();
+        }
+    }
+
+    /// 자동 완성 후보와 고른 후보를 화면에 넣는다.
+    fn show_candidates(&self) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        let address = self.address.borrow();
+        let (names, highlight) = match address.as_ref() {
+            Some(address) => (
+                address
+                    .candidates()
+                    .iter()
+                    .map(|c| SharedString::from(c.name.to_string_lossy().as_ref()))
+                    .collect(),
+                address.highlight(),
+            ),
+            None => (Vec::new(), None),
+        };
+        if !self.candidates.iter().eq(names.iter().cloned()) {
+            self.candidates.set_vec(names);
+            ui.set_candidate_content_y(0.0);
+        }
+        ui.set_candidate_highlight(highlight.map_or(-1, count));
+        if let Some(index) = highlight {
+            let offset = file_list::scroll_to_show(
+                index,
+                ui.get_candidate_row_height(),
+                -ui.get_candidate_content_y(),
+                ui.get_candidate_view_height(),
+            );
+            ui.set_candidate_content_y(-offset);
+        }
+    }
+
+    /// Tab·화살표로 다음(`forward`)이나 앞 후보를 골라 고쳐 쓰는 글자를 그 후보의 경로로 바꾼다. 입력 커서를 둘
+    /// 글자 끝의 바이트 위치를 돌려주고, 고를 후보가 없으면 -1이다.
+    fn address_step(&self, forward: bool) -> i32 {
+        let Some(ui) = self.ui.upgrade() else {
+            return -1;
+        };
+        let text = {
+            let mut address = self.address.borrow_mut();
+            let Some(candidate) = address.as_mut().and_then(|a| a.step(forward)) else {
+                return -1;
+            };
+            candidate.location.to_string()
+        };
+        self.show_candidates();
+        let end = i32::try_from(text.len()).unwrap_or(i32::MAX);
+        ui.set_address_text(text.into());
+        end
+    }
+
+    /// Enter: 고쳐 쓴 글자로 간다. 해석했으면 고쳐 쓰는 모드를 닫고 `true`다. 해석하지 못했으면 모드를 그대로
+    /// 두어 고칠 수 있게 하고, 까닭을 보이고 `false`다. 탭은 원래 위치에 남는다.
+    fn address_go(&self, text: &str) -> bool {
+        self.remember_scroll();
+        let went = self.app.borrow_mut().go_to_text(text);
+        if went {
+            self.close_address_edit();
+        }
+        self.render();
+        went
+    }
+
+    /// 자동 완성 후보를 눌렀다: 그 폴더로 간다.
+    fn candidate_pressed(&self, index: i32) {
+        let location = self.address.borrow().as_ref().and_then(|address| {
+            let index = usize::try_from(index).ok()?;
+            Some(address.candidate(index)?.location.clone())
+        });
+        self.close_address_edit();
+        if let Some(location) = location {
+            self.go(location);
+        }
     }
 
     /// 글자로 이동: IME가 조합을 끝낸 글자들.
@@ -370,6 +572,9 @@ impl View {
     /// F2: 커서 항목의 이름 입력란을 연다.
     fn begin_rename(&self) {
         let Some(ui) = self.ui.upgrade() else { return };
+        if self.address.borrow().is_some() {
+            return;
+        }
         let opened = {
             let app = self.app.borrow();
             let tab = app.active_tab();
@@ -434,6 +639,36 @@ fn list_problem(error: &ListError) -> (Problem, String, String) {
         ListError::PermissionDenied { .. } => (Problem::PermissionDenied, location, String::new()),
         ListError::NotAFolder { .. } => (Problem::NotAFolder, location, String::new()),
         ListError::Io { source, .. } => (Problem::Io, location, source.to_string()),
+    }
+}
+
+/// 주소창 글자 해석 오류를 화면의 종류와 값·자세한 내용으로. 문장은 화면이 만든다.
+fn address_problem(error: &ResolveError) -> (Problem, String, String) {
+    let none = String::new;
+    match error {
+        ResolveError::Empty => (Problem::AddressEmpty, none(), none()),
+        ResolveError::InvalidCharacter { character } => (
+            Problem::AddressInvalidCharacter,
+            format!("{character:?}"),
+            none(),
+        ),
+        ResolveError::UndefinedVariable { name } => (
+            Problem::AddressUndefinedVariable,
+            format!("%{name}%"),
+            none(),
+        ),
+        ResolveError::NotAbsolute { text } => (Problem::AddressNotAbsolute, text.clone(), none()),
+        ResolveError::NotFound { location } => {
+            (Problem::AddressNotFound, location.to_string(), none())
+        }
+        ResolveError::PermissionDenied { location } => (
+            Problem::AddressPermissionDenied,
+            location.to_string(),
+            none(),
+        ),
+        ResolveError::Io { location, source } => {
+            (Problem::AddressIo, location.to_string(), source.to_string())
+        }
     }
 }
 

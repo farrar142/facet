@@ -23,14 +23,14 @@ use std::time::{Duration, Instant};
 
 use facet_win::{OpenError, OpenResult, ShellWorker};
 
-use crate::{Candidate, Location};
 use crate::command::{self, CommandId};
 use crate::details::Sort;
 use crate::tab::{
-    ChangeOutcome, CompletionId, CompletionResult, Navigation, ReadOutcome, ReadRequest, ReadResult,
-    Tab,
+    ChangeOutcome, CompletionId, CompletionResult, Navigation, ReadOutcome, ReadRequest,
+    ReadResult, Tab,
 };
 use crate::watch::ChangeBatch;
+use crate::{Candidate, Location};
 
 /// 앱 안의 탭 하나를 가리키는 번호. 탭을 다른 패널·창으로 옮겨도 바뀌지 않는다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -109,10 +109,22 @@ impl Window {
 
 /// 일꾼 스레드가 보내는 것: 읽기 결과나 묶은 변경.
 enum Message {
-    Read { tab: TabId, result: ReadResult },
-    Changes { tab: TabId, batch: ChangeBatch },
-    Opened { tab: TabId, result: OpenResult },
-    Completed { tab: TabId, result: CompletionResult },
+    Read {
+        tab: TabId,
+        result: ReadResult,
+    },
+    Changes {
+        tab: TabId,
+        batch: ChangeBatch,
+    },
+    Opened {
+        tab: TabId,
+        result: OpenResult,
+    },
+    Completed {
+        tab: TabId,
+        result: CompletionResult,
+    },
 }
 
 /// 앱이 정한 깨우기([`App::set_waker`]).
