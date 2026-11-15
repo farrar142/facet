@@ -16,6 +16,7 @@ use facet_core::{Item, ListError, Location, provider_for};
 use slint::{Model, ModelRc, ModelTracker, SharedString};
 
 mod measure;
+mod text;
 
 slint::include_modules!();
 
