@@ -45,6 +45,8 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::NewWindow => "새 창",
         CommandId::CopyToOtherPanel => "반대편 패널로 복사",
         CommandId::MoveToOtherPanel => "반대편 패널로 이동",
+        CommandId::CopyTo => "복사 위치…",
+        CommandId::MoveTo => "이동 위치…",
     }
 }
 

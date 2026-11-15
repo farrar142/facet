@@ -332,9 +332,10 @@ impl CommandId {
         match self {
             CommandId::SwitchPanel => window.is_split(),
             CommandId::CopyToOtherPanel | CommandId::MoveToOtherPanel => {
-                window.opposite_panel().is_none_or(|other| {
-                    other.active_tab().location().file_system_path().is_some()
-                }) && self.is_enabled_in(window.active_panel())
+                window
+                    .opposite_panel()
+                    .is_none_or(|other| other.active_tab().location().file_system_path().is_some())
+                    && self.is_enabled_in(window.active_panel())
             }
             command => command.is_enabled_in(window.active_panel()),
         }

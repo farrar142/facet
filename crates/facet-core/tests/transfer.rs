@@ -673,7 +673,10 @@ fn 대상_선택_창은_원본과_반대편_위치와_최근_대상을_보이고
         Err(TargetError::Resolve(_))
     ));
     assert!(matches!(
-        app.transfer_plan_to(JobKind::Copy, &dir.path().join("없음").display().to_string()),
+        app.transfer_plan_to(
+            JobKind::Copy,
+            &dir.path().join("없음").display().to_string()
+        ),
         Err(TargetError::Resolve(_))
     ));
     assert!(matches!(

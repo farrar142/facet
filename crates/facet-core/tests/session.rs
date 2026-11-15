@@ -774,7 +774,10 @@ fn 최근_대상이_없는_앞선_파일도_읽히고_최근_대상은_저장했
         restored.recent_targets(),
         [root.path().join("c"), root.path().join("b")].as_slice()
     );
-    assert_eq!(restored.session().unwrap().recent_targets, saved.recent_targets);
+    assert_eq!(
+        restored.session().unwrap().recent_targets,
+        saved.recent_targets
+    );
 }
 
 #[test]
