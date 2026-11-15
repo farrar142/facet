@@ -54,12 +54,12 @@ use std::time::{Duration, Instant};
 
 use facet_core::command::{self, CommandId, Key};
 use facet_core::details::{self, Column, Direction};
+use facet_core::edit::{EditError, EditKind, Edited};
 use facet_core::file_list;
 use facet_core::job::{
     ConflictAnswer, CopyRejection, ErrorAnswer, JobId, JobKind, JobState, Remaining,
 };
 use facet_core::launch::{LaunchTarget, resolve_launch};
-use facet_core::name_input::NameInput;
 use facet_core::placement::{self, Monitor, Rect, WindowState};
 use facet_core::selection::{CursorMove, Pick};
 use facet_core::session::{self, Loaded, SAVE_DELAY, Saver};
@@ -79,6 +79,7 @@ use slint::{
 
 use crate::address::AddressEdit;
 use crate::palette::Palette;
+use crate::rename::{Confirm, Rename};
 use crate::tab_drag::{Frame, Hover, Point, ScreenPoint, Strip, TabDrag, Target};
 use crate::target::{Section, TargetChooser};
 
@@ -89,6 +90,7 @@ mod keys;
 mod measure;
 mod palette;
 mod question;
+mod rename;
 mod tab_drag;
 mod target;
 mod text;
@@ -599,8 +601,22 @@ fn connect(ui: &AppWindow, w: WindowId) {
         with_view(w, |view| view.execute(command));
     });
     ui.on_begin_rename(move || with_view(w, View::begin_rename));
-    ui.on_confirm_rename(move |text| with_view(w, |view| view.confirm_rename(&text)));
-    ui.on_cancel_rename(move || with_view(w, View::cancel_rename));
+    ui.on_confirm_rename(move |text| {
+        let mut closed = true;
+        with_view(w, |view| closed = view.confirm_rename(&text));
+        closed
+    });
+    ui.on_cancel_rename(move || {
+        let mut closed = true;
+        with_view(w, |view| closed = view.cancel_rename());
+        closed
+    });
+    ui.on_rename_edited(move |text| with_view(w, |view| view.rename_edited(&text)));
+    ui.on_answer_extension(move |yes| {
+        let mut closed = true;
+        with_view(w, |view| closed = view.answer_extension(yes));
+        closed
+    });
     ui.on_remove_selection(|text, anchor, cursor| {
         ime::remove_selection(&text, anchor, cursor).0.into()
     });
@@ -960,8 +976,10 @@ struct View {
     app: Rc<RefCell<App>>,
     /// 패널마다(0 왼쪽, 1 오른쪽) 화면에 넘긴 모델.
     panels: [PanelModels; MAX_PANELS],
-    /// 열려 있는 이름 입력란. 화면의 `editing`과 함께 바뀐다.
-    name_input: RefCell<Option<NameInput>>,
+    /// 열려 있거나 확정해 결과를 기다리는 이름바꾸기. 열려 있으면 화면의 `editing`이 그 행이다.
+    rename: RefCell<Option<Rename>>,
+    /// 새 폴더를 만들라고 넘기고 결과를 기다리는 탭. 결과가 오면 만든 폴더의 행에 이름 입력란을 연다.
+    new_folder_tab: Cell<Option<TabId>>,
     /// 주소창을 고쳐 쓰는 중이면 그 상태. 화면의 `address-editing`과 함께 바뀐다.
     address: RefCell<Option<AddressEdit>>,
     /// 자동 완성 후보의 이름.
@@ -1026,7 +1044,8 @@ impl View {
             ui,
             app,
             panels,
-            name_input: RefCell::default(),
+            rename: RefCell::default(),
+            new_folder_tab: Cell::new(None),
             address: RefCell::default(),
             candidates,
             palette: RefCell::default(),
@@ -1308,6 +1327,7 @@ impl View {
         };
         let mut committed = [false; MAX_PANELS];
         let mut touched = false;
+        let mut edits = Vec::new();
         for (tab, update) in updates {
             let Some(panel) = visible.iter().position(|id| id == tab) else {
                 continue;
@@ -1320,6 +1340,7 @@ impl View {
                     self.receive_candidates(*id, candidates.clone());
                     self.receive_target_candidates(*id, candidates.clone());
                 }
+                Update::Edited(result) if panel == active => edits.push((*tab, result)),
                 _ => {}
             }
         }
@@ -1338,6 +1359,9 @@ impl View {
             if committed {
                 self.restore_scroll(panel);
             }
+        }
+        for (tab, result) in edits {
+            self.receive_edited(tab, result);
         }
     }
 
@@ -1379,6 +1403,7 @@ impl View {
                 redraw_at = Some(redraw_at.map_or(at, |earlier| earlier.min(at)));
             }
         }
+        self.follow_rename_row();
         if let Some(at) = redraw_at {
             // 「읽는 중」을 드러낼 때가 오면 다시 그린다.
             let window = self.window;
@@ -1617,9 +1642,17 @@ impl View {
             Execution::ChooseTransferTarget(kind) => self.open_target(kind),
             Execution::Rename => self.begin_rename(),
             Execution::NewFolder => {
-                // 만든 폴더는 결과를 받을 때 목록에 들어가 선택·커서가 된다. 이름 입력란을 곧바로 여는 것과 실패
-                // 까닭을 보이는 것은 #156이 한다.
-                let _ = self.app.borrow_mut().new_folder(text::NEW_FOLDER_BASE);
+                // 만든 폴더는 결과를 받을 때 목록에 들어가 선택·커서가 되고, 그 행에 이름 입력란이 열린다
+                // (`receive_edited`).
+                self.close_rename();
+                let tab = self.app.borrow().active_tab_id();
+                let started = self.app.borrow_mut().new_folder(text::NEW_FOLDER_BASE);
+                match started {
+                    Ok(()) => self.new_folder_tab.set(Some(tab)),
+                    Err(error) => self
+                        .ui
+                        .set_notice(text::new_folder_error_text(error).into()),
+                }
             }
             // 실행취소할 수 없는 까닭과 작업 기록 목록을 보이는 것은 앱 티켓이 한다.
             Execution::UndoRefused(_) | Execution::ShowHistory => {}
@@ -2211,58 +2244,258 @@ impl View {
         list.set_content_y(-offset);
     }
 
-    /// F2: 커서 항목의 이름 입력란을 연다.
+    /// F2: 커서 항목(선택이 여럿이어도 커서 항목 하나)의 이름 입력란을 연다. 파일은 확장자 앞까지 고른 채 연다.
     fn begin_rename(&self) {
-        let ui = &self.ui;
-        if self.address.borrow().is_some() {
-            return;
-        }
         let opened = {
             let app = self.app.borrow();
             let tab = app.active_tab();
             tab.cursor().and_then(|index| {
                 let item = tab.get(index)?;
-                let input = NameInput::open(std::slice::from_ref(item), Some(0))?;
-                Some((index, input))
+                Some((index, Rename::open(&item.name, item.is_folder, false)))
             })
         };
-        let Some((index, input)) = opened else {
+        if let Some((index, rename)) = opened {
+            let text = rename.original().to_owned();
+            self.open_rename(index, rename, &text);
+        }
+    }
+
+    /// 새 폴더를 만들었다: 그 행에 이름 입력란을 전체 선택으로 연다. 그만두면 「새 폴더」로 남는다.
+    fn begin_new_folder_rename(&self, edited: &Edited) {
+        let Some(name) = edited.name() else {
             return;
         };
+        let Some(index) = self.row_of(name) else {
+            return;
+        };
+        let rename = Rename::open(name, true, true);
+        let text = rename.original().to_owned();
+        self.open_rename(index, rename, &text);
+    }
+
+    /// `index`번 행에 `text`를 채운 이름 입력란을 연다(다른 입력이 열려 있으면 열지 않는다).
+    fn open_rename(&self, index: usize, rename: Rename, text: &str) {
+        let ui = &self.ui;
+        if self.address.borrow().is_some()
+            || ui.get_palette_open()
+            || ui.get_target_open()
+            || ui.get_confirm_open()
+        {
+            return;
+        }
         // 입력란이 화면 밖 행에 열리지 않게 먼저 그 행을 보인다.
         self.show_row(index);
-        ui.set_edit_text(input.original().into());
-        ui.set_notice(Notice::None);
+        let (start, end) = rename.selection(text);
+        ui.set_edit_text(text.into());
+        ui.set_edit_selection_start(i32::try_from(start).unwrap_or(0));
+        ui.set_edit_selection_end(i32::try_from(end).unwrap_or(0));
+        ui.set_notice(SharedString::new());
+        // 다시 열 때 입력란 요소를 새로 만들게(선택·포커스) 먼저 닫는다.
+        ui.set_editing(-1);
+        *self.rename.borrow_mut() = Some(rename);
+        self.render_rename();
         ui.set_editing(i32::try_from(index).unwrap_or(i32::MAX));
-        *self.name_input.borrow_mut() = Some(input);
     }
 
-    /// Enter: 입력을 확정한다. 파일 이름은 바꾸지 않는다.
-    fn confirm_rename(&self, text: &str) {
+    /// 이름 입력란 곁의 까닭과 확장자 확인을 화면에 넣는다.
+    fn render_rename(&self) {
         let ui = &self.ui;
-        ui.set_editing(-1);
-        if let Some(input) = self.name_input.borrow_mut().take() {
-            let entered = input.confirm(text);
-            ui.set_notice_entered(entered.entered.into());
-            ui.set_notice_original(entered.original.into());
-            ui.set_notice(Notice::Entered);
+        let rename = self.rename.borrow();
+        let problem = rename
+            .as_ref()
+            .and_then(Rename::problem)
+            .map(text::rename_problem_text)
+            .unwrap_or_default();
+        ui.set_edit_problem(problem.into());
+        ui.set_edit_asking_extension(rename.as_ref().is_some_and(Rename::asking_extension));
+    }
+
+    /// 활성 탭에서 이름이 `name`인 행.
+    fn row_of(&self, name: &std::ffi::OsStr) -> Option<usize> {
+        self.app
+            .borrow()
+            .active_tab()
+            .items()
+            .position(|item| item.name == name)
+    }
+
+    /// 목록이 바뀌었다(정렬·변경 감시): 열린 이름 입력란을 그 항목의 지금 행으로 옮기고, 항목이 사라졌으면 닫는다.
+    fn follow_rename_row(&self) {
+        let name = match self.rename.borrow().as_ref() {
+            Some(rename) if rename.pending().is_none() => rename.original_name().to_owned(),
+            _ => return,
+        };
+        match self.row_of(&name) {
+            Some(index) => {
+                let index = i32::try_from(index).unwrap_or(i32::MAX);
+                if self.ui.get_editing() != index {
+                    self.ui.set_editing(index);
+                }
+            }
+            None => self.close_rename(),
         }
     }
 
-    /// Esc: 입력을 취소한다.
-    fn cancel_rename(&self) {
-        let ui = &self.ui;
-        ui.set_editing(-1);
-        if let Some(input) = self.name_input.borrow_mut().take() {
-            input.cancel();
-            ui.set_notice(Notice::Cancelled);
+    /// Enter·입력란 밖 클릭: 확정한다. 입력란을 닫았으면 `true`, 막혀 남았으면 `false`.
+    fn confirm_rename(&self, text: &str) -> bool {
+        let decision = match self.rename.borrow_mut().as_mut() {
+            Some(rename) if rename.pending().is_none() => rename.confirm(text),
+            _ => return true,
+        };
+        self.decide_rename(decision, text)
+    }
+
+    /// 확장자 바꿈 확인의 답. 입력란을 닫았으면 `true`.
+    fn answer_extension(&self, yes: bool) -> bool {
+        let text = self.ui.get_edit_text().to_string();
+        let decision = match self.rename.borrow_mut().as_mut() {
+            Some(rename) if rename.pending().is_none() => rename.answer_extension(yes, &text),
+            _ => return true,
+        };
+        self.decide_rename(decision, &text)
+    }
+
+    /// 확정의 결과대로 한다: 닫기, 남기기(까닭·확인을 보임), 코어 이름바꾸기에 넘기기(UI 스레드는 기다리지 않는다).
+    fn decide_rename(&self, decision: Confirm, text: &str) -> bool {
+        match decision {
+            Confirm::Close => {
+                self.close_rename();
+                true
+            }
+            Confirm::Stay | Confirm::AskExtension => {
+                self.render_rename();
+                false
+            }
+            Confirm::Submit {
+                name,
+                after_new_folder,
+            } => {
+                let Some(original) = self
+                    .rename
+                    .borrow()
+                    .as_ref()
+                    .map(|rename| rename.original_name().to_owned())
+                else {
+                    return true;
+                };
+                let result = {
+                    let mut app = self.app.borrow_mut();
+                    if after_new_folder {
+                        app.rename_new_folder(&original, &name)
+                    } else {
+                        app.rename(&original, &name)
+                    }
+                };
+                match result {
+                    Ok(()) => {
+                        if let Some(rename) = self.rename.borrow_mut().as_mut() {
+                            rename.submitted(&name);
+                        }
+                        self.ui.set_editing(-1);
+                        self.render_rename();
+                        true
+                    }
+                    Err(EditError::Unchanged) => {
+                        self.close_rename();
+                        true
+                    }
+                    Err(error) => {
+                        if let Some(rename) = self.rename.borrow_mut().as_mut() {
+                            rename.failed(error, text);
+                        }
+                        self.render_rename();
+                        false
+                    }
+                }
+            }
         }
     }
 
-    /// 알림 없이 이름 입력란을 닫는다.
+    /// 이름 입력란의 글자가 바뀌었다: 이름 확인을 다시 한다.
+    fn rename_edited(&self, text: &str) {
+        if let Some(rename) = self.rename.borrow_mut().as_mut() {
+            rename.edited(text);
+        }
+        self.render_rename();
+    }
+
+    /// Esc: 그만둔다(새 폴더 직후면 「새 폴더」로 남는다). 확장자를 묻는 중이면 입력란으로 돌아가고 `false`.
+    fn cancel_rename(&self) -> bool {
+        let closes = self.rename.borrow_mut().as_mut().is_none_or(Rename::cancel);
+        if closes {
+            self.close_rename();
+        } else {
+            self.render_rename();
+        }
+        closes
+    }
+
+    /// 이름 입력란을 닫는다. 결과를 기다리던 이름바꾸기도 잊는다(실패하면 상태 줄에 까닭이 보인다).
     fn close_rename(&self) {
-        if self.name_input.borrow_mut().take().is_some() {
+        if self.rename.borrow_mut().take().is_some() {
             self.ui.set_editing(-1);
+            self.render_rename();
+        }
+    }
+
+    /// 이름바꾸기·새 폴더의 결과가 활성 패널의 탭에 왔다. 코어가 이미 목록에 반영해 새 이름이 선택·커서다.
+    fn receive_edited(&self, tab: TabId, result: &Result<Edited, EditError>) {
+        let pending = self
+            .rename
+            .borrow()
+            .as_ref()
+            .filter(|rename| rename.pending().is_some())
+            .map(|rename| rename.original_name().to_owned());
+        let is_rename = pending.is_some()
+            && result
+                .as_ref()
+                .map_or(self.new_folder_tab.get() != Some(tab), |edited| {
+                    edited.kind == EditKind::Rename
+                });
+        if let Some(original) = pending.filter(|_| is_rename) {
+            match result {
+                Ok(_) => {
+                    self.rename.borrow_mut().take();
+                    self.render_rename();
+                    let cursor = self.app.borrow().active_tab().cursor();
+                    if let Some(index) = cursor {
+                        self.show_row(index);
+                    }
+                }
+                Err(error) => match self.row_of(&original) {
+                    // 까닭을 두고 친 이름으로 입력란을 다시 연다.
+                    Some(index) => {
+                        let reopened = self.rename.borrow_mut().take().map(|mut rename| {
+                            let text = rename.failed(*error, "");
+                            (rename, text)
+                        });
+                        if let Some((rename, text)) = reopened {
+                            self.open_rename(index, rename, &text);
+                        }
+                    }
+                    None => {
+                        self.close_rename();
+                        self.ui.set_notice(text::rename_error_text(*error).into());
+                    }
+                },
+            }
+            return;
+        }
+        if self.new_folder_tab.get() == Some(tab) {
+            self.new_folder_tab.set(None);
+            match result {
+                Ok(edited) if edited.kind == EditKind::NewFolder => {
+                    self.begin_new_folder_rename(edited)
+                }
+                Ok(_) => {}
+                Err(error) => self
+                    .ui
+                    .set_notice(text::new_folder_error_text(*error).into()),
+            }
+            return;
+        }
+        if let Err(error) = result {
+            self.ui.set_notice(text::rename_error_text(*error).into());
         }
     }
 }

@@ -5,6 +5,9 @@
 
 use facet_core::command::{CommandId, Key, Shortcut};
 use facet_core::details::FileType;
+use facet_core::edit::EditError;
+use facet_core::name_input::{MAX_NAME_UNITS, NameError};
+use facet_win::file_ops::FileOpErrorKind;
 
 /// 명령 이름: 명령 팔레트에 보이고, 팔레트 검색은 이 이름에서 찾는다(코어는 ID만 갖는다).
 pub fn command_name(command: CommandId) -> &'static str {
@@ -57,6 +60,69 @@ pub fn command_name(command: CommandId) -> &'static str {
 
 /// 새 폴더의 처음 이름(바탕 이름). 있으면 코어가 「새 폴더 (2)」처럼 번호를 붙인다.
 pub const NEW_FOLDER_BASE: &str = "새 폴더";
+
+/// 이름 입력란 곁에 보일, 쓸 수 없는 이름의 까닭.
+pub fn name_error_text(error: NameError) -> String {
+    match error {
+        NameError::Empty => "이름을 입력하세요".to_owned(),
+        NameError::ForbiddenChar(c) => {
+            format!(
+                "이름에 쓸 수 없는 글자가 있습니다: {c}  (\\ / : * ? \" < > | 는 쓸 수 없습니다)"
+            )
+        }
+        NameError::ControlChar(c) => {
+            format!("이름에 제어 문자를 쓸 수 없습니다: U+{:04X}", u32::from(c))
+        }
+        NameError::Reserved => {
+            "Windows가 예약한 이름입니다(CON, PRN, AUX, NUL, COM1~9, LPT1~9)".to_owned()
+        }
+        NameError::TrailingDot => "이름이 점(.)으로 끝날 수 없습니다".to_owned(),
+        NameError::TrailingSpace => "이름이 공백으로 끝날 수 없습니다".to_owned(),
+        NameError::TooLong { units } => {
+            format!("이름이 너무 깁니다: {units}자 (최대 {MAX_NAME_UNITS}자)")
+        }
+    }
+}
+
+/// 이름바꾸기·새 폴더가 막히거나 실패한 까닭.
+pub fn edit_error_text(error: EditError) -> String {
+    match error {
+        EditError::Unavailable => "지금 이 위치에서는 할 수 없습니다".to_owned(),
+        EditError::Unchanged => "이름이 바뀌지 않았습니다".to_owned(),
+        EditError::InvalidName(error) => name_error_text(error),
+        EditError::NameTaken => "같은 이름의 항목이 이미 있습니다".to_owned(),
+        EditError::File(kind) => match kind {
+            FileOpErrorKind::AccessDenied => "권한이 없습니다".to_owned(),
+            FileOpErrorKind::SourceMissing => "항목이 사라졌습니다".to_owned(),
+            FileOpErrorKind::TargetExists => "같은 이름의 항목이 이미 있습니다".to_owned(),
+            FileOpErrorKind::Locked => "다른 프로그램이 쓰고 있습니다".to_owned(),
+            FileOpErrorKind::DiskFull => "디스크가 가득 찼습니다".to_owned(),
+            FileOpErrorKind::Unsupported => "이 환경에서는 할 수 없습니다".to_owned(),
+            FileOpErrorKind::CrossVolume
+            | FileOpErrorKind::Cancelled
+            | FileOpErrorKind::TimedOut
+            | FileOpErrorKind::Other => "이름을 바꾸지 못했습니다".to_owned(),
+        },
+    }
+}
+
+/// 이름 입력란 곁의 까닭.
+pub fn rename_problem_text(problem: crate::rename::Problem) -> String {
+    match problem {
+        crate::rename::Problem::Name(error) => name_error_text(error),
+        crate::rename::Problem::Edit(error) => edit_error_text(error),
+    }
+}
+
+/// 새 폴더를 만들지 못한 까닭(상태 줄).
+pub fn new_folder_error_text(error: EditError) -> String {
+    format!("새 폴더를 만들지 못했습니다: {}", edit_error_text(error))
+}
+
+/// 이름바꾸기가 실패했는데 입력란을 다시 열 수 없을 때(항목이 사라짐, 그 사이 입력란을 닫음, 상태 줄).
+pub fn rename_error_text(error: EditError) -> String {
+    format!("이름을 바꾸지 못했습니다: {}", edit_error_text(error))
+}
 
 /// 단축키의 글자: `Ctrl+Shift+P`, `Alt+←`. 키 이름은 번역하지 않는다.
 pub fn shortcut_text(shortcut: &Shortcut) -> String {
@@ -177,6 +243,20 @@ mod tests {
         assert_eq!(
             os_error_detail("액세스가 거부되었습니다.", 0x8007_0005_u32 as i32),
             "액세스가 거부되었습니다. (0x80070005)"
+        );
+    }
+
+    #[test]
+    fn 이름_까닭_글자() {
+        assert!(name_error_text(NameError::ForbiddenChar('?')).contains(": ?"));
+        assert!(name_error_text(NameError::TooLong { units: 300 }).contains("300"));
+        assert_eq!(
+            edit_error_text(EditError::NameTaken),
+            "같은 이름의 항목이 이미 있습니다"
+        );
+        assert_eq!(
+            edit_error_text(EditError::File(FileOpErrorKind::AccessDenied)),
+            "권한이 없습니다"
         );
     }
 
