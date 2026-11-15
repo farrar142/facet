@@ -126,6 +126,11 @@ impl CopyJob {
                 copier.handle(entry);
             }
             let _ = scanner.join();
+            // 훑기는 취소됐을 때만 다 세지 않고 멈춘다. 복사 쪽이 취소를 보기 전에 훑기가 먼저 멈춰 통로가
+            // 닫혔어도(예: 항목을 하나도 넣기 전에 일시정지한 채 취소) 취소로 끝낸다.
+            if !totals.counted.load(Ordering::Acquire) {
+                copier.cancelled = true;
+            }
             if !copier.cancelled {
                 copier.reporter.current = None;
                 copier.reporter.finish();

@@ -812,9 +812,12 @@ mod windows {
         wait_for(&mut queue, &mut events, |e| {
             *e == state_changed(first, JobState::Running)
         });
+        // 시작하자마자 멈춰 둔다(차례를 쥔 채 멈추므로 뒤 작업을 넣는 동안 앞 작업이 끝나 버리지 않는다).
+        assert!(queue.pause(first), "앞 작업이 이미 끝났다: {events:?}");
         let paused = queue.copy(vec![small.clone()], targets[1].clone()).unwrap();
         let after = queue.copy(vec![small.clone()], targets[2].clone()).unwrap();
         let dropped = queue.copy(vec![small.clone()], targets[3].clone()).unwrap();
+        assert_eq!(queue.state(after), Some(JobState::Queued));
         assert!(queue.pause(paused));
         assert!(queue.pause(dropped));
         assert_eq!(queue.state(paused), Some(JobState::Paused));
@@ -825,7 +828,10 @@ mod windows {
             &mut events,
             |e| matches!(e, JobEvent::Finished { job, .. } if *job == after),
         );
-        assert!(events.contains(&state_changed(first, JobState::Cancelled)));
+        assert!(
+            events.contains(&state_changed(first, JobState::Cancelled)),
+            "{events:?}"
+        );
         assert!(events.contains(&state_changed(after, JobState::Finished)));
         assert!(
             !events.contains(&state_changed(paused, JobState::Running)),
@@ -883,10 +889,13 @@ mod windows {
 
         let mut queue = JobQueue::new();
         let first = queue.copy(vec![big.clone()], targets[0].clone()).unwrap();
-        let mut events = Vec::new();
-        wait_for(&mut queue, &mut events, |e| is_copying(e, first));
         let urgent = queue.copy(vec![small.clone()], targets[1].clone()).unwrap();
         let later = queue.copy(vec![small.clone()], targets[2].clone()).unwrap();
+        let mut events = Vec::new();
+        // 앞 작업이 시작하자마자(큰 파일을 복사하는 동안) 지금 시작한다.
+        wait_for(&mut queue, &mut events, |e| {
+            *e == state_changed(first, JobState::Running)
+        });
         assert!(queue.start_now(urgent));
         assert!(!queue.start_now(urgent), "이미 시작한 작업");
         assert!(!queue.start_now(first), "실행 중인 작업");
