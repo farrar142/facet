@@ -182,7 +182,7 @@ mod with_jobs {
         assert!(app.shows_progress_window());
 
         let dst = dir.path().join("dst");
-        let opened = app.open_launch_window(resolve_launch(dir.path(), &[dst.clone()]));
+        let opened = app.open_launch_window(resolve_launch(dir.path(), std::slice::from_ref(&dst)));
         assert_eq!(app.active_window_id(), opened);
         assert_eq!(app.active_tab().location(), &loc(&dst));
         assert!(!app.shows_progress_window());
