@@ -39,6 +39,7 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::GoToTab(_) => "n번째 탭",
         CommandId::LastTab => "마지막 탭",
         CommandId::OpenInNewTab => "새 탭에서 열기",
+        CommandId::ReopenClosedTab => "닫은 탭 되살리기",
     }
 }
 

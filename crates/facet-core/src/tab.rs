@@ -289,6 +289,41 @@ struct Pending {
     reselect: Option<OsString>,
 }
 
+/// 닫은 탭에서 되살릴 것: 위치, 뒤로·앞으로 기록, 정렬, 닫을 때의 선택·커서·스크롤. 목록은 담지 않는다
+/// (되살리면 위치를 다시 읽는다). [`Tab::close`]가 만들고 [`Tab::reopen`]이 탭으로 되돌린다.
+#[derive(Debug)]
+pub struct ClosedTab {
+    location: Location,
+    back: Vec<Location>,
+    back_views: Vec<ViewState>,
+    forward: Vec<Location>,
+    forward_views: Vec<ViewState>,
+    sort: Sort,
+    view: ViewState,
+}
+
+impl ClosedTab {
+    /// 닫을 때의 위치.
+    pub fn location(&self) -> &Location {
+        &self.location
+    }
+
+    /// 뒤로 기록. 가장 가까운 위치가 끝이다.
+    pub fn back_history(&self) -> &[Location] {
+        &self.back
+    }
+
+    /// 앞으로 기록. 가장 가까운 위치가 끝이다.
+    pub fn forward_history(&self) -> &[Location] {
+        &self.forward
+    }
+
+    /// 정렬.
+    pub fn sort(&self) -> Sort {
+        self.sort
+    }
+}
+
 /// 패널 안에서 위치 하나를 보여 주는 단위.
 ///
 /// 목록은 탭의 정렬로 정렬해 둔다. 숨김 항목을 감출 때([`Tab::show_hidden`]가 `false`) 숨김 속성이
@@ -370,6 +405,45 @@ impl Tab {
             open_error: None,
             shown: true,
         }
+    }
+
+    /// 탭을 닫아 되살릴 것만 남긴다([`ClosedTab`]): 위치, 뒤로·앞으로 기록(과 그 보기 상태), 정렬, 지금 보기
+    /// 상태(선택·커서·스크롤). 목록과 감시는 버린다.
+    pub fn close(mut self) -> ClosedTab {
+        let view = self.take_view();
+        ClosedTab {
+            location: self.location,
+            back: self.back,
+            back_views: self.back_views,
+            forward: self.forward,
+            forward_views: self.forward_views,
+            sort: self.sort,
+            view,
+        }
+    }
+
+    /// 닫은 탭을 되살린다. 위치·기록·정렬·보기 상태는 닫을 때 그대로이고 목록은 비어 있다. 보이는 탭이며, 목록을
+    /// 채우려면 [`Navigation::Refresh`]로 다시 읽는다(선택·커서는 이름으로 남는다).
+    pub fn reopen(closed: ClosedTab, show_hidden: bool) -> Tab {
+        let ClosedTab {
+            location,
+            back,
+            back_views,
+            forward,
+            forward_views,
+            sort,
+            view,
+        } = closed;
+        let mut tab = Tab::new(location, sort, show_hidden);
+        tab.back = back;
+        tab.back_views = back_views;
+        tab.forward = forward;
+        tab.forward_views = forward_views;
+        tab.selection = view.selection;
+        tab.cursor = view.cursor.map(|name| (name, 0));
+        tab.anchor = view.anchor;
+        tab.scroll = view.scroll;
+        tab
     }
 
     /// 탭 제목: 위치의 폴더 이름. 드라이브 루트는 드라이브 이름(`C:`)이다. 화면 문장이 아니라 이름이다.
