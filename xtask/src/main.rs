@@ -192,8 +192,45 @@ fn ci_steps() -> Vec<Step> {
             "빌드",
             &["build", "--workspace", "--all-targets", "--locked"],
         ),
-        step("테스트", &["test", "--workspace", "--locked"]),
+        test_step(),
     ]
+}
+
+/// 다른 볼륨 이동 테스트(`crates/facet-win/tests/file_ops.rs`)에 두 번째 볼륨의 폴더를 넘기는 환경 변수.
+const OTHER_VOLUME_VAR: &str = "FACET_TEST_OTHER_VOLUME_DIR";
+
+/// `cargo test --workspace`. 임시 폴더와 작업 공간이 다른 드라이브면(GitHub 러너는 임시 폴더가 `C:`, 저장소가
+/// `D:`) 작업 공간의 `target/other-volume`을 두 번째 볼륨으로 넘겨 다른 볼륨 이동도 확인한다. 이미 정해 두었으면
+/// 그대로 둔다.
+fn test_step() -> Step {
+    let mut test = step("테스트", &["test", "--workspace", "--locked"]);
+    if env::var_os(OTHER_VOLUME_VAR).is_none()
+        && let Some(dir) = other_volume_dir()
+    {
+        test.env.push((OTHER_VOLUME_VAR, dir.display().to_string()));
+    }
+    test
+}
+
+/// 임시 폴더와 다른 드라이브에 있는 작업 공간의 `target/other-volume`. 같은 드라이브거나 만들지 못하면 `None`.
+fn other_volume_dir() -> Option<PathBuf> {
+    let workspace = std::path::absolute(env!("CARGO_MANIFEST_DIR"))
+        .ok()?
+        .parent()?
+        .to_path_buf();
+    let drive = |path: &std::path::Path| match path.components().next() {
+        Some(std::path::Component::Prefix(prefix)) => {
+            Some(prefix.as_os_str().to_string_lossy().to_uppercase())
+        }
+        _ => None,
+    };
+    let temp = std::path::absolute(env::temp_dir()).ok()?;
+    if drive(&workspace)? == drive(&temp)? {
+        return None;
+    }
+    let dir = workspace.join("target").join("other-volume");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
 }
 
 fn bench_steps() -> Vec<Step> {
