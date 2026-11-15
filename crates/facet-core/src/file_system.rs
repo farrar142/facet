@@ -39,6 +39,11 @@ impl Provider for FileSystemProvider {
         Ok(items)
     }
 
+    /// 폴더 안의 항목 경로. 글자로만 잇고 파일 시스템에 묻지 않는다.
+    fn child(&self, location: &Location, name: &std::ffi::OsStr) -> Location {
+        Location::file_system(path_of(location).join(name))
+    }
+
     /// 한 단계 위 폴더. 드라이브 루트(`C:\`)와 네트워크 공유 루트(`\\server\share`)에는 없다.
     ///
     /// 경로를 글자로만 다루고 파일 시스템에 묻지 않는다. `..`을 풀지 않는다.
