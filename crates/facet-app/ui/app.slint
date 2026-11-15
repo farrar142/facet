@@ -83,8 +83,174 @@ export struct PanelData {
     selected-size: string,
 }
 
+// 작업의 상태(코어의 `JobState`). 문장은 화면이 `@tr()`로 만든다.
+export enum JobStatus { queued, running, paused, awaiting-answer, finished, failed, cancelled }
+
+// 작업 영역의 작업 하나: **진행 표시**에 그릴 값. 수치 글자(바이트·속도·남은 시간)는 Rust가 만든다.
+export struct JobRow {
+    // 작업 번호(단추를 누르면 Rust에 돌려준다).
+    id: int,
+    // 이동이면 참, 복사면 거짓.
+    moving: bool,
+    // 대상 폴더.
+    target: string,
+    status: JobStatus,
+    // 더 바뀌지 않는 마지막 상태(끝남·실패·취소)인가.
+    terminal: bool,
+    // 항목 수: 한 것/센 것. 다 세기 전(`counted`가 거짓)에는 센 것이 늘어난다.
+    items-done: int,
+    items-total: int,
+    counted: bool,
+    // 바이트: 한 것/센 것, 평균 속도(초당). 진행이 아직 없으면 속도는 비어 있다.
+    bytes-done: string,
+    bytes-total: string,
+    speed: string,
+    // 남은 시간. 비었으면 「계산 중」이다.
+    remaining: string,
+    // 지금 다루는 항목의 이름.
+    current: string,
+    // 결과가 왔다(닫을 수 있다). 끝낸·건너뛴·남은 항목 수.
+    finished: bool,
+    completed: int,
+    skipped: int,
+    left: int,
+}
+
+// 복사·이동 확인 줄에서 시작 전에 막힌 까닭(코어의 `CopyRejection`). 문장은 화면이 `@tr()`로 만든다.
+export enum TransferProblem { none, no-sources, target-missing, target-not-folder, into-itself, target-inside-source }
+
 // 상태 줄의 이름 입력란 알림. 문장은 화면이 `@tr()`로 만든다(ADR-0007).
 export enum Notice { none, entered, cancelled }
+
+// 작은 단추: 진행 표시와 확인 줄에 쓴다. 눌러도 키보드 입력을 가져가지 않는다(창이 목록으로 돌린다).
+component SmallButton inherits Rectangle {
+    in property <string> text;
+    callback clicked();
+    width: label.preferred-width + 16px;
+    height: 22px;
+    border-radius: 3px;
+    border-width: 1px;
+    border-color: Palette.border;
+    background: touch.pressed ? Palette.selection-background
+        : touch.has-hover ? Palette.alternate-background : Palette.control-background;
+    label := Text {
+        text: root.text;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        color: Palette.foreground;
+    }
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// **진행 표시**: 작업 영역의 작업 하나. 종류·대상·상태와 단추, 그 아래 항목 수·바이트·속도·남은 시간·지금 파일,
+// 끝났으면 결과(끝낸·건너뛴·남은 항목 수).
+component JobView inherits Rectangle {
+    in property <JobRow> job;
+    callback pause();
+    callback resume();
+    callback cancel();
+    callback start-now();
+    callback dismiss();
+
+    border-width: 1px;
+    border-radius: 4px;
+    border-color: Palette.border;
+    background: Palette.background;
+    VerticalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        padding-top: 4px;
+        padding-bottom: 4px;
+        spacing: 2px;
+        HorizontalLayout {
+            spacing: 8px;
+            Text {
+                text: root.job.moving ? @tr("이동 → {}", root.job.target) : @tr("복사 → {}", root.job.target);
+                horizontal-stretch: 1;
+                overflow: elide;
+                vertical-alignment: center;
+                font-weight: 700;
+            }
+            Text {
+                text: root.job.status == JobStatus.queued ? @tr("대기 중")
+                    : root.job.status == JobStatus.running ? @tr("실행 중")
+                    : root.job.status == JobStatus.paused ? @tr("일시정지")
+                    : root.job.status == JobStatus.awaiting-answer ? @tr("답을 기다림")
+                    : root.job.status == JobStatus.finished ? @tr("끝남")
+                    : root.job.status == JobStatus.failed ? @tr("끝남(건너뛴 오류 있음)")
+                    : @tr("취소됨");
+                vertical-alignment: center;
+                color: root.job.status == JobStatus.failed || root.job.status == JobStatus.awaiting-answer ? #c42b1c
+                    : Palette.foreground.transparentize(30%);
+            }
+            if root.job.status == JobStatus.queued: SmallButton {
+                text: @tr("지금 시작");
+                clicked => {
+                    root.start-now();
+                }
+            }
+            if root.job.status == JobStatus.queued || root.job.status == JobStatus.running: SmallButton {
+                text: @tr("일시정지");
+                clicked => {
+                    root.pause();
+                }
+            }
+            if root.job.status == JobStatus.paused: SmallButton {
+                text: @tr("이어하기");
+                clicked => {
+                    root.resume();
+                }
+            }
+            if !root.job.terminal: SmallButton {
+                text: @tr("취소");
+                clicked => {
+                    root.cancel();
+                }
+            }
+            if root.job.finished: SmallButton {
+                text: @tr("닫기");
+                clicked => {
+                    root.dismiss();
+                }
+            }
+        }
+        if !root.job.finished: HorizontalLayout {
+            spacing: 14px;
+            Text {
+                text: root.job.counted ? @tr("{} / {} 항목", root.job.items-done, root.job.items-total)
+                    : @tr("{} / {}+ 항목", root.job.items-done, root.job.items-total);
+                color: Palette.foreground.transparentize(30%);
+            }
+            Text {
+                text: @tr("{} / {}", root.job.bytes-done, root.job.bytes-total);
+                color: Palette.foreground.transparentize(30%);
+            }
+            if root.job.speed != "": Text {
+                text: @tr("{}/초", root.job.speed);
+                color: Palette.foreground.transparentize(30%);
+            }
+            Text {
+                text: root.job.remaining == "" ? @tr("남은 시간: 계산 중") : @tr("남은 시간: {}", root.job.remaining);
+                color: Palette.foreground.transparentize(30%);
+            }
+            Text {
+                text: root.job.current;
+                horizontal-stretch: 1;
+                overflow: elide;
+                color: Palette.foreground.transparentize(30%);
+            }
+        }
+        if root.job.finished: Text {
+            text: @tr("끝낸 항목 {} · 건너뛴 항목 {} · 남은 항목 {}", root.job.completed, root.job.skipped, root.job.left);
+            overflow: elide;
+            color: Palette.foreground.transparentize(30%);
+        }
+    }
+}
 
 // 열 머리글 한 칸. 누르면 정렬하고, 오른쪽 경계를 끌어 너비를 바꾼다.
 component Header inherits Rectangle {
@@ -858,6 +1024,18 @@ export component AppWindow inherits Window {
     in property <string> notice-entered;
     in property <string> notice-original;
     out property <length> row-height: 24px;
+    // 작업 영역: 작업 대기열의 작업들(모든 창에 같은 것). 작업이 없으면 자리를 차지하지 않는다.
+    in property <[JobRow]> jobs;
+    out property <length> job-height: 56px;
+    property <length> work-height: root.jobs.length == 0 ? 0px : min(root.jobs.length, 3) * root.job-height + 4px;
+    // 반대편 패널로 복사·이동의 확인 줄: 열려 있는가, 이동인가, 대상 폴더, 항목 수, 시작 전에 막힌 까닭과 그 경로.
+    in property <bool> confirm-open;
+    in property <bool> confirm-moving;
+    in property <string> confirm-target;
+    in property <int> confirm-items;
+    in property <TransferProblem> confirm-problem;
+    in property <string> confirm-problem-path;
+    property <length> confirm-height: root.confirm-open ? 38px : 0px;
     // 열 너비. 머리글 경계를 끌어 바꾼다. 두 패널이 함께 쓴다.
     in-out property <length> name-width: 320px;
     in-out property <length> modified-width: 140px;
@@ -924,6 +1102,16 @@ export component AppWindow inherits Window {
     callback palette-run(int) -> bool;
     callback palette-close();
 
+    // 확인 줄: Enter·「시작」(막힌 까닭이 보이면 닫기), Esc·「취소」.
+    callback confirm-accept();
+    callback confirm-cancel();
+    // 진행 표시의 단추: 작업 번호.
+    callback job-pause(int);
+    callback job-resume(int);
+    callback job-cancel(int);
+    callback job-start-now(int);
+    callback job-dismiss(int);
+
     forward-focus: keys;
 
     // 목록으로 키보드를 돌린다. 주소창을 고쳐 쓰던 중이면 그만둔다.
@@ -975,6 +1163,15 @@ export component AppWindow inherits Window {
         selection-background-color: transparent;
         key-pressed(event) => {
             if (root.palette-open) {
+                return accept;
+            }
+            // 확인 줄이 열려 있으면 Enter로 시작, Esc로 취소하고 다른 키는 받지 않는다.
+            if (root.confirm-open) {
+                if (event.text == Key.Return) {
+                    root.confirm-accept();
+                } else if (event.text == Key.Escape) {
+                    root.confirm-cancel();
+                }
                 return accept;
             }
             if (root.show-about) {
@@ -1048,7 +1245,7 @@ export component AppWindow inherits Window {
         x: 8px;
         y: 8px + root.banner-height;
         width: parent.width - 16px;
-        height: parent.height - 16px - root.banner-height;
+        height: parent.height - 16px - root.banner-height - root.confirm-height - root.work-height;
         property <length> gap: root.split ? 6px : 0px;
         property <length> left-width: root.split ? round((self.width - self.gap) * root.split-ratio / 1px) * 1px : self.width;
 
@@ -1255,6 +1452,97 @@ export component AppWindow inherits Window {
             }
             cancel-address-edit => {
                 root.cancel-address-edit();
+            }
+        }
+    }
+
+    // 확인 줄: 반대편 패널로 복사·이동할 대상과 항목 수. 시작 전에 막히면 그 까닭을 보인다.
+    if root.confirm-open: Rectangle {
+        x: 8px;
+        y: parent.height - 8px - root.work-height - 32px;
+        width: parent.width - 16px;
+        height: 32px;
+        border-radius: 4px;
+        border-width: 1px;
+        border-color: root.confirm-problem == TransferProblem.none ? Palette.accent-background : #c42b1c;
+        background: root.confirm-problem == TransferProblem.none ? Palette.accent-background.transparentize(85%) : #fde7e9;
+        TouchArea { }
+        HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            spacing: 8px;
+            Text {
+                text: root.confirm-problem == TransferProblem.none
+                    ? (root.confirm-moving
+                        ? @tr("{}개 항목을 {}(으)로 이동합니다. Enter로 시작, Esc로 취소", root.confirm-items, root.confirm-target)
+                        : @tr("{}개 항목을 {}(으)로 복사합니다. Enter로 시작, Esc로 취소", root.confirm-items, root.confirm-target))
+                    : root.confirm-problem == TransferProblem.no-sources ? @tr("옮길 항목이 없습니다")
+                    : root.confirm-problem == TransferProblem.target-missing ? @tr("대상 위치가 없습니다: {}", root.confirm-problem-path)
+                    : root.confirm-problem == TransferProblem.target-not-folder ? @tr("대상이 폴더가 아닙니다: {}", root.confirm-problem-path)
+                    : root.confirm-problem == TransferProblem.into-itself ? @tr("폴더를 그 폴더 자신으로 보낼 수 없습니다: {}", root.confirm-problem-path)
+                    : @tr("대상 위치가 원본 폴더 안에 있습니다: {}", root.confirm-problem-path);
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+                overflow: elide;
+                color: root.confirm-problem == TransferProblem.none ? Palette.foreground : #c42b1c;
+            }
+            if root.confirm-problem == TransferProblem.none: VerticalLayout {
+                alignment: center;
+                SmallButton {
+                    text: @tr("시작");
+                    clicked => {
+                        root.confirm-accept();
+                        keys.focus();
+                    }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                SmallButton {
+                    text: root.confirm-problem == TransferProblem.none ? @tr("취소") : @tr("닫기");
+                    clicked => {
+                        root.confirm-cancel();
+                        keys.focus();
+                    }
+                }
+            }
+        }
+    }
+
+    // 작업 영역: 창 아래쪽에 작업 대기열의 작업마다 진행 표시를 보인다. 세 개가 넘으면 넘겨 본다.
+    if root.jobs.length > 0: Rectangle {
+        x: 8px;
+        y: parent.height - 8px - root.work-height + 4px;
+        width: parent.width - 16px;
+        height: root.work-height - 4px;
+        ListView {
+            for job in root.jobs: Rectangle {
+                height: root.job-height;
+                JobView {
+                    y: 0px;
+                    height: root.job-height - 4px;
+                    job: job;
+                    pause => {
+                        root.job-pause(job.id);
+                        keys.focus();
+                    }
+                    resume => {
+                        root.job-resume(job.id);
+                        keys.focus();
+                    }
+                    cancel => {
+                        root.job-cancel(job.id);
+                        keys.focus();
+                    }
+                    start-now => {
+                        root.job-start-now(job.id);
+                        keys.focus();
+                    }
+                    dismiss => {
+                        root.job-dismiss(job.id);
+                        keys.focus();
+                    }
+                }
             }
         }
     }
