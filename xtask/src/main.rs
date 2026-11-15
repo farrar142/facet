@@ -196,7 +196,8 @@ fn ci_steps() -> Vec<Step> {
     ]
 }
 
-/// 다른 볼륨 이동 테스트(`crates/facet-win/tests/file_ops.rs`)에 두 번째 볼륨의 폴더를 넘기는 환경 변수.
+/// 다른 볼륨 이동 테스트(`crates/facet-win/tests/file_ops.rs`의 이름 바꾸기, `crates/facet-core/tests/moves.rs`의
+/// 볼륨을 넘는 이동 작업)에 두 번째 볼륨의 폴더를 넘기는 환경 변수.
 const OTHER_VOLUME_VAR: &str = "FACET_TEST_OTHER_VOLUME_DIR";
 
 /// `cargo test --workspace`. 임시 폴더와 작업 공간이 다른 드라이브면(GitHub 러너는 임시 폴더가 `C:`, 저장소가
