@@ -32,6 +32,9 @@
 //!
 //! # 대화
 //!
+//! 넘기는 쪽은 파이프 소유자를 확인한 뒤 쓰기 전에 파이프 서버 프로세스(주인)에 포그라운드 권한을 넘긴다
+//! (`AllowSetForegroundWindow`). 그래야 주인이 연 새 창이 앞으로 나온다.
+//!
 //! 넘기는 쪽이 본문 길이(`u32`, 리틀 엔디언)와 본문([`crate::single_instance::encode_launch`])을 쓰면,
 //! 주인이 1바이트로 답한다(1 = 받음, 0 = 버림). 길이가 [`MAX_LAUNCH_MESSAGE_LEN`]을 넘으면 본문을 읽지 않고
 //! 버린다. 받는 쪽의 읽기·쓰기는 [`CONNECTION_TIMEOUT`] 안에 끝나야 하고, 넘으면 그 연결을 버린다.
@@ -66,13 +69,15 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
-    PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT, WaitNamedPipeW,
+    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeServerProcessId, PIPE_READMODE_BYTE,
+    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+    WaitNamedPipeW,
 };
 use windows::Win32::System::Threading::{
     CreateEventW, CreateMutexW, GetCurrentProcess, OpenProcessToken, SetEvent,
     WaitForMultipleObjects,
 };
+use windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 use windows::core::{PCWSTR, PWSTR};
 
 use crate::single_instance::{
@@ -605,6 +610,20 @@ fn pipe_owner(file: &std::fs::File) -> io::Result<String> {
     unsafe { sid_string(owner) }
 }
 
+/// 파이프를 연 주인 프로세스에게 창을 앞으로 가져올 권한을 넘긴다. 사용자가 막 실행한 프로세스(넘기는 쪽)는
+/// 포그라운드를 가질 수 있지만 뒤에서 도는 주인은 그렇지 못해, 넘기지 않으면 주인이 연 새 창이 작업 표시줄에서
+/// 깜빡이기만 한다. 넘기는 쪽에 그 권한이 없거나 주인을 알 수 없으면 아무것도 하지 않는다(창은 그래도 뜬다).
+fn allow_owner_foreground(file: &std::fs::File) {
+    let handle = HANDLE(file.as_raw_handle());
+    let mut pid = 0u32;
+    // SAFETY: handle은 방금 연 파이프 클라이언트 핸들이고, pid는 쓸 수 있는 지역 변수다.
+    if unsafe { GetNamedPipeServerProcessId(handle, &mut pid) }.is_err() || pid == 0 {
+        return;
+    }
+    // SAFETY: 프로세스 번호 하나를 넘길 뿐이다. 실패하면(권한이 없음) 무시한다.
+    let _ = unsafe { AllowSetForegroundWindow(pid) };
+}
+
 fn open_pipe(name: &str, wide: &[u16], deadline: Instant) -> Result<std::fs::File, ForwardError> {
     loop {
         let opened = OpenOptions::new()
@@ -650,6 +669,7 @@ pub(crate) fn forward(
     if pipe_owner(&file).map_err(ForwardError::Io)? != identity.user_sid {
         return Err(ForwardError::NotOurs);
     }
+    allow_owner_foreground(&file);
     let mut frame = Vec::with_capacity(4 + body.len());
     frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
     frame.extend_from_slice(body);
