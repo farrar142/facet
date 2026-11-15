@@ -14,10 +14,12 @@
 //! 이 모듈은 스레드를 만들지 않는다. 일꾼 스레드로 읽고 결과를 탭에 넘기는 일은
 //! [`crate::window::App`]이 한다. 그래서 탭만 따로 화면 없이, 결과가 오는 순서를 정해 가며 시험할 수 있다.
 
-use std::ffi::OsString;
+use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
 use std::time::{Duration, Instant};
 
 use crate::details::{DetailsList, Sort};
+use crate::selection::{CursorMove, StatusSummary, TypeAhead, ViewState, starts_with_folded};
 use crate::{Item, ListError, Location, provider_for};
 
 /// 읽기가 이만큼 넘게 걸리면 탭이 「읽는 중」을 드러낸다([`Tab::is_reading`]).
@@ -117,6 +119,8 @@ struct Pending {
     location: Location,
     kind: Kind,
     started: Instant,
+    /// 위로 갈 때 방금 있던 폴더의 이름. 확정되면 그 항목을 선택하고 커서를 둔다.
+    reselect: Option<OsString>,
 }
 
 /// 패널 안에서 위치 하나를 보여 주는 단위.
@@ -129,8 +133,12 @@ pub struct Tab {
     location: Location,
     /// 뒤로 기록. 가장 가까운 것이 끝이다.
     back: Vec<Location>,
+    /// `back`과 짝을 이루는, 그 위치를 떠날 때의 보기 상태(선택·커서·스크롤).
+    back_views: Vec<ViewState>,
     /// 앞으로 기록. 가장 가까운 것이 끝이다.
     forward: Vec<Location>,
+    /// `forward`와 짝을 이루는 보기 상태.
+    forward_views: Vec<ViewState>,
     sort: Sort,
     show_hidden: bool,
     /// 숨김 항목까지 모두 담은 목록.
@@ -140,6 +148,15 @@ pub struct Tab {
     pending: Option<Pending>,
     next_id: u64,
     error: Option<ListError>,
+    /// 선택한 항목의 이름. 보이는 항목만 든다.
+    selection: HashSet<OsString>,
+    /// 커서 항목의 이름과 보이는 항목 안 번호(정렬·새로 고침 뒤 `reindex`로 맞춘다).
+    cursor: Option<(OsString, usize)>,
+    /// Shift 범위의 기준 항목 이름.
+    anchor: Option<OsString>,
+    /// 화면이 맨 위에 보이는 행 번호. 화면이 알려 주는 값을 그대로 보관한다.
+    scroll: usize,
+    type_ahead: TypeAhead,
 }
 
 impl Tab {
@@ -150,7 +167,9 @@ impl Tab {
         Tab {
             location,
             back: Vec::new(),
+            back_views: Vec::new(),
             forward: Vec::new(),
+            forward_views: Vec::new(),
             sort,
             show_hidden,
             list: DetailsList::new(Vec::new(), sort),
@@ -158,6 +177,11 @@ impl Tab {
             pending: None,
             next_id: 0,
             error: None,
+            selection: HashSet::new(),
+            cursor: None,
+            anchor: None,
+            scroll: 0,
+            type_ahead: TypeAhead::default(),
         }
     }
 
@@ -256,12 +280,21 @@ impl Tab {
     /// 그것을 대신하고, 앞선 요청의 결과는 버린다. 시작하면 지난 오류를 지운다.
     pub fn navigate(&mut self, navigation: Navigation) -> Option<ReadRequest> {
         let provider = provider_for(&self.location);
+        let mut reselect = None;
         let (location, kind) = match navigation {
             Navigation::Go(location) => (location, Kind::New),
             Navigation::Open(name) => (provider.child(&self.location, &name), Kind::New),
             Navigation::Back => (self.back.last()?.clone(), Kind::Back),
             Navigation::Forward => (self.forward.last()?.clone(), Kind::Forward),
-            Navigation::Up => (provider.parent(&self.location)?, Kind::New),
+            Navigation::Up => {
+                let parent = provider.parent(&self.location)?;
+                reselect = self
+                    .location
+                    .file_system_path()
+                    .and_then(|path| path.file_name())
+                    .map(OsStr::to_os_string);
+                (parent, Kind::New)
+            }
             Navigation::Refresh => (self.location.clone(), Kind::Refresh),
         };
         let id = RequestId(self.next_id);
@@ -272,6 +305,7 @@ impl Tab {
             location: location.clone(),
             kind,
             started: Instant::now(),
+            reselect,
         });
         Some(ReadRequest {
             id,
@@ -296,21 +330,32 @@ impl Tab {
                 return ReadOutcome::Failed;
             }
         };
+        let mut restored = None;
         match pending.kind {
             Kind::New if pending.location != self.location => {
                 let previous = std::mem::replace(&mut self.location, pending.location);
                 self.back.push(previous);
+                let view = self.take_view();
+                self.back_views.push(view);
                 self.forward.clear();
+                self.forward_views.clear();
+                restored = Some(ViewState::default());
             }
             Kind::Back => {
                 self.back.pop();
                 let previous = std::mem::replace(&mut self.location, pending.location);
                 self.forward.push(previous);
+                let view = self.take_view();
+                self.forward_views.push(view);
+                restored = self.back_views.pop();
             }
             Kind::Forward => {
                 self.forward.pop();
                 let previous = std::mem::replace(&mut self.location, pending.location);
                 self.back.push(previous);
+                let view = self.take_view();
+                self.back_views.push(view);
+                restored = self.forward_views.pop();
             }
             Kind::New | Kind::Refresh => {}
         }
@@ -320,6 +365,20 @@ impl Tab {
         }
         self.list = list;
         self.update_visible();
+        if let Some(view) = restored {
+            self.selection = view.selection;
+            self.cursor = view.cursor.map(|name| (name, 0));
+            self.anchor = view.anchor;
+            self.scroll = view.scroll;
+        }
+        self.prune_selection();
+        self.reindex();
+        if let Some(name) = pending.reselect
+            && pending.kind == Kind::New
+            && let Some(index) = self.position_of(&name)
+        {
+            self.select_only(index);
+        }
         ReadOutcome::Committed
     }
 
@@ -331,6 +390,7 @@ impl Tab {
         self.sort = sort;
         self.list.set_sort(sort);
         self.update_visible();
+        self.reindex();
     }
 
     /// 숨김 항목 보이기/감추기. 앱 전체에 하나인 상태를 따르므로 보통 [`crate::window::App::set_show_hidden`]이
@@ -341,6 +401,8 @@ impl Tab {
         }
         self.show_hidden = show_hidden;
         self.update_visible();
+        self.prune_selection();
+        self.reindex();
     }
 
     fn update_visible(&mut self) {
@@ -356,5 +418,220 @@ impl Tab {
                     .collect(),
             )
         };
+    }
+
+    // --- 선택·커서 ---
+
+    /// 지금 보기 상태를 꺼내 간다(기록에 남길 때). 선택·커서·기준은 비고 스크롤은 0이 된다.
+    fn take_view(&mut self) -> ViewState {
+        ViewState {
+            selection: std::mem::take(&mut self.selection),
+            cursor: self.cursor.take().map(|(name, _)| name),
+            anchor: self.anchor.take(),
+            scroll: std::mem::take(&mut self.scroll),
+        }
+    }
+
+    /// 이름이 `name`인 보이는 항목의 번호. 항목 수만큼 훑는다.
+    fn position_of(&self, name: &OsStr) -> Option<usize> {
+        (0..self.len()).find(|&i| self.get(i).is_some_and(|item| item.name == name))
+    }
+
+    /// 보이지 않거나 사라진 항목을 선택·기준에서 뺀다. 이름 집합을 한 번 만들어 대조하므로 항목 수에 비례한다.
+    fn prune_selection(&mut self) {
+        if !self.selection.is_empty() {
+            let mut selection = std::mem::take(&mut self.selection);
+            let present: HashSet<&OsStr> = self.items().map(|i| i.name.as_os_str()).collect();
+            selection.retain(|name| present.contains(name.as_os_str()));
+            self.selection = selection;
+        }
+        if let Some(anchor) = &self.anchor
+            && self.position_of(anchor).is_none()
+        {
+            self.anchor = None;
+        }
+    }
+
+    /// 커서의 번호를 지금 목록에 맞춘다. 커서 항목이 사라졌으면 원래 번호 근처 항목으로 옮긴다.
+    fn reindex(&mut self) {
+        let Some((name, old)) = self.cursor.take() else {
+            return;
+        };
+        let len = self.len();
+        if len == 0 {
+            return;
+        }
+        let index = self.position_of(&name).unwrap_or_else(|| old.min(len - 1));
+        if let Some(item) = self.get(index) {
+            self.cursor = Some((item.name.clone(), index));
+        }
+    }
+
+    /// 커서 항목의 번호.
+    pub fn cursor(&self) -> Option<usize> {
+        self.cursor.as_ref().map(|(_, index)| *index)
+    }
+
+    /// 커서 항목.
+    pub fn cursor_item(&self) -> Option<&Item> {
+        self.get(self.cursor()?)
+    }
+
+    fn set_cursor(&mut self, index: usize) -> Option<usize> {
+        let name = self.get(index)?.name.clone();
+        self.cursor = Some((name, index));
+        Some(index)
+    }
+
+    /// 커서를 옮긴다. 선택은 바꾸지 않는다. 옮긴 뒤의 번호를 돌려주고, 항목이 없으면 `None`이다.
+    ///
+    /// 커서가 없으면 첫 항목에 둔다. 끝에서는 더 가지 않고 그 자리에 머문다.
+    pub fn move_cursor(&mut self, movement: CursorMove) -> Option<usize> {
+        let len = self.len();
+        if len == 0 {
+            return None;
+        }
+        let target = match (self.cursor(), movement) {
+            (_, CursorMove::First) => 0,
+            (_, CursorMove::Last) => len - 1,
+            (None, _) => 0,
+            (Some(at), CursorMove::Up) => at.saturating_sub(1),
+            (Some(at), CursorMove::Down) => (at + 1).min(len - 1),
+            (Some(at), CursorMove::PageUp(page)) => at.saturating_sub(page.max(1)),
+            (Some(at), CursorMove::PageDown(page)) => (at + page.max(1)).min(len - 1),
+        };
+        self.set_cursor(target)
+    }
+
+    /// `index`번째 항목이 선택됐는가.
+    pub fn is_selected(&self, index: usize) -> bool {
+        self.get(index)
+            .is_some_and(|item| self.selection.contains(&item.name))
+    }
+
+    /// 선택한 항목 수.
+    pub fn selected_count(&self) -> usize {
+        self.selection.len()
+    }
+
+    /// 선택한 항목을 정렬된 순서로.
+    pub fn selected_items(&self) -> impl Iterator<Item = &Item> + '_ {
+        self.items()
+            .filter(|item| self.selection.contains(&item.name))
+    }
+
+    /// 단일 선택(클릭): `index`번째만 선택하고 커서와 범위 기준을 거기 둔다. 범위 밖이면 아무것도 안 한다.
+    pub fn select_only(&mut self, index: usize) {
+        let Some(name) = self.get(index).map(|i| i.name.clone()) else {
+            return;
+        };
+        self.selection.clear();
+        self.selection.insert(name.clone());
+        self.anchor = Some(name);
+        self.set_cursor(index);
+    }
+
+    /// Shift 범위: 범위 기준부터 `index`까지를 선택하고(앞선 선택은 버린다) 커서를 `index`에 둔다.
+    /// 기준이 없으면 커서, 그것도 없으면 `index` 자신이 기준이다.
+    pub fn select_range(&mut self, index: usize) {
+        if index >= self.len() {
+            return;
+        }
+        let anchor = self
+            .anchor
+            .as_deref()
+            .and_then(|name| self.position_of(name))
+            .or(self.cursor())
+            .unwrap_or(index);
+        let (from, to) = (anchor.min(index), anchor.max(index));
+        let names: HashSet<OsString> = (from..=to)
+            .filter_map(|i| self.get(i).map(|item| item.name.clone()))
+            .collect();
+        let anchor_name = self.get(anchor).map(|item| item.name.clone());
+        self.selection = names;
+        self.anchor = anchor_name;
+        self.set_cursor(index);
+    }
+
+    /// Ctrl 토글: `index`번째의 선택을 뒤집고 커서와 범위 기준을 거기 둔다.
+    pub fn toggle_select(&mut self, index: usize) {
+        let Some(name) = self.get(index).map(|i| i.name.clone()) else {
+            return;
+        };
+        if !self.selection.remove(&name) {
+            self.selection.insert(name.clone());
+        }
+        self.anchor = Some(name);
+        self.set_cursor(index);
+    }
+
+    /// 커서 항목의 선택을 뒤집는다(Ctrl+Space). 커서가 없으면 아무것도 안 한다.
+    pub fn toggle_cursor_selection(&mut self) {
+        if let Some(index) = self.cursor() {
+            self.toggle_select(index);
+        }
+    }
+
+    /// 보이는 항목을 모두 선택한다. 커서는 그대로다.
+    pub fn select_all(&mut self) {
+        self.selection = self.items().map(|item| item.name.clone()).collect();
+    }
+
+    /// 선택을 모두 푼다. 커서는 그대로다.
+    pub fn clear_selection(&mut self) {
+        self.selection.clear();
+    }
+
+    /// 화면이 맨 위에 보이는 행 번호.
+    pub fn scroll(&self) -> usize {
+        self.scroll
+    }
+
+    /// 화면이 맨 위에 보이는 행 번호를 알린다. 뒤로·앞으로 기록에 함께 남는다.
+    pub fn set_scroll(&mut self, scroll: usize) {
+        self.scroll = scroll;
+    }
+
+    /// 글자로 이동: `c`로 시작하는 항목으로 커서를 옮기고 그 번호를 돌려준다. 없으면 커서는 그대로고 `None`이다.
+    ///
+    /// - [`crate::selection::TYPE_AHEAD_TIMEOUT`] 안에 이어 친 글자는 접두어로 이어 붙인다.
+    ///   그보다 늦으면 새로 시작한다.
+    /// - 같은 글자를 거듭 치면 그 글자로 시작하는 항목을 커서 다음부터 차례로 돈다.
+    /// - 대소문자를 가리지 않는다. 한글은 IME가 조합을 끝낸 글자를 넘긴다.
+    ///
+    /// 시각 `now`는 부르는 쪽이 넘긴다. 선택은 바꾸지 않는다.
+    pub fn type_to_find(&mut self, c: char, now: Instant) -> Option<usize> {
+        let search = self.type_ahead.push(c, now);
+        let len = self.len();
+        if len == 0 {
+            return None;
+        }
+        let start = match self.cursor() {
+            Some(at) if search.include_cursor => at,
+            Some(at) => at + 1,
+            None => 0,
+        };
+        let found = (0..len).map(|offset| (start + offset) % len).find(|&i| {
+            self.get(i)
+                .is_some_and(|item| starts_with_folded(&item.name, &search.prefix))
+        })?;
+        self.set_cursor(found)
+    }
+
+    /// 상태 표시줄 수치: 항목 수, 선택 수, 선택한 파일 크기 합.
+    pub fn status(&self) -> StatusSummary {
+        let selected_size = if self.selection.is_empty() {
+            0
+        } else {
+            self.selected_items()
+                .filter(|item| !item.is_folder)
+                .map(|item| item.size)
+                .sum()
+        };
+        StatusSummary {
+            item_count: self.len(),
+            selected_count: self.selection.len(),
+            selected_size,
+        }
     }
 }
