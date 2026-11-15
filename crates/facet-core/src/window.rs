@@ -29,7 +29,8 @@
 //! ([`App::reopen_closed_tab`])는 마지막에 넣은 탭부터 위치·기록·정렬을 그대로 활성 창의 활성 패널에 활성 탭으로
 //! 열고 그 위치를 다시 읽는다. 이 목록은 저장하지 않는다.
 //!
-//! 세션([`crate::session`]): [`App::session`]이 지금 창·패널·탭·위치·정렬·분할 비율을 세션으로 내고,
+//! 세션([`crate::session`]): [`App::session`]이 지금 창·패널·탭·위치·정렬·분할 비율·창 자리([`Window::placement`])를
+//! 세션으로 내고,
 //! [`App::restore`]가 세션을 되살린다(보이는 탭만 읽기 시작하고, 나머지는 처음 보일 때 읽는다).
 //!
 //! 앱은 탭의 읽기 요청을 일꾼 스레드에서 읽고([`App::navigate`]), 그 결과를 요청한 탭에 넘긴다
@@ -56,6 +57,7 @@ use facet_win::{OpenError, OpenResult, ShellWorker};
 use crate::command::{self, CommandId, CommandState};
 use crate::details::Sort;
 use crate::launch::LaunchTarget;
+use crate::placement::Placement;
 use crate::session::{PanelSession, Session, TabSession, WindowSession};
 use crate::tab::{
     ChangeOutcome, ClosedTab, CompletionId, CompletionResult, Navigation, ReadOutcome, ReadRequest,
@@ -215,6 +217,8 @@ pub struct Window {
     active: usize,
     /// 분할 비율: 패널이 둘일 때 왼쪽 패널이 차지하는 몫(0..1). 합쳐도 남아 다시 나누면 그대로 쓴다.
     split_ratio: f32,
+    /// 화면 자리·크기·최대화. 앱이 창을 띄우고 옮길 때마다 알린다. 아직 모르면 `None`이다.
+    placement: Option<Placement>,
 }
 
 impl Window {
@@ -224,6 +228,7 @@ impl Window {
             panels: vec![panel],
             active: 0,
             split_ratio: SPLIT_RATIO_DEFAULT,
+            placement: None,
         }
     }
 
@@ -279,6 +284,18 @@ impl Window {
     /// 분할 비율을 반반([`SPLIT_RATIO_DEFAULT`])으로 맞춘다(경계를 두 번 누름).
     pub fn reset_split_ratio(&mut self) {
         self.split_ratio = SPLIT_RATIO_DEFAULT;
+    }
+
+    /// 창의 화면 자리·크기·최대화(가상 화면 기준 물리 픽셀, [`crate::placement`]). 세션에 남고, 되살린 창은 이
+    /// 자리로 뜬다. 앱이 아직 알리지 않았으면(띄우기 전) `None`이다.
+    pub fn placement(&self) -> Option<Placement> {
+        self.placement
+    }
+
+    /// 창의 화면 자리를 정한다. 앱이 창을 옮기거나 크기를 바꾸거나 최대화할 때마다 알린다
+    /// ([`Placement::observe`]로 고친 값).
+    pub fn set_placement(&mut self, placement: Option<Placement>) {
+        self.placement = placement;
     }
 }
 
@@ -464,6 +481,7 @@ impl App {
             restored.panels.extend(panels);
             restored.active = active_panel;
             restored.set_split_ratio(window.split_ratio);
+            restored.placement = window.placement;
             if w <= session.active_window {
                 active = Some(self.windows.len());
             }
@@ -508,6 +526,7 @@ impl App {
                     .collect(),
                 active_panel: window.active,
                 split_ratio: window.split_ratio,
+                placement: window.placement,
             })
             .collect();
         Some(Session {
