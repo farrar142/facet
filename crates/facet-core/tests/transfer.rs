@@ -16,6 +16,10 @@ use facet_core::tab::{Navigation, ReadOutcome, Tab};
 use facet_core::window::{App, Execution, TargetError, TransferPlan};
 use tempfile::TempDir;
 
+#[cfg(windows)]
+#[path = "common/bin.rs"]
+mod bin;
+
 const WAIT: Duration = Duration::from_secs(10);
 
 fn loc(path: &Path) -> Location {
@@ -455,7 +459,11 @@ fn 이름_충돌_질문은_작업_영역에_있고_두_번째_답은_무시된�
     assert_eq!(conflict.source.size, Some(1));
     assert_eq!(conflict.target.size, Some(10));
     assert!(conflict.can_overwrite);
-    assert!(conflict.overwrite_is_permanent);
+    // 휴지통이 있는 위치면 대상을 휴지통으로 보낸 뒤 덮어쓰므로 되살릴 수 있다.
+    assert_eq!(
+        conflict.overwrite_is_permanent,
+        !facet_win::recycle::has_recycle_bin(&dst)
+    );
 
     // 한 창에서 답하면 곧바로 질문이 사라진다(다른 창도 같은 작업 영역을 그린다).
     assert_eq!(
@@ -473,7 +481,9 @@ fn 이름_충돌_질문은_작업_영역에_있고_두_번째_답은_무시된�
     assert!(!dst.join("파일 (2).txt").exists());
     let entry = app.work_area().entry(job).unwrap();
     assert_eq!(entry.question, None);
-    assert_eq!(entry.summary.as_ref().unwrap().files_overwritten, 1);
+    let summary = entry.summary.as_ref().unwrap();
+    assert_eq!(summary.files_overwritten, 1);
+    bin::purge(&summary.recycled);
 }
 
 /// 항목별 오류 질문도 작업 영역에 들고, 한 번 답하면 사라지며 두 번째 답은 무시된다.

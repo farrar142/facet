@@ -9,6 +9,10 @@
 //! - **이동**: 실행취소는 대상의 항목을 원래 자리로 되옮긴다(같은 볼륨은 이름 바꾸기, 볼륨을 넘으면 이동 엔진의
 //!   복사 뒤 원본 삭제). 이동이 만든 대상 폴더는 비면 지우고, 이동이 지운 원래 폴더는 다시 만든다. 다시 실행은 다시
 //!   옮긴다.
+//! - **덮어쓰기**(복사·이동이 원래 대상을 휴지통으로 보내고 덮어씀, [`Step::Overwrote`]): 실행취소는 새 파일을
+//!   치우고(복사면 휴지통으로, 이동이면 원래 자리로 되옮김) 옛 파일을 휴지통에서 복원한다. 옛 파일의 휴지통 항목이
+//!   없으면(휴지통을 비움) [`RevertSkip::RecycledMissing`]로 건너뛴다. 다시 실행은 옛 파일을 다시 휴지통으로 보내고
+//!   다시 덮어쓴다(영구 덮어쓰기는 하지 않는다).
 //!
 //! 하기 전에 밖의 변경을 기록해 둔 모습([`Stamp`])으로 본다: 다룰 항목이 없거나 바뀌었거나, 되바꿀(만들·되옮길)
 //! 자리에 같은 이름이 있거나, 지울 폴더가 비어 있지 않으면 그 항목을 건너뛰고 까닭을 [`Summary::not_reverted`]에
@@ -22,10 +26,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
 use facet_win::file_ops::{self, FileOpErrorKind};
-use facet_win::recycle::{self, RecycleOutcome};
+use facet_win::recycle::{self, RecycleOutcome, RecycledItem};
 
-use super::copy::{Copier, ErrorStep, error_kind};
-use super::{Context, Summary};
+use super::copy::{Copier, ErrorStep, FileOutcome, error_kind};
+use super::{Context, Resolution, Summary};
 use crate::history::{NotReverted, Outcomes, Reversal, RevertSkip, Stamp, Step, path_key};
 
 /// 휴지통으로 한 번에 보내는 항목 수. 셸 호출 사이에서 일시정지·취소를 보고 진행을 알린다.
@@ -244,6 +248,28 @@ impl Run<'_, '_> {
                     stamp,
                 })
             }),
+            (
+                Step::Overwrote {
+                    source,
+                    path,
+                    moved,
+                    stamp,
+                    replaced,
+                    replaced_stamp,
+                },
+                Reversal::Undo,
+            ) => self.undo_overwrite(source, path, *moved, stamp, replaced, replaced_stamp),
+            (
+                Step::Overwrote {
+                    source,
+                    path,
+                    moved,
+                    stamp,
+                    replaced_stamp,
+                    ..
+                },
+                Reversal::Redo,
+            ) => self.redo_overwrite(source, path, *moved, stamp, replaced_stamp),
             (Step::MovedFolder { from, to, .. }, Reversal::Redo) => prepare_moved_folder(from, to)
                 .map_or_else(Into::into, |(stamp, made)| {
                     Attempt::Done(Step::MovedFolder {
@@ -384,6 +410,178 @@ impl Run<'_, '_> {
             return Err(Refusal::Asked);
         }
         Stamp::read(target).ok_or(Refusal::Asked)
+    }
+
+    /// 덮어쓰기의 실행취소: `path`의 새 파일(기록한 모습 `stamp`)을 치우고(복사면 휴지통으로 보내고, 이동이면
+    /// `source`로 되옮김) 덮어쓰기 전에 휴지통으로 보낸 옛 파일 `replaced`를 `path`로 복원한다.
+    ///
+    /// 새 파일이 없거나 바뀌었거나 옛 파일의 휴지통 항목이 없으면(휴지통을 비움) 아무것도 하지 않고 건너뛴다. 새
+    /// 파일을 치운 뒤 옛 파일을 복원하지 못하면 새 파일을 제자리로 되돌린다(휴지통에서 복원하거나 되옮김): 그래서
+    /// 실행취소 전 상태로 남아 고친 뒤 다시 해 볼 수 있다. 되돌리기마저 실패하면(볼륨을 넘어 되옮긴 새 파일, 그 사이
+    /// 그 자리를 다른 항목이 차지함) 새 파일은 `source`나 휴지통에 남는다(영구히 지우지 않는다).
+    fn undo_overwrite(
+        &mut self,
+        source: &Path,
+        path: &Path,
+        moved: bool,
+        stamp: &Stamp,
+        replaced: &RecycledItem,
+        replaced_stamp: &Stamp,
+    ) -> Attempt {
+        let Some(now) = Stamp::read(path) else {
+            return Attempt::Skip(RevertSkip::Missing);
+        };
+        if !stamp.matches(&now) {
+            return Attempt::Skip(RevertSkip::Changed);
+        }
+        if fs::symlink_metadata(replaced.recycled()).is_err() {
+            return Attempt::Skip(RevertSkip::RecycledMissing);
+        }
+        // 새 파일을 치운다.
+        let cleared = if moved {
+            match self.move_between(path, source, stamp) {
+                Ok(moved_back) => Cleared::MovedBack(moved_back),
+                Err(refusal) => return refusal.into(),
+            }
+        } else {
+            match recycle::recycle(&[path.to_path_buf()]).pop() {
+                Some(RecycleOutcome::Recycled(item)) => Cleared::Recycled(item),
+                Some(RecycleOutcome::NotRecyclable) => {
+                    return Attempt::Skip(RevertSkip::NotRecyclable);
+                }
+                Some(RecycleOutcome::Failed(error)) => return Attempt::Failed(error.kind()),
+                Some(RecycleOutcome::NotAttempted) | None => {
+                    return Attempt::Failed(FileOpErrorKind::Other);
+                }
+            }
+        };
+        // 옛 파일을 되살린다.
+        match recycle::restore(replaced) {
+            Ok(_) => {
+                let new_stamp = match cleared {
+                    Cleared::Recycled(item) => {
+                        self.copier.summary.recycled.push(item);
+                        *stamp
+                    }
+                    Cleared::MovedBack(moved_back) => moved_back,
+                };
+                Attempt::Done(Step::Overwrote {
+                    source: source.to_path_buf(),
+                    path: path.to_path_buf(),
+                    moved,
+                    stamp: new_stamp,
+                    replaced: replaced.clone(),
+                    replaced_stamp: Stamp::read(path).unwrap_or(*replaced_stamp),
+                })
+            }
+            Err(error) => {
+                // 옛 파일을 되살리지 못했다: 새 파일을 제자리로 되돌려 실행취소 전 상태로 둔다.
+                match cleared {
+                    Cleared::Recycled(item) => {
+                        if recycle::restore(&item).is_err() {
+                            self.copier.summary.recycled.push(item);
+                        }
+                    }
+                    Cleared::MovedBack(_) => {
+                        let _ = file_ops::rename(source, path);
+                    }
+                }
+                match error.kind() {
+                    FileOpErrorKind::SourceMissing => Attempt::Skip(RevertSkip::RecycledMissing),
+                    FileOpErrorKind::TargetExists => Attempt::Skip(RevertSkip::NameTaken),
+                    kind => Attempt::Failed(kind),
+                }
+            }
+        }
+    }
+
+    /// 덮어쓰기의 다시 실행: 다시 덮어쓴다. `path`에 돌아와 있는 옛 파일(기록한 모습 `replaced_stamp`)을 다시
+    /// 휴지통으로 보내고 그 자리에 `source`(기록한 모습 `stamp`)를 다시 복사하거나(복사) 다시 옮긴다(이동). 처음
+    /// 덮어쓰기와 같은 엔진이다(임시 이름에 다 쓴 뒤 놓기).
+    ///
+    /// 원본이나 옛 파일이 없거나 바뀌었으면 건너뛴다. 영구 덮어쓰기는 하지 않는다: 휴지통이 없는 위치이거나 셸이
+    /// 휴지통에 넣지 않으려 하면 [`RevertSkip::NotRecyclable`]로 건너뛴다.
+    fn redo_overwrite(
+        &mut self,
+        source: &Path,
+        path: &Path,
+        moved: bool,
+        stamp: &Stamp,
+        replaced_stamp: &Stamp,
+    ) -> Attempt {
+        let Some(now) = Stamp::read(source) else {
+            return Attempt::Skip(RevertSkip::Missing);
+        };
+        if !stamp.matches(&now) {
+            return Attempt::Skip(RevertSkip::Changed);
+        }
+        let Some(old) = Stamp::read(path) else {
+            return Attempt::Skip(RevertSkip::Missing);
+        };
+        if !replaced_stamp.matches(&old) {
+            return Attempt::Skip(RevertSkip::Changed);
+        }
+        if !recycle::has_recycle_bin(path) {
+            return Attempt::Skip(RevertSkip::NotRecyclable);
+        }
+        let is_link = fs::symlink_metadata(source).is_ok_and(|m| m.file_type().is_symlink());
+        let failures = self.copier.summary.failures.len();
+        let skipped = self.copier.summary.conflicts_skipped;
+        self.copier.permanent_overwrite = false;
+        self.copier.refused = false;
+        self.copier.last_replaced = None;
+        let mut copy = !moved;
+        if moved {
+            match self.copier.move_over(source, path) {
+                FileOutcome::Copied { .. } => {}
+                FileOutcome::Failed(FileOpErrorKind::CrossVolume) => copy = true,
+                FileOutcome::Refused => self.copier.refused = true,
+                FileOutcome::Failed(kind) => {
+                    self.copier.permanent_overwrite = true;
+                    return Attempt::Failed(kind);
+                }
+                FileOutcome::Cancelled | FileOutcome::Skipped | FileOutcome::Exists => {
+                    self.copier.permanent_overwrite = true;
+                    return Attempt::Failed(FileOpErrorKind::TargetExists);
+                }
+            }
+        }
+        if copy {
+            // 다른 볼륨으로 옮기기(복사 뒤 원본 삭제)와 복사는 복사의 덮어쓰기로: 이미 정한 답으로 묻지 않는다.
+            self.copier.moving = moved;
+            self.copier.preset = Some(Resolution::Overwrite);
+            if is_link {
+                self.copier.copy_link(source, path);
+            } else {
+                self.copier
+                    .reporter
+                    .totals
+                    .bytes
+                    .fetch_add(now.size, Ordering::AcqRel);
+                self.copier.copy_file(source, path, now.size);
+            }
+            self.copier.preset = None;
+            self.copier.moving = false;
+        }
+        self.copier.permanent_overwrite = true;
+        if self.copier.refused {
+            self.copier.refused = false;
+            return Attempt::Skip(RevertSkip::NotRecyclable);
+        }
+        let failed = self.copier.cancelled
+            || self.copier.summary.failures.len() > failures
+            || self.copier.summary.conflicts_skipped > skipped;
+        match (self.copier.last_replaced.take(), Stamp::read(path)) {
+            (Some((item, old)), Some(stamp)) if !failed => Attempt::Done(Step::Overwrote {
+                source: source.to_path_buf(),
+                path: path.to_path_buf(),
+                moved,
+                stamp,
+                replaced: item,
+                replaced_stamp: old,
+            }),
+            _ => Attempt::Unfinished,
+        }
     }
 
     /// 복사의 실행취소: `indices`의 복사본들(기록의 거꾸로, 안쪽 항목이 바깥 폴더보다 먼저)을 살펴 그대로인 것을
@@ -561,9 +759,18 @@ fn current_path(step: &Step, reversal: Reversal) -> &Path {
             Step::Renamed { from, .. } | Step::Moved { from, .. } | Step::MovedFolder { from, .. },
             Reversal::Redo,
         ) => from,
-        (Step::CreatedFolder { path, .. }, _) | (Step::Copied { path, .. }, Reversal::Undo) => path,
-        (Step::Copied { source, .. }, Reversal::Redo) => source,
+        (Step::CreatedFolder { path, .. }, _)
+        | (Step::Copied { path, .. } | Step::Overwrote { path, .. }, Reversal::Undo) => path,
+        (Step::Copied { source, .. } | Step::Overwrote { source, .. }, Reversal::Redo) => source,
     }
+}
+
+/// 덮어쓰기의 실행취소가 새 파일을 치운 방법.
+enum Cleared {
+    /// 복사본을 휴지통으로 보냈다.
+    Recycled(RecycledItem),
+    /// 옮겨 온 파일을 원래 자리로 되옮겼다(그 뒤의 모습).
+    MovedBack(Stamp),
 }
 
 /// 하지 못한 까닭: 밖의 변경(건너뜀), 파일 연산의 실패(물음), 이미 물어 답대로 함.

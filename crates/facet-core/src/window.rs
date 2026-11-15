@@ -1854,7 +1854,8 @@ impl App {
     }
 
     /// 끝난 복사·이동(끝남·실패·취소 모두)을 작업 기록에 남긴다: 실제로 한 항목만 담고, 한 항목이 없으면 남기지
-    /// 않는다. 덮어쓴 파일이 있으면 되돌릴 수 없다고 남긴다(덮어쓴 파일은 되살릴 수 없으므로).
+    /// 않는다. 휴지통을 거치지 않고 영구 덮어쓴 파일이 있으면 되돌릴 수 없다고 남긴다(그 파일은 되살릴 수 없으므로).
+    /// 휴지통으로 보내고 덮어쓴 파일은 되돌릴 수 있다(옛 파일을 휴지통에서 복원).
     fn record_transfer(&mut self, job: JobId, summary: &crate::job::Summary) {
         let Some((kind, journal)) = self.journals.remove(&job) else {
             return;
