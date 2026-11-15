@@ -13,6 +13,7 @@ pub mod measure;
 pub mod name_input;
 mod provider;
 pub mod selection;
+pub mod session;
 pub mod tab;
 pub mod watch;
 pub mod window;
