@@ -238,7 +238,7 @@ fn 분할_비율은_한도_안으로_잘리고_반반으로_맞출_수_있다() 
     assert_eq!(window.set_split_ratio(f32::INFINITY), SPLIT_RATIO_MAX);
     // 숫자가 아니면 바꾸지 않는다.
     assert_eq!(window.set_split_ratio(f32::NAN), SPLIT_RATIO_MAX);
-    assert!(SPLIT_RATIO_MIN > 0.0 && SPLIT_RATIO_MAX < 1.0);
+    const { assert!(SPLIT_RATIO_MIN > 0.0 && SPLIT_RATIO_MAX < 1.0) };
 
     window.reset_split_ratio();
     assert_eq!(window.split_ratio(), 0.5);

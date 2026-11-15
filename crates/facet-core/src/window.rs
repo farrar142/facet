@@ -202,6 +202,11 @@ impl Window {
         &mut self.panels[self.active]
     }
 
+    /// `index`번째 패널(0이 왼쪽). 없으면 `None`이다.
+    pub fn panel_mut(&mut self, index: usize) -> Option<&mut Panel> {
+        self.panels.get_mut(index)
+    }
+
     /// 활성 패널이 몇 번째인가(0이 왼쪽).
     pub fn active_panel_index(&self) -> usize {
         self.active
