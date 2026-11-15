@@ -11,8 +11,8 @@ use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
 use facet_core::job::{
-    AnswerError, Conflict, ConflictAnswer, ItemKind, JobEvent, JobId, JobQueue, JobState,
-    Resolution, Summary,
+    AnswerError, Conflict, ConflictAnswer, ErrorAnswer, ItemKind, JobEvent, JobId, JobQueue,
+    JobState, Resolution, Summary,
 };
 use tempfile::TempDir;
 
@@ -556,6 +556,15 @@ fn 덮어쓰기_복사가_실패하면_원래_파일이_그대로이고_임시_�
     queue
         .answer_conflict(id, ConflictAnswer::once(Resolution::Overwrite))
         .unwrap();
+    // 원본을 읽지 못한 것은 항목별 오류로 묻는다. 묻는 동안에도 원래 파일이 그대로이고 임시 파일이 없다.
+    wait_for(
+        &mut queue,
+        &mut events,
+        |e| matches!(e, JobEvent::ItemError { job, .. } if *job == id),
+    );
+    assert_eq!(read(&target_dir.join("a.txt")), "원래");
+    assert_eq!(names(&target_dir), ["a.txt"], "임시 파일이 남았다");
+    queue.answer_error(id, ErrorAnswer::Skip).unwrap();
     let summary = wait_finished(&mut queue, &mut events, id);
     drop(lock);
     assert_eq!(summary.failures.len(), 1, "{summary:?}");

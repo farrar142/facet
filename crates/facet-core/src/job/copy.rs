@@ -10,6 +10,7 @@
 //! 통로는 크기 제한이 없다: 훑기가 복사보다 앞서 나가야 전체를 셀 수 있기 때문이다. 항목 하나가 경로 둘만큼의
 //! 메모리를 쓴다.
 
+use std::cell::RefCell;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, FileType};
 use std::io;
@@ -23,9 +24,9 @@ use std::time::{Duration, Instant};
 use facet_win::file_ops::{self, CopyStep, FileOpErrorKind};
 
 use super::{
-    Conflict, ConflictItem, Context, Control, CopyRejection, ItemFailure, ItemKind, JobEvent,
-    JobId, Outbox, PROGRESS_INTERVAL, Progress, Remaining, Resolution, Summary, is_within,
-    same_path,
+    Conflict, ConflictItem, Context, Control, CopyRejection, ErrorAnswer, ItemFailure, ItemKind,
+    JobEvent, JobId, Outbox, PROGRESS_INTERVAL, Progress, Remaining, Resolution, Summary,
+    is_within, same_path,
 };
 
 /// 대상이 이미 있어 다시 확인하는 횟수의 한도. 확인과 쓰기 사이에 밖에서 같은 이름을 만들면 다시 묻는데, 그것이
@@ -123,6 +124,7 @@ impl CopyJob {
                 skip_depth: 0,
                 folders: Vec::new(),
                 remembered: None,
+                skip_errors: false,
                 context,
                 cancelled: false,
             };
@@ -291,14 +293,30 @@ enum Entry {
     },
     /// 따라 들어가지 않는 링크.
     Link,
-    /// 훑지 못한 항목.
+    /// 훑지 못한 항목. 다시 시도하면 `target`이 있을 때 그 항목을 다시 훑는다(없으면 다시 훑을 수 없어 다시 묻는다).
     Failed {
         source: PathBuf,
+        target: Option<PathBuf>,
         kind: FileOpErrorKind,
     },
 }
 
-/// 원본을 깊이 우선으로 훑어 항목을 넣는다. 넣기 전에 센 것에 더해, 복사 쪽이 한 것이 센 것을 넘지 않는다.
+/// 항목을 센 것에 더한다. 넣기 전에 세어, 복사 쪽이 한 것이 센 것을 넘지 않는다.
+fn count(totals: &Totals, entry: &Entry) {
+    match entry {
+        // 폴더 끝은 항목이 아니라 표지다.
+        Entry::FolderEnd { .. } => {}
+        Entry::File { size, .. } => {
+            totals.items.fetch_add(1, Ordering::AcqRel);
+            totals.bytes.fetch_add(*size, Ordering::AcqRel);
+        }
+        _ => {
+            totals.items.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+}
+
+/// 원본을 깊이 우선으로 훑어 항목을 센 뒤 넣는다.
 ///
 /// 항목마다 일시정지면 기다리고, 취소됐으면 다 세지 않은 채(`counted`를 세우지 않고) 멈춘다.
 fn scan(
@@ -308,17 +326,7 @@ fn scan(
     control: &Control,
 ) {
     let send = |entry: Entry| {
-        match entry {
-            // 폴더 끝은 항목이 아니라 표지다.
-            Entry::FolderEnd { .. } => {}
-            Entry::File { size, .. } => {
-                totals.items.fetch_add(1, Ordering::AcqRel);
-                totals.bytes.fetch_add(size, Ordering::AcqRel);
-            }
-            _ => {
-                totals.items.fetch_add(1, Ordering::AcqRel);
-            }
-        }
+        count(totals, &entry);
         // 받는 쪽이 없으면 더 넣을 곳이 없다.
         let _ = sender.send(entry);
     };
@@ -326,32 +334,43 @@ fn scan(
         if !control.proceed() {
             return;
         }
-        let Some(target) = target else {
-            send(Entry::Failed {
-                source,
-                kind: FileOpErrorKind::Other,
-            });
-            continue;
-        };
-        match fs::symlink_metadata(&source) {
-            Err(error) => send(Entry::Failed {
-                source,
-                kind: error_kind(&error),
-            }),
-            Ok(metadata) if metadata.file_type().is_symlink() => send(Entry::Link),
-            Ok(metadata) if metadata.is_dir() => {
-                if !walk(source, target, &send, control) {
-                    return;
-                }
-            }
-            Ok(metadata) => send(Entry::File {
-                source,
-                target,
-                size: metadata.len(),
-            }),
+        if !scan_one(source, target, &send, control) {
+            return;
         }
     }
     totals.counted.store(true, Ordering::Release);
+}
+
+/// 원본 항목 하나(폴더면 그 아래 전부)를 훑어 넣는다. 취소돼 멈췄으면 `false`.
+fn scan_one(
+    source: PathBuf,
+    target: Option<PathBuf>,
+    send: &dyn Fn(Entry),
+    control: &Control,
+) -> bool {
+    let Some(target) = target else {
+        send(Entry::Failed {
+            source,
+            target: None,
+            kind: FileOpErrorKind::Other,
+        });
+        return true;
+    };
+    match fs::symlink_metadata(&source) {
+        Err(error) => send(Entry::Failed {
+            source,
+            target: Some(target),
+            kind: error_kind(&error),
+        }),
+        Ok(metadata) if metadata.file_type().is_symlink() => send(Entry::Link),
+        Ok(metadata) if metadata.is_dir() => return walk(source, target, send, control),
+        Ok(metadata) => send(Entry::File {
+            source,
+            target,
+            size: metadata.len(),
+        }),
+    }
+    true
 }
 
 /// 폴더 하나를 깊이 우선으로 훑는다. 깊은 폴더에서 스택이 넘치지 않게 되부르지 않고 스택을 쓴다. 취소돼 멈췄으면
@@ -369,9 +388,11 @@ fn walk(source: PathBuf, target: PathBuf, send: &dyn Fn(Entry), control: &Contro
                 send(Entry::FolderEnd { source, target });
             }
             Some(Err(error)) => {
-                // 목록을 다 읽지 못했다. 그 폴더는 여기까지로 닫는다(같은 오류가 되풀이되지 않게).
+                // 목록을 다 읽지 못했다. 그 폴더는 여기까지로 닫는다(같은 오류가 되풀이되지 않게). 이미 넣은 안의
+                // 항목과 겹치므로 그 폴더를 다시 훑지 않는다.
                 send(Entry::Failed {
                     source: source.clone(),
+                    target: None,
                     kind: error_kind(&error),
                 });
                 let (_, source, target) = stack.pop().expect("방금 본 폴더");
@@ -383,6 +404,7 @@ fn walk(source: PathBuf, target: PathBuf, send: &dyn Fn(Entry), control: &Contro
                 match entry.file_type() {
                     Err(error) => send(Entry::Failed {
                         source: child_source,
+                        target: Some(child_target),
                         kind: error_kind(&error),
                     }),
                     Ok(kind) if is_link(&kind) => send(Entry::Link),
@@ -397,6 +419,7 @@ fn walk(source: PathBuf, target: PathBuf, send: &dyn Fn(Entry), control: &Contro
                         }),
                         Err(error) => send(Entry::Failed {
                             source: child_source,
+                            target: Some(child_target),
                             kind: error_kind(&error),
                         }),
                     },
@@ -420,6 +443,7 @@ fn open_folder(source: PathBuf, target: PathBuf, stack: &mut Vec<Listing>, send:
         }
         Err(error) => send(Entry::Failed {
             source,
+            target: Some(target),
             kind: error_kind(&error),
         }),
     }
@@ -448,6 +472,8 @@ struct Copier<'a> {
     folders: Vec<OpenFolder>,
     /// 「나머지에도 적용」으로 받은 답.
     remembered: Option<Resolution>,
+    /// 「나머지 오류도 건너뛰기」로 답했다: 남은 항목별 오류는 묻지 않고 건너뛴다.
+    skip_errors: bool,
     context: &'a Context<'a>,
     /// 취소로 멈췄다.
     cancelled: bool,
@@ -475,6 +501,26 @@ enum FileOutcome {
     Cancelled,
     /// 실패했다.
     Failed(FileOpErrorKind),
+}
+
+/// 폴더 하나를 시작한 결과.
+enum FolderOutcome {
+    /// 들어갔거나(만들었거나 합쳤음) 이름 충돌로 건너뛰었다.
+    Done,
+    /// 취소로 그만뒀다.
+    Cancelled,
+    /// 실패했다.
+    Failed(FileOpErrorKind),
+}
+
+/// 항목별 오류에 대한 답을 따른 다음 걸음.
+enum ErrorStep {
+    /// 그 항목을 처음부터 다시 한다.
+    Retry,
+    /// 그 항목을 건너뛴다(이미 [`Summary::failures`]에 담았다).
+    Skip,
+    /// 작업을 취소한다(이미 `cancelled`를 세웠다).
+    Cancel,
 }
 
 impl Copier<'_> {
@@ -506,22 +552,110 @@ impl Copier<'_> {
                 // 들어간 폴더만 끝이 온다(건너뛴 폴더의 끝은 `skip`이 먹는다).
                 let folder = self.folders.pop();
                 debug_assert!(folder.as_ref().is_some_and(|f| f.scanned == target));
-                if let Some(folder) = folder.filter(|f| f.created)
-                    && let Err(error) = file_ops::copy_folder_metadata(&source, &folder.actual)
-                {
-                    self.fail(source, error.kind());
+                if let Some(folder) = folder.filter(|f| f.created) {
+                    self.finish_folder(&source, &folder.actual);
                 }
             }
             Entry::Link => {
                 self.summary.links_skipped += 1;
                 self.reporter.items_done += 1;
             }
-            Entry::Failed { source, kind } => {
-                self.fail(source, kind);
-                self.reporter.items_done += 1;
-            }
+            Entry::Failed {
+                source,
+                target,
+                kind,
+            } => self.scan_failed(source, target, kind),
         }
         self.reporter.maybe_emit();
+    }
+
+    /// 안의 항목을 다 쓴 폴더의 시각·속성을 원본과 맞춘다. 실패하면 묻는다.
+    fn finish_folder(&mut self, source: &Path, target: &Path) {
+        while let Err(error) = file_ops::copy_folder_metadata(source, target) {
+            match self.on_error(source, error.kind()) {
+                ErrorStep::Retry => {}
+                ErrorStep::Skip | ErrorStep::Cancel => return,
+            }
+        }
+    }
+
+    /// 훑지 못한 항목: 묻는다. 다시 시도면 그 항목을 지금 다시 훑어 그 결과를 차례로 다룬다(다시 실패하면 다시
+    /// 묻는다).
+    fn scan_failed(&mut self, source: PathBuf, target: Option<PathBuf>, kind: FileOpErrorKind) {
+        loop {
+            match self.on_error(&source, kind) {
+                ErrorStep::Skip => {
+                    self.reporter.items_done += 1;
+                    return;
+                }
+                ErrorStep::Cancel => return,
+                ErrorStep::Retry => {
+                    if let Some(target) = target {
+                        self.rescan(source, target);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /// 훑지 못했던 항목 하나를 다시 훑어 다룬다. 앞서 그 항목을 하나로 셌으므로 빼고 다시 센다.
+    fn rescan(&mut self, source: PathBuf, target: PathBuf) {
+        let totals = Arc::clone(&self.reporter.totals);
+        totals.items.fetch_sub(1, Ordering::AcqRel);
+        let control = self.context.control;
+        let entries = RefCell::new(Vec::new());
+        let send = |entry: Entry| {
+            count(&totals, &entry);
+            entries.borrow_mut().push(entry);
+        };
+        let finished = scan_one(source, Some(target), &send, control);
+        for entry in entries.into_inner() {
+            if !control.proceed() {
+                self.cancelled = true;
+            }
+            if self.cancelled {
+                return;
+            }
+            self.handle(entry);
+        }
+        if !finished {
+            self.cancelled = true;
+        }
+    }
+
+    /// 항목별 오류를 묻고(「나머지 오류도 건너뛰기」 뒤면 묻지 않고 건너뛴다) 답을 따른다. 건너뛰면
+    /// [`Summary::failures`]에 담고, 취소면 `cancelled`를 세운다.
+    fn on_error(&mut self, source: &Path, kind: FileOpErrorKind) -> ErrorStep {
+        let failure = ItemFailure {
+            source: source.to_path_buf(),
+            kind,
+        };
+        let answer = if self.skip_errors {
+            ErrorAnswer::Skip
+        } else {
+            match self.context.ask_error(failure.clone()) {
+                Some(answer) => answer,
+                None => {
+                    self.cancelled = true;
+                    return ErrorStep::Cancel;
+                }
+            }
+        };
+        match answer {
+            ErrorAnswer::Retry => ErrorStep::Retry,
+            ErrorAnswer::Skip | ErrorAnswer::SkipAll => {
+                if answer == ErrorAnswer::SkipAll {
+                    self.skip_errors = true;
+                }
+                self.summary.failures.push(failure);
+                ErrorStep::Skip
+            }
+            ErrorAnswer::CancelJob => {
+                self.cancelled = true;
+                ErrorStep::Cancel
+            }
+        }
     }
 
     /// 훑기가 정한 대상 경로를 실제 대상 경로로 바꾼다(바깥 폴더가 「이름 (2)」가 됐으면 그 아래로).
@@ -535,75 +669,82 @@ impl Copier<'_> {
         }
     }
 
-    /// 폴더를 만들거나(있으면 합치거나, 파일과 부딪히면 묻고) 들어간다. 취소로 그만뒀으면 `false`.
+    /// 폴더를 만들거나(있으면 합치거나, 파일과 부딪히면 묻고) 들어간다. 실패하면 항목별 오류로 묻고, 건너뛰면 그
+    /// 아래 전부를 건너뛴다. 취소로 그만뒀으면 `false`.
     fn start_folder(&mut self, source: PathBuf, scanned: PathBuf, target: PathBuf) -> bool {
+        loop {
+            let kind = match self.try_start_folder(&source, &scanned, &target) {
+                FolderOutcome::Done => return true,
+                FolderOutcome::Cancelled => {
+                    self.cancelled = true;
+                    return false;
+                }
+                FolderOutcome::Failed(kind) => kind,
+            };
+            match self.on_error(&source, kind) {
+                ErrorStep::Retry => {}
+                ErrorStep::Skip => {
+                    self.skip_depth = 1;
+                    return true;
+                }
+                ErrorStep::Cancel => return false,
+            }
+        }
+    }
+
+    fn try_start_folder(&mut self, source: &Path, scanned: &Path, target: &Path) -> FolderOutcome {
         for _ in 0..MAX_ATTEMPTS {
-            match fs::symlink_metadata(&target) {
+            match fs::symlink_metadata(target) {
                 // 같은 이름의 폴더(링크가 아닌): 묻지 않고 합친다.
                 Ok(metadata) if metadata.is_dir() => {
                     self.summary.folders_merged += 1;
                     self.enter(scanned, target, false);
-                    return true;
+                    return FolderOutcome::Done;
                 }
                 // 같은 이름의 파일(또는 링크): 묻는다. 덮어쓰기는 고를 수 없다.
                 Ok(_) => {
-                    let Some(resolution) = self.resolve(&source, &target, false) else {
-                        self.cancelled = true;
-                        return false;
+                    let Some(resolution) = self.resolve(source, target, false) else {
+                        return FolderOutcome::Cancelled;
                     };
                     match resolution {
                         Resolution::KeepBoth => {
-                            let renamed = free_numbered(&target, false);
-                            return self.create_folder(source, scanned, renamed);
+                            let renamed = free_numbered(target, false);
+                            return self.create_folder(scanned, &renamed);
                         }
                         // 덮어쓰기 답은 `resolve`가 받지 않는다.
                         _ => {
                             self.summary.conflicts_skipped += 1;
                             self.skip_depth = 1;
-                            return true;
+                            return FolderOutcome::Done;
                         }
                     }
                 }
-                Err(_) => match file_ops::create_folder(&target) {
-                    Ok(()) => {
-                        self.summary.folders_copied += 1;
-                        self.enter(scanned, target, true);
-                        return true;
-                    }
+                Err(_) => match self.create_folder(scanned, target) {
                     // 확인한 뒤 밖에서 생겼다: 다시 본다.
-                    Err(error) if error.kind() == FileOpErrorKind::TargetExists => {}
-                    Err(error) => {
-                        self.fail(source, error.kind());
-                        self.skip_depth = 1;
-                        return true;
-                    }
+                    FolderOutcome::Failed(FileOpErrorKind::TargetExists) => {}
+                    outcome => return outcome,
                 },
             }
         }
-        self.fail(source, FileOpErrorKind::TargetExists);
-        self.skip_depth = 1;
-        true
+        FolderOutcome::Failed(FileOpErrorKind::TargetExists)
     }
 
-    /// 둘 다 유지로 정한 새 이름의 폴더를 만들고 들어간다.
-    fn create_folder(&mut self, source: PathBuf, scanned: PathBuf, target: PathBuf) -> bool {
-        match file_ops::create_folder(&target) {
+    /// 폴더를 만들고 들어간다.
+    fn create_folder(&mut self, scanned: &Path, target: &Path) -> FolderOutcome {
+        match file_ops::create_folder(target) {
             Ok(()) => {
                 self.summary.folders_copied += 1;
                 self.enter(scanned, target, true);
+                FolderOutcome::Done
             }
-            Err(error) => {
-                self.fail(source, error.kind());
-                self.skip_depth = 1;
-            }
+            Err(error) => FolderOutcome::Failed(error.kind()),
         }
-        true
     }
 
-    fn enter(&mut self, scanned: PathBuf, actual: PathBuf, created: bool) {
+    fn enter(&mut self, scanned: &Path, actual: &Path, created: bool) {
         self.folders.push(OpenFolder {
-            scanned,
-            actual,
+            scanned: scanned.to_path_buf(),
+            actual: actual.to_path_buf(),
             created,
         });
     }
@@ -622,7 +763,7 @@ impl Copier<'_> {
             can_overwrite,
             overwrite_is_permanent: can_overwrite,
         };
-        let answer = self.context.ask(conflict)?;
+        let answer = self.context.ask_conflict(conflict)?;
         if answer.apply_to_rest {
             self.remembered = Some(answer.resolution);
         }
@@ -645,11 +786,47 @@ impl Copier<'_> {
         }
     }
 
-    /// 파일 하나를 복사한다(대상이 있으면 묻고 답대로). 취소로 그만뒀으면 `false`(그 파일은 하지 않은 것으로
-    /// 남는다).
+    /// 파일 하나를 복사한다(대상이 있으면 묻고 답대로). 실패하면(만들다 만 파일은 `copy_file`이 이미 지웠다)
+    /// 항목별 오류로 묻고, 다시 시도면 그 파일을 처음부터 다시 한다. 취소로 그만뒀으면 `false`(그 파일은 하지 않은
+    /// 것으로 남는다).
     fn copy_file(&mut self, source: &Path, target: &Path, size: u64) -> bool {
         self.reporter.current = Some(source.to_path_buf());
         let base = self.reporter.bytes_done;
+        loop {
+            let outcome = self.attempt_file(source, target, size, base);
+            self.reporter.bytes_done = base;
+            let kind = match outcome {
+                FileOutcome::Copied { overwritten } => {
+                    self.summary.files_copied += 1;
+                    self.summary.bytes_copied += size;
+                    if overwritten {
+                        self.summary.files_overwritten += 1;
+                    }
+                    break;
+                }
+                FileOutcome::Skipped => {
+                    self.summary.conflicts_skipped += 1;
+                    break;
+                }
+                FileOutcome::Cancelled => {
+                    self.cancelled = true;
+                    return false;
+                }
+                FileOutcome::Exists => FileOpErrorKind::TargetExists,
+                FileOutcome::Failed(kind) => kind,
+            };
+            match self.on_error(source, kind) {
+                ErrorStep::Retry => {}
+                ErrorStep::Skip => break,
+                ErrorStep::Cancel => return false,
+            }
+        }
+        self.reporter.bytes_done = base + size;
+        true
+    }
+
+    /// 파일 하나를 한 번 해 본다. 대상이 쓰는 사이에 밖에서 생기면 [`MAX_ATTEMPTS`]까지 다시 확인한다.
+    fn attempt_file(&mut self, source: &Path, target: &Path, size: u64, base: u64) -> FileOutcome {
         let mut outcome = FileOutcome::Exists;
         for _ in 0..MAX_ATTEMPTS {
             outcome = match fs::symlink_metadata(target) {
@@ -661,25 +838,7 @@ impl Copier<'_> {
             }
             self.reporter.bytes_done = base;
         }
-        match outcome {
-            FileOutcome::Copied { overwritten } => {
-                self.summary.files_copied += 1;
-                self.summary.bytes_copied += size;
-                if overwritten {
-                    self.summary.files_overwritten += 1;
-                }
-            }
-            FileOutcome::Skipped => self.summary.conflicts_skipped += 1,
-            FileOutcome::Cancelled => {
-                self.cancelled = true;
-                self.reporter.bytes_done = base;
-                return false;
-            }
-            FileOutcome::Exists => self.fail(source.to_path_buf(), FileOpErrorKind::TargetExists),
-            FileOutcome::Failed(kind) => self.fail(source.to_path_buf(), kind),
-        }
-        self.reporter.bytes_done = base + size;
-        true
+        outcome
     }
 
     /// 대상에 같은 이름이 있는 파일: 묻고 답대로 한다.
@@ -752,10 +911,6 @@ impl Copier<'_> {
                 kind => FileOutcome::Failed(kind),
             },
         }
-    }
-
-    fn fail(&mut self, source: PathBuf, kind: FileOpErrorKind) {
-        self.summary.failures.push(ItemFailure { source, kind });
     }
 }
 

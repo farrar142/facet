@@ -19,7 +19,8 @@
 //! 작업이 사용자의 답을 기다려야 하면(**이름 충돌**, [`JobEvent::Conflict`]) 그 작업만 [`JobState::AwaitingAnswer`]로
 //! 멈추고 질문 사건을 보낸다. 답을 기다리는 작업은 **차례를 놓는다**: 차례 실행의 다음 작업이 곧 시작할 수 있다.
 //! 답([`JobQueue::answer_conflict`])을 받은 작업은 차례를 다시 기다리지 않고 그 자리에서 이어 돈다(그동안 차례를
-//! 잡은 작업과 나란히). 답을 기다리는 작업도 취소할 수 있다. 오류 질문도 이 규칙을 따른다.
+//! 잡은 작업과 나란히). 답을 기다리는 작업도 취소할 수 있다. **항목별 오류**([`JobEvent::ItemError`],
+//! [`JobQueue::answer_error`])도 같은 규칙을 따른다.
 //!
 //! 지금 있는 작업은 **복사**([`JobQueue::copy`])다. 진행·이름 충돌·오류 처리의 자세한 규칙은 그 문서에 있다.
 
@@ -58,11 +59,11 @@ pub enum JobState {
     Running,
     /// 사용자가 멈췄다. 시작 전에 멈춘 작업은 차례가 와도 시작하지 않는다.
     Paused,
-    /// 이름 충돌에 대한 사용자의 답을 기다린다. 차례를 잡고 있지 않다.
+    /// 이름 충돌이나 항목별 오류에 대한 사용자의 답을 기다린다. 차례를 잡고 있지 않다.
     AwaitingAnswer,
-    /// 끝났다. 항목별 실패가 없다(이름 충돌로 건너뛴 항목은 있을 수 있다).
+    /// 끝났다. 항목별 오류로 건너뛴 항목이 없다(이름 충돌로 건너뛴 항목은 있을 수 있다).
     Finished,
-    /// 끝났지만 실패한 항목이 있다.
+    /// 끝났지만 항목별 오류로 건너뛴 항목([`Summary::failures`])이 있다.
     Failed,
     /// 사용자가 취소했다. 이미 다 복사한 항목은 남는다.
     Cancelled,
@@ -112,12 +113,12 @@ pub struct Progress {
     pub elapsed: Duration,
 }
 
-/// 실패한 항목 하나.
+/// 항목 하나에서 난 오류(**항목별 오류**): 그 원본 항목과 오류 종류. 문장은 화면 몫이다(ADR-0007).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemFailure {
     /// 원본 경로.
     pub source: PathBuf,
-    /// 실패 종류.
+    /// 오류 종류(잠김·접근 거부·디스크 가득 참·원본 없음·그 밖 등).
     pub kind: FileOpErrorKind,
 }
 
@@ -139,7 +140,8 @@ pub struct Summary {
     pub folders_merged: u64,
     /// 따라 들어가지 않고 건너뛴 심볼릭 링크·정션 수(파일 링크 포함). 링크 자체를 복사하는 것은 뒤 티켓이다.
     pub links_skipped: u64,
-    /// 실패한 항목(폴더면 그 아래는 따로 세지 않는다).
+    /// 항목별 오류에 건너뛰기(또는 「나머지 오류도 건너뛰기」)로 답해 건너뛴 항목과 그 오류(폴더면 그 아래는
+    /// 따로 세지 않는다). 그 수는 [`Summary::errors_skipped`]. 하나라도 있으면 작업은 [`JobState::Failed`]로 끝난다.
     pub failures: Vec<ItemFailure>,
     /// 처리한 항목 수([`Progress::items_done`]와 같은 셈: 건너뛴 항목도 든다).
     pub items_done: u64,
@@ -149,6 +151,13 @@ pub struct Summary {
     pub items_remaining: u64,
     /// 원본을 다 셌는지. `true`면 `items_done + items_remaining`이 원본 전체 항목 수다.
     pub all_counted: bool,
+}
+
+impl Summary {
+    /// 항목별 오류로 건너뛴 항목 수([`Summary::failures`]의 수).
+    pub fn errors_skipped(&self) -> u64 {
+        self.failures.len() as u64
+    }
 }
 
 /// 대기열이 보내는 사건.
@@ -177,6 +186,14 @@ pub enum JobEvent {
         job: JobId,
         /// 부딪힌 두 항목.
         conflict: Conflict,
+    },
+    /// 항목별 오류: 작업이 답을 기다린다. [`JobState::AwaitingAnswer`]의 [`JobEvent::StateChanged`] 바로 뒤에 온다.
+    /// [`JobQueue::answer_error`]로 답한다. 복사하다 만 파일은 이 사건을 보내기 전에 지운다.
+    ItemError {
+        /// 작업.
+        job: JobId,
+        /// 오류가 난 원본 항목과 오류 종류.
+        error: ItemFailure,
     },
     /// 작업이 끝났다. 마지막 상태의 [`JobEvent::StateChanged`] 바로 뒤에 온다. 이 작업의 마지막 사건이다.
     Finished {
@@ -271,10 +288,25 @@ impl ConflictAnswer {
     }
 }
 
+/// 항목별 오류에 대한 답.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ErrorAnswer {
+    /// 그 항목을 처음부터 다시 한다(복사하던 파일은 질문 전에 지웠으므로 처음부터 다시 쓴다). 디스크 가득 참도
+    /// 공간을 비운 뒤 다시 시도하면 그 항목부터 이어 가고, 이미 복사한 항목은 다시 복사하지 않는다.
+    Retry,
+    /// 그 항목(폴더면 그 아래 전부)을 하지 않는다. [`Summary::failures`]에 담는다.
+    Skip,
+    /// 「나머지 오류도 건너뛰기」: 이 항목을 건너뛰고 그 작업의 남은 항목별 오류는 묻지 않고 건너뛴다.
+    SkipAll,
+    /// 작업을 취소한다([`JobQueue::cancel`]과 같다: 만들다 만 파일은 지우고 이미 끝낸 항목은 남긴다).
+    CancelJob,
+}
+
 /// 답을 받지 않은 까닭.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AnswerError {
-    /// 그 작업은 이름 충돌의 답을 기다리지 않는다(없는·끝난·취소 중인 작업 포함).
+    /// 그 작업은 그 종류의 질문(이름 충돌, 항목별 오류)에 답을 기다리지 않는다(없는·끝난·취소 중인 작업, 다른
+    /// 종류의 질문을 기다리는 작업 포함).
     NotAsking,
     /// 파일과 폴더가 부딪힌 충돌에 덮어쓰기 답을 했다. 작업은 계속 답을 기다린다.
     OverwriteNotAllowed,
@@ -350,8 +382,24 @@ struct Control {
 struct Flags {
     paused: bool,
     cancelled: bool,
-    /// 받은 이름 충돌의 답(작업 스레드가 가져간다).
-    answer: Option<ConflictAnswer>,
+    /// 받은 답(작업 스레드가 가져간다).
+    answer: Option<Answer>,
+}
+
+/// 작업이 묻는 질문의 종류. 답을 기다리는 동안 판에 둔다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Question {
+    /// 이름 충돌. 덮어쓰기 답을 받을 수 있는지.
+    Conflict { can_overwrite: bool },
+    /// 항목별 오류.
+    Error,
+}
+
+/// 질문에 대한 답.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Answer {
+    Conflict(ConflictAnswer),
+    Error(ErrorAnswer),
 }
 
 impl Control {
@@ -378,7 +426,7 @@ impl Control {
     }
 
     /// 답이 오거나 취소될 때까지 기다린다. 취소됐으면 `None`.
-    fn wait_answer(&self) -> Option<ConflictAnswer> {
+    fn wait_answer(&self) -> Option<Answer> {
         let mut flags = lock(&self.flags);
         loop {
             if flags.cancelled {
@@ -394,7 +442,7 @@ impl Control {
         }
     }
 
-    fn set_answer(&self, answer: ConflictAnswer) {
+    fn set_answer(&self, answer: Answer) {
         lock(&self.flags).answer = Some(answer);
         self.changed.notify_all();
     }
@@ -409,11 +457,38 @@ struct Context<'a> {
 }
 
 impl Context<'_> {
-    /// 이름 충돌을 묻고 답을 기다린다. 기다리는 동안 작업은 [`JobState::AwaitingAnswer`]이고 차례를 놓는다. 답이
-    /// 오면 [`JobState::Running`]으로 이어 가고(상태는 답하는 쪽이 바꾼다), 취소되면 `None`.
+    /// 이름 충돌을 묻고 답을 기다린다. 취소되면 `None`.
+    fn ask_conflict(&self, conflict: Conflict) -> Option<ConflictAnswer> {
+        let question = Question::Conflict {
+            can_overwrite: conflict.can_overwrite,
+        };
+        let event = JobEvent::Conflict {
+            job: self.id,
+            conflict,
+        };
+        match self.ask(question, event)? {
+            Answer::Conflict(answer) => Some(answer),
+            Answer::Error(_) => None,
+        }
+    }
+
+    /// 항목별 오류를 묻고 답을 기다린다. 취소되면(작업 취소 답 포함) `None`.
+    fn ask_error(&self, error: ItemFailure) -> Option<ErrorAnswer> {
+        let event = JobEvent::ItemError {
+            job: self.id,
+            error,
+        };
+        match self.ask(Question::Error, event)? {
+            Answer::Error(ErrorAnswer::CancelJob) | Answer::Conflict(_) => None,
+            Answer::Error(answer) => Some(answer),
+        }
+    }
+
+    /// 묻고 답을 기다린다. 기다리는 동안 작업은 [`JobState::AwaitingAnswer`]이고 차례를 놓는다. 답이 오면
+    /// [`JobState::Running`]으로 이어 가고(상태는 답하는 쪽이 바꾼다), 취소되면 `None`.
     ///
     /// 일시정지 중이면 이어 갈 때까지 기다린 뒤 묻는다(일시정지와 답 기다림이 겹치지 않게).
-    fn ask(&self, conflict: Conflict) -> Option<ConflictAnswer> {
+    fn ask(&self, question: Question, event: JobEvent) -> Option<Answer> {
         loop {
             let mut board = self.shared.board();
             let slot = board.jobs.get_mut(&self.id)?;
@@ -428,15 +503,12 @@ impl Context<'_> {
                 continue;
             }
             slot.state = JobState::AwaitingAnswer;
-            slot.can_overwrite = conflict.can_overwrite;
+            slot.question = Some(question);
             self.outbox.send(JobEvent::StateChanged {
                 job: self.id,
                 state: JobState::AwaitingAnswer,
             });
-            self.outbox.send(JobEvent::Conflict {
-                job: self.id,
-                conflict,
-            });
+            self.outbox.send(event);
             if board.turn == Some(self.id) {
                 board.turn = None;
             }
@@ -473,8 +545,8 @@ struct Slot {
     control: Arc<Control>,
     /// 취소를 청했다(작업 스레드가 멈추면 취소로 끝난다).
     cancelling: bool,
-    /// 답을 기다리는 이름 충돌에 덮어쓰기 답을 받을 수 있는지.
-    can_overwrite: bool,
+    /// 답을 기다리는 질문. 답을 받으면 비운다.
+    question: Option<Question>,
 }
 
 /// 시작한 작업: 번호, 작업, 그 표지.
@@ -609,8 +681,11 @@ impl JobQueue {
     /// 덮어쓰기는 대상 폴더 안 임시 이름에 다 쓴 뒤 바꿔치기하므로, 복사가 실패하거나 취소되면 원래 파일이 그대로
     /// 남고 임시 파일은 남지 않는다. 덮어쓴 파일은 되살릴 수 없다(영구 삭제).
     ///
-    /// **임시 동작**(질문으로 바꾸는 것은 뒤 티켓): 항목별 오류는 묻지 않고 그 항목을 건너뛰어
-    /// [`Summary::failures`]에 담는다. 실패한 항목이 있으면 작업은 [`JobState::Failed`]로 끝난다.
+    /// **항목별 오류**(잠김·접근 거부·디스크 가득 참·원본 없음 등)도 묻는다: 복사하다 만 파일을 지운 뒤 작업이
+    /// [`JobState::AwaitingAnswer`]가 되고 [`JobEvent::ItemError`]를 보낸 뒤 [`JobQueue::answer_error`]의 답
+    /// ([`ErrorAnswer`])대로 한다: 다시 시도(그 항목을 처음부터), 건너뛰기, 작업 취소, 「나머지 오류도 건너뛰기」.
+    /// 훑은 뒤 복사 전에 원본이 사라져도 원본 없음으로 묻는다. 건너뛴 항목은 [`Summary::failures`]에 담고, 하나라도
+    /// 있으면 작업은 [`JobState::Failed`]로 끝난다.
     ///
     /// 일시정지하면 파일 경계를 기다리지 않고 파일 복사의 진행 콜백(덩어리 사이)에서 멈추고 훑기도 멈춘다. 취소하면
     /// 복사하다 만 파일은 지우고, 이미 다 복사한 항목은 남긴다.
@@ -631,7 +706,7 @@ impl JobQueue {
                     job: Some(job),
                     control: Arc::default(),
                     cancelling: false,
-                    can_overwrite: false,
+                    question: None,
                 },
             );
             board.pending.push_back(id);
@@ -757,18 +832,53 @@ impl JobQueue {
         let Some(slot) = board.jobs.get_mut(&job) else {
             return Err(AnswerError::NotAsking);
         };
+        let Some(Question::Conflict { can_overwrite }) = slot.question else {
+            return Err(AnswerError::NotAsking);
+        };
         if slot.cancelling || slot.state != JobState::AwaitingAnswer {
             return Err(AnswerError::NotAsking);
         }
-        if answer.resolution.overwrites() && !slot.can_overwrite {
+        if answer.resolution.overwrites() && !can_overwrite {
             return Err(AnswerError::OverwriteNotAllowed);
         }
+        slot.question = None;
         slot.state = JobState::Running;
         self.outbox.send(JobEvent::StateChanged {
             job,
             state: JobState::Running,
         });
-        slot.control.set_answer(answer);
+        slot.control.set_answer(Answer::Conflict(answer));
+        Ok(())
+    }
+
+    /// 항목별 오류의 답을 기다리는 작업에 답한다. 다시 시도·건너뛰기·나머지 오류도 건너뛰기면 작업은
+    /// [`JobState::Running`]이 되어(그 상태 사건을 보낸다) 차례를 다시 기다리지 않고 그 자리에서 이어 돈다. 작업
+    /// 취소면 [`JobQueue::cancel`]과 같다.
+    ///
+    /// 항목별 오류의 답을 기다리지 않는 작업이면 [`AnswerError::NotAsking`].
+    pub fn answer_error(&mut self, job: JobId, answer: ErrorAnswer) -> Result<(), AnswerError> {
+        let mut board = self.shared.board();
+        let Some(slot) = board.jobs.get_mut(&job) else {
+            return Err(AnswerError::NotAsking);
+        };
+        if slot.cancelling
+            || slot.state != JobState::AwaitingAnswer
+            || slot.question != Some(Question::Error)
+        {
+            return Err(AnswerError::NotAsking);
+        }
+        if answer == ErrorAnswer::CancelJob {
+            drop(board);
+            self.cancel(job);
+            return Ok(());
+        }
+        slot.question = None;
+        slot.state = JobState::Running;
+        self.outbox.send(JobEvent::StateChanged {
+            job,
+            state: JobState::Running,
+        });
+        slot.control.set_answer(Answer::Error(answer));
         Ok(())
     }
 

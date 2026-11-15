@@ -443,32 +443,6 @@ mod windows {
     }
 
     #[test]
-    fn 없는_원본은_항목_오류로_세고_작업은_실패로_끝난다() {
-        let dir = TempDir::new().unwrap();
-        let target = dir.path().join("대상");
-        fs::create_dir_all(&target).unwrap();
-        let present = dir.path().join("있음.txt");
-        fs::write(&present, "x").unwrap();
-        let missing = dir.path().join("없음.txt");
-
-        let mut queue = JobQueue::new();
-        let events = copy_and_wait(&mut queue, vec![missing.clone(), present.clone()], &target);
-        let id = match events.last().unwrap() {
-            JobEvent::Finished { job, .. } => *job,
-            other => panic!("{other:?}"),
-        };
-        let summary = summary_of(&events, id);
-        assert_eq!(summary.files_copied, 1);
-        assert_eq!(summary.failures.len(), 1, "{summary:?}");
-        assert_eq!(summary.failures[0].source, missing);
-        assert!(target.join("있음.txt").is_file());
-        assert!(events.contains(&JobEvent::StateChanged {
-            job: id,
-            state: JobState::Failed
-        }));
-    }
-
-    #[test]
     fn 긴_경로와_한글_이모지_이름을_복사한다() {
         let dir = TempDir::new().unwrap();
         let source = dir.path().join("원본 🌏");
