@@ -21,6 +21,7 @@
 pub mod build;
 pub mod cli;
 pub mod dump;
+pub mod follow;
 pub mod layout;
 #[cfg(windows)]
 pub mod pipe;

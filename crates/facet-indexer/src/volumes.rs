@@ -13,9 +13,12 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 
-use facet_index::{self as index, Hit, Index, Order, SortKey};
+use facet_index::{
+    self as index, Freshness, Hit, Index, JournalInfo, JournalState, Order, SortKey,
+};
 use facet_protocol::{
     ErrorKind, ErrorMessage, NoIndexReason, QueryMessage, StatusMessage, VolumeState, VolumeStatus,
 };
@@ -62,18 +65,47 @@ pub fn classify(drive_type: u32, filesystem: Option<&str>) -> Option<Plan> {
     }
 }
 
+/// 질의와 USN 따라가기가 함께 쓰는 볼륨 하나의 인덱스.
+///
+/// 질의는 읽기 잠금을 쥐고 실행하고, 따라가기는 쓰기 잠금을 잠깐 쥐고 바꾼다. 그래서 바꿀 때
+/// 인덱스를 복제하지 않는다.
+#[derive(Debug)]
+struct Shared {
+    index: RwLock<Index>,
+    /// 바꿀 때마다 1씩 는다(쓰기 잠금 안에서). 이어 받기 표지가 만들 때의 값과 견줘 무효를 가린다.
+    generation: AtomicU64,
+}
+
+impl Shared {
+    fn new(index: Index) -> Self {
+        Self {
+            index: RwLock::new(index),
+            generation: AtomicU64::new(0),
+        }
+    }
+
+    fn read(&self) -> RwLockReadGuard<'_, Index> {
+        // 잠근 채 패닉한 쪽이 있어도 인덱스는 질의할 수 있다(바꾸던 중이면 결과가 덜 맞을 뿐이다).
+        self.index.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation.load(AtomicOrdering::Acquire)
+    }
+}
+
 /// 볼륨 하나의 상태.
 #[derive(Debug, Clone)]
 enum Slot {
     /// 만드는 중. 앞선 인덱스가 있으면 그것으로 답한다.
-    Building(Option<Arc<Index>>),
-    Ready(Arc<Index>),
+    Building(Option<Arc<Shared>>),
+    Ready(Arc<Shared>),
     NotIndexed(NoIndexReason),
 }
 
 impl Slot {
     /// 질의에 쓸 인덱스.
-    fn index(&self) -> Option<&Arc<Index>> {
+    fn index(&self) -> Option<&Arc<Shared>> {
         match self {
             Self::Building(old) => old.as_ref(),
             Self::Ready(index) => Some(index),
@@ -103,7 +135,8 @@ pub struct Page {
 
 /// 이어 받기 표지. 볼륨마다 아직 내보내지 않은 결과를 들고 있다.
 ///
-/// 표지를 만든 뒤 어느 볼륨의 인덱스가 바뀌면(다시 만들어 바꿔 끼우면) 표지는 무효다.
+/// 표지를 만든 뒤 어느 볼륨의 인덱스가 바뀌면(다시 만들어 바꿔 끼우거나 USN 저널의 변경을
+/// 적용하면) 표지는 무효다.
 #[derive(Debug)]
 pub struct Cursor {
     sort: Option<(SortKey, Order)>,
@@ -116,7 +149,9 @@ pub struct Cursor {
 #[derive(Debug)]
 struct Part {
     volume: String,
-    index: Arc<Index>,
+    index: Arc<Shared>,
+    /// 표지를 만들 때 그 인덱스의 [`Shared::generation`].
+    generation: u64,
     /// 꺼내 두었지만 아직 내보내지 않은 결과(그 볼륨 안에서는 정렬 순서).
     buffered: VecDeque<Hit>,
     /// 그 볼륨의 남은 결과.
@@ -130,7 +165,10 @@ impl Part {
             let Some(cursor) = self.next.take() else {
                 break;
             };
-            let page = self.index.resume(cursor, limit - self.buffered.len())?;
+            let page = self
+                .index
+                .read()
+                .resume(cursor, limit - self.buffered.len())?;
             self.buffered.extend(page.hits);
             self.next = page.next;
         }
@@ -236,7 +274,47 @@ impl Volumes {
     /// 무효가 된다).
     pub fn set_ready(&self, volume: &str, index: Index) {
         self.slots_mut()
-            .insert(volume.to_owned(), Slot::Ready(Arc::new(index)));
+            .insert(volume.to_owned(), Slot::Ready(Arc::new(Shared::new(index))));
+    }
+
+    /// 준비된 볼륨 `volume`의 인덱스를 `change`로 바꾼다(USN 저널의 변경 적용). 그 볼륨의 결과를
+    /// 든 이어 받기 표지는 무효가 된다. 준비된 볼륨이 아니면(만드는 중, 인덱스 없음, 모르는 볼륨)
+    /// 바꾸지 않고 `None`이다.
+    ///
+    /// 바꾸는 동안 그 볼륨의 질의는 기다린다. `change`는 짧아야 한다.
+    pub fn update<R>(&self, volume: &str, change: impl FnOnce(&mut Index) -> R) -> Option<R> {
+        let shared = match self.slots().get(volume) {
+            Some(Slot::Ready(shared)) => Arc::clone(shared),
+            _ => return None,
+        };
+        let mut index = shared.index.write().unwrap_or_else(|e| e.into_inner());
+        let result = change(&mut index);
+        shared.generation.fetch_add(1, AtomicOrdering::AcqRel);
+        Some(result)
+    }
+
+    /// 준비된 볼륨 `volume`의 인덱스가 든 저널 상태를 `info`와 견준다([`Index::check_journal`]).
+    /// 준비된 볼륨이 아니면 `None`.
+    pub fn check_journal(&self, volume: &str, info: JournalInfo) -> Option<Freshness> {
+        match self.slots().get(volume) {
+            Some(Slot::Ready(shared)) => Some(shared.read().check_journal(info)),
+            _ => None,
+        }
+    }
+
+    /// 준비된 볼륨 `volume`의 인덱스가 든 저널 상태를 `state`로 바꾼다. 저널 상태는 질의 결과에
+    /// 보이지 않으므로 이어 받기 표지는 그대로 산다. 준비된 볼륨이 아니면 `false`.
+    pub fn set_journal(&self, volume: &str, state: JournalState) -> bool {
+        let shared = match self.slots().get(volume) {
+            Some(Slot::Ready(shared)) => Arc::clone(shared),
+            _ => return false,
+        };
+        shared
+            .index
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_journal(state);
+        true
     }
 
     /// `volume`에는 인덱스가 없다. 앞선 인덱스가 있었으면 버린다.
@@ -262,10 +340,10 @@ impl Volumes {
                 volume: volume.clone(),
                 state: match slot {
                     Slot::Building(old) => VolumeState::Building {
-                        items: old.as_ref().map(|i| i.len() as u64),
+                        items: old.as_ref().map(|i| i.read().len() as u64),
                     },
                     Slot::Ready(index) => VolumeState::Ready {
-                        items: index.len() as u64,
+                        items: index.read().len() as u64,
                     },
                     Slot::NotIndexed(reason) => VolumeState::NotIndexed(reason.clone()),
                 },
@@ -280,7 +358,7 @@ impl Volumes {
         let limit = query.limit.map_or(usize::MAX, |n| n as usize);
         let (snapshot, building) = {
             let slots = self.slots();
-            let snapshot: Vec<(String, Arc<Index>)> = slots
+            let snapshot: Vec<(String, Arc<Shared>)> = slots
                 .iter()
                 .filter_map(|(v, s)| s.index().map(|i| (v.clone(), Arc::clone(i))))
                 .collect();
@@ -295,11 +373,16 @@ impl Volumes {
                     message: "질의가 취소됐습니다".to_owned(),
                 });
             }
-            let page = index.search(&q);
+            let (page, generation) = {
+                let guard = index.read();
+                // 읽기 잠금을 쥔 동안은 판이 바뀌지 않는다.
+                (guard.search(&q), index.generation())
+            };
             total += page.total;
             parts.push(Part {
                 volume,
                 index,
+                generation,
                 buffered: page.hits.into(),
                 next: page.next,
             });
@@ -322,7 +405,7 @@ impl Volumes {
                 slots
                     .get(&p.volume)
                     .and_then(Slot::index)
-                    .is_some_and(|i| Arc::ptr_eq(i, &p.index))
+                    .is_some_and(|i| Arc::ptr_eq(i, &p.index) && i.generation() == p.generation)
             });
             if !fresh {
                 return Err(index::ResumeError::Stale.into());
