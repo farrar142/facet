@@ -715,6 +715,60 @@ impl Tab {
         ChangeOutcome::Applied
     }
 
+    /// 숨김 항목까지 모든 항목의 이름(같은 이름 확인용).
+    pub(crate) fn all_names(&self) -> impl Iterator<Item = &OsStr> + '_ {
+        self.list.iter().map(|item| item.name.as_os_str())
+    }
+
+    /// 끝난 이름바꾸기·새 폴더([`crate::edit::Edited`])를 목록에 곧바로 반영한다. 변경 감시의 묶음을 기다리지 않는
+    /// 것은 이름 확정부터 새 이름이 보이기까지 한 프레임(16ms) 안이어야 해서다(감시는 [`crate::watch::BATCH_INTERVAL`]
+    /// 100ms 단위로 묶는다). 뒤에 감시가 같은 변경을 알려도 이름으로 맞추므로 목록·선택이 그대로다.
+    ///
+    /// - 이름바꾸기: 원래 이름 항목을 새 이름 항목으로 바꿔 다시 정렬하고, 선택·커서·범위 기준이 갖던 원래 이름을 새
+    ///   이름으로 옮긴다. 바꾼 항목은 선택·커서다.
+    /// - 새 폴더: 만든 폴더를 넣고 그것만 선택해 커서를 둔다.
+    ///
+    /// 이 탭이 그 폴더를 보고 있지 않으면 아무것도 하지 않고 `false`다.
+    pub(crate) fn apply_edit(&mut self, edited: &crate::edit::Edited) -> bool {
+        let Some(name) = edited.name() else {
+            return false;
+        };
+        let here = self.location.file_system_path();
+        if here.is_none() || here != edited.path.parent() {
+            return false;
+        }
+        let name = name.to_os_string();
+        let mut changes = Vec::with_capacity(2);
+        let original = edited.original_name().map(OsStr::to_os_string);
+        if let Some(original) = &original {
+            changes.push((original.clone(), None));
+        }
+        changes.push((name.clone(), edited.item.clone()));
+        self.list.apply_changes(changes);
+        self.update_visible();
+        if let Some(original) = &original {
+            if self.selection.remove(original) {
+                self.selection.insert(name.clone());
+            }
+            if self.anchor.as_ref() == Some(original) {
+                self.anchor = Some(name.clone());
+            }
+        }
+        match self.position_of(&name) {
+            Some(index) if edited.kind == crate::edit::EditKind::NewFolder => {
+                self.select_only(index);
+            }
+            Some(index) => {
+                self.selection.insert(name.clone());
+                self.set_cursor(index);
+            }
+            None => {}
+        }
+        self.prune_selection();
+        self.reindex();
+        true
+    }
+
     /// 주소창에 친 글자로 간다: 해석 → 이동 시작. 파일 경로를 쳤으면 그 폴더로 가고 도착하면 그 파일을 선택한다.
     ///
     /// 해석에 실패하면 `None`을 돌려주고 [`Tab::address_error`]에 까닭을 둔다. 위치·기록·기다리는 읽기는

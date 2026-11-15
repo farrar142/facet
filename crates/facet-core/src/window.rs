@@ -61,6 +61,7 @@ use facet_win::{OpenError, OpenResult, ShellWorker};
 
 use crate::command::{self, CommandId, CommandState};
 use crate::details::Sort;
+use crate::edit::{self, EditError, Edited};
 use crate::job::{
     AnswerError, ConflictAnswer, CopyRejection, ErrorAnswer, JobId, JobKind, JobQueue,
 };
@@ -337,6 +338,10 @@ enum Message {
         tab: TabId,
         result: CompletionResult,
     },
+    Edited {
+        tab: TabId,
+        result: Result<Edited, EditError>,
+    },
 }
 
 /// 앱이 정한 깨우기([`App::set_waker`]).
@@ -377,6 +382,10 @@ pub enum Update {
         id: CompletionId,
         candidates: Option<Vec<Candidate>>,
     },
+    /// 이름바꾸기·새 폴더의 결과([`App::rename`]·[`App::new_folder`]). 성공했고 그 탭이 그 폴더를 보고 있으면 목록에
+    /// 이미 반영했고, 바꾼(만든) 항목이 선택·커서다(새 폴더면 화면은 [`Tab::cursor`] 행에 이름 입력란을 연다).
+    /// 실패면 까닭이고 아무것도 바뀌지 않았다.
+    Edited(Result<Edited, EditError>),
 }
 
 /// 명령을 실행한 결과.
@@ -399,6 +408,11 @@ pub enum Execution {
     /// 보일 내용은 [`App::transfer_choice`]가 주고, 고른 글자는 [`App::transfer_plan_to`]로 해석해
     /// [`App::start_transfer`]에 넘긴다.
     ChooseTransferTarget(JobKind),
+    /// 화면이 할 일: 커서 항목의 이름 입력란을 연다(F2). 확정하면 [`App::rename`]에 넘긴다.
+    Rename,
+    /// 화면이 할 일: 활성 탭 위치에 새 폴더를 만든다. 처음 이름(바탕 이름)은 화면 문장이라 화면이 정해
+    /// [`App::new_folder`]에 넘긴다.
+    NewFolder,
 }
 
 /// 대상 선택 창에 보일 내용([`App::transfer_choice`]).
@@ -1300,6 +1314,12 @@ impl App {
                 }
                 (id, Update::Opened(opened))
             }
+            Message::Edited { tab: id, result } => {
+                if let (Ok(edited), Some(tab)) = (&result, self.tab_mut(id)) {
+                    tab.apply_edit(edited);
+                }
+                (id, Update::Edited(result))
+            }
             Message::Completed { tab: id, result } => {
                 let completion = result.id();
                 let candidates = self
@@ -1471,6 +1491,8 @@ impl App {
                 let kind = command.transfer_kind().expect("복사·이동 명령이다");
                 return Execution::ChooseTransferTarget(kind);
             }
+            CommandId::Rename => return Execution::Rename,
+            CommandId::NewFolder => return Execution::NewFolder,
             CommandId::NewWindow => {
                 let location = if !self.has_windows() {
                     home_location()
@@ -1560,6 +1582,85 @@ impl App {
             .spawn(forward)
             .expect("열기 결과를 기다리는 스레드를 만들지 못했다");
         Execution::Done
+    }
+
+    /// 활성 탭의 항목 `original`(화면이 넘긴 이름 입력란의 항목, 선택이 여럿이면 커서 항목)의 이름을 `new_name`으로
+    /// 바꾼다. 작업 대기열을 거치지 않고 일꾼 스레드에서 곧바로 바꾸며, 결과는 [`Update::Edited`]로 온다
+    /// ([`App::poll`]). 막지 않는다.
+    ///
+    /// 실행 전에 막는 것은 일꾼 스레드를 띄우지 않고 곧바로 까닭을 돌려준다: 위치가 실제 폴더가 아니거나 항목이
+    /// 목록에 없음([`EditError::Unavailable`]), 원래 이름과 똑같음([`EditError::Unchanged`]), 쓸 수 없는 이름
+    /// ([`EditError::InvalidName`], [`crate::name_input::validate_name`]), 같은 폴더에 같은 이름(대소문자 무시, 숨김
+    /// 항목 포함)의 다른 항목([`EditError::NameTaken`]). 대소문자만 다른 이름은 같은 항목의 이름바꾸기라 막지 않고
+    /// 디스크에서도 대소문자가 바뀐다. 실행 중의 실패(권한 없음, 그 사이 같은 이름 생김, 원본 사라짐)는 결과의
+    /// 까닭이다.
+    ///
+    /// 바꾼 뒤 목록이 다시 정렬돼도 새 이름의 항목이 선택·커서로 남는다(결과를 받을 때 곧바로 반영,
+    /// [`Update::Edited`]).
+    pub fn rename(&mut self, original: &std::ffi::OsStr, new_name: &str) -> Result<(), EditError> {
+        if !self.has_windows() {
+            return Err(EditError::Unavailable);
+        }
+        let tab = self.active_tab();
+        let folder = tab
+            .location()
+            .file_system_path()
+            .ok_or(EditError::Unavailable)?
+            .to_path_buf();
+        if !tab.all_names().any(|name| name == original) {
+            return Err(EditError::Unavailable);
+        }
+        if original == std::ffi::OsStr::new(new_name) {
+            return Err(EditError::Unchanged);
+        }
+        crate::name_input::validate_name(new_name).map_err(EditError::InvalidName)?;
+        if edit::name_taken(tab.all_names(), original, new_name) {
+            return Err(EditError::NameTaken);
+        }
+        let original = original.to_os_string();
+        let new_name = new_name.to_string();
+        self.spawn_edit("facet-rename", move || {
+            edit::rename(&folder, &original, &new_name)
+        });
+        Ok(())
+    }
+
+    /// 활성 탭 위치에 새 폴더를 만든다. 이름은 화면이 넘긴 바탕 이름 `base`(한국어는 「새 폴더」)이고, 있으면
+    /// 「`base` (2)」, 「(3)」 …이다([`edit::new_folder`]). 일꾼 스레드에서 곧바로 만들며(작업 대기열을 거치지 않음),
+    /// 결과는 [`Update::Edited`]로 온다. 받을 때 만든 폴더가 목록에 들어가 선택·커서가 되므로 화면은 그 행에 이름
+    /// 입력란을 연다. 위치가 실제 폴더가 아니면 [`EditError::Unavailable`], 바탕 이름을 쓸 수 없으면
+    /// [`EditError::InvalidName`]이다.
+    pub fn new_folder(&mut self, base: &str) -> Result<(), EditError> {
+        if !self.can_execute(CommandId::NewFolder) {
+            return Err(EditError::Unavailable);
+        }
+        crate::name_input::validate_name(base).map_err(EditError::InvalidName)?;
+        let folder = self
+            .active_tab()
+            .location()
+            .file_system_path()
+            .ok_or(EditError::Unavailable)?
+            .to_path_buf();
+        let base = base.to_string();
+        self.spawn_edit("facet-new-folder", move || edit::new_folder(&folder, &base));
+        Ok(())
+    }
+
+    /// 이름바꾸기·새 폴더 하나를 새 일꾼 스레드에서 하고 결과를 활성 탭 앞으로 보낸다.
+    fn spawn_edit(
+        &self,
+        name: &str,
+        run: impl FnOnce() -> Result<Edited, EditError> + Send + 'static,
+    ) {
+        let tab = self.active_tab_id();
+        let outbox = self.outbox.clone();
+        thread::Builder::new()
+            .name(name.into())
+            .spawn(move || {
+                let result = run();
+                outbox.send(Message::Edited { tab, result });
+            })
+            .expect("이름바꾸기·새 폴더 일꾼 스레드를 만들지 못했다");
     }
 
     /// 반대편 패널로 복사·이동할 내용: 원본은 활성 창의 활성 탭의 선택(목록 순서, 없으면 커서 항목 하나), 대상은

@@ -1,7 +1,8 @@
 //! 이름 입력란: 고른 항목의 이름을 그 행 자리에서 고쳐 쓰는 입력란(F2).
 //!
-//! 지금은 한글 IME를 확인하는 데만 쓴다. 확정해도 입력값을 돌려줄 뿐 파일 이름은 바꾸지 않는다.
-//! 실제 이름바꾸기는 작업으로 S4에서 만든다. 화면에 낼 문장은 만들지 않는다(ADR-0007).
+//! 입력란 자체는 확정해도 입력값을 돌려줄 뿐 파일 시스템을 건드리지 않는다. 확정한 이름으로 실제 파일 이름을
+//! 바꾸는 것은 [`crate::window::App::rename`](일꾼 스레드, [`crate::edit`])이고, 입력할 때마다 부르는 이름 확인은
+//! [`validate_name`]이다. 화면에 낼 문장은 만들지 않는다(ADR-0007).
 
 use crate::Item;
 
@@ -44,7 +45,7 @@ impl NameInput {
         &self.original
     }
 
-    /// 입력을 확정한다. 입력값을 돌려줄 뿐 파일 시스템은 건드리지 않는다.
+    /// 입력을 확정한다. 입력값을 돌려줄 뿐 파일 시스템은 건드리지 않는다(바꾸기는 [`crate::window::App::rename`]).
     pub fn confirm(self, entered: &str) -> EnteredName {
         EnteredName {
             original: self.original,
