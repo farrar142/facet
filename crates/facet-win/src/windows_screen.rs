@@ -2,8 +2,16 @@
 
 use std::num::NonZeroIsize;
 
-use windows::Win32::Foundation::POINT;
-use windows::Win32::UI::WindowsAndMessaging::{GA_ROOT, GetAncestor, WindowFromPoint};
+use windows::Win32::Foundation::{LPARAM, POINT, RECT};
+use windows::Win32::Graphics::Gdi::{
+    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO,
+};
+use windows::core::BOOL;
+
+use crate::MonitorInfo;
+use windows::Win32::UI::WindowsAndMessaging::{
+    GA_ROOT, GetAncestor, MONITORINFOF_PRIMARY, WindowFromPoint,
+};
 
 /// 화면 점 `(x, y)`(가상 화면 기준 물리 픽셀, 다른 모니터도 같은 좌표계) 아래 보이는 최상위 창의 핸들 값.
 ///
@@ -22,6 +30,48 @@ pub fn top_level_window_at(x: i32, y: i32) -> Option<NonZeroIsize> {
     NonZeroIsize::new(root.0 as isize)
 }
 
+/// 붙어 있는 모니터마다 작업 영역과 주 모니터 여부. 정보를 얻지 못한 모니터는 뺀다.
+pub fn monitors() -> Vec<MonitorInfo> {
+    let mut found: Vec<MonitorInfo> = Vec::new();
+    // SAFETY: 콜백은 이 호출 안에서만 불리고, LPARAM은 그동안 살아 있는 `found`를 가리킨다. 다른 곳에서 `found`를
+    // 빌리지 않는다.
+    let _ = unsafe {
+        EnumDisplayMonitors(
+            None,
+            None,
+            Some(add_monitor),
+            LPARAM(&mut found as *mut Vec<MonitorInfo> as isize),
+        )
+    };
+    found
+}
+
+unsafe extern "system" fn add_monitor(
+    monitor: HMONITOR,
+    _: HDC,
+    _: *mut RECT,
+    data: LPARAM,
+) -> BOOL {
+    // SAFETY: `monitors`가 넘긴 LPARAM이고, EnumDisplayMonitors가 돌아오기 전에만 불린다.
+    let found = unsafe { &mut *(data.0 as *mut Vec<MonitorInfo>) };
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `monitor`는 Windows가 넘긴 핸들이고 `info`는 cbSize를 채운 지역 값이다.
+    if unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+        let work = info.rcWork;
+        found.push(MonitorInfo {
+            left: work.left,
+            top: work.top,
+            right: work.right,
+            bottom: work.bottom,
+            primary: info.dwFlags & MONITORINFOF_PRIMARY != 0,
+        });
+    }
+    true.into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -30,5 +80,19 @@ mod tests {
     fn 어느_모니터에도_없는_점에는_창이_없다() {
         assert_eq!(top_level_window_at(-1_000_000_000, -1_000_000_000), None);
         assert_eq!(top_level_window_at(1_000_000_000, 1_000_000_000), None);
+    }
+
+    #[test]
+    fn 모니터의_작업_영역은_비지_않고_주_모니터는_많아야_하나다() {
+        // CI 러너처럼 화면이 없는 세션에서도 가상 모니터 하나가 있지만, 없더라도 실패하지 않는다.
+        let monitors = monitors();
+        for monitor in &monitors {
+            assert!(monitor.left < monitor.right, "{monitor:?}");
+            assert!(monitor.top < monitor.bottom, "{monitor:?}");
+        }
+        assert!(
+            monitors.iter().filter(|m| m.primary).count() <= 1,
+            "{monitors:?}"
+        );
     }
 }
