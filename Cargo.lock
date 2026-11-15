@@ -1181,6 +1181,7 @@ name = "facet-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "facet-win",
  "tempfile",
 ]
 

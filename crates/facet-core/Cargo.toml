@@ -12,6 +12,7 @@ workspace = true
 
 [dev-dependencies]
 tempfile = "3.27.0"
+facet-win.workspace = true
 
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
