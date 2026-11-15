@@ -105,7 +105,7 @@ fn 전체_경로는_작업_폴더와_상관없다() {
     let dir = tree();
     let other = TempDir::new().unwrap();
     let b = dir.path().join("b");
-    let targets = resolve_launch(other.path(), &[b.clone()]);
+    let targets = resolve_launch(other.path(), std::slice::from_ref(&b));
     assert_eq!(targets[0].location, loc(&b));
     assert!(targets[0].error.is_none());
 }
