@@ -11,6 +11,7 @@ pub mod launch;
 mod location;
 pub mod measure;
 pub mod name_input;
+pub mod placement;
 mod provider;
 pub mod selection;
 pub mod session;

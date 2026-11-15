@@ -1,8 +1,13 @@
 //! 세션: 끝낼 때 저장해 다음 실행에 되살리는 창·패널·탭 상태.
 //!
 //! 담는 것: 창 목록과 마지막 활성 창, 창마다 패널(하나나 둘)·활성 패널·분할 비율, 패널마다 탭·활성 탭, 탭마다
-//! 위치·정렬. 뒤로·앞으로 기록, 선택·스크롤, 닫은 탭 목록, 숨김 항목 보이기는 담지 않는다. 창의 화면 자리·크기·
-//! 최대화는 다음 티켓이 각 창의 `placement`에 담는다(지금은 늘 `null`로 쓰고 읽을 때 무시한다).
+//! 위치·정렬, 창마다 화면 자리·크기·최대화([`crate::placement::Placement`], 파일의 `placement`). 뒤로·앞으로 기록,
+//! 선택·스크롤, 닫은 탭 목록, 숨김 항목 보이기는 담지 않는다.
+//!
+//! 창 자리는 가상 화면 기준 물리 픽셀이다(좌표 단위는 [`crate::placement`]). 자리를 모르는 창(아직 화면에 띄우지
+//! 않았다)은 `placement`가 `null`이고, 되살리면 Windows가 정한 자리에 뜬다. 형식 버전 1의 앞선 파일은 늘 `null`을
+//! 썼으므로 버전을 올리지 않았다: 앞선 파일은 그대로 읽히고(창 자리만 없다), 앞선 facet은 새 파일의 `placement`를
+//! 무시한다. `placement`가 형식에 맞지 않으면(값이 빠졌거나 크기가 0) 그 창의 자리만 버리고 나머지는 읽는다.
 //!
 //! 파일은 사람이 읽을 수 있는 JSON이고 형식 버전([`FORMAT_VERSION`])을 갖는다. 자리는 `%APPDATA%\facet\session.json`
 //! ([`session_path`])이고, 환경 변수 [`ENV_PATH`]로 바꿀 수 있다. 측정 모드는 [`ENV_PATH`]가 없으면 세션 파일을
@@ -29,6 +34,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Location;
 use crate::details::{Column, Direction, Sort};
+use crate::placement::{Placement, Rect};
 
 /// 세션 파일의 형식 버전. 형식을 바꾸면 올린다. 이 버전이 아닌 파일은 깨진 파일처럼 옆에 남긴다.
 pub const FORMAT_VERSION: u64 = 1;
@@ -55,6 +61,8 @@ pub struct WindowSession {
     pub active_panel: usize,
     /// 분할 비율(왼쪽 패널의 몫). 합친 창에도 남는다.
     pub split_ratio: f32,
+    /// 창의 화면 자리·크기·최대화. 모르면(아직 띄우지 않은 창) `None`이다.
+    pub placement: Option<Placement>,
 }
 
 /// 패널 하나: 탭들과 활성 탭.
@@ -361,12 +369,45 @@ struct FileV1 {
 
 #[derive(Serialize, Deserialize)]
 struct WindowV1 {
-    /// 창의 화면 자리·크기·최대화를 담을 자리(다음 티켓). 지금은 늘 `null`이고 읽을 때 무시한다.
+    /// 창의 화면 자리·크기·최대화([`PlacementV1`]). 모르면 `null`이다. 형식에 맞지 않으면 버린다(읽을 때 값으로
+    /// 받아 따로 해석한다).
     #[serde(default)]
     placement: Option<serde_json::Value>,
     split_ratio: f32,
     active_panel: usize,
     panels: Vec<PanelV1>,
+}
+
+/// 창 자리: 바깥 테두리 왼쪽 위(`x`, `y`)와 안쪽 크기(`width`, `height`), 가상 화면 기준 물리 픽셀. 최대화한 창은
+/// 최대화를 풀었을 때의 자리다.
+#[derive(Serialize, Deserialize)]
+struct PlacementV1 {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    maximized: bool,
+}
+
+impl PlacementV1 {
+    fn from_placement(placement: &Placement) -> Self {
+        PlacementV1 {
+            x: placement.normal.x,
+            y: placement.normal.y,
+            width: placement.normal.width,
+            height: placement.normal.height,
+            maximized: placement.maximized,
+        }
+    }
+
+    /// 파일의 `placement` 값. `null`이거나 형식에 맞지 않거나 크기가 0이면 `None`이다.
+    fn read(value: Option<serde_json::Value>) -> Option<Placement> {
+        let placement: PlacementV1 = serde_json::from_value(value?).ok()?;
+        (placement.width > 0 && placement.height > 0).then_some(Placement {
+            normal: Rect::new(placement.x, placement.y, placement.width, placement.height),
+            maximized: placement.maximized,
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -419,7 +460,10 @@ impl FileV1 {
                 .windows
                 .iter()
                 .map(|window| WindowV1 {
-                    placement: None,
+                    placement: window.placement.as_ref().map(|placement| {
+                        serde_json::to_value(PlacementV1::from_placement(placement))
+                            .expect("창 자리는 늘 JSON으로 바꿀 수 있다")
+                    }),
                     split_ratio: window.split_ratio,
                     active_panel: window.active_panel,
                     panels: window
@@ -442,6 +486,7 @@ impl FileV1 {
                 .windows
                 .into_iter()
                 .map(|window| WindowSession {
+                    placement: PlacementV1::read(window.placement),
                     split_ratio: window.split_ratio,
                     active_panel: window.active_panel,
                     panels: window

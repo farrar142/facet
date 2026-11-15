@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use facet_core::Location;
 use facet_core::details::{Column, Direction, Sort};
 use facet_core::launch::resolve_launch;
+use facet_core::placement::{Placement, Rect};
 use facet_core::session::{
     self, ENV_PATH, Loaded, PanelSession, Saver, Session, SessionError, TabSession, WindowSession,
 };
@@ -91,6 +92,10 @@ fn sample(root: &Path) -> Session {
                 ],
                 active_panel: 1,
                 split_ratio: 0.3,
+                placement: Some(Placement {
+                    normal: Rect::new(120, 80, 1280, 900),
+                    maximized: true,
+                }),
             },
             WindowSession {
                 panels: vec![PanelSession {
@@ -105,6 +110,10 @@ fn sample(root: &Path) -> Session {
                 }],
                 active_panel: 0,
                 split_ratio: 0.7,
+                placement: Some(Placement {
+                    normal: Rect::new(-1500, -40, 900, 700),
+                    maximized: false,
+                }),
             },
         ],
         active_window: 0,
@@ -132,8 +141,22 @@ fn 화면_상태를_저장했다_읽으면_같은_상태다() {
     let first = app.windows()[0].id();
     app.activate_window(first);
     app.activate_panel(0);
+    // 앱이 알린 창 자리: 첫 창은 최대화(보통 자리를 남김), 둘째 창은 왼쪽 모니터(음수 좌표).
+    let placed = Placement {
+        normal: Rect::new(200, 100, 1200, 800),
+        maximized: true,
+    };
+    app.window_mut(first).unwrap().set_placement(Some(placed));
+    let second = app.windows()[1].id();
+    let left = Placement {
+        normal: Rect::new(-1700, 50, 1000, 700),
+        maximized: false,
+    };
+    app.window_mut(second).unwrap().set_placement(Some(left));
     settle(&mut app);
     let saved = app.session().expect("창이 있다");
+    assert_eq!(saved.windows[0].placement, Some(placed));
+    assert_eq!(saved.windows[1].placement, Some(left));
     assert_eq!(saved.windows.len(), 2);
     assert_eq!(saved.windows[0].panels.len(), 2);
 
@@ -147,6 +170,8 @@ fn 화면_상태를_저장했다_읽으면_같은_상태다() {
     assert_eq!(restored.windows()[0].active_panel_index(), 0);
     assert_eq!(restored.windows()[0].split_ratio(), 0.35);
     assert_eq!(restored.windows()[1].active_panel().active_index(), 0);
+    assert_eq!(restored.windows()[0].placement(), Some(placed));
+    assert_eq!(restored.windows()[1].placement(), Some(left));
 
     // 손으로 만든 세션도 같다.
     let sample = sample(root.path());
@@ -161,7 +186,9 @@ fn 세션_파일은_버전을_가진_사람이_읽을_수_있는_json이다() {
     let json = sample(root.path()).to_json();
     assert!(json.contains("\"version\": 1"), "{json}");
     assert!(json.contains("\"split_ratio\": 0.3"), "{json}");
-    assert!(json.contains("\"placement\": null"), "{json}");
+    assert!(json.contains("\"maximized\": true"), "{json}");
+    assert!(json.contains("\"x\": -1500"), "{json}");
+    assert!(json.contains("\"width\": 1280"), "{json}");
     assert!(json.contains("\"column\": \"size\""), "{json}");
     assert!(json.contains('\n'), "들여 쓴다");
     assert_eq!(Session::from_json(&json).unwrap(), sample(root.path()));
@@ -354,6 +381,7 @@ fn 사라진_위치의_탭은_처음_볼_때_가장_가까운_남은_상위로_�
             }],
             active_panel: 0,
             split_ratio: 0.5,
+            placement: None,
         }],
         active_window: 0,
     };
@@ -394,6 +422,7 @@ fn 보이는_탭의_위치가_사라졌으면_곧바로_상위로_열린다() {
             }],
             active_panel: 0,
             split_ratio: 0.5,
+            placement: None,
         }],
         active_window: 0,
     };
@@ -437,6 +466,7 @@ fn 사라진_위치의_상위가_하나도_없으면_홈_폴더로_열린다() {
             }],
             active_panel: 0,
             split_ratio: 0.5,
+            placement: None,
         }],
         active_window: 0,
     };
@@ -506,6 +536,7 @@ fn 세션의_범위_밖_번호와_빈_패널은_다듬어_되살린다() {
                 panels: vec![],
                 active_panel: 0,
                 split_ratio: 0.5,
+                placement: None,
             },
             WindowSession {
                 panels: vec![
@@ -520,6 +551,7 @@ fn 세션의_범위_밖_번호와_빈_패널은_다듬어_되살린다() {
                 ],
                 active_panel: 5,
                 split_ratio: 9.0,
+                placement: None,
             },
         ],
         active_window: 3,
@@ -645,4 +677,69 @@ fn 세션_파일_자리는_appdata_아래이고_측정_모드는_바꾼_자리�
         Some(PathBuf::from(r"D:\측정\session.json"))
     );
     assert_eq!(session::session_path_with(false, env(&[])), None);
+}
+
+/// 형식 버전 1의 앞선 파일(창 자리를 담기 전, `placement`가 늘 `null`).
+const OLDER_FILE: &str = r#"{
+  "version": 1,
+  "active_window": 0,
+  "windows": [
+    {
+      "placement": null,
+      "split_ratio": 0.5,
+      "active_panel": 0,
+      "panels": [
+        { "active_tab": 0, "tabs": [ { "location": { "file_system": "C:\\" }, "sort": { "column": "name", "direction": "ascending" } } ] }
+      ]
+    }
+  ]
+}"#;
+
+#[test]
+fn 창_자리가_없는_앞선_파일은_그대로_읽고_창_자리만_없다() {
+    let session = Session::from_json(OLDER_FILE).unwrap();
+    assert_eq!(session.windows.len(), 1);
+    assert_eq!(session.windows[0].placement, None);
+    assert_eq!(session.windows[0].panels[0].tabs.len(), 1);
+    // `placement` 열쇠가 아예 없어도 같다.
+    let without_key = OLDER_FILE.replace("\"placement\": null,", "");
+    assert_eq!(Session::from_json(&without_key).unwrap(), session);
+    // 다시 쓰면 `null`로 남는다(앞선 facet도 읽는다).
+    assert!(session.to_json().contains("\"placement\": null"));
+}
+
+#[test]
+fn 형식에_맞지_않는_창_자리는_그_창의_자리만_버린다() {
+    for placement in [
+        r#""placement": { "x": 10, "y": 10, "width": 800 },"#,
+        r#""placement": { "x": 10, "y": 10, "width": 0, "height": 600, "maximized": false },"#,
+        r#""placement": { "x": 10, "y": 10, "width": -5, "height": 600, "maximized": false },"#,
+        r#""placement": "왼쪽 위","#,
+    ] {
+        let text = OLDER_FILE.replace("\"placement\": null,", placement);
+        let session = Session::from_json(&text).unwrap_or_else(|e| panic!("{placement}: {e}"));
+        assert_eq!(session.windows[0].placement, None, "{placement}");
+        assert_eq!(session.windows[0].panels[0].tabs.len(), 1, "{placement}");
+    }
+    let text = OLDER_FILE.replace(
+        "\"placement\": null,",
+        r#""placement": { "x": -10, "y": 20, "width": 800, "height": 600, "maximized": true },"#,
+    );
+    assert_eq!(
+        Session::from_json(&text).unwrap().windows[0].placement,
+        Some(Placement {
+            normal: Rect::new(-10, 20, 800, 600),
+            maximized: true
+        })
+    );
+}
+
+#[test]
+fn 창_자리를_모르는_새_창은_세션에_자리가_없다() {
+    let root = tree();
+    let mut app = App::new(Some(loc(root.path())));
+    app.open_window(loc(&root.path().join("a")));
+    settle(&mut app);
+    let session = app.session().unwrap();
+    assert!(session.windows.iter().all(|w| w.placement.is_none()));
 }

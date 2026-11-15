@@ -8,6 +8,8 @@
 //! - [`DirectoryWatcher`]: 폴더 하나의 변경을 감시 스레드에서 알린다(`ReadDirectoryChangesW`).
 //! - [`top_level_window_at`]: 화면 점 아래 보이는 최상위 창(`WindowFromPoint`). 탭을 창 사이로 끌 때 쓴다.
 //!   Windows에서만 있다.
+//! - [`monitors`]: 붙어 있는 모니터마다 작업 영역과 주 모니터 여부(`EnumDisplayMonitors`). 세션의 창 자리를 보이는
+//!   곳으로 고칠 때 쓴다. Windows가 아니면 빈 목록이다.
 //! - [`single_instance`]: 단일 실행. 주인 되기([`single_instance::claim`], 사용자 로그온 세션 범위 뮤텍스),
 //!   받기([`single_instance::Owner::listen`], 같은 사용자만 여는 파이프의 수신기 스레드),
 //!   넘기기([`single_instance::forward`], 인자와 작업 폴더). Windows가 아니면 늘 주인이 된다.
@@ -35,6 +37,36 @@ pub use watch::{DirectoryChange, DirectoryWatcher};
 pub use windows_impl::compare_names_like_explorer;
 #[cfg(windows)]
 pub use windows_screen::top_level_window_at;
+
+/// 모니터 하나: 작업 영역(작업 표시줄을 뺀 영역)과 주 모니터 여부([`monitors`]).
+///
+/// 좌표는 가상 화면 기준 물리 픽셀이다(주 모니터 왼쪽 위가 0,0, 다른 모니터도 같은 좌표계). 앱 프로세스는 winit이
+/// 모니터마다 DPI 인식(Per-Monitor v2)으로 켜므로 배율과 상관없이 실제 픽셀이다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MonitorInfo {
+    /// 작업 영역의 왼쪽.
+    pub left: i32,
+    /// 작업 영역의 위.
+    pub top: i32,
+    /// 작업 영역의 오른쪽(이 값은 영역 밖).
+    pub right: i32,
+    /// 작업 영역의 아래(이 값은 영역 밖).
+    pub bottom: i32,
+    /// 주 모니터인가.
+    pub primary: bool,
+}
+
+/// 지금 붙어 있는 모니터들. 얻지 못하면(또는 Windows가 아니면) 빈 목록이다.
+#[cfg(windows)]
+pub fn monitors() -> Vec<MonitorInfo> {
+    windows_screen::monitors()
+}
+
+/// 지금 붙어 있는 모니터들. Windows가 아니면 늘 빈 목록이다.
+#[cfg(not(windows))]
+pub fn monitors() -> Vec<MonitorInfo> {
+    Vec::new()
+}
 
 /// 기본 프로그램으로 열기가 실패한 까닭.
 #[derive(Debug, Clone, PartialEq, Eq)]
