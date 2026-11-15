@@ -27,8 +27,12 @@
 //!   활성 패널이 바뀐다. 키 입력과 명령은 활성 패널의 활성 탭으로 간다. 패널 나누기·합치기·분할 비율은 코어가 한다.
 //! - 코어의 창마다 Slint 창을 하나씩 그린다(한 프로세스, 한 이벤트 루프). 창에서 일어난 입력은 먼저 그 창을 코어의
 //!   활성 창으로 알린 뒤 넘기므로, 어느 창에서 친 키든 그 창의 활성 패널의 활성 탭으로 간다. 명령으로 창이 생기거나
-//!   닫히면 코어의 창 목록에 화면을 맞추고(`sync_windows`), 창이 남지 않으면([`App::is_finished`]) 이벤트 루프를
-//!   끝낸다. 제목 줄의 닫기 단추는 코어의 창 닫기([`App::close_window`])다. 깨우기 하나로 모든 창을 갱신한다.
+//!   닫히면 코어의 창 목록에 화면을 맞추고(`sync_windows`), 창이 남지 않고 끝나지 않은 작업도 없으면
+//!   ([`App::is_finished`]) 이벤트 루프를 끝낸다. 제목 줄의 닫기 단추는 코어의 창 닫기([`App::close_window`])다.
+//!   깨우기 하나로 모든 창을 갱신한다.
+//! - 진행 창: 보통 창을 모두 닫았는데 작업이 남아 있으면([`App::shows_progress_window`]) 작업 영역만 담은 작은 창
+//!   (`ProgressWindow`)을 띄운다. 거기서도 단추와 질문 대화에 답하고, 「새 창」·Ctrl+N이나 다시 실행으로 보통 창이
+//!   생기면 닫는다. 작업이 모두 끝나면 닫고 앱을 끝낸다. 사용자가 닫으려 하면 닫지 않고 까닭을 보인다.
 //! - 반대편 패널로 복사·이동(F7·F8): 코어가 확인 줄을 띄우라고 하면([`Execution::ConfirmTransfer`]) 창 아래에 대상과
 //!   항목 수([`App::transfer_plan`])를 보이고, Enter면 작업 대기열에 넣는다([`App::start_transfer`], 막히면 까닭을
 //!   보인다). Esc면 아무것도 하지 않는다.
@@ -181,6 +185,9 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = view.ui.hide();
     }
     drop(views);
+    if let Some(progress) = PROGRESS.with(|slot| slot.borrow_mut().take()) {
+        let _ = progress.ui.hide();
+    }
     // 마지막 상태를 한 번 더 쓴다. 창이 모두 닫혀 끝났으면 마지막 창이 있던 세션이 남는다.
     save_session();
     if let Some(saver) = SAVER.with(|slot| slot.borrow_mut().take())
@@ -215,6 +222,8 @@ thread_local! {
     static VIEWS: RefCell<Vec<Rc<View>>> = const { RefCell::new(Vec::new()) };
     /// 탭을 창 밖에 놓아 생긴, 아직 띄우지 않은 창의 자리와 크기. `sync_windows`가 띄울 때 쓰고 지운다.
     static PLACEMENTS: RefCell<Vec<(WindowId, Placement)>> = const { RefCell::new(Vec::new()) };
+    /// 진행 창. 보통 창이 없는데 작업이 남아 있을 때만 있다([`sync_progress`]).
+    static PROGRESS: RefCell<Option<ProgressView>> = const { RefCell::new(None) };
 }
 
 /// 새 창을 띄울 자리(바깥 테두리 왼쪽 위의 화면 점)와 크기(물리 픽셀).
@@ -365,7 +374,7 @@ fn with_view(window: WindowId, f: impl FnOnce(&View)) {
     let Some(view) = view_of(window) else { return };
     {
         let mut app = view.app.borrow_mut();
-        if !app.is_finished() && app.active_window_id() != window {
+        if app.has_windows() && app.active_window_id() != window {
             app.activate_window(window);
         }
     }
@@ -409,8 +418,9 @@ fn open_launch_window(targets: Vec<LaunchTarget>) {
     }
 }
 
-/// 코어의 창 목록에 화면을 맞춘다: 새 창은 Slint 창을 만들어 띄우고, 닫힌 창은 감춘다. 창이 남지 않아 앱이
-/// 끝났으면([`App::is_finished`]) 이벤트 루프를 끝낸다.
+/// 코어의 창 목록에 화면을 맞춘다: 새 창은 Slint 창을 만들어 띄우고, 닫힌 창은 감춘다. 진행 창도 맞춘다
+/// ([`sync_progress`]). 창이 남지 않고 끝나지 않은 작업도 없어 앱이 끝났으면([`App::is_finished`]) 이벤트 루프를
+/// 끝낸다.
 fn sync_windows() {
     let Some(app) = APP.with(|slot| slot.borrow().clone()) else {
         return;
@@ -453,7 +463,10 @@ fn sync_windows() {
             Err(error) => eprintln!("창을 만들지 못함: {error}"),
         }
     }
-    // 창·패널·탭·분할 비율이 바뀌었을 수 있다(사용자 입력은 모두 여기를 지난다).
+    // 보통 창이 모두 닫혔는데 작업이 남았으면 진행 창을 띄우고, 보통 창이 다시 생겼거나 작업이 끝났으면 닫는다.
+    sync_progress(&app);
+    // 창·패널·탭·분할 비율이 바뀌었을 수 있다(사용자 입력은 모두 여기를 지난다). 진행 창만 남았으면 세션은 `None`이라
+    // 넘기지 않고, 파일에는 마지막 보통 창 상태가 남는다.
     save_session();
     if app.borrow().is_finished() {
         let _ = slint::quit_event_loop();
@@ -513,15 +526,21 @@ fn poll_all() {
     }
     let (updates, jobs) = {
         let mut app = app.borrow_mut();
-        if app.is_finished() {
-            return;
-        }
         (app.poll(), app.poll_jobs())
     };
     if jobs {
         for view in &views {
             view.render_jobs();
         }
+        render_progress(&app);
+        // 진행 창만 남은 동안 마지막 작업이 끝났으면 진행 창을 닫고 앱을 끝낸다.
+        if !app.borrow().has_windows() {
+            sync_windows();
+        }
+    }
+    if app.borrow().is_finished() {
+        sync_windows();
+        return;
     }
     if updates.is_empty() {
         return;
@@ -712,6 +731,133 @@ fn refresh_jobs() {
     for view in views() {
         view.render_jobs();
     }
+    render_progress(&app);
+}
+
+/// 작업 영역의 작업들을 진행 표시 모델에 넣는다(보통 창의 작업 영역과 진행 창이 함께 쓴다). 같은 작업들이면 바뀐
+/// 줄만 고쳐 단추 같은 화면 요소를 다시 만들지 않는다. 질문을 기다리는 작업 수를 돌려준다. 앱을 빌리지 못하면
+/// `None`이다.
+fn render_job_rows(app: &RefCell<App>, jobs: &VecModel<JobRow>) -> Option<usize> {
+    let rows: Vec<JobRow> = {
+        let app = app.try_borrow().ok()?;
+        app.work_area().entries().iter().map(job_row).collect()
+    };
+    let questions = rows.iter().filter(|row| row.ask != JobAsk::None).count();
+    let same =
+        jobs.row_count() == rows.len() && jobs.iter().zip(&rows).all(|(old, new)| old.id == new.id);
+    if !same {
+        jobs.set_vec(rows);
+        return Some(questions);
+    }
+    for (i, row) in rows.into_iter().enumerate() {
+        if jobs.row_data(i).as_ref() != Some(&row) {
+            jobs.set_row_data(i, row);
+        }
+    }
+    Some(questions)
+}
+
+/// 진행 창: 보통 창이 하나도 없는데 끝나지 않은 작업이 남아 있을 때만 떠 있는 작은 창([`App::shows_progress_window`]).
+/// 코어의 창이 아니어서 창 목록·세션에 들지 않는다.
+struct ProgressView {
+    ui: ProgressWindow,
+    jobs: Rc<VecModel<JobRow>>,
+}
+
+impl ProgressView {
+    fn open() -> Result<Self, slint::PlatformError> {
+        let ui = ProgressWindow::new()?;
+        let jobs = Rc::new(VecModel::default());
+        ui.set_jobs(ModelRc::from(Rc::clone(&jobs)));
+        // 닫기 단추로는 닫지 않는다: 닫으며 작업을 취소하면 사용자가 모르는 사이 작업을 잃을 수 있고, 창 없이 두면
+        // 프로세스가 보이지 않게 남는다. 그만두려면 작업마다 취소하고, 작업이 모두 끝나면 저절로 닫힌다.
+        let weak = ui.as_weak();
+        ui.window().on_close_requested(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_close_refused(true);
+            }
+            CloseRequestResponse::KeepWindowShown
+        });
+        ui.on_new_window(open_new_window);
+        ui.on_key(|text, ctrl, alt, shift| {
+            let command =
+                keys::shortcut_of(&text, ctrl, alt, shift).and_then(command::find_by_shortcut);
+            if command == Some(CommandId::NewWindow) {
+                open_new_window();
+                return true;
+            }
+            false
+        });
+        ui.on_job_pause(move |id| job_action(id, JobAction::Pause));
+        ui.on_job_resume(move |id| job_action(id, JobAction::Resume));
+        ui.on_job_cancel(move |id| job_action(id, JobAction::Cancel));
+        ui.on_job_start_now(move |id| job_action(id, JobAction::StartNow));
+        ui.on_job_dismiss(move |id| job_action(id, JobAction::Dismiss));
+        ui.on_job_answer_conflict(move |id, choice, rest| {
+            job_action(
+                id,
+                JobAction::AnswerConflict(question::conflict_answer(choice, rest)),
+            );
+        });
+        ui.on_job_answer_error(move |id, choice| {
+            job_action(id, JobAction::AnswerError(question::error_answer(choice)));
+        });
+        Ok(ProgressView { ui, jobs })
+    }
+
+    fn render(&self, app: &RefCell<App>) {
+        render_job_rows(app, &self.jobs);
+    }
+}
+
+/// 진행 창의 「새 창」과 Ctrl+N: 코어의 「새 창」 명령(창이 없으면 사용자 홈 폴더)으로 보통 창을 열고 앞으로
+/// 가져온다. 보통 창이 생기면 진행 창은 닫힌다.
+fn open_new_window() {
+    let Some(app) = APP.with(|slot| slot.borrow().clone()) else {
+        return;
+    };
+    if app.borrow_mut().execute(CommandId::NewWindow) != Execution::Done {
+        return;
+    }
+    let window = app.borrow().active_window_id();
+    sync_windows();
+    if let Some(view) = view_of(window) {
+        view.ui
+            .window()
+            .with_winit_window(|winit| winit.focus_window());
+    }
+}
+
+/// 진행 창을 코어에 맞춘다: 띄워야 하는데 없으면 만들어 띄우고, 필요 없어졌으면 감춘다(그 창의 콜백 안에서 불렸을
+/// 수 있으므로 버리기는 이벤트 루프로 돌아간 뒤).
+fn sync_progress(app: &RefCell<App>) {
+    let wanted = app.borrow().shows_progress_window();
+    let open = PROGRESS.with(|slot| slot.borrow().is_some());
+    if wanted && !open {
+        match ProgressView::open() {
+            Ok(view) => {
+                view.render(app);
+                let _ = view.ui.show();
+                PROGRESS.with(|slot| *slot.borrow_mut() = Some(view));
+            }
+            Err(error) => eprintln!("진행 창을 만들지 못함: {error}"),
+        }
+    } else if !wanted
+        && open
+        && let Some(view) = PROGRESS.with(|slot| slot.borrow_mut().take())
+    {
+        let _ = view.ui.hide();
+        Timer::single_shot(Duration::ZERO, move || drop(view));
+    }
+}
+
+/// 진행 창이 떠 있으면 다시 그린다.
+fn render_progress(app: &RefCell<App>) {
+    PROGRESS.with(|slot| {
+        if let Some(view) = slot.borrow().as_ref() {
+            view.render(app);
+        }
+    });
 }
 
 /// 화면에 넘기는 작업 번호.
@@ -892,28 +1038,8 @@ impl View {
 
     /// 작업 영역을 그린다. 같은 작업들이면 바뀐 줄만 고쳐 단추 같은 화면 요소를 다시 만들지 않는다.
     fn render_jobs(&self) {
-        let rows: Vec<JobRow> = {
-            let Ok(app) = self.app.try_borrow() else {
-                return;
-            };
-            app.work_area().entries().iter().map(job_row).collect()
-        };
-        let questions = rows.iter().filter(|row| row.ask != JobAsk::None).count();
-        self.ui.set_job_questions(count(questions));
-        let same = self.jobs.row_count() == rows.len()
-            && self
-                .jobs
-                .iter()
-                .zip(&rows)
-                .all(|(old, new)| old.id == new.id);
-        if !same {
-            self.jobs.set_vec(rows);
-            return;
-        }
-        for (i, row) in rows.into_iter().enumerate() {
-            if self.jobs.row_data(i).as_ref() != Some(&row) {
-                self.jobs.set_row_data(i, row);
-            }
+        if let Some(questions) = render_job_rows(&self.app, &self.jobs) {
+            self.ui.set_job_questions(count(questions));
         }
     }
 
