@@ -10,6 +10,8 @@ mod location;
 pub mod measure;
 pub mod name_input;
 mod provider;
+pub mod tab;
+pub mod window;
 
 pub use file_system::FileSystemProvider;
 pub use location::{Attributes, Item, ListError, Location};

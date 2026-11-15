@@ -3,6 +3,8 @@
 //! 지금은 파일 시스템 공급자 하나뿐이다. 압축 파일(S13)과 셸 공급자(S12)가 같은
 //! 인터페이스를 구현한다. 주소창 글자 해석과 변경 감시는 뒤 티켓이 여기에 더한다.
 
+use std::ffi::OsStr;
+
 use crate::file_system::FileSystemProvider;
 use crate::{Item, ListError, Location};
 
@@ -12,6 +14,9 @@ use crate::{Item, ListError, Location};
 pub trait Provider: Send + Sync {
     /// `location`의 항목 목록을 읽는다. 순서는 공급자가 돌려준 순서이며 정렬하지 않는다.
     fn list(&self, location: &Location) -> Result<Vec<Item>, ListError>;
+
+    /// `location` 안의 이름이 `name`인 항목의 위치. 있는지는 묻지 않는다.
+    fn child(&self, location: &Location, name: &OsStr) -> Location;
 
     /// `location`의 상위 위치. 더 올라갈 곳이 없으면(드라이브 루트 등) `None`이다.
     fn parent(&self, location: &Location) -> Option<Location>;
