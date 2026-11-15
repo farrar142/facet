@@ -8,8 +8,9 @@ use std::time::{Duration, Instant};
 
 use facet_index::{
     ATTRIBUTE_DIRECTORY, Index, NewItem, USN_REASON_FILE_CREATE, USN_REASON_FILE_DELETE,
-    USN_REASON_RENAME_NEW_NAME, USN_REASON_RENAME_OLD_NAME,
+    USN_REASON_RENAME_NEW_NAME, USN_REASON_RENAME_OLD_NAME, USN_REASON_SECURITY_CHANGE,
 };
+use facet_indexer::access::Caller;
 use facet_indexer::follow::{self, IndexFile, JournalNow, Records, SavePolicy, Source, Stop};
 use facet_indexer::session::Cancel;
 use facet_indexer::volumes::Volumes;
@@ -658,5 +659,41 @@ fn saves_after_the_interval_when_something_changed() {
     h.wait_ready();
     h.push(60, 40, USN_REASON_FILE_CREATE, FILE, "later.txt");
     wait_saved(&file, "later", &[r"T:\문서\later.txt"]);
+    h.stop();
+}
+
+/// 막힌 폴더 목록을 테스트가 바꾸는 가짜 사용자.
+struct Denying(Mutex<Vec<String>>);
+
+impl Caller for Denying {
+    fn user(&self) -> Option<String> {
+        Some("S-1-5-21-1".into())
+    }
+
+    fn can_list(&self, folder: &str) -> bool {
+        !self.0.lock().unwrap().iter().any(|d| d == folder)
+    }
+}
+
+#[test]
+fn a_security_change_record_makes_the_changed_permission_show_up() {
+    let h = Harness::start();
+    h.finish_build(Ok(index(&["report.txt"])));
+    h.wait_ready();
+    let caller = Denying(Mutex::new(vec![r"T:\문서".into()]));
+    let visible = |h: &Harness| {
+        h.volumes
+            .search_as(&query("report", None), &caller, &Cancel::new())
+            .unwrap()
+            .hits
+            .len()
+    };
+    assert_eq!(visible(&h), 0);
+
+    // 권한이 풀려도 기억으로 답하다가, 보안 변경 레코드를 적용하면 반영된다.
+    caller.0.lock().unwrap().clear();
+    assert_eq!(visible(&h), 0);
+    h.push(40, ROOT, USN_REASON_SECURITY_CHANGE, DIR, "문서");
+    h.wait_for("보안 변경 반영", |h| visible(h) == 1);
     h.stop();
 }
