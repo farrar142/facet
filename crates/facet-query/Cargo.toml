@@ -1,0 +1,29 @@
+[package]
+name = "facet-query"
+description = "facet 시험용 질의 명령: 인덱서 서비스의 파이프에 붙어 질의하고 결과를 출력한다"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "facet_query"
+path = "src/lib.rs"
+
+[[bin]]
+name = "facet-query"
+path = "src/main.rs"
+
+# Windows API를 직접 부르지 않는다(#48). 질의 프로토콜 크레이트와 std만 쓰고, 작업 공간 lint가
+# unsafe_code를 금지한다. 파이프는 std의 파일 열기로 연다. tests/boundary.rs가 이 의존성 목록을 지킨다.
+[lints]
+workspace = true
+
+[dependencies]
+facet-protocol.workspace = true
+
+[dev-dependencies]
+# 테스트만 같은 프로세스에 파이프 서버를 띄우려고 쓴다. 실행 파일에는 들어가지 않는다.
+facet-index.workspace = true
+facet-indexer = { path = "../facet-indexer" }

@@ -11,6 +11,11 @@ pub const USAGE: &str = "\
       <볼륨>은 드라이브 문자(예: D: 또는 D). 레코드는 고정값(fixup)을 되돌리지 않은 디스크 그대로다.
       --start  첫 레코드 번호(기본 0)
       --count  레코드 수(기본: start부터 MFT의 유효 데이터 끝까지)
+  serve-sample [--pipe 이름] [--reports N]
+      (개발용) 견본 인덱스(메모리, 볼륨 S:)로 질의 파이프 서버를 띄운다. Ctrl+C로 끝낸다.
+      시험용 질의 명령(facet-query)으로 질의해 본다.
+      --pipe     파이프 이름(기본: 인덱서 서비스의 파이프 이름)
+      --reports  견본 「보고서 N.txt」 파일 수(기본 1000)
   help
       이 도움말을 보인다";
 
@@ -19,6 +24,14 @@ pub const USAGE: &str = "\
 pub enum Command {
     Help,
     DumpMft(DumpArgs),
+    ServeSample(ServeArgs),
+}
+
+/// `serve-sample`의 인자.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ServeArgs {
+    pub pipe: String,
+    pub reports: u64,
 }
 
 /// `dump-mft`의 인자.
@@ -36,6 +49,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     match args.first().map(String::as_str) {
         None | Some("help" | "--help" | "-h") => Ok(Command::Help),
         Some("dump-mft") => parse_dump(&args[1..]).map(Command::DumpMft),
+        Some("serve-sample") => parse_serve(&args[1..]).map(Command::ServeSample),
         Some(other) => Err(format!("알 수 없는 명령: {other}")),
     }
 }
@@ -63,6 +77,24 @@ fn parse_dump(rest: &[String]) -> Result<DumpArgs, String> {
         [] | [_] => Err("dump-mft에는 <볼륨>과 <출력 파일>이 필요합니다".to_owned()),
         [_, _, extra, ..] => Err(format!("알 수 없는 인자: {extra}")),
     }
+}
+
+fn parse_serve(rest: &[String]) -> Result<ServeArgs, String> {
+    let mut serve = ServeArgs {
+        pipe: facet_protocol::PIPE_NAME.to_owned(),
+        reports: 1000,
+    };
+    let mut it = rest.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--pipe" => {
+                serve.pipe = it.next().ok_or("--pipe 뒤에 값이 없습니다")?.clone();
+            }
+            "--reports" => serve.reports = number(it.next(), "--reports")?,
+            _ => return Err(format!("알 수 없는 인자: {arg}")),
+        }
+    }
+    Ok(serve)
 }
 
 fn number(value: Option<&String>, flag: &str) -> Result<u64, String> {
@@ -118,6 +150,32 @@ mod tests {
                 count: None,
             }))
         );
+    }
+
+    #[test]
+    fn serve_sample_takes_pipe_and_reports() {
+        assert_eq!(
+            parse(&args(&["serve-sample"])),
+            Ok(Command::ServeSample(ServeArgs {
+                pipe: facet_protocol::PIPE_NAME.to_owned(),
+                reports: 1000,
+            }))
+        );
+        assert_eq!(
+            parse(&args(&[
+                "serve-sample",
+                "--pipe",
+                "my-pipe",
+                "--reports",
+                "5"
+            ])),
+            Ok(Command::ServeSample(ServeArgs {
+                pipe: "my-pipe".to_owned(),
+                reports: 5,
+            }))
+        );
+        assert!(parse(&args(&["serve-sample", "--pipe"])).is_err());
+        assert!(parse(&args(&["serve-sample", "x"])).is_err());
     }
 
     #[test]

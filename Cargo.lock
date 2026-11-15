@@ -1198,6 +1198,8 @@ dependencies = [
 name = "facet-indexer"
 version = "0.1.0"
 dependencies = [
+ "facet-index",
+ "facet-protocol",
  "tempfile",
  "windows-sys 0.61.2",
 ]
@@ -1207,6 +1209,15 @@ name = "facet-protocol"
 version = "0.1.0"
 dependencies = [
  "facet-index",
+]
+
+[[package]]
+name = "facet-query"
+version = "0.1.0"
+dependencies = [
+ "facet-index",
+ "facet-indexer",
+ "facet-protocol",
 ]
 
 [[package]]

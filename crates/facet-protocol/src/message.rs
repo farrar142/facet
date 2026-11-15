@@ -14,7 +14,8 @@ use crate::wire::{DecodeError, MAX_DEPTH, Reader, Writer};
 pub enum Request {
     /// 버전 인사. 연결하면 가장 먼저 보낸다. 클라이언트의 프로토콜 버전을 담는다.
     Hello { version: u16 },
-    /// 질의. 같은 연결의 앞선 질의(와 그 이어 받기 표지)는 취소된다.
+    /// 질의. 같은 연결의 앞선 질의(와 그 이어 받기 표지)는 취소된다. 아직 답하지 않은 앞선
+    /// 질의·이어 받기는 [`ErrorKind::Cancelled`] 오류로 답한다.
     Query(QueryMessage),
     /// 앞선 질의의 다음 결과 조각 받기.
     Resume(ResumeMessage),
@@ -193,6 +194,9 @@ pub enum ErrorKind {
     StaleCursor,
     /// 서비스 안의 오류.
     Internal,
+    /// 같은 연결에 새 질의가 와서 이 질의(또는 그 이어 받기)를 취소했다. 새 질의의 응답은 이
+    /// 응답 뒤에 온다.
+    Cancelled,
 }
 
 impl fmt::Display for ErrorMessage {
@@ -386,6 +390,7 @@ impl Message for Response {
                     ErrorKind::InvalidQuery => 2,
                     ErrorKind::StaleCursor => 3,
                     ErrorKind::Internal => 4,
+                    ErrorKind::Cancelled => 5,
                 });
                 w.str(&e.message);
             }
@@ -448,6 +453,7 @@ impl Message for Response {
                     2 => ErrorKind::InvalidQuery,
                     3 => ErrorKind::StaleCursor,
                     4 => ErrorKind::Internal,
+                    5 => ErrorKind::Cancelled,
                     tag => return Err(unknown("오류", tag)),
                 };
                 Self::Error(ErrorMessage {
