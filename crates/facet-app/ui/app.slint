@@ -24,6 +24,14 @@ export struct PaletteRow {
     enabled: bool,
 }
 
+// 복사·이동 대상 선택 창의 줄 하나: 경로와 출처(반대편 패널 위치, 최근 대상, 친 글자의 자동 완성 후보). 출처의
+// 이름 글자는 화면이 `@tr()`로 만든다.
+export enum TargetSection { opposite, recent, completion }
+export struct TargetRow {
+    path: string,
+    section: TargetSection,
+}
+
 // 목록 읽기나 기본 프로그램으로 열기가 실패한 까닭. 문장은 화면이 `@tr()`로 만든다.
 export enum Problem {
     none,
@@ -1440,6 +1448,20 @@ export component AppWindow inherits Window {
     in property <[PaletteRow]> palette-rows;
     in property <int> palette-highlight: -1;
     in-out property <string> palette-text;
+    // 복사·이동 대상 선택 창: 열려 있는가, 이동인가, 원본 항목 수, 줄(반대편 패널 위치·최근 대상·자동 완성 후보), 고른
+    // 줄(없으면 -1), 입력 글자, 해석하지 못한 까닭(주소창과 같은 글자 해석·폴더가 아님)과 시작 전에 막힌 까닭.
+    in property <bool> target-open;
+    in property <bool> target-moving;
+    in property <int> target-items;
+    in property <[TargetRow]> target-rows;
+    in property <int> target-highlight: -1;
+    in-out property <string> target-text;
+    in property <Problem> target-problem: Problem.none;
+    in property <string> target-problem-value;
+    in property <string> target-problem-detail;
+    in property <TransferProblem> target-transfer-problem: TransferProblem.none;
+    in property <string> target-transfer-problem-path;
+    property <bool> target-has-problem: root.target-problem != Problem.none || root.target-transfer-problem != TransferProblem.none;
     // 활성 패널에서 이름 입력란이 열린 행. 없으면 -1.
     in property <int> editing: -1;
     // 이름 입력란의 글자. 열 때 Rust가 현재 이름을 채운다.
@@ -1534,6 +1556,15 @@ export component AppWindow inherits Window {
     callback palette-run(int) -> bool;
     callback palette-close();
 
+    // 대상 선택 창: 글자가 바뀌었다(자동 완성), 줄을 골랐다(1·-1, 입력 커서를 둘 글자 끝의 바이트 위치를 돌려주고 고를 줄이
+    // 없으면 -1), Enter로 확정한다(참이면 작업을 넣고 닫았다. 해석하지 못했으면 거짓이고 창은 그대로다), 줄을 눌렀다(참이면
+    // 닫았다), 닫는다.
+    callback target-edited(string);
+    callback target-step(int) -> int;
+    callback target-accept(string) -> bool;
+    callback target-row-pressed(int) -> bool;
+    callback target-cancel();
+
     // 확인 줄: Enter·「시작」(막힌 까닭이 보이면 닫기), Esc·「취소」.
     callback confirm-accept();
     callback confirm-cancel();
@@ -1597,7 +1628,7 @@ export component AppWindow inherits Window {
         color: transparent;
         selection-background-color: transparent;
         key-pressed(event) => {
-            if (root.palette-open) {
+            if (root.palette-open || root.target-open) {
                 return accept;
             }
             // 확인 줄이 열려 있으면 Enter로 시작, Esc로 취소하고 다른 키는 받지 않는다.
@@ -1958,7 +1989,7 @@ export component AppWindow inherits Window {
                     height: parent.height - 4px;
                     job: job;
                     // 다른 입력(이름 입력란, 주소창, 팔레트, 확인 줄, 정보 화면)이 열려 있으면 키보드를 뺏지 않는다.
-                    autofocus: root.editing < 0 && !root.address-editing && !root.palette-open && !root.confirm-open && !root.show-about;
+                    autofocus: root.editing < 0 && !root.address-editing && !root.palette-open && !root.target-open && !root.confirm-open && !root.show-about;
                     answer-conflict(choice, rest) => {
                         root.job-answer-conflict(job.id, choice, rest);
                         keys.focus();
@@ -2149,6 +2180,148 @@ export component AppWindow inherits Window {
                             vertical-alignment: center;
                             color: (i == root.palette-highlight ? Palette.selection-foreground : Palette.foreground)
                                 .transparentize(entry.enabled ? 30% : 65%);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 복사·이동 대상 선택 창: 창 위에 겹쳐 그린다. 입력란에 경로를 치면 하위 폴더 후보가 뜨고, 비어 있으면 반대편 패널
+    // 위치와 최근 대상을 보인다. ↑↓·Tab으로 고르고 Enter로 확정, Esc로 닫는다.
+    if root.target-open: Rectangle {
+        background: #00000040;
+        TouchArea {
+            clicked => {
+                keys.focus();
+                root.target-cancel();
+            }
+        }
+        Rectangle {
+            y: 48px;
+            width: min(parent.width - 32px, 560px);
+            height: 74px + (root.target-has-problem ? 24px : 0px) + min(root.target-rows.length, 11) * 28px;
+            background: Palette.background;
+            border-width: 1px;
+            border-color: Palette.border;
+            border-radius: 6px;
+            drop-shadow-blur: 8px;
+            drop-shadow-color: #00000060;
+            TouchArea { }
+            Text {
+                x: 12px;
+                y: 8px;
+                width: parent.width - 24px;
+                height: 20px;
+                overflow: elide;
+                vertical-alignment: center;
+                text: root.target-moving
+                    ? @tr("{}개 항목을 이동할 폴더를 고르세요", root.target-items)
+                    : @tr("{}개 항목을 복사할 폴더를 고르세요", root.target-items);
+            }
+            Rectangle {
+                x: 8px;
+                y: 34px;
+                width: parent.width - 16px;
+                height: 28px;
+                border-width: 1px;
+                border-color: root.target-has-problem ? #c42b1c : Palette.accent-background;
+                clip: true;
+                target-input := TextInput {
+                    x: 6px;
+                    width: parent.width - 12px;
+                    single-line: true;
+                    vertical-alignment: center;
+                    color: Palette.foreground;
+                    text <=> root.target-text;
+                    init => {
+                        self.focus();
+                        self.select-all();
+                    }
+                    edited => {
+                        root.target-edited(self.text);
+                    }
+                    accepted => {
+                        if (root.target-accept(self.text)) {
+                            keys.focus();
+                        }
+                    }
+                    key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            keys.focus();
+                            root.target-cancel();
+                            return accept;
+                        }
+                        if (event.text == Key.Tab || event.text == Key.Backtab || event.text == Key.DownArrow
+                            || event.text == Key.UpArrow) {
+                            let backward = event.text == Key.Backtab || event.text == Key.UpArrow
+                                || (event.text == Key.Tab && event.modifiers.shift);
+                            let end = root.target-step(backward ? -1 : 1);
+                            if (end >= 0) {
+                                self.set-selection-offsets(end, end);
+                            }
+                            return accept;
+                        }
+                        reject
+                    }
+                }
+            }
+            if root.target-has-problem: Text {
+                x: 12px;
+                y: 64px;
+                width: parent.width - 24px;
+                height: 24px;
+                overflow: elide;
+                vertical-alignment: center;
+                color: #c42b1c;
+                text: root.target-problem == Problem.address-empty ? @tr("주소를 입력하세요")
+                    : root.target-problem == Problem.address-invalid-character ? @tr("주소에 쓸 수 없는 글자가 있습니다: {}", root.target-problem-value)
+                    : root.target-problem == Problem.address-undefined-variable ? @tr("환경 변수가 없습니다: {}", root.target-problem-value)
+                    : root.target-problem == Problem.address-not-absolute ? @tr("전체 경로가 아닙니다: {}", root.target-problem-value)
+                    : root.target-problem == Problem.address-not-found ? @tr("위치가 없습니다: {}", root.target-problem-value)
+                    : root.target-problem == Problem.address-permission-denied ? @tr("위치를 확인할 권한이 없습니다: {}", root.target-problem-value)
+                    : root.target-problem == Problem.address-io ? @tr("위치를 확인하지 못했습니다: {}: {}", root.target-problem-value, root.target-problem-detail)
+                    : root.target-problem == Problem.not-a-folder ? @tr("폴더가 아닙니다: {}", root.target-problem-value)
+                    : root.target-transfer-problem == TransferProblem.no-sources ? @tr("옮길 항목이 없습니다")
+                    : root.target-transfer-problem == TransferProblem.target-missing ? @tr("대상 위치가 없습니다: {}", root.target-transfer-problem-path)
+                    : root.target-transfer-problem == TransferProblem.target-not-folder ? @tr("대상이 폴더가 아닙니다: {}", root.target-transfer-problem-path)
+                    : root.target-transfer-problem == TransferProblem.into-itself ? @tr("폴더를 그 폴더 자신으로 보낼 수 없습니다: {}", root.target-transfer-problem-path)
+                    : @tr("대상 위치가 원본 폴더 안에 있습니다: {}", root.target-transfer-problem-path);
+            }
+            ListView {
+                x: 1px;
+                y: 70px + (root.target-has-problem ? 24px : 0px);
+                width: parent.width - 2px;
+                height: min(root.target-rows.length, 11) * 28px;
+                for entry[i] in root.target-rows: Rectangle {
+                    height: 28px;
+                    background: i == root.target-highlight ? Palette.selection-background
+                        : target-entry-touch.has-hover ? Palette.alternate-background : transparent;
+                    target-entry-touch := TouchArea {
+                        clicked => {
+                            keys.focus();
+                            if (!root.target-row-pressed(i)) {
+                                target-input.focus();
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 12px;
+                        Text {
+                            text: entry.path;
+                            overflow: elide;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            color: i == root.target-highlight ? Palette.selection-foreground : Palette.foreground;
+                        }
+                        Text {
+                            text: entry.section == TargetSection.opposite ? @tr("반대편 패널")
+                                : entry.section == TargetSection.recent ? @tr("최근") : "";
+                            vertical-alignment: center;
+                            color: (i == root.target-highlight ? Palette.selection-foreground : Palette.foreground)
+                                .transparentize(30%);
                         }
                     }
                 }

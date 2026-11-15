@@ -32,6 +32,10 @@
 //! - 반대편 패널로 복사·이동(F7·F8): 코어가 확인 줄을 띄우라고 하면([`Execution::ConfirmTransfer`]) 창 아래에 대상과
 //!   항목 수([`App::transfer_plan`])를 보이고, Enter면 작업 대기열에 넣는다([`App::start_transfer`], 막히면 까닭을
 //!   보인다). Esc면 아무것도 하지 않는다.
+//! - 복사·이동 대상 선택 창(「복사 위치…」「이동 위치…」, 패널이 하나일 때의 F7·F8): 코어가
+//!   [`Execution::ChooseTransferTarget`]을 주면 창 위에 경로 입력란·반대편 패널 위치·최근 대상을 보인다
+//!   ([`App::transfer_choice`], 상태는 `src/target.rs`). 글자는 [`App::transfer_plan_to`]가 주소창과 같은 규칙으로
+//!   해석하고, Enter가 확인이라 곧바로 작업 대기열에 넣는다. 해석하지 못하면 까닭을 보이고 창은 그대로다.
 //! - 작업 영역: 창 아래쪽에 작업마다 진행 표시를 그린다([`App::work_area`], 모든 창에 같은 것). 작업 대기열의 사건은
 //!   같은 깨우기로 오고([`App::poll_jobs`], 작업마다 초당 10번 이하) 그때만 다시 그린다. 일시정지·이어하기·취소·
 //!   지금 시작·닫기 단추는 코어의 작업 대기열을 부른다.
@@ -57,7 +61,8 @@ use facet_core::selection::{CursorMove, Pick};
 use facet_core::session::{self, Loaded, SAVE_DELAY, Saver};
 use facet_core::tab::{AutoRefresh, Navigation, ReadOutcome, Relocation, Tab};
 use facet_core::window::{
-    App, Execution, MAX_PANELS, Panel, TabDestination, TabId, TransferPlan, Update, WindowId,
+    App, Execution, MAX_PANELS, Panel, TabDestination, TabId, TargetError, TransferPlan, Update,
+    WindowId,
 };
 use facet_core::work_area::JobEntry;
 use facet_core::{ListError, Location, OpenError, ResolveError, provider_for};
@@ -71,6 +76,7 @@ use slint::{
 use crate::address::AddressEdit;
 use crate::palette::Palette;
 use crate::tab_drag::{Frame, Hover, Point, ScreenPoint, Strip, TabDrag, Target};
+use crate::target::{Section, TargetChooser};
 
 mod address;
 mod ime;
@@ -80,6 +86,7 @@ mod measure;
 mod palette;
 mod question;
 mod tab_drag;
+mod target;
 mod text;
 
 slint::include_modules!();
@@ -601,6 +608,23 @@ fn connect(ui: &AppWindow, w: WindowId) {
         ran
     });
     ui.on_palette_close(move || with_view(w, View::close_palette));
+    ui.on_target_edited(move |text| with_view(w, |view| view.target_edited(&text)));
+    ui.on_target_step(move |step| {
+        let mut end = -1;
+        with_view(w, |view| end = view.target_step(step >= 0));
+        end
+    });
+    ui.on_target_accept(move |text| {
+        let mut closed = false;
+        with_view(w, |view| closed = view.target_accept(&text));
+        closed
+    });
+    ui.on_target_row_pressed(move |index| {
+        let mut closed = false;
+        with_view(w, |view| closed = view.target_row_pressed(index));
+        closed
+    });
+    ui.on_target_cancel(move || with_view(w, View::close_target));
     ui.on_confirm_accept(move || with_view(w, View::accept_transfer));
     ui.on_confirm_cancel(move || with_view(w, View::close_transfer));
     ui.on_job_pause(move |id| job_action(id, JobAction::Pause));
@@ -801,6 +825,10 @@ struct View {
     keep_rows: Cell<bool>,
     /// 누른 탭의 끌기 상태. 탭을 누르면 생기고 놓거나 끊기면 없어진다.
     tab_drag: RefCell<Option<TabDrag<WindowId>>>,
+    /// 복사·이동 대상 선택 창이 열려 있으면 그 상태. 화면의 `target-open`과 함께 바뀐다.
+    target: RefCell<Option<TargetChooser>>,
+    /// 대상 선택 창의 줄.
+    target_rows: Rc<VecModel<TargetRow>>,
     /// 확인 줄이 열려 있으면 확인하면 넣을 복사·이동. 화면의 `confirm-open`과 함께 바뀐다.
     transfer: RefCell<Option<TransferPlan>>,
     /// 작업 영역의 진행 표시들.
@@ -838,6 +866,8 @@ impl View {
         ui.set_candidates(ModelRc::from(Rc::clone(&candidates)));
         let palette_rows = Rc::new(VecModel::default());
         ui.set_palette_rows(ModelRc::from(Rc::clone(&palette_rows)));
+        let target_rows = Rc::new(VecModel::default());
+        ui.set_target_rows(ModelRc::from(Rc::clone(&target_rows)));
         let jobs = Rc::new(VecModel::default());
         ui.set_jobs(ModelRc::from(Rc::clone(&jobs)));
         Rc::new(View {
@@ -853,6 +883,8 @@ impl View {
             reading_timer: Timer::default(),
             keep_rows: Cell::new(false),
             tab_drag: RefCell::default(),
+            target: RefCell::default(),
+            target_rows,
             transfer: RefCell::default(),
             jobs,
         })
@@ -919,12 +951,206 @@ impl View {
             Ok(_) => {
                 self.close_transfer();
                 refresh_jobs();
+                // 최근 대상이 바뀌었다.
+                save_session();
             }
             Err(rejection) => {
                 let (problem, path) = transfer_problem(&rejection, &plan);
                 self.ui.set_confirm_problem(problem);
                 self.ui.set_confirm_problem_path(path.into());
             }
+        }
+    }
+
+    /// 복사·이동의 대상 선택 창을 연다: 원본 수를 보이고 반대편 패널 위치와 최근 대상을 줄로 보인다. 지금 할 수 없으면
+    /// 열지 않는다.
+    fn open_target(&self, kind: JobKind) {
+        let Some(choice) = self.app.borrow().transfer_choice(kind) else {
+            return;
+        };
+        self.close_rename();
+        self.close_address_edit();
+        self.close_palette();
+        self.close_transfer();
+        let ui = &self.ui;
+        ui.set_target_moving(kind == JobKind::Move);
+        ui.set_target_items(count(choice.sources.len()));
+        ui.set_target_text(SharedString::new());
+        self.clear_target_problem();
+        *self.target.borrow_mut() = Some(TargetChooser::new(choice));
+        self.show_target_rows();
+        ui.set_target_open(true);
+    }
+
+    /// 선택 창을 닫는다(Esc): 아무것도 하지 않는다.
+    fn close_target(&self) {
+        if self.target.borrow_mut().take().is_some() {
+            self.ui.set_target_open(false);
+            self.target_rows.set_vec(Vec::new());
+            self.ui.set_target_highlight(-1);
+        }
+    }
+
+    /// 보여 준 까닭을 지운다.
+    fn clear_target_problem(&self) {
+        let ui = &self.ui;
+        ui.set_target_problem(Problem::None);
+        ui.set_target_problem_value(SharedString::new());
+        ui.set_target_problem_detail(SharedString::new());
+        ui.set_target_transfer_problem(TransferProblem::None);
+        ui.set_target_transfer_problem_path(SharedString::new());
+    }
+
+    /// 선택 창의 줄과 고른 줄을 화면에 넣는다.
+    fn show_target_rows(&self) {
+        let (rows, highlight) = match self.target.borrow().as_ref() {
+            Some(chooser) => (
+                chooser
+                    .rows()
+                    .into_iter()
+                    .map(|row| TargetRow {
+                        path: row.path.into(),
+                        section: match row.section {
+                            Section::Opposite => TargetSection::Opposite,
+                            Section::Recent => TargetSection::Recent,
+                            Section::Completion => TargetSection::Completion,
+                        },
+                    })
+                    .collect::<Vec<_>>(),
+                chooser.highlight(),
+            ),
+            None => (Vec::new(), None),
+        };
+        if !self.target_rows.iter().eq(rows.iter().cloned()) {
+            self.target_rows.set_vec(rows);
+        }
+        self.ui.set_target_highlight(highlight.map_or(-1, count));
+    }
+
+    /// 선택 창의 글자가 바뀌었다: 까닭을 지우고 하위 폴더 후보를 일꾼 스레드에서 새로 읽는다(글자가 비면 반대편
+    /// 위치와 최근 대상으로 돌아간다).
+    fn target_edited(&self, text: &str) {
+        self.clear_target_problem();
+        {
+            let mut target = self.target.borrow_mut();
+            let Some(chooser) = target.as_mut() else {
+                return;
+            };
+            if text.trim().is_empty() {
+                chooser.cleared();
+            } else {
+                let id = self.app.borrow_mut().complete_address(text);
+                chooser.requested(id);
+            }
+        }
+        self.show_target_rows();
+    }
+
+    /// 선택 창이 기다리는 자동 완성 결과를 받는다(늦게 온 앞선 요청의 결과는 버린다).
+    fn receive_target_candidates(
+        &self,
+        id: facet_core::tab::CompletionId,
+        candidates: Option<Vec<facet_core::Candidate>>,
+    ) {
+        let received = self
+            .target
+            .borrow_mut()
+            .as_mut()
+            .is_some_and(|chooser| chooser.receive(id, candidates));
+        if received {
+            self.show_target_rows();
+        }
+    }
+
+    /// Tab·화살표로 다음(`forward`)이나 앞 줄을 골라 입력란을 그 줄의 경로로 바꾼다. 입력 커서를 둘 글자 끝의 바이트
+    /// 위치를 돌려주고, 고를 줄이 없으면 -1이다.
+    fn target_step(&self, forward: bool) -> i32 {
+        let row = self
+            .target
+            .borrow_mut()
+            .as_mut()
+            .and_then(|chooser| chooser.step(forward));
+        let Some(row) = row else {
+            return -1;
+        };
+        self.clear_target_problem();
+        self.show_target_rows();
+        let end = i32::try_from(row.path.len()).unwrap_or(i32::MAX);
+        self.ui.set_target_text(row.path.into());
+        end
+    }
+
+    /// Enter: 입력란의 글자를 대상 폴더로 해석해 작업을 대기열에 넣는다. 넣었으면 창을 닫고 `true`다. 해석하지
+    /// 못했거나 시작 전에 막히면 까닭을 보이고 창은 그대로 두며 `false`다.
+    fn target_accept(&self, text: &str) -> bool {
+        let Some(kind) = self
+            .target
+            .borrow()
+            .as_ref()
+            .map(|chooser| chooser.choice().kind)
+        else {
+            return true;
+        };
+        let planned = self.app.borrow().transfer_plan_to(kind, text);
+        let plan = match planned {
+            Ok(plan) => plan,
+            Err(TargetError::Unavailable) => {
+                self.close_target();
+                return true;
+            }
+            Err(error) => {
+                self.clear_target_problem();
+                let (problem, value, detail) = match &error {
+                    TargetError::Resolve(error) => address_problem(error),
+                    TargetError::NotAFolder { text } => {
+                        (Problem::NotAFolder, text.clone(), String::new())
+                    }
+                    TargetError::Unavailable => (Problem::None, String::new(), String::new()),
+                };
+                self.ui.set_target_problem(problem);
+                self.ui.set_target_problem_value(value.into());
+                self.ui.set_target_problem_detail(detail.into());
+                return false;
+            }
+        };
+        let started = self.app.borrow_mut().start_transfer(&plan);
+        match started {
+            Ok(_) => {
+                self.close_target();
+                refresh_jobs();
+                // 최근 대상이 바뀌었다.
+                save_session();
+                true
+            }
+            Err(rejection) => {
+                self.clear_target_problem();
+                let (problem, path) = transfer_problem(&rejection, &plan);
+                self.ui.set_target_transfer_problem(problem);
+                self.ui.set_target_transfer_problem_path(path.into());
+                false
+            }
+        }
+    }
+
+    /// 줄을 눌렀다. 반대편 패널 위치·최근 대상이면 그 폴더로 바로 시작하고(닫았으면 `true`), 자동 완성 후보면 그
+    /// 폴더 경로를 입력란에 넣고 그 아래 후보를 읽는다(창은 그대로, `false`).
+    fn target_row_pressed(&self, index: i32) -> bool {
+        let row = usize::try_from(index).ok().and_then(|index| {
+            self.target
+                .borrow()
+                .as_ref()
+                .and_then(|chooser| chooser.row(index))
+        });
+        let Some(row) = row else {
+            return false;
+        };
+        match row.section {
+            Section::Completion => {
+                self.ui.set_target_text(row.path.clone().into());
+                self.target_edited(&row.path);
+                false
+            }
+            Section::Opposite | Section::Recent => self.target_accept(&row.path),
         }
     }
 
@@ -961,6 +1187,7 @@ impl View {
                 Update::Read(ReadOutcome::Failed) if panel == active => self.mark_loaded(),
                 Update::Completion { id, candidates } if panel == active => {
                     self.receive_candidates(*id, candidates.clone());
+                    self.receive_target_candidates(*id, candidates.clone());
                 }
                 _ => {}
             }
@@ -1256,6 +1483,7 @@ impl View {
             Execution::EditAddress => self.begin_address_edit(),
             Execution::ShowCommandPalette => self.open_palette(),
             Execution::ConfirmTransfer(kind) => self.open_transfer(kind),
+            Execution::ChooseTransferTarget(kind) => self.open_target(kind),
             Execution::Done | Execution::Disabled | Execution::WindowClosed => {}
         }
     }
@@ -1265,6 +1493,7 @@ impl View {
     fn tab_switched(&self) {
         self.close_rename();
         self.close_address_edit();
+        self.close_target();
         self.render();
         for panel in 0..MAX_PANELS {
             self.restore_scroll(panel);

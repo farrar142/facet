@@ -117,6 +117,7 @@ fn sample(root: &Path) -> Session {
             },
         ],
         active_window: 0,
+        recent_targets: Vec::new(),
     }
 }
 
@@ -384,6 +385,7 @@ fn 사라진_위치의_탭은_처음_볼_때_가장_가까운_남은_상위로_�
             placement: None,
         }],
         active_window: 0,
+        recent_targets: Vec::new(),
     };
     let file = TempDir::new().unwrap();
     let path = file.path().join("session.json");
@@ -425,6 +427,7 @@ fn 보이는_탭의_위치가_사라졌으면_곧바로_상위로_열린다() {
             placement: None,
         }],
         active_window: 0,
+        recent_targets: Vec::new(),
     };
     let mut app = App::restore(Some(saved), Vec::new());
     settle(&mut app);
@@ -469,6 +472,7 @@ fn 사라진_위치의_상위가_하나도_없으면_홈_폴더로_열린다() {
             placement: None,
         }],
         active_window: 0,
+        recent_targets: Vec::new(),
     };
     let mut app = App::restore(Some(saved), Vec::new());
     settle(&mut app);
@@ -555,6 +559,7 @@ fn 세션의_범위_밖_번호와_빈_패널은_다듬어_되살린다() {
             },
         ],
         active_window: 3,
+        recent_targets: Vec::new(),
     };
     let app = App::restore(Some(saved), Vec::new());
     assert_eq!(app.windows().len(), 1);
@@ -566,6 +571,7 @@ fn 세션의_범위_밖_번호와_빈_패널은_다듬어_되살린다() {
     let empty = Session {
         windows: vec![],
         active_window: 0,
+        recent_targets: Vec::new(),
     };
     assert_default(&App::restore(Some(empty), Vec::new()));
 }
@@ -742,4 +748,52 @@ fn 창_자리를_모르는_새_창은_세션에_자리가_없다() {
     settle(&mut app);
     let session = app.session().unwrap();
     assert!(session.windows.iter().all(|w| w.placement.is_none()));
+}
+
+#[test]
+fn 최근_대상이_없는_앞선_파일도_읽히고_최근_대상은_저장했다_읽으면_그대로다() {
+    // 최근 대상을 담기 전의 버전 1 파일: 필드가 없어도 읽고 비어 있다(버전은 올리지 않았다).
+    let older = Session::from_json(OLDER_FILE).unwrap();
+    assert!(older.recent_targets.is_empty());
+
+    let root = tree();
+    let mut app = App::new(Some(loc(&root.path().join("a"))));
+    settle(&mut app);
+    let mut saved = app.session().unwrap();
+    assert!(saved.recent_targets.is_empty());
+    saved.recent_targets = vec![root.path().join("c"), root.path().join("b")];
+
+    let json = saved.to_json();
+    assert!(json.contains("\"version\": 1"), "{json}");
+    let read = Session::from_json(&json).unwrap();
+    assert_eq!(read, saved);
+
+    // 앱으로 되살리면 앱의 최근 대상이 되고, 다시 저장하면 그대로 나온다.
+    let restored = App::restore(Some(read), Vec::new());
+    assert_eq!(
+        restored.recent_targets(),
+        [root.path().join("c"), root.path().join("b")].as_slice()
+    );
+    assert_eq!(
+        restored.session().unwrap().recent_targets,
+        saved.recent_targets
+    );
+}
+
+#[test]
+fn 되살린_최근_대상은_열_개까지만_같은_폴더는_한_번만_남는다() {
+    let root = tree();
+    let mut app = App::new(Some(loc(root.path())));
+    settle(&mut app);
+    let mut saved = app.session().unwrap();
+    saved.recent_targets = (0..14).map(|n| root.path().join(format!("t{n}"))).collect();
+    saved.recent_targets.insert(3, root.path().join("t0"));
+    let restored = App::restore(Some(saved), Vec::new());
+    let recent = restored.recent_targets();
+    assert_eq!(recent.len(), 10);
+    // 앞쪽(가장 최근) 순서를 지키고 중복은 첫 번째(가장 최근) 자리에 남는다.
+    assert_eq!(recent[0], root.path().join("t0"));
+    assert_eq!(recent[1], root.path().join("t1"));
+    assert_eq!(recent[2], root.path().join("t2"));
+    assert_eq!(recent[3], root.path().join("t3"));
 }

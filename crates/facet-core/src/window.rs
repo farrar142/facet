@@ -77,6 +77,9 @@ use crate::{Candidate, Location, provider_for};
 /// 닫은 탭 목록에 남기는 최근 탭 수. 넘으면 가장 오래된 탭이 빠진다.
 pub const CLOSED_TABS_LIMIT: usize = 20;
 
+/// 최근 대상 폴더를 이만큼까지 남긴다([`App::recent_targets`]).
+pub const RECENT_TARGETS_LIMIT: usize = 10;
+
 /// 창이 가질 수 있는 패널 수(좌우 둘).
 pub const MAX_PANELS: usize = 2;
 
@@ -391,7 +394,47 @@ pub enum Execution {
     /// 화면이 할 일: 반대편 패널로 복사·이동의 확인 줄을 띄운다. 보일 원본·대상·항목 수는
     /// [`App::transfer_plan`]이 주고, 확인하면 [`App::start_transfer`]로 작업을 넣는다.
     ConfirmTransfer(JobKind),
+    /// 화면이 할 일: 복사·이동의 대상 선택 창을 연다(「복사 위치…」「이동 위치…」, 패널이 하나일 때의 F7·F8).
+    /// 보일 내용은 [`App::transfer_choice`]가 주고, 고른 글자는 [`App::transfer_plan_to`]로 해석해
+    /// [`App::start_transfer`]에 넘긴다.
+    ChooseTransferTarget(JobKind),
 }
+
+/// 대상 선택 창에 보일 내용([`App::transfer_choice`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferChoice {
+    /// 복사·이동.
+    pub kind: JobKind,
+    /// 원본 항목의 경로들: 활성 탭의 선택(목록 순서), 선택이 없으면 커서 항목 하나.
+    pub sources: Vec<PathBuf>,
+    /// 반대편 패널의 활성 탭 위치(패널이 둘이고 실제 폴더일 때).
+    pub opposite: Option<PathBuf>,
+    /// 최근 대상 폴더, 가장 최근 것부터(최대 [`RECENT_TARGETS_LIMIT`]개).
+    pub recent: Vec<PathBuf>,
+}
+
+/// 대상 선택 창에 친 글자를 대상 폴더로 해석하지 못한 까닭([`App::transfer_plan_to`]).
+#[derive(Debug)]
+pub enum TargetError {
+    /// 지금 이 복사·이동을 실행할 수 없다(원본이 없음 등).
+    Unavailable,
+    /// 주소창과 같은 글자 해석이 실패했다(빔·없는 위치·쓸 수 없는 글자 등).
+    Resolve(crate::provider::ResolveError),
+    /// 폴더가 아니라 파일이나 실제 폴더가 아닌 위치다.
+    NotAFolder { text: String },
+}
+
+impl std::fmt::Display for TargetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable => write!(f, "지금은 복사·이동할 수 없습니다"),
+            Self::Resolve(error) => write!(f, "{error}"),
+            Self::NotAFolder { text } => write!(f, "폴더가 아닙니다: {text}"),
+        }
+    }
+}
+
+impl std::error::Error for TargetError {}
 
 /// 반대편 패널로 복사·이동할 내용([`App::transfer_plan`]): 확인 줄에 보일 대상과 항목 수, 확인하면 넣을 작업.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -420,6 +463,8 @@ pub struct App {
     next_window: u64,
     /// 닫은 탭 목록. 가장 최근에 닫은 탭이 끝이다. [`CLOSED_TABS_LIMIT`]개까지.
     closed: VecDeque<ClosedTab>,
+    /// 최근 대상 폴더. 가장 최근 것이 앞이다. [`RECENT_TARGETS_LIMIT`]개까지.
+    recent_targets: Vec<PathBuf>,
     /// 셸 일꾼 스레드. 콜드 스타트를 늦추지 않도록 처음 파일을 열 때 띄운다.
     shell: Option<ShellWorker>,
     /// 작업 대기열. 앱 전체에 하나다(일꾼 스레드는 처음 작업을 넣을 때 뜬다).
@@ -475,6 +520,9 @@ impl App {
     pub fn restore(session: Option<Session>, launch: Vec<LaunchTarget>) -> Self {
         let mut app = App::empty();
         if let Some(session) = session {
+            for target in session.recent_targets.iter().rev() {
+                push_recent(&mut app.recent_targets, target.clone());
+            }
             app.push_session(session);
         }
         if app.is_finished() {
@@ -573,6 +621,7 @@ impl App {
         Some(Session {
             windows,
             active_window: self.active,
+            recent_targets: self.recent_targets.clone(),
         })
     }
 
@@ -614,6 +663,7 @@ impl App {
             next_tab: 0,
             next_window: 0,
             closed: VecDeque::new(),
+            recent_targets: Vec::new(),
             shell: None,
             jobs: JobQueue::new(),
             work_area: WorkArea::new(),
@@ -1393,8 +1443,18 @@ impl App {
                 }
                 return Execution::Done;
             }
-            CommandId::CopyToOtherPanel => return Execution::ConfirmTransfer(JobKind::Copy),
-            CommandId::MoveToOtherPanel => return Execution::ConfirmTransfer(JobKind::Move),
+            CommandId::CopyToOtherPanel | CommandId::MoveToOtherPanel => {
+                let kind = command.transfer_kind().expect("복사·이동 명령이다");
+                return if self.active_window().is_split() {
+                    Execution::ConfirmTransfer(kind)
+                } else {
+                    Execution::ChooseTransferTarget(kind)
+                };
+            }
+            CommandId::CopyTo | CommandId::MoveTo => {
+                let kind = command.transfer_kind().expect("복사·이동 명령이다");
+                return Execution::ChooseTransferTarget(kind);
+            }
             CommandId::NewWindow => {
                 let location = if self.is_finished() {
                     home_location()
@@ -1490,21 +1550,31 @@ impl App {
     /// 반대편 패널의 활성 탭 위치다. 그 명령을 지금 실행할 수 없으면(원본이 없음, 패널이 하나, 실제 폴더가 아닌
     /// 위치) `None`이다. 확인 줄은 이것을 보이고, 확인하면 [`App::start_transfer`]에 넘긴다.
     pub fn transfer_plan(&self, kind: JobKind) -> Option<TransferPlan> {
-        let command = match kind {
-            JobKind::Copy => CommandId::CopyToOtherPanel,
-            JobKind::Move => CommandId::MoveToOtherPanel,
-        };
-        if !self.can_execute(command) {
-            return None;
-        }
-        let window = self.active_window();
-        let target = window
+        let sources = self.transfer_sources(kind)?;
+        let target = self
+            .active_window()
             .opposite_panel()?
             .active_tab()
             .location()
             .file_system_path()?
             .to_path_buf();
-        let tab = window.active_panel().active_tab();
+        Some(TransferPlan {
+            kind,
+            sources,
+            target,
+        })
+    }
+
+    /// 복사·이동할 원본: 활성 탭의 선택(목록 순서), 없으면 커서 항목 하나. 그 작업을 지금 실행할 수 없으면 `None`.
+    fn transfer_sources(&self, kind: JobKind) -> Option<Vec<PathBuf>> {
+        let command = match kind {
+            JobKind::Copy => CommandId::CopyTo,
+            JobKind::Move => CommandId::MoveTo,
+        };
+        if !self.can_execute(command) {
+            return None;
+        }
+        let tab = self.active_window().active_panel().active_tab();
         let folder = tab.location().file_system_path()?;
         let mut sources: Vec<PathBuf> = tab
             .selected_items()
@@ -1513,11 +1583,57 @@ impl App {
         if sources.is_empty() {
             sources.push(folder.join(&tab.cursor_item()?.name));
         }
-        Some(TransferPlan {
+        Some(sources)
+    }
+
+    /// 대상 선택 창에 보일 내용. 그 복사·이동을 지금 실행할 수 없으면 `None`이다.
+    pub fn transfer_choice(&self, kind: JobKind) -> Option<TransferChoice> {
+        let sources = self.transfer_sources(kind)?;
+        let opposite = self
+            .active_window()
+            .opposite_panel()
+            .and_then(|panel| panel.active_tab().location().file_system_path())
+            .map(PathBuf::from);
+        Some(TransferChoice {
+            kind,
+            sources,
+            opposite,
+            recent: self.recent_targets.clone(),
+        })
+    }
+
+    /// 대상 선택 창에서 고른 글자를 대상 폴더로 해석해 [`App::start_transfer`]에 넘길 내용을 만든다. 주소창과 같은
+    /// 글자 해석([`crate::Provider::resolve`])을 쓰고 파일 시스템에 한 번 묻는다. 해석하지 못했거나 폴더가 아니면
+    /// 까닭을 돌려주고 아무것도 바꾸지 않는다.
+    pub fn transfer_plan_to(&self, kind: JobKind, text: &str) -> Result<TransferPlan, TargetError> {
+        let sources = self
+            .transfer_sources(kind)
+            .ok_or(TargetError::Unavailable)?;
+        let resolved = provider_for(self.active_tab().location())
+            .resolve(text)
+            .map_err(TargetError::Resolve)?;
+        let not_a_folder = || TargetError::NotAFolder {
+            text: text.trim().to_string(),
+        };
+        if resolved.select.is_some() {
+            return Err(not_a_folder());
+        }
+        let target = resolved
+            .location
+            .file_system_path()
+            .ok_or_else(not_a_folder)?
+            .to_path_buf();
+        Ok(TransferPlan {
             kind,
             sources,
             target,
         })
+    }
+
+    /// 최근 대상 폴더: 실제로 작업을 시작한 대상, 가장 최근 것부터 [`RECENT_TARGETS_LIMIT`]개까지. 같은 폴더는 한
+    /// 번만 있고 다시 쓰면 앞으로 온다. 앱 전체에 하나이고 세션 파일에 남는다.
+    pub fn recent_targets(&self) -> &[PathBuf] {
+        &self.recent_targets
     }
 
     /// 확인한 복사·이동을 작업 대기열에 넣고 작업 영역에 더한다. 시작 전에 막힌 경우(자기 하위로 복사, 대상 위치
@@ -1528,6 +1644,7 @@ impl App {
         let id = self
             .jobs
             .submit(plan.kind, plan.sources.clone(), plan.target.clone())?;
+        push_recent(&mut self.recent_targets, plan.target.clone());
         self.work_area
             .add(id, plan.kind, plan.target.clone(), plan.sources.len());
         // 넣자마자 온 대기 사건을 바로 반영한다.
@@ -1609,6 +1726,16 @@ impl CommandState for App {
     fn is_enabled(&self, command: CommandId) -> bool {
         self.can_execute(command)
     }
+}
+
+/// `target`을 최근 대상의 맨 앞에 둔다. 같은 폴더(대소문자 무시)가 이미 있으면 그것을 앞으로 옮기고, 넘치면 가장
+/// 오래된 것을 뺀다.
+fn push_recent(recent: &mut Vec<PathBuf>, target: PathBuf) {
+    let key = |path: &PathBuf| path.to_string_lossy().to_lowercase();
+    let wanted = key(&target);
+    recent.retain(|path| key(path) != wanted);
+    recent.insert(0, target);
+    recent.truncate(RECENT_TARGETS_LIMIT);
 }
 
 /// 사용자 홈 폴더. 알 수 없으면 현재 폴더다.

@@ -62,6 +62,8 @@ fn name(command: CommandId) -> &'static str {
         CommandId::NewWindow => "새 창",
         CommandId::CopyToOtherPanel => "반대편 패널로 복사",
         CommandId::MoveToOtherPanel => "반대편 패널로 이동",
+        CommandId::CopyTo => "복사 위치…",
+        CommandId::MoveTo => "이동 위치…",
     }
 }
 
@@ -156,8 +158,11 @@ fn s2_탭_명령과_기본_단축키() {
         assert!(CommandId::ALL.contains(command), "{command:?}");
         assert_eq!(command.shortcuts(), shortcuts.as_slice(), "{command:?}");
     }
-    // S1의 14개와 탭·패널·창 명령, 반대편 패널로 복사·이동이 전부다.
-    assert_eq!(CommandId::ALL.len(), 14 + expected.len());
+    // 복사 위치…·이동 위치…는 기본 단축키가 없다.
+    assert!(CopyTo.shortcuts().is_empty());
+    assert!(MoveTo.shortcuts().is_empty());
+    // S1의 14개와 탭·패널·창 명령, 반대편 패널로 복사·이동, 위치를 골라 복사·이동이 전부다.
+    assert_eq!(CommandId::ALL.len(), 14 + expected.len() + 2);
     assert_eq!(GoToTab(3).as_str(), "go-to-tab-3");
     assert_eq!(CommandId::from_id("go-to-tab-8"), Some(GoToTab(8)));
     assert_eq!(CommandId::from_id("go-to-tab-9"), None);
