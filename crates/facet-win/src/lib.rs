@@ -8,6 +8,9 @@
 //! - [`DirectoryWatcher`]: 폴더 하나의 변경을 감시 스레드에서 알린다(`ReadDirectoryChangesW`).
 //! - [`top_level_window_at`]: 화면 점 아래 보이는 최상위 창(`WindowFromPoint`). 탭을 창 사이로 끌 때 쓴다.
 //!   Windows에서만 있다.
+//! - [`single_instance`]: 단일 실행. 주인 되기([`single_instance::claim`], 사용자 로그온 세션 범위 뮤텍스),
+//!   받기([`single_instance::Owner::listen`], 같은 사용자만 여는 파이프의 수신기 스레드),
+//!   넘기기([`single_instance::forward`], 인자와 작업 폴더). Windows가 아니면 늘 주인이 된다.
 
 use std::fmt;
 use std::io;
@@ -15,9 +18,12 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 
+pub mod single_instance;
 mod watch;
 #[cfg(windows)]
 mod windows_impl;
+#[cfg(windows)]
+mod windows_instance;
 #[cfg(windows)]
 mod windows_screen;
 #[cfg(windows)]
