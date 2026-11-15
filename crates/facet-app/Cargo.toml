@@ -13,7 +13,19 @@ path = "src/main.rs"
 
 [dependencies]
 facet-core.workspace = true
-slint = "1.18"
+# 렌더러는 software 하나만 넣는다(#75). femtovg(OpenGL)는 창을 만들 때 준비에 140ms 넘게 걸려 콜드 스타트
+# 기준(200ms)을 못 넘고, skia(D3D)는 그보다 느린 데다 실행 파일을 키우고 미리 빌드된 skia를 내려받는다.
+# 다른 렌더러를 재 보려면 그 feature(`renderer-femtovg`, `renderer-skia`)를 더하고 `SLINT_BACKEND`로 고른다.
+# `unstable-winit-030`은 측정 모드가 winit의 「다시 그려라」 이벤트로 프레임을 세는 데 쓴다(`src/measure.rs`).
+# 이 API는 Slint 부 버전마다 바뀔 수 있어 1.18.x로 묶는다.
+slint = { version = "~1.18", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "backend-winit",
+    "renderer-software",
+    "accessibility",
+    "unstable-winit-030",
+] }
 
 # 작업 공간 lint와 같되 unsafe_code만 forbid 대신 deny다. Slint가 만든 코드(`slint::include_modules!`)는
 # 안에서 `#[allow(unsafe_code)]`를 쓰는데 forbid는 그것을 막는다. deny는 손으로 쓴 unsafe를 여전히 오류로 만든다.
@@ -24,4 +36,4 @@ unsafe_code = "deny"
 all = { level = "warn", priority = -1 }
 
 [build-dependencies]
-slint-build = "1.18"
+slint-build = "~1.18"
