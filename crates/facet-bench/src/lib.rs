@@ -7,6 +7,8 @@
 //! - 인덱스 벤치마크: 시험 폴더와 같은 이름의 합성 인덱스([`synthetic_index`])를 만들어
 //!   메모리([`INDEX_MEMORY_LIMIT`])와 부분 일치 질의 시간([`QUERY_LIMIT`])을 잰다.
 //!   `cargo xtask ci`가 이것도 부른다.
+//! - MFT 파싱 벤치마크: 저장소의 MFT 조각을 되풀이한 덩어리([`mft_image`])를 인덱스로 만드는
+//!   시간([`MFT_PARSE_LIMIT`])을 잰다. `cargo xtask ci`가 이것도 부른다.
 
 pub mod screen;
 
@@ -370,6 +372,77 @@ pub fn check_memory(bytes: usize, limit: usize) -> Result<(), String> {
             "인덱스 메모리 상한 초과: {:.1}MB ≥ 상한 {:.1}MB",
             bytes as f64 / 1e6,
             limit as f64 / 1e6
+        ))
+    }
+}
+
+/// MFT 파싱 벤치마크의 재료: 저장소의 MFT 조각(`testdata/mft/ntfs-basic.mft`, 레코드 256개).
+pub const MFT_FIXTURE: &[u8] = include_bytes!("../../../testdata/mft/ntfs-basic.mft");
+
+/// MFT 조각의 레코드 크기.
+pub const MFT_RECORD_SIZE: usize = 1024;
+
+/// MFT 파싱 벤치마크의 기본 레코드 수. 항목 100만 개 볼륨의 MFT 크기 무렵이다.
+pub const MFT_RECORDS: usize = 1_000_000;
+
+/// MFT 레코드 100만 개(1GB)를 인덱스로 만드는 파싱 시간의 기준(로컬, 릴리스 빌드).
+///
+/// spec #22의 기준은 「항목 100만 개 볼륨의 첫 인덱스 10초 미만」이고, 그 안에 MFT 읽기·파싱·저장이
+/// 모두 든다. MFT 100만 레코드는 약 1GB다. 이를 디스크에서 순서대로 읽는 데 느린 쪽(초당 150MB 안팎의
+/// 하드 디스크)으로 약 7초, 인덱스 저장과 서비스 준비에 약 1초를 잡으면 파싱 몫은 2초가 남는다.
+/// SSD에서는 읽기가 1~2초라 여유가 더 있다.
+pub const MFT_PARSE_TARGET: Duration = Duration::from_millis(2000);
+
+/// CI가 실패시키는 MFT 파싱 시간 상한: 로컬 기준 [`MFT_PARSE_TARGET`]의 10배.
+/// [`LIST_LIMIT`]과 같은 까닭으로 넉넉하다(알고리즘이 한 단계 나빠지는 실수만 잡는다).
+pub const MFT_PARSE_LIMIT: Duration = Duration::from_millis(20_000);
+
+/// MFT 조각을 `records`개 레코드가 되도록 되풀이해 이어 붙인 MFT 덩어리.
+///
+/// 레코드마다 고정값이 맞으므로 모두 정상 레코드로 읽힌다. 되풀이한 레코드의 부모 참조는 첫 조각의
+/// 폴더를 가리키므로 항목 대부분이 경로를 갖는다.
+pub fn mft_image(records: usize) -> Vec<u8> {
+    let len = records * MFT_RECORD_SIZE;
+    MFT_FIXTURE.iter().copied().cycle().take(len).collect()
+}
+
+/// MFT 덩어리 `image`를 인덱스로 만드는 시간을 `runs`번 잰다. 재기 전에 한 번 돌려 데운다.
+/// [`Measurement::item_count`]는 만든 인덱스의 항목 수다.
+pub fn measure_mft(image: &[u8], runs: usize) -> Result<Measurement, String> {
+    let parse = || {
+        facet_index::Index::from_mft(SYNTHETIC_ROOT, MFT_RECORD_SIZE, image)
+            .map_err(|e| e.to_string())
+    };
+    let (index, report) = parse()?;
+    if report.skipped != 0 {
+        return Err(format!(
+            "MFT 조각에서 건너뛴 레코드가 있습니다: {}개",
+            report.skipped
+        ));
+    }
+    let mut item_count = index.len();
+    drop(index);
+    let mut times = Vec::with_capacity(runs);
+    for _ in 0..runs {
+        let start = Instant::now();
+        let (index, _) = parse()?;
+        times.push(start.elapsed());
+        item_count = index.len();
+    }
+    Ok(Measurement { item_count, times })
+}
+
+/// MFT 파싱 중앙값이 `limit`을 넘으면 넘은 수치를 담은 메시지를 돌려준다.
+pub fn check_mft_limit(m: &Measurement, records: usize, limit: Duration) -> Result<(), String> {
+    let median = m.median();
+    if median <= limit {
+        Ok(())
+    } else {
+        Err(format!(
+            "MFT 파싱 상한 초과: 레코드 {records}개 중앙값 {}ms > 상한 {}ms (최악 {}ms)",
+            median.as_millis(),
+            limit.as_millis(),
+            m.max().as_millis()
         ))
     }
 }

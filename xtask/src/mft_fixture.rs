@@ -30,6 +30,8 @@ struct Entry {
     /// 볼륨 루트에서의 경로(`\`로 시작).
     path: String,
     size: Option<u64>,
+    /// 수정 날짜(`FILETIME`)와 파일 속성. 지운 레코드·확장 레코드는 `None`.
+    stamp: Option<(u64, u32)>,
     note: String,
 }
 
@@ -99,6 +101,7 @@ fn populate(volume: &str) -> Result<Made, String> {
             kind,
             path: format!("\\{rel}"),
             size,
+            stamp: None,
             note: note.to_owned(),
         });
         Ok((record, sequence))
@@ -219,12 +222,19 @@ fn populate(volume: &str) -> Result<Made, String> {
             kind,
             path: format!("\\{rel}"),
             size: None,
+            stamp: None,
             note: "레코드 사용 중 표시가 꺼짐".to_owned(),
         });
     }
     fs::remove_dir_all(at("지울 폴더")).map_err(|e| format!("지울 폴더: {e}"))?;
     fs::remove_file(at("지울 파일.txt")).map_err(|e| format!("지울 파일.txt: {e}"))?;
     let deleted_records = deleted.iter().map(|e| e.record).collect();
+
+    // 수정 날짜와 속성은 모든 항목을 만들고 지운 뒤에 읽는다. 폴더의 수정 날짜는 안에 항목을
+    // 만들거나 지울 때마다 바뀌기 때문이다. 하드 링크는 레코드가 같으므로 값도 같다.
+    for e in &mut entries {
+        e.stamp = Some(stamp(&at(&e.path[1..]))?);
+    }
     entries.extend(deleted);
 
     Ok(Made {
@@ -242,6 +252,19 @@ fn long_name(units: usize) -> String {
         .take(units - 4)
         .collect();
     format!("{base}.txt")
+}
+
+/// 항목의 수정 날짜(`FILETIME`)와 파일 속성. Windows가 `$STANDARD_INFORMATION`에서 읽어 주는 값이다.
+#[cfg(windows)]
+fn stamp(path: &Path) -> Result<(u64, u32), String> {
+    use std::os::windows::fs::MetadataExt;
+    let m = fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok((m.last_write_time(), m.file_attributes()))
+}
+
+#[cfg(not(windows))]
+fn stamp(_: &Path) -> Result<(u64, u32), String> {
+    Err("MFT 조각은 Windows에서만 만든다".to_owned())
 }
 
 /// 파일 ID에서 (레코드 번호, 순번)을 얻는다. NTFS 파일 ID의 아래 48비트가 레코드 번호다.
@@ -348,6 +371,7 @@ fn extension_records(bytes: &[u8], entries: &[Entry]) -> Vec<Entry> {
             kind: "확장 레코드",
             path,
             size: None,
+            stamp: None,
             note: format!("기본 레코드 {base_record}(순번 {base_sequence})"),
         });
     }
@@ -360,14 +384,18 @@ fn expected_tsv(entries: &[Entry], records: usize) -> String {
     let mut s = format!(
         "# {FIXTURE}.mft의 기대값 목록. `cargo xtask mft-fixture`가 만든다. 형식은 README.md.\n\
          # 조각: 레코드 0..{records}, 레코드당 {RECORD}바이트, 디스크 그대로(고정값 미적용).\n\
-         # 레코드\t순번\t종류\t경로\t크기\t비고\n"
+         # 레코드\t순번\t종류\t경로\t크기\t수정 날짜\t속성\t비고\n"
     );
     for e in sorted {
         let size = e.size.map_or_else(|| "-".to_owned(), |s| s.to_string());
+        let (modified, attributes) = e.stamp.map_or_else(
+            || ("-".to_owned(), "-".to_owned()),
+            |(m, a)| (m.to_string(), format!("0x{a:08X}")),
+        );
         let _ = writeln!(
             s,
-            "{}\t{}\t{}\t{}\t{}\t{}",
-            e.record, e.sequence, e.kind, e.path, size, e.note
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            e.record, e.sequence, e.kind, e.path, size, modified, attributes, e.note
         );
     }
     s

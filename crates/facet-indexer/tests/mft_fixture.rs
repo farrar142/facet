@@ -27,7 +27,7 @@ fn expected() -> Vec<Line> {
         .filter(|l| !l.starts_with('#') && !l.is_empty())
         .map(|l| {
             let cols: Vec<&str> = l.split('\t').collect();
-            assert_eq!(cols.len(), 6, "열이 6개가 아님: {l}");
+            assert_eq!(cols.len(), 8, "열이 8개가 아님: {l}");
             Line {
                 record: cols[0].parse().unwrap(),
                 sequence: cols[1].parse().unwrap(),
