@@ -737,6 +737,7 @@ impl View {
             ui.set_split(window.is_split());
             ui.set_active_panel(count(window.active_panel_index()));
             ui.set_split_ratio(window.split_ratio());
+            ui.set_folder_title(window.active_panel().active_tab().title().into());
         }
         let now = Instant::now();
         let mut redraw_at: Option<Instant> = None;
