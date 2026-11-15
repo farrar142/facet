@@ -606,6 +606,8 @@ struct View {
     palette_rows: Rc<VecModel<PaletteRow>>,
     /// 「읽는 중」을 드러낼 때 다시 그리는 타이머.
     reading_timer: Timer,
+    /// 켜져 있으면 다음 `render`가 행 모델을 reset하지 않는다(행 눌러 고르기가 바뀐 행만 알리는 동안).
+    keep_rows: Cell<bool>,
     /// 누른 탭의 끌기 상태. 탭을 누르면 생기고 놓거나 끊기면 없어진다.
     tab_drag: RefCell<Option<TabDrag<WindowId>>>,
 }
@@ -652,6 +654,7 @@ impl View {
             palette: RefCell::default(),
             palette_rows,
             reading_timer: Timer::default(),
+            keep_rows: Cell::new(false),
             tab_drag: RefCell::default(),
         })
     }
@@ -837,8 +840,11 @@ impl View {
         );
         let redraw_at = tab.reading_shown_at().filter(|at| *at > now);
         drop(app);
-        // 화면은 보이는 행만 다시 묻는다.
-        models.rows.notify.reset();
+        // 화면은 보이는 행만 다시 묻는다. 행 요소를 새로 만들면 누르던 행의 TouchArea가 사라져 더블 클릭이
+        // 이어지지 않으므로, 고르기만 바뀐 때는 reset하지 않는다.
+        if !self.keep_rows.get() {
+            models.rows.notify.reset();
+        }
         redraw_at
     }
 
@@ -1451,8 +1457,33 @@ impl View {
         let Ok(index) = usize::try_from(row) else {
             return;
         };
+        let panel = self.active_panel();
+        let before = self.row_marks();
         self.app.borrow_mut().active_tab_mut().pick(index, pick);
-        self.render();
+        let after = self.row_marks();
+        // 목록은 그대로고 선택·커서만 바뀌었으니 바뀐 행만 알린다. 행 요소가 그대로 남아야 더블 클릭이 된다.
+        if before.len() == after.len() {
+            self.keep_rows.set(true);
+            self.render();
+            self.keep_rows.set(false);
+            for (i, (a, b)) in before.iter().zip(&after).enumerate() {
+                if a != b {
+                    self.panels[panel].rows.notify.row_changed(i);
+                }
+            }
+        } else {
+            self.render();
+        }
+    }
+
+    /// 활성 탭의 행마다 (선택됨, 커서).
+    fn row_marks(&self) -> Vec<(bool, bool)> {
+        let app = self.app.borrow();
+        let tab = app.active_tab();
+        let cursor = tab.cursor();
+        (0..tab.len())
+            .map(|i| (tab.is_selected(i), cursor == Some(i)))
+            .collect()
     }
 
     /// 행을 두 번 눌렀다: 그 행을 고르고 연다(폴더면 들어가고 파일이면 기본 프로그램으로).
