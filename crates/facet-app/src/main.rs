@@ -881,6 +881,11 @@ fn job_row(entry: &JobEntry) -> JobRow {
     JobRow {
         id: job_number(entry.id),
         moving: entry.kind == JobKind::Move,
+        reverting: match entry.kind {
+            JobKind::Copy | JobKind::Move => 0,
+            JobKind::Undo => 1,
+            JobKind::Redo => 2,
+        },
         target: entry.target.display().to_string().into(),
         status: match entry.state {
             JobState::Queued => JobStatus::Queued,
@@ -1616,6 +1621,8 @@ impl View {
                 // 까닭을 보이는 것은 #156이 한다.
                 let _ = self.app.borrow_mut().new_folder(text::NEW_FOLDER_BASE);
             }
+            // 실행취소할 수 없는 까닭과 작업 기록 목록을 보이는 것은 앱 티켓이 한다.
+            Execution::UndoRefused(_) | Execution::ShowHistory => {}
             Execution::Done | Execution::Disabled | Execution::WindowClosed => {}
         }
     }
