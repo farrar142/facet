@@ -28,9 +28,10 @@ use facet_win::file_ops::{self, CopyStep, FileOpErrorKind, Link};
 
 use super::{
     Conflict, ConflictItem, Context, Control, CopyRejection, ErrorAnswer, ItemFailure, ItemKind,
-    JobEvent, JobId, Outbox, PROGRESS_INTERVAL, Progress, Remaining, Resolution, Summary,
-    is_within, same_path,
+    JobEvent, JobId, JournalSink, Outbox, PROGRESS_INTERVAL, Progress, Remaining, Resolution,
+    Summary, is_within, same_path,
 };
+use crate::history::{Stamp, Step};
 
 /// 대상이 이미 있어 다시 확인하는 횟수의 한도. 확인과 쓰기 사이에 밖에서 같은 이름을 만들면 다시 묻는데, 그것이
 /// 끝없이 되풀이되지 않게 한다.
@@ -49,6 +50,8 @@ const COPY_SUFFIX: &str = " - 복사본";
 pub(super) struct CopyJob {
     pub(super) roots: Vec<Root>,
     pub(super) target: PathBuf,
+    /// 한 일을 적을 곳(작업 기록에 남길 작업만).
+    pub(super) journal: Option<JournalSink>,
 }
 
 /// 넘긴 원본 하나.
@@ -95,7 +98,11 @@ impl CopyJob {
                 same_folder,
             });
         }
-        Ok(CopyJob { roots, target })
+        Ok(CopyJob {
+            roots,
+            target,
+            journal: None,
+        })
     }
 
     /// 넘긴 원본 수.
@@ -111,6 +118,7 @@ impl CopyJob {
     pub(super) fn run(self, context: &Context<'_>) -> (Summary, bool) {
         let plans = self.plan();
         let mut copier = Copier::new(context, false);
+        copier.journal = self.journal;
         // 훑기는 취소됐을 때만 다 세지 않고 멈춘다. 복사 쪽이 취소를 보기 전에 훑기가 먼저 멈췄어도(예: 항목을
         // 하나도 넣기 전에 일시정지한 채 취소) 다 세지 않았으므로 `finish`가 취소로 끝낸다.
         if copier.run_pipeline(plans) {
@@ -448,8 +456,12 @@ pub(super) struct Copier<'a> {
     pub(super) context: &'a Context<'a>,
     /// 취소로 멈췄다.
     pub(super) cancelled: bool,
-    /// 이동 작업의 복사(볼륨을 넘는 이동): 복사를 마친 원본을 지운다.
-    moving: bool,
+    /// 이동 작업의 복사(볼륨을 넘는 이동): 복사를 마친 원본을 지운다. 실행취소가 볼륨을 넘어 되옮길 때 잠시 켠다.
+    pub(super) moving: bool,
+    /// 한 일을 적을 곳(작업 기록에 남길 작업만). 실제로 만들거나 옮긴 항목만 적는다.
+    pub(super) journal: Option<JournalSink>,
+    /// 이름 충돌에 둘 다 유지로 답해 방금 쓴 실제 대상 경로(「이름 (2)」). 기록에 실제 이름을 남기는 데 쓴다.
+    kept_as: Option<PathBuf>,
 }
 
 /// 들어가 있는 폴더 하나.
@@ -511,7 +523,64 @@ impl<'a> Copier<'a> {
             context,
             cancelled: false,
             moving,
+            journal: None,
+            kept_as: None,
         }
+    }
+
+    /// 파일·링크 하나를 `source`에서 `target`으로 복사했다(이동이면 옮겼다). 작업 기록에 적는다.
+    pub(super) fn note_item(&self, source: &Path, target: &Path, overwritten: bool) {
+        let Some(journal) = &self.journal else {
+            return;
+        };
+        let Some(stamp) = Stamp::read(target) else {
+            return;
+        };
+        let step = if self.moving {
+            Step::Moved {
+                from: source.to_path_buf(),
+                to: target.to_path_buf(),
+                stamp,
+            }
+        } else {
+            Step::Copied {
+                source: source.to_path_buf(),
+                path: target.to_path_buf(),
+                stamp,
+            }
+        };
+        let mut journal = super::lock(journal);
+        journal.overwrote |= overwritten;
+        journal.steps.push(step);
+    }
+
+    /// 폴더 `target`에 들어갔다(`created`면 만들었고, 아니면 같은 이름의 폴더와 합쳤다). 작업 기록에 적는다. 복사가
+    /// 합친 폴더는 만든 것이 아니므로 적지 않는다(실행취소가 지우지 않게).
+    pub(super) fn note_folder(&self, source: &Path, target: &Path, created: bool) {
+        let Some(journal) = &self.journal else {
+            return;
+        };
+        if !self.moving && !created {
+            return;
+        }
+        let Some(stamp) = Stamp::read(target) else {
+            return;
+        };
+        let step = if self.moving {
+            Step::MovedFolder {
+                from: source.to_path_buf(),
+                to: target.to_path_buf(),
+                created,
+                stamp,
+            }
+        } else {
+            Step::Copied {
+                source: source.to_path_buf(),
+                path: target.to_path_buf(),
+                stamp,
+            }
+        };
+        super::lock(journal).steps.push(step);
     }
 
     /// 원본들을 훑기 스레드가 훑는 동안 이미 센 항목부터 복사한다. 다 훑었으면 `true`(취소로 훑기가 멈췄으면
@@ -631,7 +700,12 @@ impl<'a> Copier<'a> {
 
     /// 안의 항목을 다 쓴 폴더의 시각·속성을 원본과 맞춘다(들어가기 전에 읽어 둔 `snapshot`이 있으면 그 값으로).
     /// 실패하면 묻는다.
-    fn finish_folder(&mut self, source: &Path, target: &Path, snapshot: Option<&fs::Metadata>) {
+    pub(super) fn finish_folder(
+        &mut self,
+        source: &Path,
+        target: &Path,
+        snapshot: Option<&fs::Metadata>,
+    ) {
         let apply = |target: &Path| match snapshot {
             Some(metadata) => file_ops::apply_folder_metadata(metadata, target),
             None => file_ops::copy_folder_metadata(source, target),
@@ -764,6 +838,7 @@ impl<'a> Copier<'a> {
                 Ok(metadata) if metadata.is_dir() => {
                     self.summary.folders_merged += 1;
                     self.enter(scanned, target, false);
+                    self.note_folder(source, target, false);
                     return FolderOutcome::Done;
                 }
                 // 같은 이름의 파일(또는 링크): 묻는다. 덮어쓰기는 고를 수 없다.
@@ -774,7 +849,7 @@ impl<'a> Copier<'a> {
                     match resolution {
                         Resolution::KeepBoth => {
                             let renamed = free_numbered(target, false);
-                            return self.create_folder(scanned, &renamed);
+                            return self.create_folder(source, scanned, &renamed);
                         }
                         // 덮어쓰기 답은 `resolve`가 받지 않는다.
                         _ => {
@@ -784,7 +859,7 @@ impl<'a> Copier<'a> {
                         }
                     }
                 }
-                Err(_) => match self.create_folder(scanned, target) {
+                Err(_) => match self.create_folder(source, scanned, target) {
                     // 확인한 뒤 밖에서 생겼다: 다시 본다.
                     FolderOutcome::Failed(FileOpErrorKind::TargetExists) => {}
                     outcome => return outcome,
@@ -795,11 +870,12 @@ impl<'a> Copier<'a> {
     }
 
     /// 폴더를 만들고 들어간다.
-    fn create_folder(&mut self, scanned: &Path, target: &Path) -> FolderOutcome {
+    fn create_folder(&mut self, source: &Path, scanned: &Path, target: &Path) -> FolderOutcome {
         match file_ops::create_folder(target) {
             Ok(()) => {
                 self.summary.folders_copied += 1;
                 self.enter(scanned, target, true);
+                self.note_folder(source, target, true);
                 FolderOutcome::Done
             }
             Err(error) => FolderOutcome::Failed(error.kind()),
@@ -869,6 +945,7 @@ impl<'a> Copier<'a> {
     /// 이동 작업의 복사면 복사를 마친 뒤 원본을 지운다(지우지 못하면 항목별 오류로 묻는다).
     pub(super) fn copy_file(&mut self, source: &Path, target: &Path, size: u64) -> bool {
         self.reporter.current = Some(source.to_path_buf());
+        self.kept_as = None;
         let base = self.reporter.bytes_done;
         loop {
             let outcome = self.attempt_file(source, target, size, base);
@@ -880,6 +957,8 @@ impl<'a> Copier<'a> {
                     if overwritten {
                         self.summary.files_overwritten += 1;
                     }
+                    let written = self.kept_as.take();
+                    self.note_item(source, written.as_deref().unwrap_or(target), overwritten);
                     if self.moving && !self.remove_source(source, file_ops::remove_file) {
                         return false;
                     }
@@ -929,8 +1008,9 @@ impl<'a> Copier<'a> {
     /// 링크를 만들 권한이 없으면 접근 거부) 항목별 오류로 묻는다. 취소로 그만뒀으면 `false`.
     ///
     /// 이동 작업의 복사면 링크를 만든 뒤 원본 링크를 지운다(가리키는 곳은 건드리지 않는다).
-    fn copy_link(&mut self, source: &Path, target: &Path) -> bool {
+    pub(super) fn copy_link(&mut self, source: &Path, target: &Path) -> bool {
         self.reporter.current = Some(source.to_path_buf());
+        self.kept_as = None;
         loop {
             let kind = match self.attempt_link(source, target) {
                 FileOutcome::Copied { overwritten } => {
@@ -938,6 +1018,8 @@ impl<'a> Copier<'a> {
                     if overwritten {
                         self.summary.files_overwritten += 1;
                     }
+                    let written = self.kept_as.take();
+                    self.note_item(source, written.as_deref().unwrap_or(target), overwritten);
                     return !self.moving || self.remove_source(source, file_ops::remove_link);
                 }
                 FileOutcome::Skipped => {
@@ -1003,6 +1085,10 @@ impl<'a> Copier<'a> {
                 let renamed = free_numbered(target, !link.kind.is_folder());
                 match write_link(link, &renamed) {
                     FileOutcome::Exists => FileOutcome::Failed(FileOpErrorKind::TargetExists),
+                    outcome @ FileOutcome::Copied { .. } => {
+                        self.kept_as = Some(renamed);
+                        outcome
+                    }
                     outcome => outcome,
                 }
             }
@@ -1049,6 +1135,10 @@ impl<'a> Copier<'a> {
                 match self.write_file(source, &renamed, size, base) {
                     // 고른 번호를 밖에서 먼저 썼으면 실패로 둔다(같은 질문을 되풀이하지 않게).
                     FileOutcome::Exists => FileOutcome::Failed(FileOpErrorKind::TargetExists),
+                    outcome @ FileOutcome::Copied { .. } => {
+                        self.kept_as = Some(renamed);
+                        outcome
+                    }
                     outcome => outcome,
                 }
             }

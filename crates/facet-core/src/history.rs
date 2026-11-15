@@ -3,7 +3,8 @@
 //! 작업 기록([`History`])은 앱 전체에 하나이고([`crate::window::App::history`]) 메모리에만 있다(디스크에 남기지
 //! 않는다). 끝난 작업만 들어가며 최근 [`HISTORY_LIMIT`]개까지 남고, 넘치면 가장 오래된 기록이 빠진다. 기록
 //! ([`Record`])마다 작업 종류([`OperationKind`]), 항목별 결과(되돌릴 단위 [`Step`]: 원래 경로·새 경로·만든 항목과
-//! 그때의 크기·수정 시각 [`Stamp`]), 되돌릴 수 없으면 그 까닭([`NotUndoable`])을 갖는다.
+//! 그때의 크기·수정 시각 [`Stamp`]), 되돌릴 수 없으면 그 까닭([`NotUndoable`])을 갖는다. 이름바꾸기·새 폴더와
+//! 복사·이동(폴더 안의 항목도 하나씩, [`Step::Copied`]·[`Step::Moved`]·[`Step::MovedFolder`])이 기록된다.
 //!
 //! - **실행취소 대상**은 끝난 작업 가운데 마지막 기록이다([`History::undo_target`]). 그것이 되돌릴 수 없는 작업이면
 //!   실행취소는 까닭을 돌려주고 그 앞 기록으로 넘어가지 않는다.
@@ -45,6 +46,10 @@ pub enum OperationKind {
     Rename,
     /// 새 폴더. 만든 뒤 이름 입력란에서 이름을 바꿨으면 그 이름바꾸기까지 이 작업 하나다.
     NewFolder,
+    /// 복사(반대편 패널로, 복사 위치…). 항목은 [`Step::Copied`]다.
+    Copy,
+    /// 이동(반대편 패널로, 이동 위치…). 항목은 [`Step::Moved`]·[`Step::MovedFolder`]다.
+    Move,
 }
 
 /// 되돌릴 수 없는 까닭의 종류.
@@ -52,6 +57,9 @@ pub enum OperationKind {
 pub enum NotUndoable {
     /// 영구 삭제(휴지통을 거치지 않음, 덮어쓰기 포함): 되살릴 것이 남지 않는다.
     PermanentDelete,
+    /// 복사·이동이 이름 충돌에서 대상 파일을 덮어썼다: 덮어쓴 파일은 되살릴 수 없으므로 그 작업 전체를 되돌릴 수
+    /// 없다고 둔다(되돌릴 수 있다고 표시한 작업은 반드시 되돌아가야 하므로).
+    Overwritten,
 }
 
 /// 기록할 때 본 항목의 모습: 밖에서 바뀌었는지 판단하는 데 쓴다(내용 해시는 쓰지 않는다).
@@ -99,6 +107,33 @@ pub enum Step {
     },
     /// `path`에 폴더를 만들었다. 되돌리기는 비어 있으면 지우기다.
     CreatedFolder { path: PathBuf, stamp: Stamp },
+    /// 복사가 `source`를 복사해 `path`에 만든 항목(파일, 링크 자체, 만든 폴더). 폴더 안의 항목도 하나씩 따로 든다
+    /// (폴더가 먼저, 그 안의 항목이 뒤). 대상에 원래 있어 합친 폴더는 만든 것이 아니라 들지 않는다. 「- 복사본」·
+    /// 「이름 (2)」로 만들었으면 `path`가 그 이름이다. `stamp`는 `path`에 있는 항목의 모습이다.
+    ///
+    /// 되돌리기는 휴지통으로 보내기다(영구 삭제하지 않는다). 다시 하기는 같은 원본을 다시 복사하기다.
+    Copied {
+        source: PathBuf,
+        path: PathBuf,
+        stamp: Stamp,
+    },
+    /// 이동이 `from`의 항목을 통째로 `to`로 옮겼다(같은 볼륨의 이름 바꾸기, 다른 볼륨이면 복사 뒤 원본 삭제한 파일·
+    /// 링크). `stamp`는 `to`에 있는 항목의 모습이다. 되돌리기는 되옮기기다.
+    Moved {
+        from: PathBuf,
+        to: PathBuf,
+        stamp: Stamp,
+    },
+    /// 이동이 폴더 `from`을 통째로 옮기지 않고 안의 항목을 하나씩 옮긴 폴더(대상에 같은 이름 폴더가 있어 합쳤거나
+    /// 다른 볼륨이라 `to`를 만들어 옮겼다). 안의 항목은 이 뒤에 따로 든다. `created`면 이동이 `to`를 만들었다.
+    ///
+    /// 되돌리기는 `from` 폴더를 (없으면) 다시 만들고, 이동이 만든 `to`가 비었으면 지우기다.
+    MovedFolder {
+        from: PathBuf,
+        to: PathBuf,
+        created: bool,
+        stamp: Stamp,
+    },
 }
 
 impl Step {
@@ -106,15 +141,26 @@ impl Step {
     pub fn path(&self) -> &Path {
         match self {
             Step::Renamed { to, .. } => to,
-            Step::CreatedFolder { path, .. } => path,
+            Step::CreatedFolder { path, .. } | Step::Copied { path, .. } => path,
+            Step::Moved { to, .. } | Step::MovedFolder { to, .. } => to,
         }
     }
 
-    /// 작업 전에 그 항목이 있던 경로. 새로 만든 항목은 없다.
+    /// 작업 전에 그 항목이 있던 경로. 새로 만든 항목(새 폴더, 복사본)은 없다.
     pub fn original(&self) -> Option<&Path> {
         match self {
-            Step::Renamed { from, .. } => Some(from),
-            Step::CreatedFolder { .. } => None,
+            Step::Renamed { from, .. }
+            | Step::Moved { from, .. }
+            | Step::MovedFolder { from, .. } => Some(from),
+            Step::CreatedFolder { .. } | Step::Copied { .. } => None,
+        }
+    }
+
+    /// 복사한 항목의 원본 경로. 복사가 아니면 `None`.
+    pub fn source(&self) -> Option<&Path> {
+        match self {
+            Step::Copied { source, .. } => Some(source),
+            _ => None,
         }
     }
 }
@@ -207,6 +253,26 @@ impl Record {
         self.steps.len() as u64
     }
 
+    /// 맨 위 항목들: 다른 항목 아래에 있지 않은 항목(작업 이름에 쓸 것). 복사·이동은 폴더 안의 항목도 따로 들므로
+    /// 폴더 하나를 복사했으면 그 폴더 하나다. 이름바꾸기·새 폴더는 모든 항목이다.
+    pub fn top_steps(&self) -> Vec<&Step> {
+        let paths: std::collections::HashSet<String> = self
+            .steps
+            .iter()
+            .map(|step| path_key(step.path()))
+            .collect();
+        self.steps
+            .iter()
+            .filter(|step| {
+                !step
+                    .path()
+                    .ancestors()
+                    .skip(1)
+                    .any(|parent| paths.contains(&path_key(parent)))
+            })
+            .collect()
+    }
+
     /// 건너뛴 항목 수([`Record::with_skipped`]).
     pub fn items_skipped(&self) -> u64 {
         self.skipped
@@ -247,8 +313,10 @@ pub enum RevertSkip {
     Changed,
     /// 되바꿀(만들) 자리에 같은 이름의 다른 항목이 있다.
     NameTaken,
-    /// 지울 새 폴더가 비어 있지 않다(그 뒤 안에 무언가 생겼다).
+    /// 지울 폴더가 비어 있지 않다(그 뒤 안에 무언가 생겼거나, 안의 항목을 밖의 변경으로 되돌리지 못했다).
     NotEmpty,
+    /// 휴지통에 넣을 수 없어(휴지통보다 큼, 휴지통이 없는·끈 볼륨) 지우지 않았다. 실행취소는 영구 삭제하지 않는다.
+    NotRecyclable,
 }
 
 /// 밖의 변경으로 건너뛴 항목: 그 경로와 까닭.
@@ -258,6 +326,16 @@ pub struct NotReverted {
     pub path: PathBuf,
     /// 까닭.
     pub reason: RevertSkip,
+}
+
+/// 경로를 같은지 견주는 열쇠(Windows는 대소문자를 가리지 않는다).
+pub(crate) fn path_key(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if cfg!(windows) {
+        text.to_lowercase()
+    } else {
+        text.into_owned()
+    }
 }
 
 /// 항목마다 되돌린(다시 한) 결과를 작업 스레드가 적는 곳. 되돌렸으면 반대 방향에 쓸 새 모습의 항목이 들어간다.
@@ -435,20 +513,22 @@ impl History {
         let Some(running) = self.running.take() else {
             return false;
         };
-        let outcomes = running
+        let mut outcomes = running
             .outcomes
             .lock()
-            .map(|o| o.clone())
+            .map(|mut o| std::mem::take(&mut *o))
             .unwrap_or_default();
-        // 작업 스레드는 시작할 때의 차례(steps_for)로 적었다. 기록의 차례로 되돌린다.
-        let mut ordered: Vec<(Step, Option<Step>)> =
-            Self::steps_for(&running.record, running.reversal)
-                .into_iter()
-                .zip(outcomes.into_iter().chain(std::iter::repeat(None)))
-                .collect();
+        // 작업 스레드는 시작할 때의 차례(steps_for: 실행취소면 거꾸로)로 적었다. 기록의 차례로 맞춘다. 항목이 많아도
+        // (복사한 폴더 안의 1만 항목) 항목을 복제하지 않고 옮기기만 한다.
         if running.reversal == Reversal::Undo {
-            ordered.reverse();
+            outcomes.reverse();
         }
+        let ordered: Vec<(Step, Option<Step>)> = running
+            .record
+            .steps
+            .into_iter()
+            .zip(outcomes.into_iter().chain(std::iter::repeat(None)))
+            .collect();
         let mut moved = Vec::new();
         let mut stayed = Vec::new();
         for (step, outcome) in ordered {
@@ -458,8 +538,11 @@ impl History {
             }
         }
         let piece = |steps: Vec<Step>| Record {
+            id: running.record.id,
+            kind: running.record.kind,
             steps,
-            ..running.record.clone()
+            not_undoable: running.record.not_undoable,
+            skipped: running.record.skipped,
         };
         let intact = running.generation == self.generation;
         match running.reversal {
@@ -519,6 +602,45 @@ mod tests {
             Err(UndoError::NotUndoable(NotUndoable::PermanentDelete))
         );
         assert_eq!(history.records().len(), 2);
+    }
+
+    #[test]
+    fn 항목_1만_개의_복사_기록도_곧바로_다룬다() {
+        let stamp = Stamp {
+            is_folder: false,
+            size: 4096,
+            modified: SystemTime::UNIX_EPOCH,
+        };
+        let root = PathBuf::from("대상").join("사진");
+        let mut steps = vec![Step::Copied {
+            source: PathBuf::from("원본").join("사진"),
+            path: root.clone(),
+            stamp: Stamp {
+                is_folder: true,
+                ..stamp
+            },
+        }];
+        steps.extend((0..10_000).map(|n| Step::Copied {
+            source: PathBuf::from("원본").join("사진").join(format!("{n}.jpg")),
+            path: root.join(format!("{n}.jpg")),
+            stamp,
+        }));
+        let start = std::time::Instant::now();
+        let mut history = History::new();
+        history.record(Record::new(OperationKind::Copy, steps));
+        let record = history.check(Reversal::Undo).unwrap();
+        assert_eq!(record.top_steps().len(), 1, "폴더 하나를 복사한 작업이다");
+        let outcomes = Outcomes::default();
+        let steps = History::steps_for(record, Reversal::Undo);
+        *outcomes.lock().unwrap() = steps.into_iter().map(Some).collect();
+        history.begin(Reversal::Undo, JobId::for_test(1), Arc::clone(&outcomes));
+        assert!(history.finish(JobId::for_test(1)));
+        assert_eq!(
+            history.redo_target().map(Record::items_completed),
+            Some(10_001)
+        );
+        // 넉넉한 상한: 경로를 한 번씩 훑는 일이라 디버그 빌드에서도 수십 밀리초다.
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
     }
 
     #[test]

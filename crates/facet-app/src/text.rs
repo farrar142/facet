@@ -127,10 +127,10 @@ pub fn rename_error_text(error: EditError) -> String {
 }
 
 /// 기록한 작업의 이름: 상태 줄의 「〈작업 이름〉 실행취소」와 작업 기록 보기의 줄에 쓴다. 항목이 하나면 그
-/// 이름(작업 뒤 이름), 여럿이면 수를 넣는다.
+/// 이름(작업 뒤 이름), 여럿이면 수를 넣는다. 복사·이동은 폴더 안의 항목을 세지 않고 맨 위 항목으로 센다.
 pub fn operation_name(record: &Record) -> String {
-    let steps = record.steps();
-    let single = match steps {
+    let steps = record.top_steps();
+    let single = match steps.as_slice() {
         [step] => step
             .path()
             .file_name()
@@ -143,6 +143,10 @@ pub fn operation_name(record: &Record) -> String {
         (OperationKind::Rename, None) => format!("항목 {n}개 이름 바꾸기"),
         (OperationKind::NewFolder, Some(name)) => format!("새 폴더 「{name}」 만들기"),
         (OperationKind::NewFolder, None) => format!("새 폴더 {n}개 만들기"),
+        (OperationKind::Copy, Some(name)) => format!("「{name}」 복사"),
+        (OperationKind::Copy, None) => format!("항목 {n}개 복사"),
+        (OperationKind::Move, Some(name)) => format!("「{name}」 이동"),
+        (OperationKind::Move, None) => format!("항목 {n}개 이동"),
     }
 }
 
@@ -160,6 +164,7 @@ pub fn redo_notice(record: &Record) -> String {
 pub fn not_undoable_text(reason: NotUndoable) -> String {
     match reason {
         NotUndoable::PermanentDelete => "되돌릴 수 없음: 영구 삭제".to_owned(),
+        NotUndoable::Overwritten => "되돌릴 수 없음: 덮어씀".to_owned(),
     }
 }
 
@@ -167,6 +172,7 @@ pub fn not_undoable_text(reason: NotUndoable) -> String {
 pub fn undo_refused_text(record: &Record, reason: NotUndoable) -> String {
     let why = match reason {
         NotUndoable::PermanentDelete => "영구 삭제한 항목은 되살릴 수 없습니다",
+        NotUndoable::Overwritten => "덮어쓴 파일은 되살릴 수 없습니다",
     };
     format!("{}: 실행취소할 수 없습니다. {why}", operation_name(record))
 }
@@ -178,6 +184,7 @@ pub fn revert_skip_text(reason: RevertSkip) -> &'static str {
         RevertSkip::Changed => "그 뒤 바뀌었습니다",
         RevertSkip::NameTaken => "그 자리에 같은 이름의 항목이 있습니다",
         RevertSkip::NotEmpty => "폴더가 비어 있지 않습니다",
+        RevertSkip::NotRecyclable => "휴지통에 넣을 수 없어 지우지 않았습니다",
     }
 }
 
@@ -389,6 +396,40 @@ mod tests {
             }],
         );
         assert_eq!(operation_name(&folder), "새 폴더 「사진」 만들기");
+        // 복사·이동은 폴더 안의 항목을 세지 않고 맨 위 항목으로 센다.
+        let copied = |path: &str| facet_core::history::Step::Copied {
+            source: std::path::PathBuf::from(r"C:\원본"),
+            path: std::path::PathBuf::from(path),
+            stamp: stamp(),
+        };
+        let copy = Record::new(
+            OperationKind::Copy,
+            vec![
+                copied(r"C:\b\사진"),
+                copied(r"C:\b\사진\1.jpg"),
+                copied(r"C:\b\사진\2.jpg"),
+            ],
+        );
+        assert_eq!(operation_name(&copy), "「사진」 복사");
+        let copy = Record::new(
+            OperationKind::Copy,
+            vec![copied(r"C:\b\1.jpg"), copied(r"C:\b\2.jpg")],
+        );
+        assert_eq!(operation_name(&copy), "항목 2개 복사");
+        let moved = Record::not_undoable(
+            OperationKind::Move,
+            vec![facet_core::history::Step::Moved {
+                from: std::path::PathBuf::from(r"C:\a\옛.txt"),
+                to: std::path::PathBuf::from(r"C:\b\옛.txt"),
+                stamp: stamp(),
+            }],
+            NotUndoable::Overwritten,
+        );
+        assert_eq!(operation_name(&moved), "「옛.txt」 이동");
+        assert_eq!(
+            undo_refused_text(&moved, NotUndoable::Overwritten),
+            "「옛.txt」 이동: 실행취소할 수 없습니다. 덮어쓴 파일은 되살릴 수 없습니다"
+        );
         assert_eq!(
             undo_refused_text(&one, NotUndoable::PermanentDelete),
             "「새.txt」 이름 바꾸기: 실행취소할 수 없습니다. 영구 삭제한 항목은 되살릴 수 없습니다"

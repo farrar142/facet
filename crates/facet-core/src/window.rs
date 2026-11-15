@@ -50,7 +50,7 @@
 //! 주소창: 친 글자로 가기([`App::go_to_text`])는 해석한 뒤 다른 이동처럼 일꾼 스레드에서 읽는다. 자동 완성 후보
 //! ([`App::complete_address`])는 폴더를 읽느라 막히므로 일꾼 스레드에서 읽고 같은 통로로 받는다.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -62,10 +62,12 @@ use facet_win::{OpenError, OpenResult, ShellWorker};
 use crate::command::{self, CommandId, CommandState};
 use crate::details::Sort;
 use crate::edit::{self, EditError, Edited};
-use crate::history::{History, Outcomes, Record, RecordId, Reversal, UndoError};
+use crate::history::{
+    History, NotUndoable, OperationKind, Outcomes, Record, RecordId, Reversal, UndoError,
+};
 use crate::job::{
     AnswerError, ConflictAnswer, CopyRejection, ErrorAnswer, JobEvent, JobId, JobKind, JobQueue,
-    RevertJob,
+    JournalSink, RevertJob,
 };
 use crate::launch::LaunchTarget;
 use crate::placement::Placement;
@@ -497,6 +499,8 @@ pub struct App {
     work_area: WorkArea,
     /// 작업 기록과 다시 실행 목록. 앱 전체에 하나이고 메모리에만 있다.
     history: History,
+    /// 도는 복사·이동 작업이 한 일을 적는 곳. 끝나면 작업 기록으로 옮긴다.
+    journals: HashMap<JobId, (OperationKind, JournalSink)>,
     outbox: Outbox,
     receiver: Receiver<Message>,
 }
@@ -695,6 +699,7 @@ impl App {
             jobs: JobQueue::new(),
             work_area: WorkArea::new(),
             history: History::new(),
+            journals: HashMap::new(),
             outbox: Outbox {
                 sender,
                 waker: Arc::default(),
@@ -1818,9 +1823,15 @@ impl App {
     ///
     /// 작업이 끝나 원본·대상 폴더가 바뀌면 그 위치를 보는 탭은 변경 감시로 갱신된다(따로 다시 읽지 않는다).
     pub fn start_transfer(&mut self, plan: &TransferPlan) -> Result<JobId, CopyRejection> {
-        let id = self
-            .jobs
-            .submit(plan.kind, plan.sources.clone(), plan.target.clone())?;
+        let (id, journal) =
+            self.jobs
+                .submit_recorded(plan.kind, plan.sources.clone(), plan.target.clone())?;
+        let kind = if plan.kind == JobKind::Move {
+            OperationKind::Move
+        } else {
+            OperationKind::Copy
+        };
+        self.journals.insert(id, (kind, journal));
         push_recent(&mut self.recent_targets, plan.target.clone());
         self.work_area
             .add(id, plan.kind, plan.target.clone(), plan.sources.len());
@@ -1833,12 +1844,32 @@ impl App {
     pub fn poll_jobs(&mut self) -> bool {
         let mut changed = false;
         for event in self.jobs.poll() {
-            if let JobEvent::Finished { job, .. } = &event {
+            if let JobEvent::Finished { job, summary } = &event {
                 self.history.finish(*job);
+                self.record_transfer(*job, summary);
             }
             changed |= self.work_area.apply(&event);
         }
         changed
+    }
+
+    /// 끝난 복사·이동(끝남·실패·취소 모두)을 작업 기록에 남긴다: 실제로 한 항목만 담고, 한 항목이 없으면 남기지
+    /// 않는다. 덮어쓴 파일이 있으면 되돌릴 수 없다고 남긴다(덮어쓴 파일은 되살릴 수 없으므로).
+    fn record_transfer(&mut self, job: JobId, summary: &crate::job::Summary) {
+        let Some((kind, journal)) = self.journals.remove(&job) else {
+            return;
+        };
+        let journal = std::mem::take(&mut *journal.lock().unwrap_or_else(|e| e.into_inner()));
+        if journal.steps.is_empty() && !journal.overwrote {
+            return;
+        }
+        let record = if journal.overwrote {
+            Record::not_undoable(kind, journal.steps, NotUndoable::Overwritten)
+        } else {
+            Record::new(kind, journal.steps)
+        };
+        self.history
+            .record(record.with_skipped(summary.items_skipped()));
     }
 
     /// 끝난 이름바꾸기·새 폴더를 작업 기록에 남긴다.
@@ -1875,9 +1906,11 @@ impl App {
     /// ([`JobKind::Undo`], 작업 영역에도 더한다). 진행·항목별 오류 질문·취소·끝남은 다른 작업과 같고
     /// [`App::poll_jobs`]가 받는다.
     ///
-    /// 되돌리는 방법: 이름바꾸기는 되바꾸고, 새 폴더는 비어 있으면 지운다(묶인 새 폴더+이름바꾸기도 그 폴더를). 밖에서
-    /// 바뀐 항목(없음·바뀜·그 자리에 같은 이름·새 폴더가 비어 있지 않음)은 건너뛰고 까닭을 결과
-    /// ([`crate::job::Summary::not_reverted`])에 담는다. 아무것도 덮어쓰거나 지우지 않는다.
+    /// 되돌리는 방법: 이름바꾸기는 되바꾸고, 새 폴더는 비어 있으면 지운다(묶인 새 폴더+이름바꾸기도 그 폴더를).
+    /// 복사는 만든 항목을 휴지통으로 보내고([`crate::job::Summary::recycled`]), 이동은 대상의 항목을 원래 자리로
+    /// 되옮긴다(이동이 만든 대상 폴더는 비면 지운다). 밖에서 바뀐 항목(없음·바뀜·그 자리에 같은 이름·폴더가 비어 있지
+    /// 않음·휴지통에 넣을 수 없음)은 건너뛰고 까닭을 결과([`crate::job::Summary::not_reverted`])에 담는다. 아무것도
+    /// 덮어쓰거나 영구히 지우지 않는다.
     ///
     /// 끝나면 되돌린 항목은 다시 실행 목록으로 가고, 되돌리지 못한 항목은 기록에 남는다. 시작하지 않으면 까닭:
     /// 기록이 없음([`UndoError::Nothing`]), 다른 실행취소·다시 실행이 도는 중([`UndoError::Busy`]), 마지막 기록이
