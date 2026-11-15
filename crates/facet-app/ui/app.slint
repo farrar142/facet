@@ -2366,3 +2366,108 @@ export component AppWindow inherits Window {
         }
     }
 }
+
+// 진행 창: 보통 창을 모두 닫았는데 작업 대기열에 끝나지 않은 작업이 남아 있으면 이 창만 남는다. 작업 영역과 같은
+// 진행 표시·단추·질문 대화를 보인다. 작업이 모두 끝나면 Rust가 닫고 프로세스가 끝난다. 사용자가 닫으려 하면
+// 닫지 않고(작업을 몰래 잃지 않는다) 까닭을 강조한다: 그만두려면 작업마다 취소한다.
+export component ProgressWindow inherits Window {
+    title: @tr("작업 진행 - facet");
+    preferred-width: 640px;
+    preferred-height: 300px;
+    min-width: 360px;
+    min-height: 160px;
+    default-font-size: 13px;
+
+    in property <[JobRow]> jobs;
+    out property <length> job-height: 56px;
+    out property <length> question-height: 120px;
+    // 사용자가 닫기 단추를 눌렀다: 닫지 않은 까닭을 강조한다.
+    in property <bool> close-refused;
+
+    callback new-window();
+    // 키(글자와 수식 키). Ctrl+N 같은 새 창 단축키를 Rust가 코어 명령으로 찾는다. 받았으면 `true`.
+    callback key(string, bool, bool, bool) -> bool;
+    callback job-pause(int);
+    callback job-resume(int);
+    callback job-cancel(int);
+    callback job-start-now(int);
+    callback job-dismiss(int);
+    callback job-answer-conflict(int, ConflictChoice, bool);
+    callback job-answer-error(int, ErrorChoice);
+
+    forward-focus: keys;
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (root.key(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift)) {
+                return accept;
+            }
+            return reject;
+        }
+        VerticalLayout {
+            padding: 8px;
+            spacing: 6px;
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: @tr("창을 모두 닫았지만 작업이 끝날 때까지 이 창이 남습니다. 작업이 모두 끝나면 저절로 닫히고 facet이 끝납니다.");
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    SmallButton {
+                        text: @tr("새 창");
+                        clicked => {
+                            root.new-window();
+                        }
+                    }
+                }
+            }
+            if root.close-refused: Text {
+                text: @tr("작업이 남아 있어 닫지 않았습니다. 그만두려면 작업을 취소하세요.");
+                wrap: word-wrap;
+                color: #c42b1c;
+            }
+            ListView {
+                vertical-stretch: 1;
+                for job in root.jobs: Rectangle {
+                    height: job.ask == JobAsk.none ? root.job-height : root.job-height + root.question-height;
+                    JobView {
+                        y: 0px;
+                        height: parent.height - 4px;
+                        job: job;
+                        // 이 창에는 다른 입력이 없으므로 질문 대화가 생기면 키보드를 가져간다.
+                        autofocus: true;
+                        answer-conflict(choice, rest) => {
+                            root.job-answer-conflict(job.id, choice, rest);
+                            keys.focus();
+                        }
+                        answer-error(choice) => {
+                            root.job-answer-error(job.id, choice);
+                            keys.focus();
+                        }
+                        leave => {
+                            keys.focus();
+                        }
+                        pause => {
+                            root.job-pause(job.id);
+                        }
+                        resume => {
+                            root.job-resume(job.id);
+                        }
+                        cancel => {
+                            root.job-cancel(job.id);
+                        }
+                        start-now => {
+                            root.job-start-now(job.id);
+                        }
+                        dismiss => {
+                            root.job-dismiss(job.id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
