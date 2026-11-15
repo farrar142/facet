@@ -66,6 +66,9 @@ fn name(command: CommandId) -> &'static str {
         CommandId::MoveTo => "이동 위치…",
         CommandId::Rename => "이름 바꾸기",
         CommandId::NewFolder => "새 폴더",
+        CommandId::Undo => "실행취소",
+        CommandId::Redo => "다시 실행",
+        CommandId::ShowHistory => "작업 기록 보기",
     }
 }
 
@@ -164,8 +167,8 @@ fn s2_탭_명령과_기본_단축키() {
     assert!(CopyTo.shortcuts().is_empty());
     assert!(MoveTo.shortcuts().is_empty());
     // S1의 14개와 탭·패널·창 명령, 반대편 패널로 복사·이동, 위치를 골라 복사·이동, 이름 바꾸기·새 폴더(자세한 확인은
-    // tests/edit.rs)가 전부다.
-    assert_eq!(CommandId::ALL.len(), 14 + expected.len() + 2 + 2);
+    // tests/edit.rs), 실행취소·다시 실행·작업 기록 보기(자세한 확인은 tests/history.rs)가 전부다.
+    assert_eq!(CommandId::ALL.len(), 14 + expected.len() + 2 + 2 + 3);
     assert_eq!(GoToTab(3).as_str(), "go-to-tab-3");
     assert_eq!(CommandId::from_id("go-to-tab-8"), Some(GoToTab(8)));
     assert_eq!(CommandId::from_id("go-to-tab-9"), None);

@@ -122,6 +122,8 @@ export struct JobRow {
     id: int,
     // 이동이면 참, 복사면 거짓.
     moving: bool,
+    // 실행취소면 1, 다시 실행이면 2, 복사·이동이면 0. 대상은 되돌리는 항목이 있는 폴더다.
+    reverting: int,
     // 대상 폴더.
     target: string,
     status: JobStatus,
@@ -581,7 +583,9 @@ component JobView inherits Rectangle {
         HorizontalLayout {
             spacing: 8px;
             Text {
-                text: root.job.moving ? @tr("이동 → {}", root.job.target) : @tr("복사 → {}", root.job.target);
+                text: root.job.reverting == 1 ? @tr("실행취소: {}", root.job.target)
+                    : root.job.reverting == 2 ? @tr("다시 실행: {}", root.job.target)
+                    : root.job.moving ? @tr("이동 → {}", root.job.target) : @tr("복사 → {}", root.job.target);
                 horizontal-stretch: 1;
                 overflow: elide;
                 vertical-alignment: center;

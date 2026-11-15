@@ -22,11 +22,15 @@
 //! 잡은 작업과 나란히). 답을 기다리는 작업도 취소할 수 있다. **항목별 오류**([`JobEvent::ItemError`],
 //! [`JobQueue::answer_error`])도 같은 규칙을 따른다.
 //!
-//! 지금 있는 작업은 **복사**([`JobQueue::copy`])와 **이동**([`JobQueue::move_items`])이다. 진행·이름 충돌·오류
+//! 지금 있는 작업은 **복사**([`JobQueue::copy`])와 **이동**([`JobQueue::move_items`]), 그리고 작업 기록을 되돌리는
+//! **실행취소**·**다시 실행**([`crate::window::App::undo`]·[`crate::window::App::redo`])이다. 진행·이름 충돌·오류
 //! 처리의 자세한 규칙은 그 문서에 있다.
 
 mod copy;
 mod moving;
+mod revert;
+
+pub(crate) use revert::RevertJob;
 
 use std::collections::{HashMap, VecDeque};
 use std::panic::{self, AssertUnwindSafe};
@@ -52,13 +56,18 @@ impl JobId {
     }
 }
 
-/// 작업의 종류: 복사([`JobQueue::copy`])나 이동([`JobQueue::move_items`]). [`JobQueue::submit`]이 이것으로 고른다.
+/// 작업의 종류: 복사([`JobQueue::copy`])나 이동([`JobQueue::move_items`]), 실행취소·다시 실행
+/// ([`crate::window::App::undo`]·[`crate::window::App::redo`]). [`JobQueue::submit`]이 이것으로 복사·이동을 고른다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum JobKind {
     /// 복사.
     Copy,
     /// 이동.
     Move,
+    /// 실행취소: 작업 기록의 마지막 작업을 되돌린다.
+    Undo,
+    /// 다시 실행: 실행취소한 작업을 다시 한다.
+    Redo,
 }
 
 /// 작업의 상태.
@@ -74,7 +83,8 @@ pub enum JobState {
     AwaitingAnswer,
     /// 끝났다. 항목별 오류로 건너뛴 항목이 없다(이름 충돌로 건너뛴 항목은 있을 수 있다).
     Finished,
-    /// 끝났지만 항목별 오류로 건너뛴 항목([`Summary::failures`])이 있다.
+    /// 끝났지만 항목별 오류로 건너뛴 항목([`Summary::failures`])이나, 실행취소·다시 실행이 밖의 변경으로 건너뛴
+    /// 항목([`Summary::not_reverted`])이 있다.
     Failed,
     /// 사용자가 취소했다. 이미 다 복사한 항목은 남는다.
     Cancelled,
@@ -167,6 +177,10 @@ pub struct Summary {
     pub items_remaining: u64,
     /// 원본을 다 셌는지. `true`면 `items_done + items_remaining`이 원본 전체 항목 수다.
     pub all_counted: bool,
+    /// 실행취소·다시 실행이 밖의 변경(항목이 없음·바뀜, 그 자리에 같은 이름, 새 폴더가 비어 있지 않음)으로
+    /// 건너뛴 항목과 그 까닭. 아무것도 덮어쓰거나 지우지 않았다. 하나라도 있으면 작업은 [`JobState::Failed`]로
+    /// 끝난다. 복사·이동은 늘 비어 있다.
+    pub not_reverted: Vec<crate::history::NotReverted>,
 }
 
 impl Summary {
@@ -175,9 +189,10 @@ impl Summary {
         self.failures.len() as u64
     }
 
-    /// 건너뛴 항목 수: 이름 충돌로 건너뛴 것과 항목별 오류로 건너뛴 것(폴더면 그 폴더 하나로 센다).
+    /// 건너뛴 항목 수: 이름 충돌로 건너뛴 것, 항목별 오류로 건너뛴 것(폴더면 그 폴더 하나로 센다), 실행취소·다시
+    /// 실행이 밖의 변경으로 건너뛴 것.
     pub fn items_skipped(&self) -> u64 {
-        self.conflicts_skipped + self.errors_skipped()
+        self.conflicts_skipped + self.errors_skipped() + self.not_reverted.len() as u64
     }
 
     /// 끝낸 항목 수: 처리한 항목([`Summary::items_done`]) 가운데 건너뛰지 않은 것.
@@ -367,6 +382,7 @@ pub enum CopyRejection {
 enum Job {
     Copy(copy::CopyJob),
     Move(moving::MoveJob),
+    Revert(revert::RevertJob),
 }
 
 impl Job {
@@ -375,6 +391,7 @@ impl Job {
         match self {
             Job::Copy(job) => job.root_count(),
             Job::Move(job) => job.root_count(),
+            Job::Revert(job) => job.root_count(),
         }
     }
 
@@ -383,6 +400,7 @@ impl Job {
         match self {
             Job::Copy(job) => job.run(context),
             Job::Move(job) => job.run(context),
+            Job::Revert(job) => job.run(context),
         }
     }
 }
@@ -770,7 +788,8 @@ impl JobQueue {
         Ok(self.enqueue(Job::Move(job)))
     }
 
-    /// 종류에 따라 복사([`JobQueue::copy`])나 이동([`JobQueue::move_items`]) 작업을 넣는다.
+    /// 종류에 따라 복사([`JobQueue::copy`])나 이동([`JobQueue::move_items`]) 작업을 넣는다. 실행취소·다시 실행은
+    /// 원본·대상으로 넣는 작업이 아니라([`crate::window::App::undo`]) 작업을 만들지 않고 [`CopyRejection::NoSources`]다.
     pub fn submit(
         &mut self,
         kind: JobKind,
@@ -780,7 +799,19 @@ impl JobQueue {
         match kind {
             JobKind::Copy => self.copy(sources, target),
             JobKind::Move => self.move_items(sources, target),
+            JobKind::Undo | JobKind::Redo => Err(CopyRejection::NoSources),
         }
+    }
+
+    /// 실행취소·다시 실행 작업을 넣고 차례를 기다리지 않고 곧바로 시작한다([`JobQueue::start_now`]와 같다).
+    ///
+    /// 곧바로 시작하는 까닭: 실행취소는 사용자가 방금 한 일을 바로잡으려는 것이라, 앞에 큰 복사가 돌고 있다고
+    /// 그 뒤로 미루면 무엇이 되돌아갔는지 알 수 없는 채 기다리게 된다. 지금 되돌리는 이름바꾸기·새 폴더는 순간에
+    /// 끝나 다른 작업의 디스크를 거의 쓰지 않는다. 사건·일시정지·취소·항목별 오류 질문은 다른 작업과 같다.
+    pub(crate) fn revert(&mut self, job: RevertJob) -> JobId {
+        let id = self.enqueue(Job::Revert(job));
+        self.start_now(id);
+        id
     }
 
     fn enqueue(&mut self, job: Job) -> JobId {
@@ -1048,7 +1079,9 @@ fn run_job(id: JobId, job: Job, control: &Control, shared: &Shared, outbox: &Out
     let result = panic::catch_unwind(AssertUnwindSafe(|| job.run(&context)));
     let (summary, state) = match result {
         Ok((summary, true)) => (summary, JobState::Cancelled),
-        Ok((summary, false)) if summary.failures.is_empty() => (summary, JobState::Finished),
+        Ok((summary, false)) if summary.failures.is_empty() && summary.not_reverted.is_empty() => {
+            (summary, JobState::Finished)
+        }
         Ok((summary, false)) => (summary, JobState::Failed),
         // 작업 코드의 버그: 대기열은 계속 돌게 하고 그 작업만 실패로 끝낸다.
         Err(_) => (Summary::default(), JobState::Failed),
