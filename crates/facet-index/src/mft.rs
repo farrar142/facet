@@ -327,8 +327,10 @@ impl MftParser {
     fn push_name(&mut self, slot: u32, parent: u64, utf16: &[u8]) -> Result<(), Broken> {
         let start = u32::try_from(self.text.len()).map_err(|_| Broken)?;
         let units = utf16
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]));
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c));
         self.text
             .extend(char::decode_utf16(units).map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER)));
         let end = u32::try_from(self.text.len()).map_err(|_| Broken)?;
