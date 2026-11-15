@@ -323,7 +323,7 @@ const NEW_JOURNAL_DELTA: u64 = 8 * 1024 * 1024;
 /// 권한이 필요하다.
 pub struct NtfsSource {
     drive: char,
-    /// 저널을 읽는 볼륨 핸들. 처음 쓸 때 연다.
+    /// 저널을 읽는 볼륨 핸들. 쓸 때 열고 확인 사이에는 놓는다([`follow::Source::release`]).
     handle: Option<Handle>,
     buffer: Vec<u8>,
 }
@@ -479,5 +479,10 @@ impl follow::Source for NtfsSource {
 
     fn build(&mut self) -> Result<Index, String> {
         build_volume(self.drive).map(|(index, _report)| index)
+    }
+
+    fn release(&mut self) {
+        // 볼륨 핸들을 쥐고 있으면 USB 드라이브를 안전하게 떼지 못한다. 확인마다 여는 값은 작다.
+        self.handle = None;
     }
 }

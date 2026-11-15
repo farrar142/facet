@@ -17,6 +17,10 @@
 //! 저널을 읽지 못하거나 레코드가 깨졌으면 인덱스를 믿을 수 없으므로 다시 만든다. 인덱스를
 //! 만들지 못하면 「인덱스 없음(만들지 못함)」으로 두고 그 볼륨은 그만 따라간다.
 //!
+//! 볼륨이 떨어지면([`Volumes::detach`]) 따라가기는 다음 확인에서 그만둔다. 그 뒤로는 상태를 바꾸려
+//! 해도 바뀌지 않으므로 떨어진 볼륨이 결과에 되살아나지 않는다. 기다리는 동안에는 볼륨 핸들을
+//! 놓아([`Source::release`]) 사용자가 USB 드라이브를 안전하게 뗄 수 있게 한다.
+//!
 //! 인덱스 파일([`IndexFile`])을 주면 인덱스를 디스크에 저장해 다시 뜬 뒤에 쓴다.
 //!
 //! - 시작할 때 그 파일을 먼저 읽는다. 저장한 저널 상태가 지금 저널과 맞으면([`Freshness::Current`])
@@ -125,6 +129,9 @@ pub trait Source: Send {
     fn read(&mut self, journal_id: u64, start: i64) -> Result<Records, String>;
     /// MFT 전체를 읽어 인덱스를 처음부터 만든다.
     fn build(&mut self) -> Result<Index, String>;
+    /// 다음 확인까지 쥐고 있을 필요가 없는 것(볼륨 핸들 등)을 놓는다. 볼륨 핸들을 쥐고 있으면
+    /// 「하드웨어 안전하게 제거」가 막힌다. 다음 호출에서 다시 연다.
+    fn release(&mut self) {}
 }
 
 /// 따라가기를 멈추라는 신호. 복제본끼리 같은 신호를 나눈다.
@@ -187,7 +194,10 @@ pub fn run(
         let state = match loaded.take() {
             Some(state) => state,
             None => {
-                volumes.set_building(volume);
+                if !volumes.set_building(volume) {
+                    // 볼륨이 떨어졌다([`Volumes::detach`]).
+                    return;
+                }
                 match build(source) {
                     Ok((index, state)) => {
                         volumes.set_ready(volume, index);
@@ -340,6 +350,7 @@ fn follow(
         if let Some(saver) = saver.as_deref_mut() {
             saver.tick(volumes, volume);
         }
+        source.release();
         if stop.wait(poll) {
             return None;
         }
