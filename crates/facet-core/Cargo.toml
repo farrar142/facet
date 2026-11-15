@@ -12,7 +12,8 @@ workspace = true
 
 [dev-dependencies]
 tempfile = "3.27.0"
-facet-win.workspace = true
 
 [dependencies]
+# 폴더 변경 감시의 Windows 호출(`unsafe`)은 안전 래퍼 크레이트에 둔다(ADR-0002).
+facet-win.workspace = true
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }

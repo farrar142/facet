@@ -8,6 +8,11 @@
 //!    읽기가 성공했을 때만 이동을 확정한다. 실패하면 탭은 원래 위치에 남고 오류를 갖는다.
 //!    실패한 위치는 기록에 남지 않는다.
 //!
+//! 앱은 읽을 때 위치의 변경 감시도 함께 건다([`ReadRequest::run_watched`]). 감시는 탭이 갖고, 다른 위치로
+//! 옮기면 버려져 풀린다. 묶은 변경([`ChangeBatch`])은 [`Tab::apply_changes`]가 바뀐 항목만 목록에 반영한다.
+//! 알림을 잃었거나 위치가 사라졌으면 [`Tab::reload`]로 다시 읽고, 위치가 사라졌으면 가장 가까운 남은 상위
+//! 위치(없으면 사용자 홈 폴더)로 옮긴다([`Tab::relocation`]).
+//!
 //! 요청마다 번호를 붙인다. 탭이 기다리는 것은 마지막 요청 하나뿐이고, 그보다 앞선 요청의 결과는
 //! 늦게 오면 버린다([`ReadOutcome::Stale`]).
 //!
@@ -16,10 +21,13 @@
 
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::details::{DetailsList, Sort};
 use crate::selection::{CursorMove, StatusSummary, TypeAhead, ViewState, starts_with_folded};
+use crate::watch::{self, ChangeBatch, ChangeSink, Watch, WatchError};
+use crate::window::home_location;
 use crate::{Candidate, Item, ListError, Location, ResolveError, provider_for};
 
 /// 읽기가 이만큼 넘게 걸리면 탭이 「읽는 중」을 드러낸다([`Tab::is_reading`]).
@@ -54,6 +62,8 @@ pub struct ReadRequest {
     id: RequestId,
     location: Location,
     sort: Sort,
+    /// 위치가 사라졌으면 가장 가까운 남은 상위(없으면 홈)를 읽는가([`Tab::reload`]).
+    climb: bool,
 }
 
 impl ReadRequest {
@@ -68,20 +78,127 @@ impl ReadRequest {
     }
 
     /// 위치의 항목 목록을 공급자로 읽고 요청의 정렬로 정렬한다. 끝날 때까지 막으므로 UI 스레드에서
-    /// 부르지 않는다.
+    /// 부르지 않는다. 변경 감시는 걸지 않는다(탭의 [`Tab::auto_refresh`]는 [`AutoRefresh::NotWatched`]).
     pub fn run(&self) -> ReadResult {
-        let list = provider_for(&self.location)
-            .list(&self.location)
-            .map(|items| DetailsList::new(items, self.sort));
-        ReadResult { id: self.id, list }
+        self.read(None)
     }
+
+    /// [`ReadRequest::run`]처럼 읽되, 읽기 전에 위치의 변경 감시를 건다. 묶은 변경은 묶기 스레드에서
+    /// `sink`로 넘어온다. 그것을 탭의 [`Tab::apply_changes`]에 넘긴다.
+    ///
+    /// 감시를 걸 수 없어도 읽기는 한다. 그러면 탭은 「자동 새로 고침 안 됨」([`AutoRefresh::Off`])이다.
+    pub fn run_watched(&self, sink: impl Fn(ChangeBatch) + Send + Sync + 'static) -> ReadResult {
+        self.read(Some(Arc::new(sink)))
+    }
+
+    fn read(&self, sink: Option<ChangeSink>) -> ReadResult {
+        // 감시를 먼저 건다: 읽는 사이의 변경도 놓치지 않는다.
+        let attempt = |location: &Location| {
+            let watch = sink
+                .as_ref()
+                .map(|sink| watch::start(location, self.id, Arc::clone(sink)));
+            let list = provider_for(location)
+                .list(location)
+                .map(|items| DetailsList::new(items, self.sort));
+            (list, watch)
+        };
+        let result = |location: Location, (list, watch), relocation| ReadResult {
+            id: self.id,
+            location,
+            list,
+            watch,
+            relocation,
+        };
+        let first = attempt(&self.location);
+        // 권한이 없을 뿐이면 위치는 남아 있다.
+        let vanished =
+            matches!(&first.0, Err(e) if !matches!(e, ListError::PermissionDenied { .. }));
+        if !(self.climb && vanished) {
+            return result(self.location.clone(), first, None);
+        }
+        let provider = provider_for(&self.location);
+        let mut candidate = provider.parent(&self.location);
+        while let Some(location) = candidate {
+            let read = attempt(&location);
+            if read.0.is_ok() {
+                let relocation = Relocation::ToParent {
+                    vanished: self.location.clone(),
+                };
+                return result(location, read, Some(relocation));
+            }
+            candidate = provider.parent(&location);
+        }
+        let home = home_location();
+        if home != self.location {
+            let read = attempt(&home);
+            if read.0.is_ok() {
+                let relocation = Relocation::ToHome {
+                    vanished: self.location.clone(),
+                };
+                return result(home, read, Some(relocation));
+            }
+        }
+        result(self.location.clone(), first, None)
+    }
+}
+
+/// 보던 위치가 사라져 다른 위치로 옮긴 까닭. [`Tab::relocation`]이 갖는다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Relocation {
+    /// 보던 위치 `vanished`가 사라져 가장 가까운 남은 상위 위치로 옮겼다.
+    ToParent { vanished: Location },
+    /// 보던 위치 `vanished`와 그 상위가 모두 사라져(드라이브가 빠짐 등) 사용자 홈 폴더로 옮겼다.
+    ToHome { vanished: Location },
+}
+
+impl Relocation {
+    /// 사라진 위치.
+    pub fn vanished(&self) -> &Location {
+        match self {
+            Self::ToParent { vanished } | Self::ToHome { vanished } => vanished,
+        }
+    }
+
+    fn with_vanished(self, vanished: Location) -> Self {
+        match self {
+            Self::ToParent { .. } => Self::ToParent { vanished },
+            Self::ToHome { .. } => Self::ToHome { vanished },
+        }
+    }
+}
+
+/// 탭의 자동 새로 고침(변경 감시) 상태.
+#[derive(Debug, Clone, Copy)]
+pub enum AutoRefresh<'a> {
+    /// 지금 위치를 감시하고 있다. 밖에서 바뀌면 목록이 스스로 갱신된다.
+    On,
+    /// 「자동 새로 고침 안 됨」: 지금 위치에 감시를 걸 수 없었다. 새로 고침(F5)은 된다.
+    Off(&'a WatchError),
+    /// 감시를 걸지 않고 읽었다([`ReadRequest::run`]), 또는 아직 읽지 않았다.
+    NotWatched,
+}
+
+/// 묶은 변경을 탭에 넘긴 결과.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeOutcome {
+    /// 바뀐 항목을 목록에 반영했다.
+    Applied,
+    /// 알림을 잃었거나 위치가 사라졌다. [`Tab::reload`]로 다시 읽어야 한다.
+    Reload,
+    /// 탭이 지금 갖고 있지 않은 감시의 변경이라 버렸다(이미 다른 위치로 옮겼다).
+    Stale,
 }
 
 /// 읽기 요청의 결과. [`ReadRequest::run`]만 만든다.
 #[derive(Debug)]
 pub struct ReadResult {
     id: RequestId,
+    /// 실제로 읽은 위치. 사라진 위치에서 옮겼으면 요청한 위치와 다르다.
+    location: Location,
     list: Result<DetailsList, ListError>,
+    /// 건 감시. 감시를 걸지 않고 읽었으면 `None`이다.
+    watch: Option<Result<Watch, WatchError>>,
+    relocation: Option<Relocation>,
 }
 
 impl ReadResult {
@@ -151,6 +268,8 @@ enum Kind {
     Back,
     Forward,
     Refresh,
+    /// 자동 다시 읽기: 위치가 사라졌으면 남은 상위로 옮긴다. 기록은 바뀌지 않는다.
+    Reload,
 }
 
 /// 기다리는 읽기 요청.
@@ -202,6 +321,12 @@ pub struct Tab {
     /// 화면이 맨 위에 보이는 행 번호. 화면이 알려 주는 값을 그대로 보관한다.
     scroll: usize,
     type_ahead: TypeAhead,
+    /// 지금 위치의 감시와 그것을 건 읽기 요청 번호. 버리면 풀린다.
+    watching: Option<(RequestId, Watch)>,
+    /// 지금 위치에 감시를 걸지 못한 까닭.
+    watch_error: Option<WatchError>,
+    /// 보던 위치가 사라져 옮긴 까닭. 다음 이동을 시작하면 지운다.
+    relocation: Option<Relocation>,
 }
 
 impl Tab {
@@ -229,6 +354,9 @@ impl Tab {
             anchor: None,
             scroll: 0,
             type_ahead: TypeAhead::default(),
+            watching: None,
+            watch_error: None,
+            relocation: None,
         }
     }
 
@@ -282,6 +410,25 @@ impl Tab {
     /// 마지막 [`Tab::go_to_text`]가 글자를 해석하지 못한 까닭. 다음 이동을 시작하면 지운다.
     pub fn address_error(&self) -> Option<&ResolveError> {
         self.address_error.as_ref()
+    }
+
+    /// 보던 위치가 사라져 다른 위치로 옮겼으면 그 까닭. 다음 이동을 시작하면 지운다.
+    pub fn relocation(&self) -> Option<&Relocation> {
+        self.relocation.as_ref()
+    }
+
+    /// 자동 새로 고침 상태. 감시를 걸 수 없는 위치면 [`AutoRefresh::Off`]다.
+    pub fn auto_refresh(&self) -> AutoRefresh<'_> {
+        match (&self.watching, &self.watch_error) {
+            (Some(_), _) => AutoRefresh::On,
+            (None, Some(error)) => AutoRefresh::Off(error),
+            (None, None) => AutoRefresh::NotWatched,
+        }
+    }
+
+    /// 감시하고 있는 위치. 감시가 없으면 `None`이다.
+    pub fn watched_location(&self) -> Option<&Location> {
+        self.watching.as_ref().map(|_| &self.location)
     }
 
     /// 읽기를 기다리는 위치. 없으면 `None`이다.
@@ -349,10 +496,20 @@ impl Tab {
             }
             Navigation::Refresh => (self.location.clone(), Kind::Refresh),
         };
+        self.address_error = None;
+        self.relocation = None;
+        Some(self.request(location, kind, reselect))
+    }
+
+    fn request(
+        &mut self,
+        location: Location,
+        kind: Kind,
+        reselect: Option<OsString>,
+    ) -> ReadRequest {
         let id = RequestId(self.next_id);
         self.next_id += 1;
         self.error = None;
-        self.address_error = None;
         self.pending = Some(Pending {
             id,
             location: location.clone(),
@@ -360,11 +517,49 @@ impl Tab {
             started: Instant::now(),
             reselect,
         });
-        Some(ReadRequest {
+        ReadRequest {
             id,
             location,
             sort: self.sort,
-        })
+            climb: kind == Kind::Reload,
+        }
+    }
+
+    /// 자동 다시 읽기: 지금 위치를 다시 읽되, 위치가 사라졌으면 가장 가까운 남은 상위 위치로, 상위가 하나도
+    /// 없으면 사용자 홈 폴더로 옮긴다. 옮기면 [`Tab::relocation`]에 까닭을 두고, 사라진 위치는 기록에 넣지 않는다.
+    ///
+    /// [`Tab::apply_changes`]가 [`ChangeOutcome::Reload`]를 돌려줄 때 부른다. 이미 기다리는 읽기가 있으면
+    /// 그것을 가로채지 않고 `None`을 돌려준다(그 읽기가 목록을 새로 맞춘다).
+    pub fn reload(&mut self) -> Option<ReadRequest> {
+        if self.pending.is_some() {
+            return None;
+        }
+        let location = self.location.clone();
+        Some(self.request(location, Kind::Reload, None))
+    }
+
+    /// 묶은 변경을 받는다. 지금 위치의 감시에서 온 것이면 바뀐 항목만 목록에 반영해 다시 정렬한다. 선택과
+    /// 스크롤 위치는 그대로이고, 사라진 항목만 선택에서 빠진다.
+    ///
+    /// 알림을 잃었거나 위치가 사라졌으면 반영하지 않고 [`ChangeOutcome::Reload`]를 돌려준다.
+    pub fn apply_changes(&mut self, batch: ChangeBatch) -> ChangeOutcome {
+        if self
+            .watching
+            .as_ref()
+            .is_none_or(|(id, _)| *id != batch.watch)
+        {
+            return ChangeOutcome::Stale;
+        }
+        if batch.reload {
+            return ChangeOutcome::Reload;
+        }
+        if !batch.changes.is_empty() {
+            self.list.apply_changes(batch.changes);
+            self.update_visible();
+            self.prune_selection();
+            self.reindex();
+        }
+        ChangeOutcome::Applied
     }
 
     /// 주소창에 친 글자로 간다: 해석 → 이동 시작. 파일 경로를 쳤으면 그 폴더로 가고 도착하면 그 파일을 선택한다.
@@ -411,7 +606,14 @@ impl Tab {
         let Some(pending) = self.pending.take_if(|p| p.id == result.id) else {
             return ReadOutcome::Stale;
         };
-        let mut list = match result.list {
+        let ReadResult {
+            id,
+            location: read_location,
+            list,
+            watch,
+            relocation,
+        } = result;
+        let mut list = match list {
             Ok(list) => list,
             Err(error) => {
                 self.error = Some(error);
@@ -419,6 +621,8 @@ impl Tab {
             }
         };
         let mut restored = None;
+        let reselect = pending.reselect.filter(|_| pending.kind == Kind::New);
+        let moved = read_location != self.location;
         match pending.kind {
             Kind::New if pending.location != self.location => {
                 let previous = std::mem::replace(&mut self.location, pending.location);
@@ -445,7 +649,36 @@ impl Tab {
                 self.back_views.push(view);
                 restored = self.forward_views.pop();
             }
-            Kind::New | Kind::Refresh => {}
+            Kind::Reload if moved => {
+                // 사라진 위치는 기록에 넣지 않고, 그 위치의 보기 상태도 버린다.
+                self.location = read_location;
+                self.take_view();
+                restored = Some(ViewState::default());
+                // 옮긴 곳도 이어서 사라지면 다시 옮긴다. 사용자가 보던 위치는 처음 사라진 곳이다.
+                self.relocation = match (self.relocation.take(), relocation) {
+                    (Some(first), Some(again)) => {
+                        Some(again.with_vanished(first.vanished().clone()))
+                    }
+                    (_, relocation) => relocation,
+                };
+            }
+            Kind::New | Kind::Refresh | Kind::Reload => {}
+        }
+        match watch {
+            Some(Ok(watch)) => {
+                self.watching = Some((id, watch));
+                self.watch_error = None;
+            }
+            Some(Err(error)) => {
+                self.watching = None;
+                self.watch_error = Some(error);
+            }
+            // 감시 없이 읽었다: 다른 위치로 옮겼으면 앞 위치의 감시를 푼다.
+            None if moved => {
+                self.watching = None;
+                self.watch_error = None;
+            }
+            None => {}
         }
         // 읽는 사이에 정렬을 바꿨으면 지금 정렬로 맞춘다.
         if list.sort() != self.sort {
@@ -461,8 +694,7 @@ impl Tab {
         }
         self.prune_selection();
         self.reindex();
-        if let Some(name) = pending.reselect
-            && pending.kind == Kind::New
+        if let Some(name) = reselect
             && let Some(index) = self.position_of(&name)
         {
             self.select_only(index);
@@ -721,5 +953,124 @@ impl Tab {
             selected_count: self.selection.len(),
             selected_size,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! 감시를 걸 수 없는 위치처럼 실제로 만들기 어려운 결과를 직접 넣어 본다. 실제 감시는 `tests/watch.rs`.
+
+    use super::*;
+
+    fn temp_dir() -> tempfile::TempDir {
+        tempfile::TempDir::new().unwrap()
+    }
+
+    fn batch(tab: &Tab, changes: Vec<(OsString, Option<Item>)>, reload: bool) -> ChangeBatch {
+        ChangeBatch {
+            watch: tab.watching.as_ref().map(|(id, _)| *id).unwrap(),
+            changes,
+            reload,
+        }
+    }
+
+    /// 감시가 걸린 것처럼 읽는다: 버리면 아무것도 하지 않는 감시를 붙인다.
+    fn watched_tab(dir: &std::path::Path) -> Tab {
+        let mut tab = Tab::new(Location::file_system(dir), Sort::default(), false);
+        let request = tab.navigate(Navigation::Refresh).unwrap();
+        let mut result = request.run();
+        result.watch = Some(Ok(Watch::new(())));
+        assert_eq!(tab.finish(result), ReadOutcome::Committed);
+        tab
+    }
+
+    #[test]
+    fn 감시를_걸_수_없으면_자동_새로_고침_안_됨이고_새로_고침은_된다() {
+        let dir = temp_dir();
+        let location = Location::file_system(dir.path());
+        let mut tab = Tab::new(location.clone(), Sort::default(), false);
+        assert!(matches!(tab.auto_refresh(), AutoRefresh::NotWatched));
+
+        let request = tab.navigate(Navigation::Refresh).unwrap();
+        let mut result = request.run();
+        result.watch = Some(Err(WatchError::Unsupported {
+            location: location.clone(),
+        }));
+        assert_eq!(tab.finish(result), ReadOutcome::Committed);
+        let AutoRefresh::Off(error) = tab.auto_refresh() else {
+            panic!("자동 새로 고침 안 됨이어야 한다");
+        };
+        assert_eq!(error.location(), &location);
+        assert!(error.to_string().contains("감시할 수 없습니다"));
+        assert_eq!(tab.watched_location(), None);
+
+        // 새로 고침(F5)은 그대로 된다. 감시 없이 같은 위치를 다시 읽으면 상태는 그대로다.
+        std::fs::write(dir.path().join("새 파일"), b"x").unwrap();
+        let request = tab.navigate(Navigation::Refresh).unwrap();
+        assert_eq!(tab.finish(request.run()), ReadOutcome::Committed);
+        assert_eq!(tab.len(), 1);
+        assert!(matches!(tab.auto_refresh(), AutoRefresh::Off(_)));
+
+        // 다시 감시가 걸리면 켜진다.
+        let request = tab.navigate(Navigation::Refresh).unwrap();
+        let mut result = request.run();
+        result.watch = Some(Ok(Watch::new(())));
+        tab.finish(result);
+        assert!(matches!(tab.auto_refresh(), AutoRefresh::On));
+    }
+
+    #[test]
+    fn 지금_감시가_아닌_변경은_버리고_넘침은_다시_읽기를_요구한다() {
+        let dir = temp_dir();
+        std::fs::write(dir.path().join("a"), b"a").unwrap();
+        let mut tab = watched_tab(dir.path());
+        let mut stale = batch(&tab, vec![("a".into(), None)], false);
+        stale.watch = RequestId(stale.watch.0 + 100);
+        assert_eq!(tab.apply_changes(stale), ChangeOutcome::Stale);
+        assert_eq!(tab.len(), 1);
+
+        let overflow = batch(&tab, Vec::new(), true);
+        assert_eq!(tab.apply_changes(overflow), ChangeOutcome::Reload);
+        let request = tab.reload().expect("기다리는 읽기가 없으면 다시 읽는다");
+        // 기다리는 읽기가 있으면 가로채지 않는다.
+        assert!(tab.reload().is_none());
+        assert_eq!(tab.finish(request.run()), ReadOutcome::Committed);
+        assert_eq!(tab.location(), &Location::file_system(dir.path()));
+        assert!(tab.relocation().is_none());
+
+        // 감시 없이 다른 위치로 옮기면 앞 위치의 감시가 풀린다.
+        let mut tab = watched_tab(dir.path());
+        let other = temp_dir();
+        let request = tab
+            .navigate(Navigation::Go(Location::file_system(other.path())))
+            .unwrap();
+        tab.finish(request.run());
+        assert_eq!(tab.watched_location(), None);
+    }
+
+    #[test]
+    fn 바뀐_항목만_넣고_빼고_다시_정렬한다() {
+        let dir = temp_dir();
+        for name in ["b", "d"] {
+            std::fs::write(dir.path().join(name), name).unwrap();
+        }
+        let mut tab = watched_tab(dir.path());
+        let item = |name: &str, size| Item {
+            name: name.into(),
+            is_folder: false,
+            size,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+            attributes: Default::default(),
+        };
+        let changes = vec![
+            ("a".into(), Some(item("a", 1))),
+            ("d".into(), None),
+            ("b".into(), Some(item("b", 7))),
+        ];
+        let applied = batch(&tab, changes, false);
+        assert_eq!(tab.apply_changes(applied), ChangeOutcome::Applied);
+        let names: Vec<_> = tab.items().map(|i| i.name.clone()).collect();
+        assert_eq!(names, ["a", "b"]);
+        assert_eq!(tab.get(1).unwrap().size, 7);
     }
 }

@@ -1,11 +1,12 @@
 //! 공급자: 한 종류의 위치를 읽고 조작하는 방법(ADR-0004).
 //!
 //! 지금은 파일 시스템 공급자 하나뿐이다. 압축 파일(S13)과 셸 공급자(S12)가 같은
-//! 인터페이스를 구현한다. 주소창 글자 해석과 변경 감시는 뒤 티켓이 여기에 더한다.
+//! 인터페이스를 구현한다.
 
 use std::ffi::OsStr;
 
 use crate::file_system::FileSystemProvider;
+use crate::watch::{Watch, WatchError, WatchEvent};
 use crate::{Item, ListError, Location};
 
 /// 한 종류의 위치를 읽는 방법.
@@ -32,6 +33,20 @@ pub trait Provider: Send + Sync {
     /// 고쳐 쓰는 글자의 자동 완성 후보. 하위 폴더만, 이름순으로 낸다. 폴더를 읽느라 막히므로
     /// [`crate::tab::CompletionRequest`]로 UI 스레드 밖에서 부른다.
     fn complete(&self, text: &str) -> Vec<Candidate>;
+
+    /// `location`의 변경 감시를 건다. 바뀐 항목(하위 위치 안은 빼고)은 감시 스레드에서 `on_event`로 알린다.
+    /// 돌려준 [`Watch`]를 버리면 감시가 풀리고 그 뒤로는 `on_event`를 부르지 않는다.
+    ///
+    /// 감시를 걸 수 없는 위치면 까닭이 담긴 오류다. 묶기와 항목 다시 읽기는 [`crate::tab`]이 한다.
+    fn watch(
+        &self,
+        location: &Location,
+        on_event: Box<dyn FnMut(WatchEvent) + Send>,
+    ) -> Result<Watch, WatchError>;
+
+    /// `location` 안의 이름이 `name`인 항목 하나를 읽는다. 없으면 `Ok(None)`이다. 변경 알림을 받은 항목만
+    /// 다시 읽는 데 쓴다.
+    fn item(&self, location: &Location, name: &OsStr) -> Result<Option<Item>, ListError>;
 }
 
 /// 주소창 글자를 해석한 결과.

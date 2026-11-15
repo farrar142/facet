@@ -12,6 +12,7 @@ pub mod name_input;
 mod provider;
 pub mod selection;
 pub mod tab;
+pub mod watch;
 pub mod window;
 
 pub use file_system::FileSystemProvider;

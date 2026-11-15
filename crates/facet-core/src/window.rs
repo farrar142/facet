@@ -5,16 +5,19 @@
 //!
 //! 앱은 탭의 읽기 요청을 일꾼 스레드에서 읽고([`App::navigate`]), 그 결과를 요청한 탭에 넘긴다
 //! ([`App::poll`]·[`App::wait`]). 결과는 탭 번호로 찾아가므로 탭이 여럿이어도 섞이지 않는다.
+//! 읽을 때 위치의 변경 감시도 함께 걸어, 묶은 변경을 같은 통로로 받아 탭에 반영한다. 알림을 잃었거나 위치가
+//! 사라졌으면 그 탭을 다시 읽는다([`crate::tab::Tab::reload`]).
 //! 숨김 항목 보이기/감추기는 앱 전체에 하나인 상태다. 기본은 감춤이고 저장하지 않는다.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::Location;
 use crate::details::Sort;
-use crate::tab::{Navigation, ReadOutcome, ReadRequest, ReadResult, Tab};
+use crate::tab::{ChangeOutcome, Navigation, ReadOutcome, ReadRequest, ReadResult, Tab};
+use crate::watch::ChangeBatch;
 
 /// 앱 안의 탭 하나를 가리키는 번호. 탭을 다른 패널·창으로 옮겨도 바뀌지 않는다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -91,10 +94,19 @@ impl Window {
     }
 }
 
-/// 일꾼 스레드가 돌려준 읽기 결과.
-struct Done {
-    tab: TabId,
-    result: ReadResult,
+/// 일꾼 스레드가 보내는 것: 읽기 결과나 묶은 변경.
+enum Message {
+    Read { tab: TabId, result: ReadResult },
+    Changes { tab: TabId, batch: ChangeBatch },
+}
+
+/// 탭에 넘긴 결과 하나.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Update {
+    /// 읽기 결과.
+    Read(ReadOutcome),
+    /// 묶은 변경. [`ChangeOutcome::Reload`]였으면 앱이 이미 다시 읽기를 시작했다.
+    Changes(ChangeOutcome),
 }
 
 /// 앱 전체의 화면 상태: 창 목록과 앱 전체에 하나인 설정(숨김 항목 보이기).
@@ -103,8 +115,8 @@ pub struct App {
     active: usize,
     show_hidden: bool,
     next_tab: u64,
-    sender: Sender<Done>,
-    receiver: Receiver<Done>,
+    sender: Sender<Message>,
+    receiver: Receiver<Message>,
 }
 
 impl std::fmt::Debug for App {
@@ -199,13 +211,16 @@ impl App {
     }
 
     /// 요청 하나를 새 일꾼 스레드에서 읽는다. 느린 위치(네트워크 등) 하나가 다른 이동을 막지 않도록
-    /// 요청마다 스레드를 따로 둔다.
+    /// 요청마다 스레드를 따로 둔다. 읽기 전에 위치의 변경 감시를 건다.
     fn spawn_read(&self, tab: TabId, request: ReadRequest) {
         let sender = self.sender.clone();
+        let changes = self.sender.clone();
         let read = move || {
-            let result = request.run();
+            let result = request.run_watched(move |batch| {
+                let _ = changes.send(Message::Changes { tab, batch });
+            });
             // 앱이 이미 없어졌으면 결과를 받을 곳이 없다.
-            let _ = sender.send(Done { tab, result });
+            let _ = sender.send(Message::Read { tab, result });
         };
         thread::Builder::new()
             .name("facet-read".into())
@@ -213,30 +228,64 @@ impl App {
             .expect("목록 읽기 일꾼 스레드를 만들지 못했다");
     }
 
-    /// 이미 도착한 읽기 결과를 모두 탭에 넘긴다. 막지 않는다. 넘긴 결과마다 탭과 결과를 돌려준다.
-    pub fn poll(&mut self) -> Vec<(TabId, ReadOutcome)> {
-        let mut outcomes = Vec::new();
-        while let Ok(done) = self.receiver.try_recv() {
-            outcomes.push(self.deliver(done));
+    /// 이미 도착한 읽기 결과와 묶은 변경을 모두 탭에 넘긴다. 막지 않는다. 넘긴 것마다 탭과 결과를 돌려준다.
+    pub fn poll(&mut self) -> Vec<(TabId, Update)> {
+        let mut updates = Vec::new();
+        while let Ok(message) = self.receiver.try_recv() {
+            updates.push(self.deliver(message));
         }
-        outcomes
+        updates
     }
 
     /// 읽기 결과 하나가 올 때까지 `timeout`까지 기다려 탭에 넘긴다. 시간 안에 오지 않으면 `None`이다.
+    /// 그 사이에 온 묶은 변경도 탭에 넘긴다.
     pub fn wait(&mut self, timeout: Duration) -> Option<(TabId, ReadOutcome)> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if let (tab, Update::Read(outcome)) = self.wait_update(left)? {
+                return Some((tab, outcome));
+            }
+        }
+    }
+
+    /// 읽기 결과나 묶은 변경 하나가 올 때까지 `timeout`까지 기다려 탭에 넘긴다. 시간 안에 오지 않으면 `None`이다.
+    pub fn wait_update(&mut self, timeout: Duration) -> Option<(TabId, Update)> {
         match self.receiver.recv_timeout(timeout) {
-            Ok(done) => Some(self.deliver(done)),
+            Ok(message) => Some(self.deliver(message)),
             Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => None,
         }
     }
 
-    fn deliver(&mut self, done: Done) -> (TabId, ReadOutcome) {
-        let outcome = match self.tabs_mut().find(|(id, _)| *id == done.tab) {
-            Some((_, tab)) => tab.finish(done.result),
-            // 탭이 이미 닫혔다.
-            None => ReadOutcome::Stale,
-        };
-        (done.tab, outcome)
+    fn deliver(&mut self, message: Message) -> (TabId, Update) {
+        match message {
+            Message::Read { tab: id, result } => {
+                let outcome = match self.tab_mut(id) {
+                    Some(tab) => tab.finish(result),
+                    // 탭이 이미 닫혔다.
+                    None => ReadOutcome::Stale,
+                };
+                (id, Update::Read(outcome))
+            }
+            Message::Changes { tab: id, batch } => {
+                let Some(tab) = self.tab_mut(id) else {
+                    return (id, Update::Changes(ChangeOutcome::Stale));
+                };
+                let outcome = tab.apply_changes(batch);
+                if outcome == ChangeOutcome::Reload
+                    && let Some(request) = tab.reload()
+                {
+                    self.spawn_read(id, request);
+                }
+                (id, Update::Changes(outcome))
+            }
+        }
+    }
+
+    fn tab_mut(&mut self, id: TabId) -> Option<&mut Tab> {
+        self.tabs_mut()
+            .find(|(tab_id, _)| *tab_id == id)
+            .map(|(_, tab)| tab)
     }
 
     /// 활성 탭의 정렬을 바꾼다. 다시 읽지 않는다.

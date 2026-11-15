@@ -1,11 +1,12 @@
 //! 파일 시스템 공급자: 실제 폴더를 파일 시스템 API로 직접 읽는다(ADR-0004).
 
-use std::fs::{self, DirEntry, Metadata};
+use std::fs::{self, Metadata};
 use std::io;
 use std::path::{Component, Path, PathBuf, Prefix};
 
 use crate::provider::{Candidate, PathSegment, Provider, ResolveError, Resolved};
 use crate::selection::starts_with_folded;
+use crate::watch::{Watch, WatchError, WatchEvent};
 use crate::{Attributes, Item, ListError, Location};
 
 /// 로컬, 네트워크, 동기화 폴더 같은 실제 경로를 읽는 공급자.
@@ -29,16 +30,51 @@ impl Provider for FileSystemProvider {
             let entry = entry.map_err(|e| ListError::from_io(location.clone(), e))?;
             let entry_error = |e| ListError::from_io(Location::file_system(entry.path()), e);
             let metadata = entry.metadata().map_err(entry_error)?;
-            let name = entry.file_name();
-            items.push(Item {
-                is_folder: is_folder(&entry, &metadata),
-                size: metadata.len(),
-                modified: metadata.modified().map_err(entry_error)?,
-                attributes: attributes(&name, &metadata),
-                name,
-            });
+            items.push(
+                make_item(entry.file_name(), &|| entry.path(), &metadata).map_err(entry_error)?,
+            );
         }
         Ok(items)
+    }
+
+    /// 폴더 안 항목 하나를 읽는다. 목록 읽기와 같게 링크를 따라가지 않고 링크 자신의 정보를 읽는다.
+    fn item(&self, location: &Location, name: &std::ffi::OsStr) -> Result<Option<Item>, ListError> {
+        let path = path_of(location).join(name);
+        let error = |e| ListError::from_io(Location::file_system(&path), e);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(error(e)),
+        };
+        make_item(name.to_os_string(), &|| path.clone(), &metadata)
+            .map(Some)
+            .map_err(error)
+    }
+
+    /// `ReadDirectoryChangesW`로 폴더 하나(하위 폴더 안은 빼고)를 감시한다. Windows가 아니면 감시할 수 없다.
+    fn watch(
+        &self,
+        location: &Location,
+        mut on_event: Box<dyn FnMut(WatchEvent) + Send>,
+    ) -> Result<Watch, WatchError> {
+        use facet_win::{DirectoryChange, DirectoryWatcher};
+        let watcher = DirectoryWatcher::watch(path_of(location), move |change| {
+            on_event(match change {
+                DirectoryChange::Changed(name) => WatchEvent::Changed(name),
+                DirectoryChange::Overflow => WatchEvent::Overflow,
+                DirectoryChange::Ended(_) => WatchEvent::Ended,
+            });
+        })
+        .map_err(|source| match source.kind() {
+            io::ErrorKind::Unsupported => WatchError::Unsupported {
+                location: location.clone(),
+            },
+            _ => WatchError::Io {
+                location: location.clone(),
+                source,
+            },
+        })?;
+        Ok(Watch::new(watcher))
     }
 
     /// 폴더 안의 항목 경로. 글자로만 잇고 파일 시스템에 묻지 않는다.
@@ -207,6 +243,22 @@ fn expand_variables(text: &str) -> Result<String, ResolveError> {
     Ok(out)
 }
 
+/// 이름과 메타데이터(링크를 따라가지 않은 것)로 항목을 만든다. Windows에서는 시스템 호출을 더 하지 않고
+/// 경로도 만들지 않는다. `path`는 Windows가 아닌 곳에서 링크의 대상을 볼 때만 부른다.
+fn make_item(
+    name: std::ffi::OsString,
+    path: &dyn Fn() -> PathBuf,
+    metadata: &Metadata,
+) -> io::Result<Item> {
+    Ok(Item {
+        is_folder: is_folder(path, metadata),
+        size: metadata.len(),
+        modified: metadata.modified()?,
+        attributes: attributes(&name, metadata),
+        name,
+    })
+}
+
 fn path_of(location: &Location) -> &Path {
     let Location::FileSystem(path) = location;
     path
@@ -229,7 +281,7 @@ fn prefix_label(prefix: Prefix<'_>, raw: std::borrow::Cow<'_, str>) -> String {
 }
 
 #[cfg(windows)]
-fn is_folder(_entry: &DirEntry, metadata: &Metadata) -> bool {
+fn is_folder(_path: &dyn Fn() -> PathBuf, metadata: &Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
     // 폴더 심볼릭 링크와 정션도 디렉터리 속성을 가진다.
@@ -237,10 +289,10 @@ fn is_folder(_entry: &DirEntry, metadata: &Metadata) -> bool {
 }
 
 #[cfg(not(windows))]
-fn is_folder(entry: &DirEntry, metadata: &Metadata) -> bool {
+fn is_folder(path: &dyn Fn() -> PathBuf, metadata: &Metadata) -> bool {
     if metadata.is_symlink() {
         // 링크일 때만 대상을 한 번 더 본다.
-        fs::metadata(entry.path()).is_ok_and(|m| m.is_dir())
+        fs::metadata(path()).is_ok_and(|m| m.is_dir())
     } else {
         metadata.is_dir()
     }
