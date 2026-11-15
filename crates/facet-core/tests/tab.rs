@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use facet_core::details::{Column, Direction, Sort};
 use facet_core::tab::{Navigation, READING_DELAY, ReadOutcome, Tab};
-use facet_core::window::{App, home_location};
+use facet_core::window::{App, Update, home_location};
 use facet_core::{ListError, Location};
 use tempfile::TempDir;
 
@@ -473,4 +473,40 @@ fn 드라이브_루트에서는_위로가_꺼진다() {
     assert!(!tab.can_go_up());
     assert!(tab.navigate(Navigation::Up).is_none());
     assert!(tab.pending_location().is_none());
+}
+
+#[test]
+fn 결과가_오면_앱이_정한_깨우기를_부른다() {
+    let dir = tree();
+    let root = dir.path();
+    let mut app = App::new(Some(loc(root)));
+    let (woke, woken) = std::sync::mpsc::channel();
+    app.set_waker(move || {
+        let _ = woke.send(());
+    });
+    // 깨우기를 걸기 전에 온 결과는 깨우지 않을 수 있으므로, 건 뒤에 한 번 거둬 간다.
+    let mut committed = app
+        .poll()
+        .into_iter()
+        .any(|(_, u)| u == Update::Read(ReadOutcome::Committed));
+    if !committed {
+        woken
+            .recv_timeout(WAIT)
+            .expect("첫 읽기 결과가 깨워야 한다");
+        committed = app
+            .poll()
+            .into_iter()
+            .any(|(_, u)| u == Update::Read(ReadOutcome::Committed));
+    }
+    assert!(committed);
+
+    // 막지 않는 poll만으로 받는다: 깨우기가 불린 뒤에는 결과가 이미 와 있다.
+    assert!(app.navigate(Navigation::Open(OsString::from("a"))));
+    woken.recv_timeout(WAIT).expect("이동 결과가 깨워야 한다");
+    let updates = app.poll();
+    assert!(updates.contains(&(
+        app.active_window().active_panel().active_tab_id(),
+        Update::Read(ReadOutcome::Committed)
+    )));
+    assert_eq!(app.active_tab().location(), &loc(&root.join("a")));
 }

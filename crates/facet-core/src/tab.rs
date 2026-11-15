@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::details::{DetailsList, Sort};
-use crate::selection::{CursorMove, StatusSummary, TypeAhead, ViewState, starts_with_folded};
+use crate::selection::{CursorMove, Pick, StatusSummary, TypeAhead, ViewState, starts_with_folded};
 use crate::watch::{self, ChangeBatch, ChangeSink, Watch, WatchError};
 use crate::window::home_location;
 use facet_win::OpenError;
@@ -899,6 +899,38 @@ impl Tab {
         }
         self.anchor = Some(name);
         self.set_cursor(index);
+    }
+
+    /// `index`번째 항목을 가리킨다(클릭 등): `pick`대로 선택을 바꾸고 커서를 거기 둔다. 범위 밖이면 아무것도 안 한다.
+    pub fn pick(&mut self, index: usize, pick: Pick) {
+        match pick {
+            Pick::Only => self.select_only(index),
+            Pick::Range => self.select_range(index),
+            Pick::Toggle => self.toggle_select(index),
+            Pick::CursorOnly => {
+                self.set_cursor(index);
+            }
+        }
+    }
+
+    /// 커서 키: 커서를 옮기고([`Tab::move_cursor`]) 옮긴 항목을 `pick`대로 고른다. 옮긴 뒤의 번호를 돌려주고,
+    /// 항목이 없으면 `None`이다.
+    pub fn move_cursor_picking(&mut self, movement: CursorMove, pick: Pick) -> Option<usize> {
+        // 범위의 기준은 옮기기 전 커서다(기준이 없을 때).
+        if pick == Pick::Range && self.anchor.is_none() {
+            self.anchor = self.cursor_item().map(|item| item.name.clone());
+        }
+        let index = self.move_cursor(movement)?;
+        self.pick(index, pick);
+        Some(index)
+    }
+
+    /// 글자로 이동하고([`Tab::type_to_find`]) 찾은 항목만 선택한다(탐색기와 같다). 찾지 못하면 선택도 커서도
+    /// 그대로고 `None`이다.
+    pub fn type_to_select(&mut self, c: char, now: Instant) -> Option<usize> {
+        let index = self.type_to_find(c, now)?;
+        self.select_only(index);
+        Some(index)
     }
 
     /// 커서 항목의 선택을 뒤집는다(Ctrl+Space). 커서가 없으면 아무것도 안 한다.
