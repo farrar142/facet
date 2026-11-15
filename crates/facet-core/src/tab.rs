@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use crate::details::{DetailsList, Sort};
 use crate::selection::{CursorMove, StatusSummary, TypeAhead, ViewState, starts_with_folded};
-use crate::{Item, ListError, Location, provider_for};
+use crate::{Candidate, Item, ListError, Location, ResolveError, provider_for};
 
 /// 읽기가 이만큼 넘게 걸리면 탭이 「읽는 중」을 드러낸다([`Tab::is_reading`]).
 pub const READING_DELAY: Duration = Duration::from_millis(100);
@@ -91,6 +91,47 @@ impl ReadResult {
     }
 }
 
+/// 자동 완성 요청의 번호. 한 탭 안에서 요청할 때마다 커진다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CompletionId(u64);
+
+/// 주소창 글자의 자동 완성 요청. `Send`이므로 일꾼 스레드에 넘겨 [`CompletionRequest::run`]한다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionRequest {
+    id: CompletionId,
+    location: Location,
+    text: String,
+}
+
+impl CompletionRequest {
+    /// 요청 번호.
+    pub fn id(&self) -> CompletionId {
+        self.id
+    }
+
+    /// 후보를 읽는다. 폴더를 읽느라 막히므로 UI 스레드에서 부르지 않는다.
+    pub fn run(&self) -> CompletionResult {
+        CompletionResult {
+            id: self.id,
+            candidates: provider_for(&self.location).complete(&self.text),
+        }
+    }
+}
+
+/// 자동 완성 요청의 결과. [`CompletionRequest::run`]만 만든다.
+#[derive(Debug)]
+pub struct CompletionResult {
+    id: CompletionId,
+    candidates: Vec<Candidate>,
+}
+
+impl CompletionResult {
+    /// 어느 요청의 결과인가.
+    pub fn id(&self) -> CompletionId {
+        self.id
+    }
+}
+
 /// 읽기 결과를 탭에 넘긴 결과.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadOutcome {
@@ -148,6 +189,10 @@ pub struct Tab {
     pending: Option<Pending>,
     next_id: u64,
     error: Option<ListError>,
+    /// 마지막 주소창 글자 해석이 실패한 까닭.
+    address_error: Option<ResolveError>,
+    /// 마지막 자동 완성 요청 번호. 이보다 앞선 요청의 결과는 버린다.
+    next_completion: u64,
     /// 선택한 항목의 이름. 보이는 항목만 든다.
     selection: HashSet<OsString>,
     /// 커서 항목의 이름과 보이는 항목 안 번호(정렬·새로 고침 뒤 `reindex`로 맞춘다).
@@ -177,6 +222,8 @@ impl Tab {
             pending: None,
             next_id: 0,
             error: None,
+            address_error: None,
+            next_completion: 0,
             selection: HashSet::new(),
             cursor: None,
             anchor: None,
@@ -230,6 +277,11 @@ impl Tab {
     /// 마지막 이동(또는 새로 고침)이 실패한 까닭. 다음 이동을 시작하면 지운다.
     pub fn error(&self) -> Option<&ListError> {
         self.error.as_ref()
+    }
+
+    /// 마지막 [`Tab::go_to_text`]가 글자를 해석하지 못한 까닭. 다음 이동을 시작하면 지운다.
+    pub fn address_error(&self) -> Option<&ResolveError> {
+        self.address_error.as_ref()
     }
 
     /// 읽기를 기다리는 위치. 없으면 `None`이다.
@@ -300,6 +352,7 @@ impl Tab {
         let id = RequestId(self.next_id);
         self.next_id += 1;
         self.error = None;
+        self.address_error = None;
         self.pending = Some(Pending {
             id,
             location: location.clone(),
@@ -312,6 +365,41 @@ impl Tab {
             location,
             sort: self.sort,
         })
+    }
+
+    /// 주소창에 친 글자로 간다: 해석 → 이동 시작. 파일 경로를 쳤으면 그 폴더로 가고 도착하면 그 파일을 선택한다.
+    ///
+    /// 해석에 실패하면 `None`을 돌려주고 [`Tab::address_error`]에 까닭을 둔다. 위치·기록·기다리는 읽기는
+    /// 그대로다. 성공하면 [`Tab::navigate`]처럼 읽기 요청을 돌려주고 [`Tab::finish`]로 확정한다.
+    pub fn go_to_text(&mut self, text: &str) -> Option<ReadRequest> {
+        let resolved = match provider_for(&self.location).resolve(text) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                self.address_error = Some(error);
+                return None;
+            }
+        };
+        let request = self.navigate(Navigation::Go(resolved.location))?;
+        if let Some(pending) = &mut self.pending {
+            pending.reselect = resolved.select;
+        }
+        Some(request)
+    }
+
+    /// 고쳐 쓰는 글자의 자동 완성 후보를 읽을 요청. 앞선 요청의 결과는 [`Tab::finish_completion`]이 버린다.
+    pub fn complete(&mut self, text: &str) -> CompletionRequest {
+        let id = CompletionId(self.next_completion);
+        self.next_completion += 1;
+        CompletionRequest {
+            id,
+            location: self.location.clone(),
+            text: text.to_string(),
+        }
+    }
+
+    /// 자동 완성 결과를 받는다. 마지막 요청의 결과면 후보를, 늦게 온 앞선 요청의 결과면 `None`을 돌려준다.
+    pub fn finish_completion(&self, result: CompletionResult) -> Option<Vec<Candidate>> {
+        (result.id.0 + 1 == self.next_completion).then_some(result.candidates)
     }
 
     /// 읽기 결과를 받는다. 기다리는 요청의 결과일 때만 반영한다.
