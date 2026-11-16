@@ -207,7 +207,7 @@ fn 일치_열로_정렬하면_일치_수_순서이고_내용_검색에서만_켜
     assert_eq!(names(&app), ["b.txt", "c.md", "a.txt"]);
 
     // 이름 검색 결과에서는 「일치」 정렬 명령이 꺼진다.
-    assert!(app.start_search("txt"));
+    app.start_search("txt").unwrap();
     wait_read(&mut app);
     assert!(!app.can_execute(CommandId::SortByMatches));
 }

@@ -2776,7 +2776,20 @@ impl View {
         };
         self.remember_scroll();
         let started = match mode {
-            search_bar::Mode::Name => self.app.borrow_mut().start_search(query),
+            search_bar::Mode::Name => {
+                let result = self.app.borrow_mut().start_search(query);
+                match result {
+                    Ok(()) => {
+                        self.ui.set_search_problem(SharedString::new());
+                        true
+                    }
+                    Err(error) => {
+                        self.ui
+                            .set_search_problem(text::search_error_text(query, &error).into());
+                        false
+                    }
+                }
+            }
             search_bar::Mode::Content => {
                 let regex = if self.ui.get_search_regex() {
                     facet_core::content_search::ContentMode::Regex

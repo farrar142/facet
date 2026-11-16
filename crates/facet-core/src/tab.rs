@@ -46,6 +46,7 @@ use crate::live_search::{
 };
 use crate::location::SearchKind;
 use crate::name_match::{NameMatcher, has_wildcard};
+use crate::query_syntax::{self, Parsed, Today};
 use crate::search_results::{
     ContentStatus, PathChange, SearchFeed, SearchStatus, is_within, rebase,
 };
@@ -1219,9 +1220,13 @@ impl Tab {
         if scope.kind != SearchKind::Name {
             return None;
         }
+        // 시작할 때 `App::start_search`가 이미 해석해 본 글자다. 그래도 해석하지 못하면(오늘이 바뀌어도 문법은 그대로) 시작하지 않는다.
+        let Ok(Parsed::Query(condition)) = query_syntax::parse(&scope.query, Today::now()) else {
+            return None;
+        };
         Some(SearchRequest {
             root: Location::file_system(&scope.folder),
-            pattern: scope.query.clone(),
+            condition,
             show_hidden: results.status.show_hidden,
         })
     }
