@@ -76,7 +76,7 @@ use facet_core::window::{
 };
 use facet_core::work_area::JobEntry;
 use facet_core::{ListError, Location, OpenError, ResolveError, provider_for};
-use slint::winit_030::winit::event::WindowEvent;
+use slint::winit_030::winit::event::{ElementState, MouseButton, WindowEvent};
 use slint::winit_030::{EventResult, WinitWindowAccessor};
 use slint::{
     CloseRequestResponse, ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker,
@@ -84,6 +84,7 @@ use slint::{
 };
 
 use crate::address::AddressEdit;
+use crate::marquee::Marquee;
 use crate::palette::Palette;
 use crate::rename::{Confirm, Rename};
 use crate::tab_drag::{Frame, Hover, Point, ScreenPoint, Strip, TabDrag, Target};
@@ -94,6 +95,7 @@ mod history_view;
 mod ime;
 mod instance;
 mod keys;
+mod marquee;
 mod measure;
 mod palette;
 mod question;
@@ -340,28 +342,48 @@ fn open_view(app: &Rc<RefCell<App>>, window: WindowId) -> Result<Rc<View>, slint
     // 창을 옮기거나 크기를 바꾸면(최대화·최소화 포함) 이벤트를 다 처리한 뒤 그 자리를 코어에 알린다. 끄는 동안 이벤트가
     // 잇달아 와도 한 번만 맡긴다.
     let placement_pending = Rc::new(Cell::new(false));
-    ui.window().on_winit_window_event(move |_, event| {
-        keys::note_window_event(event);
-        if let WindowEvent::Focused(true) = event
-            && let Some(app) = hook_app.upgrade()
-            && let Ok(mut app) = app.try_borrow_mut()
-        {
-            app.activate_window(window);
-        }
-        if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_))
-            && !placement_pending.replace(true)
-        {
-            let pending = Rc::clone(&placement_pending);
-            Timer::single_shot(Duration::ZERO, move || {
-                pending.set(false);
-                note_placement(window);
-            });
-        }
-        if let Some(frames) = frames.as_mut() {
-            frames(event);
-        }
-        EventResult::Propagate
-    });
+    ui.window()
+        .on_winit_window_event(move |slint_window, event| {
+            keys::note_window_event(event);
+            // 사각형 선택은 누른 뒤 창의 마우스 이벤트로 따라간다. 끄는 동안 목록이 넘어가며 누른 행의 화면 요소가 사라져도
+            // 놓치지 않고, 창 밖으로 끌어도 창이 마우스를 붙잡고 있어 온다.
+            match event {
+                WindowEvent::CursorMoved { position, .. } => {
+                    let scale = f64::from(slint_window.scale_factor().max(f32::EPSILON));
+                    let at = Point {
+                        x: (position.x / scale) as f32,
+                        y: (position.y / scale) as f32,
+                    };
+                    marquee_event(window, move |view| view.marquee_moved(at));
+                }
+                WindowEvent::MouseInput {
+                    state: ElementState::Released,
+                    button: MouseButton::Left,
+                    ..
+                } => marquee_event(window, View::marquee_released),
+                WindowEvent::Focused(false) => marquee_event(window, View::marquee_cancel),
+                _ => {}
+            }
+            if let WindowEvent::Focused(true) = event
+                && let Some(app) = hook_app.upgrade()
+                && let Ok(mut app) = app.try_borrow_mut()
+            {
+                app.activate_window(window);
+            }
+            if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_))
+                && !placement_pending.replace(true)
+            {
+                let pending = Rc::clone(&placement_pending);
+                Timer::single_shot(Duration::ZERO, move || {
+                    pending.set(false);
+                    note_placement(window);
+                });
+            }
+            if let Some(frames) = frames.as_mut() {
+                frames(event);
+            }
+            EventResult::Propagate
+        });
     ui.window().on_close_requested(move || {
         close_window(window);
         CloseRequestResponse::HideWindow
@@ -390,6 +412,20 @@ fn with_view(window: WindowId, f: impl FnOnce(&View)) {
     f(&view);
     drop(view);
     sync_windows();
+}
+
+/// 창 `window`에 사각형 선택(누른 빈 곳)이 있으면 그 화면 상태로 `f`를 부른다. winit 이벤트 훅이 부르므로 코어를
+/// 다른 곳에서 빌리고 있으면 이벤트 루프로 돌아간 뒤 부른다(놓기를 잃지 않게).
+fn marquee_event(window: WindowId, f: impl FnOnce(&View) + 'static) {
+    let Some(view) = view_of(window) else { return };
+    if view.marquee.borrow().is_none() {
+        return;
+    }
+    if view.app.try_borrow_mut().is_err() {
+        Timer::single_shot(Duration::ZERO, move || marquee_event(window, f));
+        return;
+    }
+    f(&view);
 }
 
 /// 첫 창(남아 있는 가장 먼저 연 창)의 화면 상태로 `f`를 부른다. 측정 모드가 쓴다.
@@ -590,6 +626,11 @@ fn connect(ui: &AppWindow, w: WindowId) {
         clicked
     });
     ui.on_tab_drag_cancel(move || with_view(w, View::tab_drag_cancel));
+    ui.on_marquee_press(move |panel, row, ctrl, shift, x, y| {
+        with_view(w, |view| {
+            view.marquee_press(panel, row, (ctrl, shift), Point { x, y });
+        });
+    });
     ui.on_sort_by(move |column| {
         let column = match column {
             1 => Column::Modified,
@@ -1034,6 +1075,10 @@ struct View {
     keep_rows: Cell<bool>,
     /// 누른 탭의 끌기 상태. 탭을 누르면 생기고 놓거나 끊기면 없어진다.
     tab_drag: RefCell<Option<TabDrag<WindowId>>>,
+    /// 빈 곳을 누른 뒤의 사각형 선택 상태. 빈 곳을 누르면 생기고 놓거나 끊기면 없어진다.
+    marquee: RefCell<Option<MarqueeDrag>>,
+    /// 사각형 선택 중 끄는 점이 목록 위·아래 끝 밖이면 목록을 넘기는 타이머.
+    marquee_timer: Timer,
     /// 복사·이동 대상 선택 창이 열려 있으면 그 상태. 화면의 `target-open`과 함께 바뀐다.
     target: RefCell<Option<TargetChooser>>,
     /// 대상 선택 창의 줄.
@@ -1045,6 +1090,18 @@ struct View {
     /// 작업 영역의 진행 표시들.
     jobs: Rc<VecModel<JobRow>>,
 }
+
+/// 사각형 선택 하나: 끌기 상태와 마지막으로 코어에 넘긴 걸친 행.
+struct MarqueeDrag {
+    drag: Marquee<TabId>,
+    /// 사각형 선택을 시작했는가(문턱을 넘어 코어에 알렸는가).
+    started: bool,
+    /// 마지막으로 넘긴 걸친 행(시작한 점 쪽, 끄는 점 쪽).
+    span: Option<(usize, usize)>,
+}
+
+/// 사각형 선택 중 끄는 점이 끝 밖일 때 목록을 넘기는 간격.
+const MARQUEE_SCROLL_INTERVAL: Duration = Duration::from_millis(30);
 
 /// 패널 하나의 화면 모델: 보이는 탭의 행, 탭 줄, 주소창 경로 조각. 탭 줄과 경로 조각은 바뀔 때만 고쳐 화면 요소를
 /// 다시 만들지 않는다.
@@ -1095,6 +1152,8 @@ impl View {
             reading_timer: Timer::default(),
             keep_rows: Cell::new(false),
             tab_drag: RefCell::default(),
+            marquee: RefCell::default(),
+            marquee_timer: Timer::default(),
             target: RefCell::default(),
             target_rows,
             transfer: RefCell::default(),
@@ -2322,6 +2381,232 @@ impl View {
         }
     }
 
+    /// 패널 `panel`의 목록 자리와 행 수. 그 패널이 없으면 `None`이다.
+    fn marquee_list(&self, panel: usize) -> Option<marquee::List> {
+        let rows = {
+            let app = self.app.borrow();
+            app.window(self.window)?
+                .panels()
+                .get(panel)?
+                .active_tab()
+                .len()
+        };
+        let ui = PanelUi::of(&self.ui, panel);
+        Some(marquee::List {
+            left: ui.list_left(),
+            top: ui.list_top(),
+            width: ui.list_width(),
+            height: ui.view_height(),
+            scroll: (-ui.content_y()).max(0.0),
+            row_height: self.ui.get_row_height(),
+            rows,
+        })
+    }
+
+    /// 패널 `panel`의 보이는 탭 번호.
+    fn shown_tab_id(&self, panel: usize) -> Option<TabId> {
+        let app = self.app.borrow();
+        Some(
+            app.window(self.window)?
+                .panels()
+                .get(panel)?
+                .active_tab_id(),
+        )
+    }
+
+    /// 빈 곳(목록 아래면 `row`가 -1, 아니면 그 행의 이름 글자 오른쪽 여백)을 왼쪽 버튼으로 눌렀다: 끌기를 기다린다.
+    /// 끌기 시작 문턱을 넘으면 사각형 선택이고, 넘기 전에 놓으면 누르기다([`View::marquee_released`]).
+    fn marquee_press(&self, panel: i32, row: i32, modifiers: (bool, bool), at: Point) {
+        self.marquee_cancel();
+        let Ok(panel) = usize::try_from(panel) else {
+            return;
+        };
+        let (Some(tab), Some(list)) = (self.shown_tab_id(panel), self.marquee_list(panel)) else {
+            return;
+        };
+        let row = usize::try_from(row).ok();
+        *self.marquee.borrow_mut() = Some(MarqueeDrag {
+            drag: Marquee::new(panel, tab, row, modifiers, at, &list),
+            started: false,
+            span: None,
+        });
+    }
+
+    /// 누른 빈 곳에서 끌고 있다(창 기준 점). 문턱을 처음 넘으면 사각형 선택을 시작하고(Ctrl이면 지금 선택에 더함),
+    /// 사각형과 걸친 행의 선택을 바꾼다. 끄는 점이 끝 밖이면 넘기는 타이머가 목록을 넘긴다.
+    fn marquee_moved(&self, at: Point) {
+        let start = {
+            let mut state = self.marquee.borrow_mut();
+            let Some(state) = state.as_mut() else { return };
+            if !state.drag.moved(at) {
+                return;
+            }
+            (!state.started).then_some((state.drag.panel, state.drag.tab, state.drag.ctrl))
+        };
+        if let Some((panel, tab, add)) = start {
+            if self.shown_tab_id(panel) != Some(tab) {
+                self.marquee_cancel();
+                return;
+            }
+            self.with_marquee_tab(panel, |tab| tab.begin_marquee(add));
+            let window = self.window;
+            self.marquee_timer
+                .start(TimerMode::Repeated, MARQUEE_SCROLL_INTERVAL, move || {
+                    if let Some(view) = view_of(window)
+                        && view.app.try_borrow_mut().is_ok()
+                    {
+                        view.marquee_scroll();
+                    }
+                });
+        }
+        self.marquee_update(start.is_some());
+    }
+
+    /// 사각형 선택 중 끄는 점이 목록 위·아래 끝 밖이면 목록을 조금 넘기고 사각형과 선택을 맞춘다.
+    fn marquee_scroll(&self) {
+        let step = self.marquee.borrow().as_ref().and_then(|state| {
+            let list = self.marquee_list(state.drag.panel)?;
+            Some((state.drag.panel, state.drag.scroll_step(&list)))
+        });
+        let Some((panel, step)) = step else {
+            self.marquee_timer.stop();
+            return;
+        };
+        if step != 0.0 {
+            let ui = PanelUi::of(&self.ui, panel);
+            ui.set_content_y(ui.content_y() - step);
+            self.marquee_update(false);
+        }
+    }
+
+    /// 사각형을 그리고, 걸친 행이 바뀌었으면(`first`면 늘) 코어에 넘겨 선택을 바꾼다. 처음에는 끌기 전 선택이 통째로
+    /// 바뀔 수 있어 목록을 다시 그리고, 그 뒤로는 바뀐 행만 다시 그린다. 누른 탭이 더 보이지 않으면(다른 곳으로 이동
+    /// 등) 그만둔다.
+    fn marquee_update(&self, first: bool) {
+        let current = self.marquee.borrow().as_ref().and_then(|state| {
+            let list = self.marquee_list(state.drag.panel)?;
+            Some((
+                state.drag.panel,
+                state.drag.tab,
+                state.drag.rect(&list),
+                state.drag.rows(&list),
+                state.span,
+            ))
+        });
+        let Some((panel, tab, rect, span, previous)) = current else {
+            return;
+        };
+        if self.shown_tab_id(panel) != Some(tab) {
+            self.marquee_cancel();
+            return;
+        }
+        PanelUi::of(&self.ui, panel).set_marquee(MarqueeBox {
+            shown: true,
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        });
+        if !first && span == previous {
+            return;
+        }
+        if let Some(state) = self.marquee.borrow_mut().as_mut() {
+            state.started = true;
+            state.span = span;
+        }
+        let cursor_before = self.marquee_cursor(panel);
+        self.with_marquee_tab(panel, |tab| tab.marquee_select(span));
+        let cursor_after = self.marquee_cursor(panel);
+        if first {
+            self.render();
+            return;
+        }
+        // 선택이 바뀔 수 있는 행은 앞뒤 걸친 행 가운데 한쪽에만 든 행과 앞뒤 커서 행뿐이다.
+        let inside = |span: Option<(usize, usize)>, i: usize| {
+            span.is_some_and(|(a, b)| a.min(b) <= i && i <= a.max(b))
+        };
+        let (low, high) = [previous, span]
+            .into_iter()
+            .flatten()
+            .flat_map(|(a, b)| [a, b])
+            .fold((usize::MAX, 0), |(low, high), i| (low.min(i), high.max(i)));
+        self.keep_rows.set(true);
+        self.render();
+        self.keep_rows.set(false);
+        let notify = &self.panels[panel].rows.notify;
+        if low <= high {
+            for i in low..=high {
+                if inside(previous, i) != inside(span, i) {
+                    notify.row_changed(i);
+                }
+            }
+        }
+        for i in [cursor_before, cursor_after].into_iter().flatten() {
+            notify.row_changed(i);
+        }
+    }
+
+    /// 패널 `panel`의 보이는 탭의 커서 행.
+    fn marquee_cursor(&self, panel: usize) -> Option<usize> {
+        let app = self.app.borrow();
+        app.window(self.window)?
+            .panels()
+            .get(panel)?
+            .active_tab()
+            .cursor()
+    }
+
+    /// 패널 `panel`의 보이는 탭으로 `f`를 부른다.
+    fn with_marquee_tab(&self, panel: usize, f: impl FnOnce(&mut Tab)) {
+        let mut app = self.app.borrow_mut();
+        if let Some(shown) = app
+            .window_mut(self.window)
+            .and_then(|window| window.panel_mut(panel))
+        {
+            f(shown.active_tab_mut());
+        }
+    }
+
+    /// 누른 빈 곳을 놓았다. 사각형 선택이었으면 끝내고(선택은 그대로), 문턱을 넘지 않았으면 누르기라 행의 여백이면
+    /// 그 행을 클릭처럼(수식 키대로) 고르고 목록 아래 빈 곳이면 아무것도 하지 않는다(전과 같음).
+    fn marquee_released(&self) {
+        let Some(state) = self.marquee.borrow_mut().take() else {
+            return;
+        };
+        self.marquee_timer.stop();
+        if state.started {
+            self.finish_marquee(state.drag.panel);
+            return;
+        }
+        let drag = state.drag;
+        if let Some(row) = drag.row
+            && !drag.is_dragging()
+            && self.shown_tab_id(drag.panel) == Some(drag.tab)
+            && self.active_panel() == drag.panel
+        {
+            self.row_pressed(count(row), Pick::for_click(drag.ctrl, drag.shift));
+        }
+    }
+
+    /// 사각형 선택이나 누른 빈 곳을 그만둔다(창이 포커스를 잃음, 두 번 누름, 누른 탭이 사라짐). 이미 바꾼 선택은
+    /// 그대로 두고 누르기로도 보지 않는다.
+    fn marquee_cancel(&self) {
+        let Some(state) = self.marquee.borrow_mut().take() else {
+            return;
+        };
+        self.marquee_timer.stop();
+        if state.started {
+            self.finish_marquee(state.drag.panel);
+        }
+    }
+
+    /// 코어의 사각형 선택을 끝내고 사각형을 지운다.
+    fn finish_marquee(&self, panel: usize) {
+        self.with_marquee_tab(panel, Tab::end_marquee);
+        PanelUi::of(&self.ui, panel).set_marquee(MarqueeBox::default());
+        self.render();
+    }
+
     /// 활성 탭의 행마다 (선택됨, 커서).
     fn row_marks(&self) -> Vec<(bool, bool)> {
         let app = self.app.borrow();
@@ -2334,6 +2619,8 @@ impl View {
 
     /// 행을 두 번 눌렀다: 그 행을 고르고 연다(폴더면 들어가고 파일이면 기본 프로그램으로).
     fn row_opened(&self, row: i32) {
+        // 빈 곳을 두 번 누른 것이면 놓을 때 다시 고르지 않는다(연 뒤에는 다른 목록이다).
+        self.marquee_cancel();
         let Ok(index) = usize::try_from(row) else {
             return;
         };
@@ -2766,6 +3053,39 @@ impl<'a> PanelUi<'a> {
             tab_width: self.tab_width(),
             scroll: -self.tab_strip_x(),
             tabs,
+        }
+    }
+
+    fn list_left(&self) -> f32 {
+        if self.right {
+            self.ui.get_right_list_left()
+        } else {
+            self.ui.get_left_list_left()
+        }
+    }
+
+    fn list_top(&self) -> f32 {
+        if self.right {
+            self.ui.get_right_list_top()
+        } else {
+            self.ui.get_left_list_top()
+        }
+    }
+
+    fn list_width(&self) -> f32 {
+        if self.right {
+            self.ui.get_right_list_width()
+        } else {
+            self.ui.get_left_list_width()
+        }
+    }
+
+    /// 사각형 선택의 사각형.
+    fn set_marquee(&self, marquee: MarqueeBox) {
+        if self.right {
+            self.ui.set_right_marquee(marquee);
+        } else {
+            self.ui.set_left_marquee(marquee);
         }
     }
 
