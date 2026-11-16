@@ -21,10 +21,13 @@
 //!   `cargo xtask ci`가 이것도 부른다.
 //! - 실시간 탐색 벤치마크: 10만 항목 시험 나무([`make_test_tree`])를 실시간 탐색으로 끝까지 훑는 시간
 //!   ([`SEARCH_LIMIT`])을 잰다([`measure_live_search`]). `cargo xtask ci`가 이것도 부른다.
+//! - 내용 검색 벤치마크: 본문 128MB 시험 나무를 내용 검색으로 읽는 처리량([`content::CONTENT_THROUGHPUT_LIMIT`])을 잰다
+//!   ([`content::measure_content_search`]). `cargo xtask ci`가 이것도 부른다.
 //! - 복사 벤치마크: 작업 대기열의 복사 작업으로 256MiB 파일 하나의 처리량([`copy::COPY_THROUGHPUT_LIMIT`])과
 //!   4KiB 파일 2천 개가 든 폴더의 복사 시간([`copy::COPY_SMALL_LIMIT`])을 잰다. `cargo xtask ci`가 이것도 부른다.
 //!   같은 복사를 셸의 `IFileOperation`으로도 해 견주는 탐색기 비교 측정([`copy::compare`])은 사람이 잰다.
 
+pub mod content;
 pub mod copy;
 pub mod delete;
 pub mod screen;
@@ -149,7 +152,7 @@ impl std::error::Error for TestFolderError {
     }
 }
 
-fn io_err(path: &Path) -> impl FnOnce(io::Error) -> TestFolderError + '_ {
+pub(crate) fn io_err(path: &Path) -> impl FnOnce(io::Error) -> TestFolderError + '_ {
     move |source| TestFolderError::Io {
         path: path.to_path_buf(),
         source,

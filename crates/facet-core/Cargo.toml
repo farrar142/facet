@@ -20,3 +20,5 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 # 세션 파일(사람이 읽을 수 있는 JSON, `session.rs`).
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+regex = "1"
+encoding_rs = "0.8"
