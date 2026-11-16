@@ -1183,11 +1183,11 @@ fn run_live_search(
     pattern: &str,
 ) -> Result<(usize, facet_core::live_search::SearchSummary), String> {
     use facet_core::live_search::{LiveSearch, SearchEnd, SearchEvent, SearchRequest};
-    let mut search = LiveSearch::start(SearchRequest {
-        root: Location::file_system(root),
-        pattern: pattern.to_owned(),
-        show_hidden: true,
-    })
+    let mut search = LiveSearch::start(SearchRequest::name(
+        Location::file_system(root),
+        pattern,
+        true,
+    ))
     .map_err(|e| e.to_string())?;
     let mut found = 0;
     loop {

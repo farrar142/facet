@@ -16,11 +16,7 @@ use facet_core::live_search::{
 const WAIT: Duration = Duration::from_secs(30);
 
 fn request(root: &Path, pattern: &str, show_hidden: bool) -> SearchRequest {
-    SearchRequest {
-        root: Location::file_system(root),
-        pattern: pattern.to_owned(),
-        show_hidden,
-    }
+    SearchRequest::name(Location::file_system(root), pattern, show_hidden)
 }
 
 struct Outcome {

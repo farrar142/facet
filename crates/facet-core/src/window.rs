@@ -79,9 +79,10 @@ use crate::job::{
     JobKind, JobQueue, JournalSink, NotRecyclableAnswer, RevertJob,
 };
 use crate::launch::LaunchTarget;
-use crate::live_search::LiveSearch;
+use crate::live_search::{LiveSearch, StartError};
 use crate::menu::{self, Menu, MenuContext, MenuKind};
 use crate::placement::Placement;
+use crate::query_syntax::{self, ParseError, Parsed, Today};
 use crate::search_results::PathChange;
 use crate::selection::Pick;
 use crate::session::{PanelSession, Session, TabSession, WindowSession};
@@ -441,6 +442,17 @@ pub enum ContentSearchError {
     EmptyText,
     /// 정규식이 틀렸다. 까닭은 `regex` 크레이트의 설명이다.
     Regex(String),
+    /// 찾을 폴더가 없다(활성 탭이 실제 폴더도 검색 결과 위치도 아님, 창이 없음).
+    NoFolder,
+}
+
+/// 이름 검색(실시간 탐색)을 시작하지 못한 까닭([`App::start_search`]). 위치·기록은 바뀌지 않았다. 화면 문장은 앱 몫이다(ADR-0007).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SearchError {
+    /// 검색어가 비었다(공백뿐 포함).
+    Empty,
+    /// 질의 문법이 틀렸다. 틀린 글자 범위(UTF-8 바이트)와 까닭이 들어 있다.
+    Syntax(ParseError),
     /// 찾을 폴더가 없다(활성 탭이 실제 폴더도 검색 결과 위치도 아님, 창이 없음).
     NoFolder,
 }
@@ -1457,7 +1469,9 @@ impl App {
             Ok(search) => {
                 tab.attach_search(Box::new(search));
             }
-            Err(error) => tab.search_failed(error),
+            Err(StartError::Location(error)) => tab.search_failed(error),
+            // 정규식은 해석 때 이미 확인했다. 그래도 여기 오면 검색 없이 끝난다.
+            Err(StartError::Regex(_)) => tab.stop_search_unstarted(),
         }
     }
 
@@ -1501,21 +1515,31 @@ impl App {
         }
     }
 
-    /// 활성 탭에서 검색을 시작한다: 탭이 검색 결과 위치(지금 폴더 아래, 이름 조건 `query`)로 가고(뒤로·앞으로 기록에
-    /// 남아 뒤로 가면 원래 폴더), 그 이동이 확정되면 실시간 탐색이 결과를 흘려 넣는다([`Update::Search`], 진행은
-    /// [`Tab::search`]). 숨김 항목 보이기는 시작할 때의 상태를 따른다. 검색 결과 위치에서 부르면 같은 폴더를 다시 찾는다.
-    /// 검색어가 비었거나 찾을 폴더가 없으면(실제 폴더가 아님) 아무것도 하지 않고 `false`다. 막지 않는다.
-    pub fn start_search(&mut self, query: &str) -> bool {
-        if !self.has_windows() || query.trim().is_empty() {
-            return false;
+    /// 활성 탭에서 이름 검색을 시작한다: 검색어를 질의 문법([`crate::query_syntax`])으로 해석하고, 탭이 검색 결과 위치(지금
+    /// 폴더 아래, 검색어 `query`)로 가고(뒤로·앞으로 기록에 남아 뒤로 가면 원래 폴더), 그 이동이 확정되면 실시간 탐색이 그
+    /// 조건 트리로 결과를 흘려 넣는다([`Update::Search`], 진행은 [`Tab::search`]). 숨김 항목 보이기는 시작할 때의 상태를
+    /// 따른다. 검색 결과 위치에서 부르면 같은 폴더를 다시 찾는다. 검색어가 비었거나 문법이 틀렸거나(틀린 위치 포함) 찾을
+    /// 폴더가 없으면(실제 폴더가 아님) 위치·기록을 바꾸지 않고 까닭을 돌려준다.
+    pub fn start_search(&mut self, query: &str) -> Result<(), SearchError> {
+        match query_syntax::parse(query, Today::now()) {
+            Ok(Parsed::Query(_)) => {}
+            Ok(Parsed::Empty) => return Err(SearchError::Empty),
+            Err(error) => return Err(SearchError::Syntax(error)),
+        }
+        if !self.has_windows() {
+            return Err(SearchError::NoFolder);
         }
         let location = self.active_tab().location();
         let folder = match (location.file_system_path(), location.search_scope()) {
             (Some(path), _) => path.to_path_buf(),
             (None, Some(scope)) => scope.folder.clone(),
-            (None, None) => return false,
+            (None, None) => return Err(SearchError::NoFolder),
         };
-        self.navigate(Navigation::Go(Location::search_results(folder, query)))
+        if self.navigate(Navigation::Go(Location::search_results(folder, query))) {
+            Ok(())
+        } else {
+            Err(SearchError::NoFolder)
+        }
     }
 
     /// facet이 한 작업의 변화를 모든 검색 결과 탭의 결과 목록에 반영한다. 바뀐 탭은 다음 [`App::poll`]이

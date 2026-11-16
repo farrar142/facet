@@ -5,6 +5,7 @@
 
 pub mod clipboard;
 pub mod command;
+pub mod condition_match;
 pub mod content_search;
 pub mod details;
 pub mod dragdrop;

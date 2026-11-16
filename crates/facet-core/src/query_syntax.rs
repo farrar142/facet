@@ -55,6 +55,18 @@ pub struct Today {
     pub utc_offset_seconds: i32,
 }
 
+impl Today {
+    /// 이 기계의 지금 지역 날짜와 UTC와의 차이.
+    pub fn now() -> Self {
+        use chrono::Offset;
+        let now = chrono::Local::now();
+        Self {
+            date: now.date_naive(),
+            utc_offset_seconds: now.offset().fix().local_minus_utc(),
+        }
+    }
+}
+
 /// 해석 결과.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Parsed {

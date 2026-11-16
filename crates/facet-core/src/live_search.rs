@@ -1,7 +1,7 @@
 //! 실시간 탐색: 인덱스가 없는 위치에서 실제 폴더 아래를 그 자리에서 훑어 이름이 맞는 항목을 찾는 대로 흘려
 //! 보내는 엔진(ADR-0003의 강등 경로, 용어는 GLOSSARY의 **실시간 탐색**).
 //!
-//! - [`LiveSearch::start`]가 시작점(실제 폴더)·이름 조건([`crate::name_match`]의 규칙, 필터와 같음)·숨김 항목
+//! - [`LiveSearch::start`]가 시작점(실제 폴더)·조건 트리([`crate::condition_match`], 질의 문법이 만듦)·숨김 항목
 //!   보이기 여부([`SearchRequest`])를 받아 그 아래를 훑는다. 시작점 자신은 결과에 넣지 않는다.
 //! - 일꾼 스레드 [`thread_count`]개(논리 코어 수와 [`MAX_THREADS`] 중 작은 것)가 폴더 하나씩 나눠 읽는다.
 //! - 찾은 항목([`Found`]: 든 폴더와 목록 항목과 같은 [`Item`])은 묶음 스레드가 모아 [`BATCH_INTERVAL`]보다 자주
@@ -28,7 +28,10 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::name_match::NameMatcher;
+use facet_protocol::Condition;
+
+use crate::condition_match::ConditionMatcher;
+use crate::name_match::has_wildcard;
 use crate::{Item, ListError, Location};
 
 /// 일꾼 스레드 수의 상한. 디스크 하나를 훑는 일이라 스레드를 늘려도 어느 수 위로는 빨라지지 않고(SSD의 큐 깊이,
@@ -52,11 +55,60 @@ pub fn thread_count() -> usize {
 pub struct SearchRequest {
     /// 시작점. 실제 폴더여야 한다.
     pub root: Location,
-    /// 이름 조건([`crate::name_match`]의 규칙: 부분 일치, `*`·`?`가 있으면 이름 전체 와일드카드, 대소문자 무시).
-    pub pattern: String,
+    /// 항목이 맞아야 할 조건 트리([`crate::condition_match`], 인덱스와 같은 뜻). 질의 문법은
+    /// [`crate::query_syntax::parse`]가 이 트리로 바꾼다.
+    pub condition: Condition,
     /// 숨김 항목 보이기.
     pub show_hidden: bool,
 }
+
+impl SearchRequest {
+    /// 이름 조건 하나만 있는 요청: 부분 일치, `*`·`?`가 있으면 이름 전체 와일드카드(대소문자 무시, 빈 패턴은 모두).
+    pub fn name(root: Location, pattern: &str, show_hidden: bool) -> Self {
+        let condition = if has_wildcard(pattern) {
+            Condition::NameWildcard {
+                pattern: pattern.to_owned(),
+                case: facet_protocol::Case::Insensitive,
+            }
+        } else {
+            Condition::NameContains {
+                part: pattern.to_owned(),
+                case: facet_protocol::Case::Insensitive,
+            }
+        };
+        Self {
+            root,
+            condition,
+            show_hidden,
+        }
+    }
+}
+
+/// 실시간 탐색을 시작하지 못한 까닭.
+#[derive(Debug)]
+pub enum StartError {
+    /// 시작점을 읽을 수 없다(없음·폴더 아님·실제 폴더 위치 아님).
+    Location(ListError),
+    /// 조건 트리의 정규식이 틀리다(정규식 라이브러리의 설명).
+    Regex(String),
+}
+
+impl From<ListError> for StartError {
+    fn from(error: ListError) -> Self {
+        Self::Location(error)
+    }
+}
+
+impl std::fmt::Display for StartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Location(error) => error.fmt(f),
+            Self::Regex(why) => write!(f, "잘못된 정규식입니다: {why}"),
+        }
+    }
+}
+
+impl std::error::Error for StartError {}
 
 /// 찾은 항목 하나.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,7 +232,7 @@ pub struct LiveSearch {
 
 impl LiveSearch {
     /// 탐색을 시작한다. 시작점이 없거나 폴더가 아니거나 실제 폴더 위치가 아니면 시작하지 않는다.
-    pub fn start(request: SearchRequest) -> Result<LiveSearch, ListError> {
+    pub fn start(request: SearchRequest) -> Result<LiveSearch, StartError> {
         Self::spawn(request, None)
     }
 
@@ -189,11 +241,11 @@ impl LiveSearch {
     pub fn start_with_waker(
         request: SearchRequest,
         waker: impl Fn() + Send + Sync + 'static,
-    ) -> Result<LiveSearch, ListError> {
+    ) -> Result<LiveSearch, StartError> {
         Self::spawn(request, Some(Arc::new(waker)))
     }
 
-    fn spawn(request: SearchRequest, waker: Option<Waker>) -> Result<LiveSearch, ListError> {
+    fn spawn(request: SearchRequest, waker: Option<Waker>) -> Result<LiveSearch, StartError> {
         let root = request
             .root
             .file_system_path()
@@ -205,8 +257,10 @@ impl LiveSearch {
         if !metadata.is_dir() {
             return Err(ListError::NotAFolder {
                 location: request.root.clone(),
-            });
+            }
+            .into());
         }
+        let matcher = ConditionMatcher::new(&request.condition).map_err(StartError::Regex)?;
         let start = Instant::now();
         let shared = Arc::new(Shared {
             cancelled: AtomicBool::new(false),
@@ -218,7 +272,7 @@ impl LiveSearch {
             folders_scanned: AtomicUsize::new(0),
             folders_skipped: AtomicUsize::new(0),
         });
-        let matcher = Arc::new(NameMatcher::new(&request.pattern));
+        let matcher = Arc::new(matcher);
         let (found_sender, found_receiver) = mpsc::channel::<Vec<Found>>();
         for _ in 0..thread_count() {
             let shared = Arc::clone(&shared);
@@ -284,7 +338,12 @@ impl Drop for LiveSearch {
 
 /// 일꾼 하나: 대기열에서 폴더를 꺼내 읽고, 맞는 항목을 보내고, 하위 폴더를 대기열에 더한다. 대기열이 비고 읽는
 /// 일꾼도 없거나 취소되면 끝난다.
-fn work(shared: &Shared, matcher: &NameMatcher, show_hidden: bool, sender: &Sender<Vec<Found>>) {
+fn work(
+    shared: &Shared,
+    matcher: &ConditionMatcher,
+    show_hidden: bool,
+    sender: &Sender<Vec<Found>>,
+) {
     loop {
         let folder = {
             let mut queue = shared.queue();
@@ -328,7 +387,7 @@ fn work(shared: &Shared, matcher: &NameMatcher, show_hidden: bool, sender: &Send
 fn scan(
     shared: &Shared,
     folder: &Path,
-    matcher: &NameMatcher,
+    matcher: &ConditionMatcher,
     show_hidden: bool,
 ) -> (Vec<Found>, Vec<PathBuf>) {
     let skip = || {
@@ -365,7 +424,7 @@ fn scan(
         if item.is_folder && !kind.is_symlink() {
             subfolders.push(entry.path());
         }
-        if matcher.is_match(&item.name) {
+        if matcher.is_match(folder, &item) {
             found.push(Found {
                 folder: Arc::clone(&shared_folder),
                 item,

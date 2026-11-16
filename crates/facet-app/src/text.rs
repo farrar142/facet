@@ -533,6 +533,54 @@ pub fn content_search_error_text(error: &facet_core::window::ContentSearchError)
     }
 }
 
+/// 이름 검색을 시작하지 못한 까닭(검색창 아래에 보인다). 문법이 틀리면 틀린 곳을 글자 순서(1부터)로 알린다.
+pub fn search_error_text(query: &str, error: &facet_core::window::SearchError) -> String {
+    use facet_core::query_syntax::{Keyword, ParseErrorKind};
+    use facet_core::window::SearchError;
+    match error {
+        SearchError::Empty => "검색어를 입력하세요".to_owned(),
+        SearchError::NoFolder => "여기서는 검색할 수 없습니다".to_owned(),
+        SearchError::Syntax(error) => {
+            let keyword = |k: &Keyword| match k {
+                Keyword::Ext => "ext:",
+                Keyword::Size => "size:",
+                Keyword::Dm => "dm:",
+                Keyword::Path => "path:",
+                Keyword::Regex => "regex:",
+                Keyword::Folder => "folder:",
+                Keyword::File => "file:",
+            };
+            let reason = match &error.kind {
+                ParseErrorKind::UnclosedQuote => "닫히지 않은 큰따옴표입니다".to_owned(),
+                ParseErrorKind::UnclosedGroup => "닫히지 않은 <입니다".to_owned(),
+                ParseErrorKind::UnmatchedClose => "짝이 없는 >입니다".to_owned(),
+                ParseErrorKind::EmptyGroup => "비어 있는 <>입니다".to_owned(),
+                ParseErrorKind::MissingOperand => "연산자에 조건이 없습니다".to_owned(),
+                ParseErrorKind::MissingValue(k) => format!("{}에 값이 없습니다", keyword(k)),
+                ParseErrorKind::UnexpectedValue(k) => {
+                    format!("{}에는 값을 쓰지 않습니다", keyword(k))
+                }
+                ParseErrorKind::InvalidSize => "크기 값이 올바르지 않습니다".to_owned(),
+                ParseErrorKind::InvalidDate => "날짜 값이 올바르지 않습니다".to_owned(),
+                ParseErrorKind::InvalidRegex(reason) => {
+                    let last = reason.lines().rev().find(|line| !line.trim().is_empty());
+                    let last = last.unwrap_or("").trim();
+                    let last = last.strip_prefix("error: ").unwrap_or(last);
+                    format!("정규식이 올바르지 않습니다: {last}")
+                }
+                ParseErrorKind::TooDeep => "<>를 너무 깊게 겹쳤습니다".to_owned(),
+            };
+            // 바이트 오프셋을 글자 순서로 바꾼다(범위가 글자 경계가 아니어도 넘어지지 않게 자른다).
+            let at = error.range.start.min(query.len());
+            let chars = query.char_indices().take_while(|(i, _)| *i < at).count();
+            format!(
+                "검색어가 올바르지 않습니다 ({}번째 글자): {reason}",
+                chars + 1
+            )
+        }
+    }
+}
+
 /// 운영 체제가 준 오류 문장과 코드(HRESULT)를 한 글자로: `메시지 (0x80070005)`.
 /// 문장은 운영 체제의 언어로 오므로 번역하지 않는다.
 pub fn os_error_detail(message: &str, code: i32) -> String {

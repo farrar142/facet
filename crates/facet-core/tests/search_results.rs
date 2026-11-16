@@ -74,7 +74,7 @@ fn wait_search(app: &mut App) {
 
 /// 검색을 시작해 결과 위치로 옮기고 끝날 때까지 받는다.
 fn search(app: &mut App, query: &str) {
-    assert!(app.start_search(query));
+    app.start_search(query).unwrap();
     wait_read(app);
     wait_search(app);
 }
@@ -127,9 +127,12 @@ fn 검색을_시작하면_탭이_결과_위치가_되고_결과가_들어오며_
     let dir = tree();
     let root = dir.path();
     let mut app = app_at(root);
-    assert!(!app.start_search("   "), "빈 검색어는 시작하지 않는다");
+    assert!(
+        app.start_search("   ").is_err(),
+        "빈 검색어는 시작하지 않는다"
+    );
 
-    assert!(app.start_search("보고서"));
+    app.start_search("보고서").unwrap();
     wait_read(&mut app);
     let tab = app.active_tab();
     assert_eq!(
@@ -189,7 +192,7 @@ fn 검색을_시작하면_탭이_결과_위치가_되고_결과가_들어오며_
 fn 결과는_찾는_대로_들어오고_update_search로_알린다() {
     let dir = tree();
     let mut app = app_at(dir.path());
-    assert!(app.start_search("보고서"));
+    app.start_search("보고서").unwrap();
     wait_read(&mut app);
     let tab_id = app.active_tab_id();
     let deadline = Instant::now() + WAIT;
@@ -210,7 +213,7 @@ fn 다른_곳으로_가거나_탭이나_창을_닫으면_탐색이_멈춘다() {
 
     // 다른 곳으로 가기.
     let mut app = app_at(root);
-    assert!(app.start_search("보고서"));
+    app.start_search("보고서").unwrap();
     wait_read(&mut app);
     let dropped = probe(&mut app);
     assert!(app.navigate(Navigation::Go(Location::file_system(root.join("a")))));
@@ -220,7 +223,7 @@ fn 다른_곳으로_가거나_탭이나_창을_닫으면_탐색이_멈춘다() {
     assert!(app.active_tab().search().is_none());
 
     // 탭 닫기.
-    assert!(app.start_search("보고서"));
+    app.start_search("보고서").unwrap();
     wait_read(&mut app);
     let dropped = probe(&mut app);
     let id = app.active_tab_id();
@@ -231,7 +234,7 @@ fn 다른_곳으로_가거나_탭이나_창을_닫으면_탐색이_멈춘다() {
     // 창 닫기.
     let window = app.open_window(Location::file_system(root));
     wait_read(&mut app);
-    assert!(app.start_search("보고서"));
+    app.start_search("보고서").unwrap();
     wait_read(&mut app);
     let dropped = probe(&mut app);
     assert!(app.close_window(window));
@@ -283,7 +286,7 @@ fn 새로_고침은_같은_검색을_다시_하고_밖의_변경은_따라가지
 fn 검색_중지는_탐색을_멈추고_결과를_남긴다() {
     let dir = tree();
     let mut app = app_at(dir.path());
-    assert!(app.start_search("보고서"));
+    app.start_search("보고서").unwrap();
     wait_read(&mut app);
     // 검색이 도는 동안에만 켜진다. 결과 몇 개를 직접 넣은 것처럼 두고 멈춘다.
     assert!(app.can_execute(CommandId::StopSearch));
