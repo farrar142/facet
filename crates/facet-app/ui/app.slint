@@ -973,10 +973,23 @@ component ItemIcon inherits Rectangle {
 // 주소창의 경로 조각 하나. 누르면 그 위치로 간다.
 component Segment inherits Rectangle {
     in property <string> text;
+    // 끌어 온 항목이 놓일 조각인가(강조색).
+    in property <bool> drop-target;
     callback pressed();
+    // 조각의 창 기준 가로 자리가 바뀌었다(끌어 놓을 자리 판정에 쓴다).
+    callback geometry(length, length);
 
     border-radius: 3px;
-    background: touch.has-hover ? Palette.alternate-background : transparent;
+    background: root.drop-target ? Palette.accent-background.transparentize(60%) : touch.has-hover ? Palette.alternate-background : transparent;
+    init => {
+        root.geometry(self.absolute-position.x, self.width);
+    }
+    changed absolute-position => {
+        root.geometry(self.absolute-position.x, self.width);
+    }
+    changed width => {
+        root.geometry(self.absolute-position.x, self.width);
+    }
     touch := TouchArea {
         clicked => {
             root.pressed();
@@ -1001,6 +1014,10 @@ component PanelView inherits Rectangle {
     in property <PanelData> data;
     in property <[TabItem]> tabs;
     in property <[string]> segments;
+    // 끌어 온 항목이 놓일 탭·경로 조각(없으면 -1).
+    in property <int> drop-tab: -1;
+    in property <int> drop-segment: -1;
+    callback segment-geometry(int, length, length);
     in property <[Row]> rows;
     // 활성 패널인가. 패널이 둘일 때(`split`)만 테두리와 주소창 색으로 드러낸다.
     in property <bool> active;
@@ -1044,6 +1061,8 @@ component PanelView inherits Rectangle {
     // 주소창의 자리(창 기준). 창이 자동 완성 후보를 그 아래에 놓는다.
     out property <length> address-x: address-bar.absolute-position.x;
     out property <length> address-y: address-bar.absolute-position.y + address-bar.height;
+    out property <length> address-top: address-bar.absolute-position.y;
+    out property <length> address-height: address-bar.height;
     out property <length> address-width: address-bar.width;
     // 툴팁을 보일 탭(마우스가 올라간 탭, 없으면 -1)과 그 탭의 왼쪽 끝, 툴팁을 보이는가.
     property <int> tip-tab: -1;
@@ -1169,6 +1188,9 @@ component PanelView inherits Rectangle {
                             }
                         }
                     }
+                    if i == root.drop-tab: Rectangle {
+                        background: Palette.accent-background.transparentize(65%);
+                    }
                     // 탭 사이 경계.
                     Rectangle {
                         x: parent.width - 1px;
@@ -1238,6 +1260,10 @@ component PanelView inherits Rectangle {
                             min-width: i == root.segments.length - 1 ? min(self.preferred-width, address-bar.width - 8px) : 0px;
                             horizontal-stretch: i == root.segments.length - 1 ? 1 : 0;
                             text: segment;
+                            drop-target: i == root.drop-segment;
+                            geometry(x, w) => {
+                                root.segment-geometry(i, x, w);
+                            }
                             pressed => {
                                 root.activate();
                                 root.segment-pressed(i);
@@ -1849,6 +1875,16 @@ export component AppWindow inherits Window {
     in property <int> right-drop-slot: -1;
     // 다른 앱에서 끌어 온 파일이 놓일 폴더 행(Rust가 정한다): 패널마다. 없으면 -1.
     in property <int> left-drop-row: -1;
+    // 끌어 온 항목이 놓일 탭·경로 조각(패널마다, 없으면 -1)과 주소창의 세로 자리.
+    in property <int> left-drop-tab: -1;
+    in property <int> right-drop-tab: -1;
+    in property <int> left-drop-segment: -1;
+    in property <int> right-drop-segment: -1;
+    out property <length> left-address-top: left.address-top;
+    out property <length> left-address-height: left.address-height;
+    out property <length> right-address-top: right.address-top;
+    out property <length> right-address-height: right.address-height;
+    callback segment-geometry(int, int, length, length);
     in property <int> right-drop-row: -1;
     // 사각형 선택: 패널마다 목록의 보이는 영역 자리(창 기준)와 너비, 그릴 사각형(Rust가 정한다).
     out property <length> left-list-left: left.list-left;
@@ -2257,6 +2293,11 @@ export component AppWindow inherits Window {
             dragged-tab: root.left-dragged-tab;
             drop-slot: root.left-drop-slot;
             drop-row: root.left-drop-row;
+            drop-tab: root.left-drop-tab;
+            drop-segment: root.left-drop-segment;
+            segment-geometry(i, x, w) => {
+                root.segment-geometry(0, i, x, w);
+            }
             marquee: root.left-marquee;
             marquee-press(row, ctrl, shift, x, y) => {
                 root.marquee-press(0, row, ctrl, shift, x, y);
@@ -2390,6 +2431,11 @@ export component AppWindow inherits Window {
             dragged-tab: root.right-dragged-tab;
             drop-slot: root.right-drop-slot;
             drop-row: root.right-drop-row;
+            drop-tab: root.right-drop-tab;
+            drop-segment: root.right-drop-segment;
+            segment-geometry(i, x, w) => {
+                root.segment-geometry(1, i, x, w);
+            }
             marquee: root.right-marquee;
             marquee-press(row, ctrl, shift, x, y) => {
                 root.marquee-press(1, row, ctrl, shift, x, y);

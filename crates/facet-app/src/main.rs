@@ -768,6 +768,9 @@ fn connect(ui: &AppWindow, w: WindowId) {
         ime::remove_selection(&text, anchor, cursor).0.into()
     });
     ui.on_segment_pressed(move |index| with_view(w, |view| view.segment_pressed(index)));
+    ui.on_segment_geometry(move |panel, index, left, width| {
+        with_view(w, |view| view.note_crumb(panel, index, left, width));
+    });
     ui.on_begin_address_edit(move || with_view(w, View::begin_address_edit));
     ui.on_address_edited(move |text| with_view(w, |view| view.address_edited(&text)));
     ui.on_address_step(move |step| {
@@ -1202,6 +1205,8 @@ struct View {
     reading_timer: Timer,
     /// 켜져 있으면 다음 `render`가 행 모델을 reset하지 않는다(행 눌러 고르기가 바뀐 행만 알리는 동안).
     keep_rows: Cell<bool>,
+    /// 패널마다 주소창 경로 조각의 가로 자리(창 기준). 화면이 조각을 놓을 때마다 알려 주고, 끌어 놓을 자리 판정이 쓴다.
+    crumbs: RefCell<[Vec<file_drop::CrumbArea>; MAX_PANELS]>,
     /// 누른 탭의 끌기 상태. 탭을 누르면 생기고 놓거나 끊기면 없어진다.
     tab_drag: RefCell<Option<TabDrag<WindowId>>>,
     /// 빈 곳을 누른 뒤의 사각형 선택 상태. 빈 곳을 누르면 생기고 놓거나 끊기면 없어진다.
@@ -1300,6 +1305,7 @@ impl View {
             menu_sub_rows,
             reading_timer: Timer::default(),
             keep_rows: Cell::new(false),
+            crumbs: RefCell::default(),
             tab_drag: RefCell::default(),
             marquee: RefCell::default(),
             marquee_timer: Timer::default(),
@@ -2589,6 +2595,29 @@ impl View {
         self.render();
     }
 
+    /// 패널 `panel`의 `index`번째 경로 조각이 창 기준 가로 `left`부터 `width`에 놓였다.
+    fn note_crumb(&self, panel: i32, index: i32, left: f32, width: f32) {
+        let (Ok(panel), Ok(index)) = (usize::try_from(panel), usize::try_from(index)) else {
+            return;
+        };
+        let Ok(mut crumbs) = self.crumbs.try_borrow_mut() else {
+            return;
+        };
+        let Some(list) = crumbs.get_mut(panel) else {
+            return;
+        };
+        if list.len() <= index {
+            list.resize(
+                index + 1,
+                file_drop::CrumbArea {
+                    left: 0.0,
+                    width: 0.0,
+                },
+            );
+        }
+        list[index] = file_drop::CrumbArea { left, width };
+    }
+
     /// 경로 조각을 눌렀다: 그 위치로 간다.
     fn segment_pressed(&self, index: i32) {
         let location = {
@@ -3449,6 +3478,38 @@ impl<'a> PanelUi<'a> {
     }
 
     /// 다른 앱에서 끌어 온 파일이 놓일 폴더 행(없으면 -1).
+    fn set_drop_tab(&self, tab: i32) {
+        if self.right {
+            self.ui.set_right_drop_tab(tab);
+        } else {
+            self.ui.set_left_drop_tab(tab);
+        }
+    }
+
+    fn set_drop_segment(&self, segment: i32) {
+        if self.right {
+            self.ui.set_right_drop_segment(segment);
+        } else {
+            self.ui.set_left_drop_segment(segment);
+        }
+    }
+
+    fn address_top(&self) -> f32 {
+        if self.right {
+            self.ui.get_right_address_top()
+        } else {
+            self.ui.get_left_address_top()
+        }
+    }
+
+    fn address_height(&self) -> f32 {
+        if self.right {
+            self.ui.get_right_address_height()
+        } else {
+            self.ui.get_left_address_height()
+        }
+    }
+
     fn set_drop_row(&self, row: i32) {
         if self.right {
             self.ui.set_right_drop_row(row);
@@ -3626,7 +3687,7 @@ impl View {
         sources: Option<&[PathBuf]>,
     ) -> Option<DropPlace> {
         let placed = self.drop_decision(state, sources);
-        self.show_drop_row(placed.as_ref().and_then(|p| p.highlight));
+        self.show_drop_highlight(placed.as_ref().map_or(Highlight::None, |p| p.highlight));
         placed
     }
 
@@ -3644,12 +3705,19 @@ impl View {
         let window = app.window(self.window)?;
         let tab_of = |panel: usize| window.panels().get(panel).map(Panel::active_tab);
         let row_height = self.ui.get_row_height();
+        let crumbs = self.crumbs.try_borrow().ok()?;
         let areas: Vec<Option<PanelArea>> = (0..MAX_PANELS)
             .map(|panel| {
                 let tab = tab_of(panel)?;
                 let ui = PanelUi::of(&self.ui, panel);
+                let mut crumbs = crumbs[panel].clone();
+                crumbs.truncate(provider_for(tab.location()).segments(tab.location()).len());
                 Some(PanelArea {
                     top: ui.tab_strip_top(),
+                    strip: ui.tab_strip(window.panels().get(panel).map_or(0, |p| p.tabs().len())),
+                    address_top: ui.address_top(),
+                    address_height: ui.address_height(),
+                    crumbs,
                     list: marquee::List {
                         left: ui.list_left(),
                         top: ui.list_top(),
@@ -3675,6 +3743,16 @@ impl View {
             Place::Panel { panel } => {
                 tab_of(panel).and_then(|tab| tab.location().file_system_path().map(PathBuf::from))
             }
+            Place::Tab { panel, tab } => window
+                .panels()
+                .get(panel)
+                .and_then(|panel| panel.tabs().nth(tab))
+                .and_then(|(_, tab)| tab.location().file_system_path().map(PathBuf::from)),
+            Place::Crumb { panel, crumb } => tab_of(panel).and_then(|tab| {
+                let segments = provider_for(tab.location()).segments(tab.location());
+                let segment = segments.into_iter().nth(crumb)?;
+                segment.location.file_system_path().map(PathBuf::from)
+            }),
             Place::FileRow | Place::Outside => None,
         };
         let target = folder
@@ -3702,7 +3780,13 @@ impl View {
             .as_deref()
             .and_then(|folder| dragdrop::cursor_effect(decision, sources, folder));
         let highlight = match place {
-            Place::FolderRow { panel, row } if effect.is_some() => Some((panel, row)),
+            Place::FolderRow { panel, row } if effect.is_some() => Highlight::Row(panel, row),
+            Place::Tab { panel, tab } if effect.is_some() => Highlight::Tab(panel, tab),
+            Place::Crumb { panel, crumb } if effect.is_some() => Highlight::Crumb(panel, crumb),
+            _ => Highlight::None,
+        };
+        let tab_over = match place {
+            Place::Tab { panel, tab } => Some((panel, tab)),
             _ => None,
         };
         Some(DropPlace {
@@ -3710,19 +3794,51 @@ impl View {
             folder,
             effect,
             highlight,
+            tab_over,
             at: (at.x, at.y),
         })
     }
 
-    /// 끌어 온 파일이 놓일 폴더 행(패널, 항목 번호)을 드러낸다. `None`이면 지운다.
-    fn show_drop_row(&self, at: Option<(usize, usize)>) {
+    /// 끌어 온 항목이 놓일 자리(폴더 행·탭·경로 조각)를 드러낸다. `Highlight::None`이면 지운다.
+    fn show_drop_highlight(&self, at: Highlight) {
+        let value = |shown: Option<(usize, usize)>, panel: usize| {
+            shown
+                .filter(|(p, _)| *p == panel)
+                .and_then(|(_, index)| i32::try_from(index).ok())
+                .unwrap_or(-1)
+        };
         for panel in 0..MAX_PANELS {
-            let row = at
-                .filter(|(shown, _)| *shown == panel)
-                .and_then(|(_, row)| i32::try_from(row).ok())
-                .unwrap_or(-1);
-            PanelUi::of(&self.ui, panel).set_drop_row(row);
+            let ui = PanelUi::of(&self.ui, panel);
+            ui.set_drop_row(value(at.row(), panel));
+            ui.set_drop_tab(value(at.tab(), panel));
+            ui.set_drop_segment(value(at.crumb(), panel));
         }
+    }
+
+    /// 끌어 온 항목이 탭 위에 머물러 그 탭을 연다(활성 탭으로 하고 목록을 보인다).
+    fn open_dragged_over_tab(&self, panel: usize, tab: usize) {
+        let id = {
+            let Ok(app) = self.app.try_borrow() else {
+                return;
+            };
+            let Some(window) = app.window(self.window) else {
+                return;
+            };
+            let id = window
+                .panels()
+                .get(panel)
+                .and_then(|panel| panel.tabs().nth(tab))
+                .map(|(id, _)| id);
+            match id {
+                Some(id) if id != app.active_tab_id() => id,
+                _ => return,
+            }
+        };
+        self.remember_scroll();
+        if let Ok(mut app) = self.app.try_borrow_mut() {
+            app.activate_tab(id);
+        }
+        self.tab_switched();
     }
 
     /// 오른쪽 끌기로 놓은 자리(창 기준 점 `at`)에 「여기에 복사」「여기로 이동」「취소」 메뉴를 연다. 오른쪽 메뉴와 같은
@@ -3927,6 +4043,41 @@ impl View {
     }
 }
 
+/// 끄는 동안 드러낼 놓을 자리.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Highlight {
+    None,
+    /// 패널의 폴더 행(항목 번호).
+    Row(usize, usize),
+    /// 패널의 탭(탭 번호).
+    Tab(usize, usize),
+    /// 패널 주소창의 경로 조각.
+    Crumb(usize, usize),
+}
+
+impl Highlight {
+    fn row(self) -> Option<(usize, usize)> {
+        match self {
+            Highlight::Row(p, i) => Some((p, i)),
+            _ => None,
+        }
+    }
+
+    fn tab(self) -> Option<(usize, usize)> {
+        match self {
+            Highlight::Tab(p, i) => Some((p, i)),
+            _ => None,
+        }
+    }
+
+    fn crumb(self) -> Option<(usize, usize)> {
+        match self {
+            Highlight::Crumb(p, i) => Some((p, i)),
+            _ => None,
+        }
+    }
+}
+
 /// 끄는 파일을 놓을 자리의 판단.
 struct DropPlace {
     decision: dragdrop::Decision,
@@ -3934,8 +4085,10 @@ struct DropPlace {
     folder: Option<PathBuf>,
     /// 커서 효과. 놓을 수 없으면 `None`.
     effect: Option<DropEffect>,
-    /// 드러낼 폴더 행(패널, 항목 번호).
-    highlight: Option<(usize, usize)>,
+    /// 드러낼 놓을 자리.
+    highlight: Highlight,
+    /// 끄는 점이 탭 위면 그 탭(패널, 탭 번호). 놓을 수 없는 위치의 탭이어도 머물면 열린다.
+    tab_over: Option<(usize, usize)>,
     /// 창 기준 점.
     at: (f32, f32),
 }
@@ -4006,6 +4159,8 @@ struct FileDrop {
     sources: RefCell<Option<Vec<PathBuf>>>,
     /// 마지막 판단의 커서 옆 설명.
     label: RefCell<Option<facet_win::drop_target::DropLabel>>,
+    /// 탭 위 머묾 판정.
+    dwell: RefCell<file_drop::Dwell>,
 }
 
 fn drop_effect(effect: Option<DropEffect>) -> facet_win::drop_target::Effect {
@@ -4037,15 +4192,22 @@ impl facet_win::drop_target::DropHandler for FileDrop {
         };
         let sources = self.sources.borrow();
         let placed = view.drop_place(state, sources.as_deref());
+        let over = placed.as_ref().and_then(|p| p.tab_over);
+        if self.dwell.borrow_mut().update(over, Instant::now())
+            && let Some((panel, tab)) = over
+        {
+            view.open_dragged_over_tab(panel, tab);
+        }
         *self.label.borrow_mut() = placed.as_ref().map(DropPlace::label);
         drop_effect(placed.and_then(|p| p.effect))
     }
 
     fn leave(&self) {
+        self.dwell.borrow_mut().reset();
         self.sources.borrow_mut().take();
         self.label.borrow_mut().take();
         if let Some(view) = view_of(self.window) {
-            view.show_drop_row(None);
+            view.show_drop_highlight(Highlight::None);
         }
     }
 
@@ -4054,13 +4216,14 @@ impl facet_win::drop_target::DropHandler for FileDrop {
         data: &facet_win::drop_target::DragData,
         state: &facet_win::drop_target::DragState,
     ) -> facet_win::drop_target::Effect {
+        self.dwell.borrow_mut().reset();
         self.sources.borrow_mut().take();
         self.label.borrow_mut().take();
         let Some(view) = view_of(self.window) else {
             return facet_win::drop_target::Effect::None;
         };
         let placed = view.drop_place(state, data.files.as_deref());
-        view.show_drop_row(None);
+        view.show_drop_highlight(Highlight::None);
         let (Some(placed), Some(sources)) = (placed, data.files.clone()) else {
             return facet_win::drop_target::Effect::None;
         };
@@ -4139,6 +4302,7 @@ fn register_drop_target(view: &View) {
             window: view.window,
             sources: RefCell::default(),
             label: RefCell::default(),
+            dwell: RefCell::default(),
         };
         match facet_win::drop_target::register(handle, Box::new(handler)) {
             Ok(registration) => *view.drop_target.borrow_mut() = Some(registration),
