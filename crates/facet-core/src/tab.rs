@@ -40,13 +40,17 @@ use crate::content_search::{
     ContentEnd, ContentEvent, ContentFound, ContentRequest, ContentSearch,
 };
 use crate::details::Hit;
+use crate::indexer_client::{Reply, RequestError, RequestId as IndexerRequestId};
+use crate::instant_search::{
+    self, Flight, InstantState, InstantStatus, PAGE_SIZE, Unavailable, found_from_hit,
+};
 use crate::launch::LaunchTarget;
 use crate::live_search::{
     Found, SearchEnd, SearchEvent, SearchProgress, SearchRequest, SearchSummary,
 };
 use crate::location::SearchKind;
 use crate::name_match::{NameMatcher, has_wildcard};
-use crate::query_syntax::{self, Parsed, Today};
+use crate::query_syntax::{self, ParseError, Parsed, Today};
 use crate::search_results::{
     ContentStatus, PathChange, SearchFeed, SearchStatus, is_within, rebase,
 };
@@ -379,6 +383,8 @@ struct Results {
     /// 내용 검색이 결과를 흘려 넣는 것(내용 검색 결과 위치만). 버리면 검색이 멈춘다.
     content: Option<ContentSearch>,
     status: SearchStatus,
+    /// 즉시 검색 결과 위치면 그 상태(보낸 요청·이어 받기 표지·전체 개수).
+    instant: Option<InstantState>,
 }
 
 impl std::fmt::Debug for Results {
@@ -520,6 +526,10 @@ pub struct Tab {
     list_gen: u64,
     /// 검색 결과 위치면 그 상태(피드·진행). 다른 위치로 가면 버려 검색이 멈춘다.
     results: Option<Results>,
+    /// 즉시 검색의 범위: 「현재 폴더 아래만」인가(아니면 모든 볼륨). 위치를 옮겨도 탭에 남는다.
+    instant_under: bool,
+    /// 마지막으로 넘긴 즉시 검색 글자가 틀린 까닭(결과·위치는 그대로다). 맞는 글자·검색 끝내기·다른 곳으로 이동이 지운다.
+    instant_error: Option<ParseError>,
 }
 
 impl Tab {
@@ -558,6 +568,8 @@ impl Tab {
             next_filter: 0,
             list_gen: 0,
             results: None,
+            instant_under: false,
+            instant_error: None,
         }
     }
 
@@ -1059,9 +1071,14 @@ impl Tab {
         self.list_gen += 1;
         // 검색 결과 위치로 갔거나 다시 읽었으면 결과를 처음부터 받는다(앞 피드를 버려 앞 검색을 멈춘다). 다른 위치로
         // 갔으면 검색이 멈춘다.
+        let is_instant = is_instant_location(&self.location);
+        if !is_instant {
+            self.instant_error = None;
+        }
         self.results = self.location.is_search_results().then(|| Results {
             feed: None,
             content: None,
+            instant: is_instant.then(InstantState::default),
             status: SearchStatus {
                 show_hidden: self.show_hidden,
                 ..SearchStatus::default()
@@ -1097,6 +1114,14 @@ impl Tab {
         self.sort = sort;
         self.list_gen += 1;
         self.list.set_sort(sort);
+        // 즉시 검색: 서비스가 아는 열로 바꾸면 같은 질의를 그 정렬로 다시 보낸다(앱이 보낸다). 모르는 열은 받아 둔 것만 정렬한다.
+        if let Some(wanted) = instant_search::server_sort(sort)
+            && let Some(instant) = self.results.as_mut().and_then(|r| r.instant.as_mut())
+            && instant.sent
+            && instant.sent_sort != Some(wanted)
+        {
+            instant.sent = false;
+        }
         self.update_visible();
         self.reindex();
     }
@@ -1259,7 +1284,7 @@ impl Tab {
         let is_content = self
             .location
             .search_scope()
-            .is_some_and(|scope| scope.kind != SearchKind::Name);
+            .is_some_and(|scope| matches!(scope.kind, SearchKind::Content { .. }));
         let Some(results) = &mut self.results else {
             return false;
         };
@@ -1448,8 +1473,346 @@ impl Tab {
         if let Some(search) = &results.content {
             search.cancel();
         }
+        // 즉시 검색: 기다리던 응답은 버린다(이미 받은 결과는 남는다).
+        if let Some(instant) = &mut results.instant {
+            instant.in_flight = None;
+            instant.next = None;
+            instant.status.loading = false;
+            instant.status.has_more = false;
+        }
         results.status.running = false;
         true
+    }
+
+    // --- 즉시 검색 ---
+
+    /// 즉시 검색의 범위: 「현재 폴더 아래만」인가. 위치를 옮겨도 탭에 남는다.
+    pub fn instant_under(&self) -> bool {
+        self.instant_under
+    }
+
+    /// 즉시 검색의 범위를 바꾼다. 즉시 검색 결과 위치(또는 그리로 가는 이동)면 같은 글자를 새 범위로 제자리에서 고치고
+    /// ([`Tab::retarget_instant`]) 그 결과를 돌려준다. 아니면 범위만 탭에 남고 [`Retarget::NotSearching`]이다.
+    pub fn set_instant_under(&mut self, under: bool) -> Retarget {
+        self.instant_under = under;
+        let current = if self.is_instant_search() {
+            Some(self.location.clone())
+        } else {
+            self.pending
+                .as_ref()
+                .filter(|p| p.kind == Kind::New && is_instant_location(&p.location))
+                .map(|p| p.location.clone())
+        };
+        match current {
+            Some(Location::SearchResults(scope)) => self.retarget_instant(
+                Location::instant_search_results(scope.folder, scope.query, under),
+            ),
+            _ => Retarget::NotSearching,
+        }
+    }
+
+    /// 마지막으로 넘긴 즉시 검색 글자가 틀렸으면 까닭과 틀린 위치(UTF-8 바이트 범위).
+    pub fn instant_error(&self) -> Option<&ParseError> {
+        self.instant_error.as_ref()
+    }
+
+    /// 즉시 검색 글자 해석의 까닭을 두거나(`Some`) 지운다(`None`).
+    pub fn set_instant_error(&mut self, error: Option<ParseError>) {
+        self.instant_error = error;
+    }
+
+    /// 즉시 검색 결과 위치면 그 상태(전체 개수·덜 찼을 수 있음·서비스 없음). 다른 위치면 `None`이다.
+    pub fn instant(&self) -> Option<&InstantStatus> {
+        self.results
+            .as_ref()
+            .and_then(|r| r.instant.as_ref())
+            .map(|instant| &instant.status)
+    }
+
+    /// 지금 위치가 즉시 검색 결과 위치인가.
+    pub fn is_instant_search(&self) -> bool {
+        is_instant_location(&self.location)
+    }
+
+    /// 즉시 검색 결과 위치로 가는 이동(새 위치)이 읽기를 기다리는 중인가.
+    pub fn is_instant_search_pending(&self) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|p| p.kind == Kind::New && is_instant_location(&p.location))
+    }
+
+    /// 즉시 검색이 찾을 기준 폴더: 실제 폴더면 그 폴더, 즉시 검색 결과 위치면 검색 전 폴더. 다른 위치(이름·내용 검색
+    /// 결과)면 `None`이고 모든 볼륨으로 찾는다. 「현재 폴더 아래만」은 이것이 있을 때만 켜진다.
+    pub fn instant_base(&self) -> Option<PathBuf> {
+        match self.location.search_scope() {
+            None => self.location.file_system_path().map(Path::to_path_buf),
+            Some(scope) if matches!(scope.kind, SearchKind::Instant { .. }) => {
+                Some(scope.folder.clone())
+            }
+            Some(_) => None,
+        }
+    }
+
+    /// 즉시 검색 위치를 `location`으로 고친다(입력하는 동안 기록 항목을 하나만 쓰려고, 글자·범위가 바뀔 때). 지금 위치가
+    /// 즉시 검색 결과 위치면 그 자리에서 바꾸고 앞 결과는 새 응답이 올 때까지 그대로 둔다. 즉시 검색 결과 위치로 가는 이동이
+    /// 읽기를 기다리는 중이면 그 이동의 목적지를 바꾼다. 둘 다 아니면 아무것도 하지 않는다(이동은 부르는 쪽 몫).
+    pub fn retarget_instant(&mut self, location: Location) -> Retarget {
+        if !is_instant_location(&location) {
+            return Retarget::NotSearching;
+        }
+        if self.is_instant_search() && self.results.is_some() {
+            if self.location == location {
+                return Retarget::Unchanged;
+            }
+            self.location = location;
+            if let Some(instant) = self.results.as_mut().and_then(|r| r.instant.as_mut()) {
+                // 앞 질의의 응답은 더 받지 않는다(서비스는 새 질의로 앞 질의를 취소한다).
+                instant.in_flight = None;
+                instant.next = None;
+                instant.sent = false;
+                instant.status.has_more = false;
+            }
+            return Retarget::Replaced;
+        }
+        if let Some(pending) = &mut self.pending
+            && pending.kind == Kind::New
+            && is_instant_location(&pending.location)
+        {
+            if pending.location == location {
+                return Retarget::Unchanged;
+            }
+            pending.location = location;
+            return Retarget::Pending;
+        }
+        Retarget::NotSearching
+    }
+
+    /// 기다리는 읽기를 버린다(그 결과는 늦은 응답으로 버려진다). 위치는 그대로다.
+    pub fn cancel_pending(&mut self) {
+        self.pending = None;
+    }
+
+    /// 즉시 검색 질의를 아직 보내지 않았는가(위치가 막 확정됐거나, 글자·정렬이 바뀌었거나, 다시 보내야 한다).
+    pub fn instant_needs_query(&self) -> bool {
+        self.results
+            .as_ref()
+            .and_then(|r| r.instant.as_ref())
+            .is_some_and(|instant| !instant.sent)
+    }
+
+    /// 지금 위치의 즉시 검색 질의: 글자를 질의 문법으로 해석한 조건 트리(「현재 폴더 아래만」이면 폴더 아래 조건을 그리고로
+    /// 더함), 지금 정렬(서비스가 아는 열일 때), 한 화면 분량의 결과 수 제한([`PAGE_SIZE`]). 즉시 검색 결과 위치가 아니거나
+    /// 글자가 빈 질의·틀린 문법이면 `None`이다.
+    pub fn instant_query(&self) -> Option<facet_protocol::QueryMessage> {
+        let scope = self.location.search_scope()?;
+        let SearchKind::Instant { under } = scope.kind else {
+            return None;
+        };
+        let Ok(Parsed::Query(condition)) = query_syntax::parse(&scope.query, Today::now()) else {
+            return None;
+        };
+        let condition = if under {
+            facet_protocol::Condition::And(vec![
+                condition,
+                facet_protocol::Condition::Under {
+                    folder: scope.folder.to_string_lossy().into_owned(),
+                },
+            ])
+        } else {
+            condition
+        };
+        Some(facet_protocol::QueryMessage {
+            condition,
+            sort: instant_search::server_sort(self.sort),
+            limit: Some(PAGE_SIZE),
+        })
+    }
+
+    /// 질의를 요청 `id`로 보냈다: 그 응답을 기다린다(앞선 요청의 응답은 버린다).
+    pub fn instant_sent(&mut self, id: IndexerRequestId) {
+        let sort = instant_search::server_sort(self.sort);
+        if let Some(results) = &mut self.results
+            && let Some(instant) = &mut results.instant
+        {
+            instant.in_flight = Some((id, Flight::Query));
+            instant.sent = true;
+            instant.sent_sort = sort;
+            instant.next = None;
+            instant.status.loading = true;
+            instant.status.has_more = false;
+            results.status.running = true;
+        }
+    }
+
+    /// 서비스에 질의를 보낼 수 없었다(연결 자체가 없음): 「서비스 없음」을 드러낸다.
+    pub fn instant_unavailable(&mut self, why: Unavailable) {
+        if let Some(results) = &mut self.results
+            && let Some(instant) = &mut results.instant
+        {
+            instant.sent = true;
+            instant.in_flight = None;
+            instant.next = None;
+            instant.status.unavailable = Some(why);
+            instant.status.loading = false;
+            instant.status.has_more = false;
+            results.status.running = false;
+        }
+    }
+
+    /// 서비스에 닿지 못해 멈춰 있던 탭이면 다시 보낼 질의로 바꾸고 `true`다(연결이 맺어지면 앱이 부른다).
+    pub fn instant_retry(&mut self) -> bool {
+        let Some(instant) = self.results.as_mut().and_then(|r| r.instant.as_mut()) else {
+            return false;
+        };
+        if matches!(
+            instant.status.unavailable,
+            Some(Unavailable::Connection(_) | Unavailable::Disconnected)
+        ) {
+            instant.sent = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 다른 탭이 질의를 보내 이 탭의 질의가 취소됐다: 기다리던 응답과 이어 받기를 놓는다(받은 결과는 남는다).
+    pub fn instant_superseded(&mut self) {
+        if let Some(results) = &mut self.results
+            && let Some(instant) = &mut results.instant
+        {
+            instant.in_flight = None;
+            instant.next = None;
+            instant.status.loading = false;
+            instant.status.has_more = false;
+            results.status.running = false;
+        }
+    }
+
+    /// 이어 받을 결과가 더 있고 지금 응답을 기다리지 않는가.
+    pub fn has_more_results(&self) -> bool {
+        self.instant_resume().is_some()
+    }
+
+    /// 이어 받기 요청: 남은 결과가 있고 응답을 기다리는 중이 아닐 때만.
+    pub fn instant_resume(&self) -> Option<facet_protocol::ResumeMessage> {
+        let instant = self.results.as_ref()?.instant.as_ref()?;
+        if instant.in_flight.is_some() {
+            return None;
+        }
+        Some(facet_protocol::ResumeMessage {
+            cursor: instant.next?,
+            limit: PAGE_SIZE,
+        })
+    }
+
+    /// 이어 받기를 요청 `id`로 보냈다.
+    pub fn instant_resume_sent(&mut self, id: IndexerRequestId) {
+        if let Some(results) = &mut self.results
+            && let Some(instant) = &mut results.instant
+        {
+            instant.in_flight = Some((id, Flight::Resume));
+            instant.status.loading = true;
+            results.status.running = true;
+        }
+    }
+
+    /// 질의나 이어 받기를 기다리는 요청 번호(다른 탭에 가려지지 않았다면).
+    pub fn instant_in_flight(&self) -> Option<IndexerRequestId> {
+        self.results
+            .as_ref()?
+            .instant
+            .as_ref()?
+            .in_flight
+            .map(|(id, _)| id)
+    }
+
+    /// 서비스의 응답을 받는다. 이 탭이 기다리는 요청의 응답일 때만 반영한다(늦게 온 앞선 질의의 응답은 버린다).
+    pub fn instant_reply(
+        &mut self,
+        id: IndexerRequestId,
+        result: Result<Reply, RequestError>,
+    ) -> InstantReply {
+        let Some(instant) = self.results.as_mut().and_then(|r| r.instant.as_mut()) else {
+            return InstantReply::Ignored;
+        };
+        let flight = match instant.in_flight {
+            Some((waiting, flight)) if waiting == id => flight,
+            _ => return InstantReply::Ignored,
+        };
+        instant.in_flight = None;
+        instant.status.loading = false;
+        let mut found = Vec::new();
+        let mut replace = false;
+        let mut requery = false;
+        match result {
+            Ok(Reply::Page(page)) => {
+                instant.status.total = Some(page.total);
+                instant.status.total_is_upper_bound = page.total_is_upper_bound;
+                instant.status.building = page.building;
+                instant.status.unavailable = None;
+                instant.next = page.next;
+                instant.status.has_more = page.next.is_some();
+                replace = flight == Flight::Query;
+                found = page.hits.iter().map(found_from_hit).collect();
+            }
+            Ok(Reply::Status(_)) | Err(RequestError::Unexpected) => {
+                instant.status.unavailable = Some(Unavailable::Disconnected);
+            }
+            Err(RequestError::Service(error))
+                if error.kind == facet_protocol::ErrorKind::Cancelled =>
+            {
+                // 새 질의가 이 요청을 취소했다. 새 질의의 응답을 기다린다.
+                return InstantReply::Ignored;
+            }
+            Err(RequestError::Service(error))
+                if error.kind == facet_protocol::ErrorKind::StaleCursor =>
+            {
+                // 인덱스가 바뀌어 이어 받기가 무효다: 처음부터 다시 질의한다.
+                instant.next = None;
+                instant.status.has_more = false;
+                instant.sent = false;
+                requery = true;
+            }
+            Err(RequestError::Service(error)) => {
+                instant.next = None;
+                instant.status.has_more = false;
+                instant.status.unavailable = Some(Unavailable::Service(error));
+            }
+            Err(RequestError::NotConnected(connection)) => {
+                instant.next = None;
+                instant.status.has_more = false;
+                instant.status.unavailable = Some(Unavailable::Connection(connection));
+            }
+            Err(RequestError::Disconnected) => {
+                instant.next = None;
+                instant.status.has_more = false;
+                instant.status.unavailable = Some(Unavailable::Disconnected);
+            }
+        }
+        if let Some(results) = &mut self.results {
+            results.status.running = false;
+        }
+        if requery {
+            return InstantReply::Requery;
+        }
+        if replace {
+            // 새 질의의 결과: 앞 결과를 바꾼다(앞 결과는 이 응답이 올 때까지 그대로 보였다).
+            self.list_gen += 1;
+            self.list = DetailsList::new(Vec::new(), self.sort);
+        }
+        if !found.is_empty() {
+            self.list_gen += 1;
+            self.list
+                .extend_found(found.into_iter().map(|found| (found.folder, found.item)));
+        }
+        self.update_visible();
+        self.prune_selection();
+        self.reindex();
+        let loaded = self.list.len();
+        if let Some(results) = &mut self.results {
+            results.status.progress.found = loaded;
+        }
+        InstantReply::Applied
     }
 
     /// facet이 한 작업의 변화를 결과 목록에 반영한다: 지우거나 옮긴 항목(폴더면 그 아래 결과까지)은 빠지고, 같은 폴더
@@ -2086,4 +2449,35 @@ mod tests {
         assert_eq!(names, ["a", "b"]);
         assert_eq!(tab.get(1).unwrap().size, 7);
     }
+}
+
+/// 즉시 검색 결과 위치인가.
+fn is_instant_location(location: &Location) -> bool {
+    location
+        .search_scope()
+        .is_some_and(|scope| matches!(scope.kind, SearchKind::Instant { .. }))
+}
+
+/// [`Tab::retarget_instant`]의 결과.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Retarget {
+    /// 즉시 검색 결과 위치를 제자리에서 바꿨다. 질의를 다시 보내야 한다([`Tab::instant_needs_query`]).
+    Replaced,
+    /// 즉시 검색 결과 위치로 가는 이동의 목적지를 바꿨다. 이동이 확정되면 질의를 보낸다.
+    Pending,
+    /// 이미 그 위치다.
+    Unchanged,
+    /// 즉시 검색 중이 아니다(부르는 쪽이 이동한다).
+    NotSearching,
+}
+
+/// [`Tab::instant_reply`]의 결과.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstantReply {
+    /// 이 탭이 기다리는 요청의 응답이 아니라 버렸다.
+    Ignored,
+    /// 응답을 반영했다(결과·전체 개수·서비스 없음 등이 바뀜).
+    Applied,
+    /// 이어 받기가 무효라 처음부터 다시 질의해야 한다.
+    Requery,
 }

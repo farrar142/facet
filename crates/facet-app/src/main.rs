@@ -2729,7 +2729,7 @@ impl View {
                 let app = self.app.borrow();
                 match app.active_tab().location().search_scope() {
                     Some(scope) => match &scope.kind {
-                        facet_core::SearchKind::Name => {
+                        facet_core::SearchKind::Name | facet_core::SearchKind::Instant { .. } => {
                             (scope.query.clone(), String::new(), false, false)
                         }
                         facet_core::SearchKind::Content { mode, name_pattern } => (

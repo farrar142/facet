@@ -14,6 +14,7 @@ pub mod file_list;
 mod file_system;
 pub mod history;
 pub mod indexer_client;
+pub mod instant_search;
 pub mod job;
 pub mod launch;
 pub mod live_search;

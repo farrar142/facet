@@ -76,6 +76,7 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::SortByMatches => "일치로 정렬",
         CommandId::ShowInFolder => "폴더에서 보기",
         CommandId::StopSearch => "검색 중지",
+        CommandId::InstantUnderFolder => "현재 폴더 아래만",
     }
 }
 
