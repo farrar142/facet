@@ -17,6 +17,7 @@
 //!   ([`measure_clipboard`]). `cargo xtask ci`가 이것도 부른다.
 //! - 오른쪽 메뉴 구성 벤치마크: 선택 1만 개에서 메뉴를 만드는 시간([`MENU_LIMIT`])을 잰다([`measure_menu`]).
 //!   `cargo xtask ci`가 이것도 부른다.
+//! - 질의 문법 해석 벤치마크: 연산자·조건을 고루 쓴 긴 질의 하나를 해석하는 시간([`QUERY_SYNTAX_LIMIT`])을 잰다([`measure_query_syntax`]).
 //! - 필터 벤치마크: 10만 항목 목록에서 필터 한 글자·두 글자를 정하는 시간([`FILTER_LIMIT`])을 잰다([`measure_filter`]).
 //!   `cargo xtask ci`가 이것도 부른다.
 //! - 실시간 탐색 벤치마크: 10만 항목 시험 나무([`make_test_tree`])를 실시간 탐색으로 끝까지 훑는 시간
@@ -1026,6 +1027,67 @@ pub fn check_filter_limit(m: &FilterMeasurement, limit: Duration) -> Result<(), 
                 t.max().as_secs_f64() * 1000.0
             ));
         }
+    }
+    Ok(())
+}
+
+/// 질의 문법 해석 벤치마크가 해석하는 긴 질의: 연산자(그리고·또는·아님·묶기·구절)와 모든 조건을 고루 쓴다.
+pub const QUERY_SYNTAX_TEXT: &str = r#"보고서 "final draft" <ext:pdf;docx;xlsx|ext:txt> !temp size:>1mb dm:2026-01..thisweek path:src regex:^a.*z$ *.log <folder:|file:> !<backup|old> size:large <dm:thisyear|dm:2025-06> path:*\src\* 🎉 파티 c:\temp"#;
+
+/// 질의 문법 해석 시간의 로컬 기준(릴리스 빌드): 1ms. 검색창에 치는 글자마다 부르므로 한 프레임에 비해 무시할 만해야
+/// 하고, 정상 값은 수십 마이크로초다.
+pub const QUERY_SYNTAX_TARGET: Duration = Duration::from_millis(1);
+
+/// CI가 실패시키는 질의 문법 해석 시간 상한: 로컬 기준 [`QUERY_SYNTAX_TARGET`]의 10배([`LIST_LIMIT`]과 같은 까닭:
+/// 공유 러너의 편차를 견디면서 알고리즘이 한 단계 나빠지는 실수만 잡는다).
+pub const QUERY_SYNTAX_LIMIT: Duration = Duration::from_millis(10);
+
+/// 질의 문법 해석 측정: [`QUERY_SYNTAX_TEXT`] 해석 한 번의 시간. [`Measurement::item_count`]는 조건 트리의 말단 수다.
+pub fn measure_query_syntax(runs: usize) -> Result<Measurement, String> {
+    use facet_core::query_syntax::{Parsed, Today, parse};
+    let today = Today {
+        date: chrono::NaiveDate::from_ymd_opt(2026, 11, 18).ok_or("날짜")?,
+        utc_offset_seconds: 9 * 3600,
+    };
+    fn leaves(c: &facet_protocol::Condition) -> usize {
+        use facet_protocol::Condition::*;
+        match c {
+            And(v) | Or(v) => v.iter().map(leaves).sum(),
+            Not(i) => leaves(i),
+            _ => 1,
+        }
+    }
+    let run = || -> Result<usize, String> {
+        match parse(std::hint::black_box(QUERY_SYNTAX_TEXT), today) {
+            Ok(Parsed::Query(c)) => Ok(leaves(&c)),
+            other => Err(format!("긴 질의를 해석하지 못했습니다: {other:?}")),
+        }
+    };
+    let count = run()?;
+    let mut times = Vec::with_capacity(runs);
+    for _ in 0..runs {
+        let start = Instant::now();
+        let n = run()?;
+        times.push(start.elapsed());
+        if n != count {
+            return Err("해석 결과가 달라졌습니다".to_owned());
+        }
+    }
+    Ok(Measurement {
+        item_count: count,
+        times,
+    })
+}
+
+/// 질의 문법 해석 중앙값이 `limit`을 넘으면 넘은 수치를 담은 메시지를 돌려준다.
+pub fn check_query_syntax_limit(m: &Measurement, limit: Duration) -> Result<(), String> {
+    if m.median() > limit {
+        return Err(format!(
+            "질의 문법 해석 상한 초과: 중앙값 {:.3}ms > 상한 {}ms (최악 {:.3}ms)",
+            m.median().as_secs_f64() * 1000.0,
+            limit.as_millis(),
+            m.max().as_secs_f64() * 1000.0
+        ));
     }
     Ok(())
 }

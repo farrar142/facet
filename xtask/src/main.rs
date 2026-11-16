@@ -266,6 +266,7 @@ fn bench_steps() -> Vec<Step> {
         clipboard_bench_step(),
         menu_bench_step(),
         filter_bench_step(),
+        query_syntax_bench_step(),
         search_bench_step(),
         content_bench_step(),
         copy_bench_step(),
@@ -361,6 +362,15 @@ fn filter_bench_step() -> Step {
     Step {
         name: "필터 벤치마크",
         args: facet_bench("filter"),
+        env: Vec::new(),
+    }
+}
+
+/// 연산자·조건을 고루 쓴 긴 질의 하나를 해석하는 시간을 잰다. 상한은 `facet-bench`의 기본값이다.
+fn query_syntax_bench_step() -> Step {
+    Step {
+        name: "질의 문법 해석 벤치마크",
+        args: facet_bench("query-syntax"),
         env: Vec::new(),
     }
 }

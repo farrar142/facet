@@ -22,6 +22,7 @@ pub mod name_input;
 pub mod name_match;
 pub mod placement;
 mod provider;
+pub mod query_syntax;
 pub mod search_results;
 pub mod selection;
 pub mod session;

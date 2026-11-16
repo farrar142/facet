@@ -16,6 +16,8 @@ tempfile = "3.27.0"
 [dependencies]
 # 폴더 변경 감시의 Windows 호출(`unsafe`)은 안전 래퍼 크레이트에 둔다(ADR-0002).
 facet-win.workspace = true
+# 질의 문법 해석(`query_syntax.rs`)의 결과가 질의 프로토콜의 조건 트리다.
+facet-protocol.workspace = true
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 # 세션 파일(사람이 읽을 수 있는 JSON, `session.rs`).
 serde = { version = "1.0.229", features = ["derive"] }
