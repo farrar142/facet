@@ -424,6 +424,35 @@ pub enum Execution {
     UndoRefused(UndoError),
     /// 화면이 할 일: 작업 기록([`App::history`])을 읽기 전용 목록으로 연다.
     ShowHistory,
+    /// 화면이 할 일: 삭제를 실행하기 전에 되돌릴 수 없다는 경고와 항목을 보이고 확인받는다. 보일 원본은
+    /// [`App::delete_plan`]이 주고, 확인하면 [`App::start_delete`]로 작업을 넣는다. 아직 아무것도 지우지 않았다.
+    ConfirmDelete(DeleteWarning),
+}
+
+/// 삭제를 실행하기 전에 확인받는 까닭. 어느 쪽이든 휴지통을 거치지 않는 영구 삭제라 실행취소할 수 없다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteWarning {
+    /// 영구 삭제(Shift+Delete)를 골랐다.
+    Permanent,
+    /// 삭제(Delete)를 골랐지만 원본이 모두 휴지통이 없는 위치(이동식·네트워크 드라이브 등)에 있다
+    /// ([`crate::job::deletes_permanently`]).
+    NoRecycleBin,
+}
+
+/// 삭제할 내용([`App::delete_plan`]): 원본과, 실행 전에 확인받아야 하면 그 까닭.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeletePlan {
+    /// 원본 항목의 경로들: 활성 탭의 선택(목록 순서), 선택이 없으면 커서 항목 하나.
+    pub sources: Vec<PathBuf>,
+    /// 실행 전에 확인받을 까닭. 있으면 영구 삭제 작업, 없으면 휴지통 삭제 작업이다.
+    pub warning: Option<DeleteWarning>,
+}
+
+impl DeletePlan {
+    /// 휴지통을 거치지 않는 영구 삭제인가.
+    pub fn is_permanent(&self) -> bool {
+        self.warning.is_some()
+    }
 }
 
 /// 대상 선택 창에 보일 내용([`App::transfer_choice`]).
@@ -1533,6 +1562,19 @@ impl App {
                 };
             }
             CommandId::ShowHistory => return Execution::ShowHistory,
+            CommandId::Delete | CommandId::DeletePermanently => {
+                let Some(plan) = self.delete_plan(command) else {
+                    return Execution::Disabled;
+                };
+                return match plan.warning {
+                    Some(warning) => Execution::ConfirmDelete(warning),
+                    // 휴지통 삭제는 묻지 않는다(탐색기 기본값과 같다). 실행취소로 되돌린다.
+                    None => match self.start_delete(&plan) {
+                        Ok(_) => Execution::Done,
+                        Err(_) => Execution::Disabled,
+                    },
+                };
+            }
             CommandId::NewWindow => {
                 let location = if !self.has_windows() {
                     home_location()
@@ -1756,6 +1798,11 @@ impl App {
         if !self.can_execute(command) {
             return None;
         }
+        self.selected_sources()
+    }
+
+    /// 활성 탭의 선택(목록 순서), 없으면 커서 항목 하나의 경로. 위치가 실제 폴더가 아니거나 둘 다 없으면 `None`.
+    fn selected_sources(&self) -> Option<Vec<PathBuf>> {
         let tab = self.active_window().active_panel().active_tab();
         let folder = tab.location().file_system_path()?;
         let mut sources: Vec<PathBuf> = tab
@@ -1889,6 +1936,37 @@ impl App {
             self.delete_permanently(sources)
         } else {
             self.recycle(sources)
+        }
+    }
+
+    /// 삭제(`command`가 [`CommandId::Delete`])·영구 삭제([`CommandId::DeletePermanently`])할 내용: 원본은 활성 탭의
+    /// 선택(목록 순서, 없으면 커서 항목 하나)이다. 영구 삭제는 늘, 삭제는 원본이 모두 휴지통이 없는 위치에 있을 때
+    /// ([`crate::job::deletes_permanently`]) 실행 전에 확인받을 까닭([`DeletePlan::warning`])을 갖는다. 그 명령을
+    /// 지금 실행할 수 없거나 삭제 명령이 아니면 `None`이다. 아무것도 지우지 않는다.
+    pub fn delete_plan(&self, command: CommandId) -> Option<DeletePlan> {
+        if !matches!(command, CommandId::Delete | CommandId::DeletePermanently)
+            || !self.can_execute(command)
+        {
+            return None;
+        }
+        let sources = self.selected_sources()?;
+        let warning = if command == CommandId::DeletePermanently {
+            Some(DeleteWarning::Permanent)
+        } else if crate::job::deletes_permanently(&sources) {
+            Some(DeleteWarning::NoRecycleBin)
+        } else {
+            None
+        };
+        Some(DeletePlan { sources, warning })
+    }
+
+    /// 삭제할 내용([`App::delete_plan`])대로 작업을 넣는다: 확인받을 까닭이 있으면 영구 삭제 작업
+    /// ([`App::delete_permanently`]), 없으면 휴지통 삭제 작업([`App::recycle`]). 화면은 확인을 마친 뒤 부른다.
+    pub fn start_delete(&mut self, plan: &DeletePlan) -> Result<JobId, DeleteRejection> {
+        if plan.is_permanent() {
+            self.delete_permanently(plan.sources.clone())
+        } else {
+            self.recycle(plan.sources.clone())
         }
     }
 

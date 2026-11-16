@@ -22,13 +22,14 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use facet_core::Location;
+use facet_core::command::CommandId;
 use facet_core::history::{NotUndoable, OperationKind, RevertSkip, Step, UndoError};
 use facet_core::job::{
     self, AnswerError, DeleteRejection, ErrorAnswer, FileOpErrorKind, ItemKind, JobId, JobKind,
     JobQuestion, JobQueue, JobState, NotRecyclableAnswer, Summary,
 };
 use facet_core::tab::ReadOutcome;
-use facet_core::window::App;
+use facet_core::window::{App, DeleteWarning, Execution};
 use facet_win::recycle::{self, RecycledItem};
 use tempfile::TempDir;
 
@@ -236,6 +237,79 @@ fn 휴지통이_없는_위치에서_삭제하면_영구_삭제_작업이_된다(
         app.undo(),
         Err(UndoError::NotUndoable(NotUndoable::PermanentDelete))
     );
+}
+
+#[test]
+fn 휴지통이_없는_위치에서_delete_명령은_지우기_전에_확인을_맡긴다() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("공유 명령으로 지울 파일.txt");
+    fs::write(&file, "x").unwrap();
+    let Some(shared_dir) = admin_share(dir.path()) else {
+        println!("건너뜀(네트워크 위치 Delete 명령): 관리 공유에 닿을 수 없습니다");
+        return;
+    };
+    let mut app = app_at(&shared_dir);
+    app.active_tab_mut().select_all();
+
+    let plan = app.delete_plan(CommandId::Delete).expect("삭제할 내용");
+    assert_eq!(plan.warning, Some(DeleteWarning::NoRecycleBin));
+    assert_eq!(
+        app.execute(CommandId::Delete),
+        Execution::ConfirmDelete(DeleteWarning::NoRecycleBin)
+    );
+    // 확인 전에는 아무것도 지우지 않는다(Esc면 그대로 남는다).
+    assert!(app.work_area().entries().is_empty());
+    assert!(file.exists());
+
+    // 확인하면 영구 삭제 작업이다.
+    let job = app.start_delete(&plan).unwrap();
+    assert_eq!(app.work_area().entry(job).unwrap().kind, JobKind::Delete);
+    let (state, summary) = wait_job(&mut app, job);
+    assert_eq!(state, JobState::Finished, "{summary:?}");
+    assert!(!file.exists());
+}
+
+#[test]
+fn delete_명령은_묻지_않고_휴지통으로_보내고_실행취소로_돌아온다() {
+    let test = "Delete 명령";
+    let dir = TempDir::new().unwrap();
+    if !recycle_bin_usable(dir.path(), test) {
+        return;
+    }
+    let file = dir.path().join("지울 파일.txt");
+    write_file(&file, "내용");
+    let mut app = app_at(dir.path());
+    app.active_tab_mut().select_all();
+    let mut bin = Bin::default();
+    assert_eq!(app.delete_plan(CommandId::Delete).unwrap().warning, None);
+
+    assert_eq!(app.execute(CommandId::Delete), Execution::Done);
+
+    let job = app.work_area().entries()[0].id;
+    assert_eq!(app.work_area().entry(job).unwrap().kind, JobKind::Recycle);
+    match wait_question(&mut app, job) {
+        None => {}
+        Some(JobQuestion::NotRecyclable(_)) => {
+            app.answer_not_recyclable(job, NotRecyclableAnswer::CancelJob)
+                .unwrap();
+            let (_, summary) = wait_job(&mut app, job);
+            bin.keep(&summary);
+            println!("건너뜀({test}): 이 계정은 휴지통을 쓸 수 없습니다");
+            return;
+        }
+        Some(other) => panic!("묻지 않아야 한다: {other:?}"),
+    }
+    let (state, summary) = wait_job(&mut app, job);
+    bin.keep(&summary);
+    assert_eq!(state, JobState::Finished, "{summary:?}");
+    assert!(!file.exists());
+
+    assert_eq!(app.execute(CommandId::Undo), Execution::Done);
+    let undo_job = app.work_area().entries().last().unwrap().id;
+    let (state, undone) = wait_job(&mut app, undo_job);
+    bin.keep(&undone);
+    assert_eq!(state, JobState::Finished, "{undone:?}");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "내용");
 }
 
 #[test]
