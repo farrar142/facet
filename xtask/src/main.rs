@@ -1,22 +1,25 @@
 //! 저장소 작업 명령. `cargo xtask <명령>`으로 부른다.
 //!
 //! - `ci`: 형식 검사 → lint(경고를 오류로) → 빌드 → 테스트 → 실제 볼륨 테스트 → 코어 벤치마크
-//!   → 인덱스 벤치마크 → MFT 파싱 벤치마크 → 세션 읽기·해석 벤치마크 → 복사 벤치마크. CI와 로컬이 같은 명령을 쓴다. 실제 볼륨 테스트는 관리자일 때만 시험 VHD를
+//!   → 인덱스 벤치마크 → MFT 파싱 벤치마크 → 세션 읽기·해석 벤치마크 → 복사 벤치마크 → 삭제 벤치마크. CI와 로컬이 같은 명령을 쓴다. 실제 볼륨 테스트는 관리자일 때만 시험 VHD를
 //!   만들어 돌린다.
 //! - `test-folder`: 시험 폴더를 만든다(`facet-bench make-folder`).
 //! - `bench`: 벤치마크만 돌린다(`facet-bench list`·`facet-bench index`·`facet-bench mft`·`facet-bench session`·
-//!   `facet-bench copy`, 릴리스 빌드).
+//!   `facet-bench copy`·`facet-bench delete`, 릴리스 빌드).
 //!
 //! - `measure [인자]`: 앱과 측정 도구를 릴리스 빌드해 화면 수치(콜드 스타트·세션 복원 콜드 스타트·폴더 열기 첫 화면·스크롤 프레임)를 잰다.
 //! - `measure-copy <원본 폴더> <대상 폴더> [인자]`: 측정 도구를 릴리스 빌드해 같은 복사를 facet 엔진과 탐색기
 //!   (`IFileOperation`)로 재어 견준다(`facet-bench compare-copy`, 사람이 잼).
+//! - `measure-recycle <폴더> [인자]`: 측정 도구를 릴리스 빌드해 같은 파일 1만 개를 facet 휴지통 삭제 작업과 탐색기
+//!   (`IFileOperation`)로 휴지통에 보내 견준다(`facet-bench compare-recycle`, 사람이 잼, 상한 없음).
 //! - `mft-fixture`: 시험 VHD에서 MFT 조각과 기대값 목록을 만든다(`mft_fixture` 모듈, 관리자).
 //! - `dist <label>`: release 빌드한 facet을 portable zip과 체크섬으로 묶는다(`dist` 모듈).
 //! - `indexer <install|uninstall>`: 인덱서 서비스를 release로 빌드해 개발 기계에 설치하거나 지운다(관리자).
 //!
 //! 벤치마크 상한과 그 근거는 `crates/facet-bench/src/lib.rs`의 `LIST_LIMIT`·`QUERY_LIMIT`·
 //! `INDEX_MEMORY_LIMIT`·`MFT_PARSE_LIMIT`·`SESSION_PARSE_LIMIT`, `crates/facet-bench/src/copy.rs`의
-//! `COPY_THROUGHPUT_LIMIT`·`COPY_SMALL_LIMIT`에 있다.
+//! `COPY_THROUGHPUT_LIMIT`·`COPY_SMALL_LIMIT`, `crates/facet-bench/src/delete.rs`의 `DELETE_LIMIT`·
+//! `UNDO_TARGET_LIMIT`에 있다.
 
 mod dist;
 mod mft_fixture;
@@ -31,14 +34,15 @@ const USAGE: &str = "\
 
 명령:
   ci                             형식 검사, lint(경고를 오류로), 빌드, 테스트, 실제 볼륨 테스트,
-                                 코어 벤치마크, 인덱스 벤치마크, MFT 파싱 벤치마크, 세션 읽기·해석 벤치마크, 복사 벤치마크를 차례로 돌린다. 실제 볼륨 테스트는
+                                 코어 벤치마크, 인덱스 벤치마크, MFT 파싱 벤치마크, 세션 읽기·해석 벤치마크, 복사 벤치마크, 삭제 벤치마크를 차례로 돌린다. 실제 볼륨 테스트는
                                  관리자일 때만 시험 VHD를 만들어 돌리고, 아니면 건너뛴다고 출력한다
   test-folder [경로] [--count N]  N개(기본 100000) 항목이 든 시험 폴더를 만든다.
                                  경로를 빼면 임시 폴더의 facet-test-folders/items-N
   bench                          10만 항목 시험 폴더를 만들거나 확인하고 코어 목록 읽기·읽기+정렬·정렬 바꾸기를 잰 뒤,
                                  합성 인덱스 100만 개의 메모리와 부분 일치 질의를 재고, MFT 조각을
                                  되풀이한 레코드 100만 개를 인덱스로 만드는 시간을 재고, 탭 100개 세션 파일을 읽고 해석하는 시간을 재고,
-                                 임시 폴더에서 1GiB 파일 하나의 복사 처리량과 4KiB 파일 1만 개 폴더의 복사 시간을 잰다(릴리스 빌드)
+                                 임시 폴더에서 1GiB 파일 하나의 복사 처리량과 4KiB 파일 1만 개 폴더의 복사 시간을 재고,
+                                 4KiB 파일 1만 개 폴더의 영구 삭제 시간과 작업 기록 100개에서 실행취소 대상 찾는 시간을 잰다(릴리스 빌드)
   measure [--count N] [--runs N] [--scroll-runs N] [--scroll-rows N] [--refresh-hz N] [--json 파일] [경로]
                                  앱을 릴리스 빌드하고 시험 폴더(기본 10만 항목)를 열어 콜드 스타트, 떠 있는 창에서
                                  그 폴더로 이동한 폴더 열기 첫 화면, 탭 10개짜리 창 둘의 세션 복원 콜드 스타트(모두 중앙값·최악값), 스크롤 프레임 시간을 잰다. 표와 JSON(기본 target/measure.json)을 내고,
@@ -49,6 +53,11 @@ const USAGE: &str = "\
                                  JSON(기본 target/measure-copy.json)으로 낸다. 큰 파일 처리량이 탐색기의 90% 이상, 작은 파일이
                                  탐색기보다 느리지 않아야 통과하고 못 맞추면 실패한다. 같은 디스크 안·디스크 사이·USB 드라이브를
                                  폴더로 골라 잰다. CI는 부르지 않는다(사람이 잰다)
+  measure-recycle <폴더> [--count N] [--runs N] [--json 파일]
+                                 측정 도구를 릴리스 빌드하고 폴더 안에 파일 N개(기본 10000)를 만들어 facet 휴지통 삭제 작업과
+                                 탐색기(IFileOperation)가 번갈아 휴지통에 보낸 시간을 표와 JSON(기본 target/measure-recycle.json)으로
+                                 낸다. 상한 없이 비교만 낸다. 휴지통에 넣은 항목은 끝나면 휴지통에서 지운다. 휴지통이 있는(고정 디스크)
+                                 폴더를 골라야 한다. CI는 부르지 않는다(사람이 잼)
   mft-fixture                    (관리자) 시험 VHD에 정해진 항목을 만들고 MFT를 떠서
                                  testdata/mft/에 조각과 기대값 목록을 쓴다
   dist <label>                   facet을 릴리스 빌드해 target/dist/에 facet-<label>-windows-x64.zip과
@@ -76,6 +85,7 @@ fn main() -> ExitCode {
         },
         Some("measure") => run_measure(&args[1..]),
         Some("measure-copy") => run_measure_copy(&args[1..]),
+        Some("measure-recycle") => run_measure_recycle(&args[1..]),
         Some("mft-fixture") => match mft_fixture::run(&workspace_root()) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -253,6 +263,7 @@ fn bench_steps() -> Vec<Step> {
         mft_bench_step(),
         session_bench_step(),
         copy_bench_step(),
+        delete_bench_step(),
     ]
 }
 
@@ -327,6 +338,16 @@ fn copy_bench_step() -> Step {
     Step {
         name: "복사 벤치마크",
         args: facet_bench("copy"),
+        env: Vec::new(),
+    }
+}
+
+/// 임시 폴더에서 4KiB 파일 1만 개 폴더의 영구 삭제 시간(작업 대기열의 영구 삭제 작업)과 작업 기록 100개에서
+/// 실행취소 대상을 찾는 시간을 잰다. 수와 상한은 `facet-bench`의 기본값이다.
+fn delete_bench_step() -> Step {
+    Step {
+        name: "삭제 벤치마크",
+        args: facet_bench("delete"),
         env: Vec::new(),
     }
 }
@@ -600,6 +621,78 @@ fn run_measure_copy(rest: &[String]) -> ExitCode {
     }
 }
 
+/// 측정 도구를 릴리스 빌드하고 `facet-bench compare-recycle`을 돌린다(휴지통 보내기 비교 측정).
+fn run_measure_recycle(rest: &[String]) -> ExitCode {
+    let root = workspace_root();
+    let args = match measure_recycle_args(rest, &root) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!(
+                "{e}
+
+{USAGE}"
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let build = step(
+        "release 빌드",
+        &["build", "--release", "--locked", "-p", "facet-bench"],
+    );
+    if run_steps("measure-recycle", &[build]) != ExitCode::SUCCESS {
+        return ExitCode::FAILURE;
+    }
+    let bench = target_dir()
+        .join("release")
+        .join(format!("facet-bench{}", env::consts::EXE_SUFFIX));
+    match Command::new(&bench)
+        .arg("compare-recycle")
+        .args(&args)
+        .status()
+    {
+        Ok(s) if s.success() => ExitCode::SUCCESS,
+        Ok(_) => ExitCode::FAILURE,
+        Err(e) => {
+            eprintln!("xtask measure-recycle: facet-bench를 실행하지 못함: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `measure-recycle`의 인자: 폴더 하나(상대 경로는 명령을 부른 폴더 기준)와 넘길 선택 인자. `--json`을 빼면
+/// `target/measure-recycle.json`.
+fn measure_recycle_args(rest: &[String], root: &std::path::Path) -> Result<Vec<String>, String> {
+    let cwd = env::current_dir().map_err(|e| e.to_string())?;
+    let absolute = |p: &str| {
+        let p = PathBuf::from(p);
+        if p.is_relative() { cwd.join(p) } else { p }
+    };
+    let mut folder = None;
+    let mut json = None;
+    let mut passthrough = Vec::new();
+    let mut it = rest.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--json" | "--count" | "--runs" => {
+                let v = it.next().ok_or(format!("{arg} 뒤에 값이 없습니다"))?;
+                if arg == "--json" {
+                    json = Some(absolute(v));
+                } else {
+                    passthrough.extend([arg.clone(), v.clone()]);
+                }
+            }
+            _ if folder.is_none() && !arg.starts_with("--") => folder = Some(absolute(arg)),
+            _ => return Err(format!("알 수 없는 인자: {arg}")),
+        }
+    }
+    let folder = folder.ok_or("폴더를 주어야 합니다")?;
+    let json = json.unwrap_or_else(|| root.join("target").join("measure-recycle.json"));
+    let mut args = vec![folder.display().to_string()];
+    args.extend(["--json".to_owned(), json.display().to_string()]);
+    args.extend(passthrough);
+    Ok(args)
+}
+
 /// `measure-copy`의 인자: 원본·대상 폴더 둘(상대 경로는 명령을 부른 폴더 기준)과 넘길 선택 인자. `--json`을
 /// 빼면 `target/measure-copy.json`.
 fn measure_copy_args(rest: &[String], root: &std::path::Path) -> Result<Vec<String>, String> {
@@ -673,7 +766,7 @@ fn measure_args(rest: &[String], root: &std::path::Path) -> Result<Vec<String>, 
 
 #[cfg(test)]
 mod tests {
-    use super::{dist_label, indexer_action, measure_copy_args};
+    use super::{dist_label, indexer_action, measure_copy_args, measure_recycle_args};
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| (*s).to_owned()).collect()
@@ -701,6 +794,18 @@ mod tests {
         assert!(measure_copy_args(&args(&[r"C:\a"]), root).is_err());
         assert!(measure_copy_args(&args(&[r"C:\a", r"D:\b", r"E:\c"]), root).is_err());
         assert!(measure_copy_args(&args(&[r"C:\a", r"D:\b", "--limit-ms", "1"]), root).is_err());
+    }
+
+    #[test]
+    fn measure_recycle_needs_one_folder_and_fills_json() {
+        let root = std::path::Path::new(r"C:\repo");
+        let got = measure_recycle_args(&args(&[r"C:\a", "--count", "50"]), root).unwrap();
+        assert_eq!(got[0], r"C:\a");
+        assert_eq!(got[1], "--json");
+        assert!(got[2].ends_with("measure-recycle.json"), "{got:?}");
+        assert_eq!(&got[3..], ["--count", "50"]);
+        assert!(measure_recycle_args(&args(&[]), root).is_err());
+        assert!(measure_recycle_args(&args(&[r"C:\a", r"D:\b"]), root).is_err());
     }
 
     #[test]

@@ -298,6 +298,7 @@ mod screen {
             cold_starts: cold.iter().map(|n| ms(*n)).collect(),
             session_starts: vec![ms(120)],
             opens: vec![ms(100)],
+            renames: vec![ms(10)],
             frames: frames.iter().map(|n| ms(*n)).collect(),
             scroll_runs: 1,
             spec: SystemSpec {
@@ -341,6 +342,24 @@ mod screen {
         assert!(!with_opens(base(), &[]).verdict().open_pass);
         assert!(!with_opens(base(), &[160]).verdict().pass());
         assert_eq!(OPEN_LIMIT, ms(150));
+    }
+
+    fn with_renames(mut r: ScreenResult, renames: &[u64]) -> ScreenResult {
+        r.renames = renames.iter().map(|n| ms(*n)).collect();
+        r
+    }
+
+    #[test]
+    fn 이름_확정_프레임은_중앙값이_16ms_미만일_때만_통과한다() {
+        use facet_bench::screen::RENAME_LIMIT;
+        let base = || result(&[100], &[16], Some(60.0));
+        assert!(with_renames(base(), &[10, 15, 90]).verdict().rename_pass);
+        assert!(!with_renames(base(), &[10, 17, 18]).verdict().rename_pass);
+        assert!(!with_renames(base(), &[16]).verdict().rename_pass);
+        assert!(!with_renames(base(), &[]).verdict().rename_pass);
+        assert!(!with_renames(base(), &[20]).verdict().pass());
+        assert!(base().to_json().contains("\"rename_commit\""));
+        assert_eq!(RENAME_LIMIT, ms(16));
     }
 
     fn with_sessions(mut r: ScreenResult, sessions: &[u64]) -> ScreenResult {
@@ -613,5 +632,54 @@ mod session_bench {
             times: vec![Duration::from_millis(1); 3],
         };
         assert!(check_session_limit(&fast, Duration::from_millis(50)).is_ok());
+    }
+}
+
+mod delete_bench {
+    use facet_bench::delete::{
+        DELETE_LIMIT, DELETE_TARGET, UNDO_TARGET_LIMIT, create_files, full_history,
+        measure_permanent_delete, measure_undo_target,
+    };
+    use facet_core::history::HISTORY_LIMIT;
+
+    #[test]
+    fn 기록은_100개까지_차고_마지막은_되돌릴_수_없다() {
+        let history = full_history();
+        assert_eq!(history.records().len(), HISTORY_LIMIT);
+        let target = history.undo_target().unwrap();
+        assert!(target.not_undoable_reason().is_some());
+        assert!(history.records().any(|r| r.is_undoable()));
+        assert!(history.records().any(|r| !r.is_undoable()));
+    }
+
+    #[test]
+    fn 실행취소_대상_찾기는_상한_안이다() {
+        let m = measure_undo_target(3).unwrap();
+        assert_eq!(m.item_count, HISTORY_LIMIT);
+        assert_eq!(m.times.len(), 3);
+        assert!(m.median() <= UNDO_TARGET_LIMIT);
+    }
+
+    #[test]
+    fn 상한은_기준의_열_배다() {
+        assert_eq!(DELETE_LIMIT, DELETE_TARGET * 10);
+    }
+
+    #[test]
+    fn 시험_파일을_만든다() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = create_files(&dir.path().join("f"), 5).unwrap();
+        assert_eq!(paths.len(), 5);
+        assert!(paths.iter().all(|p| p.metadata().unwrap().len() == 4096));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn 영구_삭제_측정은_폴더와_파일을_세고_다_지운다() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = measure_permanent_delete(dir.path(), 20, 2).unwrap();
+        assert_eq!(m.item_count, 21);
+        assert_eq!(m.times.len(), 2);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 }
