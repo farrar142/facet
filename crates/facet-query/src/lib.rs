@@ -22,13 +22,16 @@ pub const USAGE: &str = "\
 명령:
   status
       인덱서 서비스의 상태(볼륨마다 인덱스가 있는지, 만드는 중인지, 항목 수)를 출력한다.
-  search [<이름 조각>] [--wildcard 패턴 | --regex 식] [--case-sensitive]
+  search [<이름 조각>] [--wildcard 패턴 | --regex 식] [--path 글자]
+         [--case-sensitive]
          [--sort name|path|size|modified] [--desc] [--limit N] [--pages N | --all]
       이름 조건에 맞는 항목을 질의해 한 줄에 하나씩 「경로<탭>크기」로 출력하고, 끝에 받은 수와
       전체 개수를 출력한다.
       <이름 조각>        이름에 이 글자가 들어 있다(부분 일치)
       --wildcard 패턴    이름 전체가 와일드카드(*, ?)와 맞는다
       --regex 식         이름의 어딘가가 정규식과 맞는다
+      --path 글자        전체 경로(볼륨 루트부터)에 이 글자가 들어 있다. 별표·물음표가 있으면
+                         경로 전체가 와일드카드와 맞는다. 이름 조건과 함께 주면 둘 다 맞아야 한다
       --case-sensitive   대소문자를 구별한다(기본은 무시)
       --sort 기준        정렬 기준(기본: 인덱스에 넣은 순서)
       --desc             큰 것부터 정렬한다
@@ -99,6 +102,7 @@ fn parse_search(rest: &[String]) -> Result<Search, String> {
     let mut case = Case::Insensitive;
     let mut key = None;
     let mut order = Order::Ascending;
+    let mut path: Option<String> = None;
     let mut limit = 100;
     let mut pages = Some(1);
     let mut it = rest.iter();
@@ -114,6 +118,12 @@ fn parse_search(rest: &[String]) -> Result<Search, String> {
             }
             "--wildcard" => pattern = Some((false, value("--wildcard")?)),
             "--regex" => pattern = Some((true, value("--regex")?)),
+            "--path" => {
+                if path.is_some() {
+                    return Err("--path는 한 번만 줍니다".to_owned());
+                }
+                path = Some(value("--path")?);
+            }
             "--case-sensitive" => case = Case::Sensitive,
             "--sort" => {
                 key = Some(match value("--sort")?.as_str() {
@@ -137,15 +147,33 @@ fn parse_search(rest: &[String]) -> Result<Search, String> {
             _ => part = Some(arg.clone()),
         }
     }
-    let condition = match (part, pattern) {
+    let name = match (part, pattern) {
         (Some(_), Some(_)) => {
             return Err("이름 조각과 --wildcard/--regex는 함께 줄 수 없습니다".to_owned());
         }
-        (Some(part), None) => Condition::NameContains { part, case },
-        (None, Some((false, pattern))) => Condition::NameWildcard { pattern, case },
-        (None, Some((true, pattern))) => Condition::NameRegex { pattern, case },
+        (Some(part), None) => Some(Condition::NameContains { part, case }),
+        (None, Some((false, pattern))) => Some(Condition::NameWildcard { pattern, case }),
+        (None, Some((true, pattern))) => Some(Condition::NameRegex { pattern, case }),
+        (None, None) => None,
+    };
+    // 별표·물음표가 없으면 부분 일치, 있으면 경로 전체에 대한 와일드카드.
+    let path = path.map(|text| {
+        if text.contains(['*', '?']) {
+            Condition::PathWildcard {
+                pattern: text,
+                case,
+            }
+        } else {
+            Condition::PathContains { part: text, case }
+        }
+    });
+    let condition = match (name, path) {
+        (Some(name), Some(path)) => Condition::And(vec![name, path]),
+        (Some(one), None) | (None, Some(one)) => one,
         (None, None) => {
-            return Err("search에는 이름 조각이나 --wildcard/--regex가 필요합니다".to_owned());
+            return Err(
+                "search에는 이름 조각이나 --wildcard/--regex/--path가 필요합니다".to_owned(),
+            );
         }
     };
     Ok(Search {
@@ -510,6 +538,26 @@ mod tests {
                 limit: 5,
                 pages: None,
             }
+        );
+        assert_eq!(
+            search(&["--path", "docs"]).condition,
+            Condition::PathContains {
+                part: "docs".into(),
+                case: Case::Insensitive
+            }
+        );
+        assert_eq!(
+            search(&["--path", r"C:\*\a?.txt", "--case-sensitive", "보고서"]).condition,
+            Condition::And(vec![
+                Condition::NameContains {
+                    part: "보고서".into(),
+                    case: Case::Sensitive
+                },
+                Condition::PathWildcard {
+                    pattern: r"C:\*\a?.txt".into(),
+                    case: Case::Sensitive
+                },
+            ])
         );
         assert_eq!(
             search(&["--wildcard", "*.txt", "--sort", "path", "--pages", "3"]),

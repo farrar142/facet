@@ -61,6 +61,10 @@ pub enum Condition {
     NameWildcard { pattern: String, case: Case },
     /// 이름의 어딘가가 정규식과 맞는다.
     NameRegex { pattern: String, case: Case },
+    /// 전체 경로(볼륨 루트부터, `\` 구분)에 `part`가 들어 있다.
+    PathContains { part: String, case: Case },
+    /// 전체 경로 전체가 와일드카드(`*`, `?`)와 맞는다.
+    PathWildcard { pattern: String, case: Case },
     /// 폴더 아래(하위 폴더 포함)에 있다.
     Under { folder: String },
     /// 크기가 `min` 이상 `max` 이하(`None`은 그쪽 끝이 열려 있다).
@@ -489,6 +493,8 @@ const COND_EXTENSION: u8 = 7;
 const COND_AND: u8 = 8;
 const COND_OR: u8 = 9;
 const COND_NOT: u8 = 10;
+const COND_PATH_CONTAINS: u8 = 11;
+const COND_PATH_WILDCARD: u8 = 12;
 
 fn write_case(w: &mut Writer, case: Case) {
     w.bool(case == Case::Sensitive);
@@ -516,6 +522,16 @@ fn write_condition(w: &mut Writer, c: &Condition) {
         }
         Condition::NameRegex { pattern, case } => {
             w.u8(COND_REGEX);
+            w.str(pattern);
+            write_case(w, *case);
+        }
+        Condition::PathContains { part, case } => {
+            w.u8(COND_PATH_CONTAINS);
+            w.str(part);
+            write_case(w, *case);
+        }
+        Condition::PathWildcard { pattern, case } => {
+            w.u8(COND_PATH_WILDCARD);
             w.str(pattern);
             write_case(w, *case);
         }
@@ -571,6 +587,14 @@ fn read_condition(r: &mut Reader<'_>, depth: usize) -> Result<Condition, DecodeE
             case: read_case(r)?,
         },
         COND_REGEX => Condition::NameRegex {
+            pattern: r.str()?,
+            case: read_case(r)?,
+        },
+        COND_PATH_CONTAINS => Condition::PathContains {
+            part: r.str()?,
+            case: read_case(r)?,
+        },
+        COND_PATH_WILDCARD => Condition::PathWildcard {
             pattern: r.str()?,
             case: read_case(r)?,
         },

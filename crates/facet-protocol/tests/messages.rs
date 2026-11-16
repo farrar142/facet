@@ -22,6 +22,14 @@ pub fn every_condition() -> Condition {
             pattern: r"^\d{4}-".into(),
             case: Case::Insensitive,
         },
+        Condition::PathContains {
+            part: r"Users\사용자\문서".into(),
+            case: Case::Insensitive,
+        },
+        Condition::PathWildcard {
+            pattern: r"C:\*\보고서?.txt".into(),
+            case: Case::Sensitive,
+        },
         Condition::Under {
             folder: r"C:\Users\사용자".into(),
         },
@@ -99,7 +107,7 @@ fn responses() -> Vec<Response> {
         Response::HelloRejected {
             client_version: 9,
             min_version: 1,
-            max_version: 3,
+            max_version: 4,
         },
         Response::Page(PageMessage {
             hits: vec![],
@@ -245,4 +253,19 @@ fn hello_layout_is_fixed() {
         .to_bytes(),
         [0x82, 9, 0, 1, 0, 2, 0]
     );
+}
+
+#[test]
+fn version_before_path_conditions_is_rejected() {
+    assert_eq!(PROTOCOL_VERSION, 4);
+    assert_eq!(MIN_SUPPORTED_VERSION, 4);
+    assert_eq!(
+        answer_hello(3),
+        Response::HelloRejected {
+            client_version: 3,
+            min_version: 4,
+            max_version: 4,
+        }
+    );
+    assert_eq!(answer_hello(4), Response::HelloAccepted { version: 4 });
 }
