@@ -35,6 +35,7 @@ use crate::window::home_location;
 use facet_win::OpenError;
 
 use crate::launch::LaunchTarget;
+use crate::name_match::{NameMatcher, has_wildcard};
 use crate::{Candidate, Item, ListError, Location, ResolveError, provider_for};
 
 /// 읽기가 이만큼 넘게 걸리면 탭이 「읽는 중」을 드러낸다([`Tab::is_reading`]).
@@ -256,6 +257,105 @@ impl CompletionResult {
     }
 }
 
+/// 필터 요청의 번호. 한 탭 안에서 요청할 때마다 커지며, 앞선 요청의 결과를 버리는 데 쓴다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FilterId(u64);
+
+/// 필터 거르기 요청([`Tab::request_filter`]). `Send`이므로 일꾼 스레드에 넘겨 [`FilterRequest::run`]한다.
+///
+/// 글자를 덧붙인 것이면 앞 결과 안의 이름만 담아(앞 결과가 부분 일치일 때) 앞 결과 안에서만 다시 거른다. 결과는
+/// 처음부터 거른 것과 같다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilterRequest {
+    id: FilterId,
+    text: String,
+    /// 요청을 만들 때의 목록 항목 이름(목록 안 번호 순서). 목록이 바뀌기 전까지 탭이 한 벌을 나눠 쓴다.
+    names: Arc<Vec<OsString>>,
+    /// 거를 후보의 목록 안 번호. `None`이면 모든 항목이다.
+    candidates: Option<Vec<usize>>,
+    list_gen: u64,
+}
+
+/// 후보가 이만큼 넘으면 거르기를 여러 스레드로 나눈다(이름 하나는 마이크로초 단위라 적을 때는 나누는 비용이 더 크다).
+const PARALLEL_FILTER_MIN: usize = 20_000;
+
+impl FilterRequest {
+    /// 요청 번호.
+    pub fn id(&self) -> FilterId {
+        self.id
+    }
+
+    /// 후보 이름을 이름 일치 규칙으로 거른다. 후보가 많으면 오래 걸리므로 UI 스레드에서 부르지 않는다. 후보가
+    /// [`PARALLEL_FILTER_MIN`]개를 넘으면 사용할 수 있는 코어만큼 나눠 거른다(결과는 번호 오름차순 그대로).
+    pub fn run(&self) -> FilterResult {
+        let matcher = NameMatcher::new(&self.text);
+        let all: Vec<usize>;
+        let candidates: &[usize] = match &self.candidates {
+            Some(candidates) => candidates,
+            None => {
+                all = (0..self.names.len()).collect();
+                &all
+            }
+        };
+        let filter_chunk = |chunk: &[usize]| -> Vec<usize> {
+            chunk
+                .iter()
+                .copied()
+                .filter(|&i| matcher.is_match(&self.names[i]))
+                .collect()
+        };
+        let threads = std::thread::available_parallelism().map_or(1, usize::from);
+        let matched = if candidates.len() < PARALLEL_FILTER_MIN || threads < 2 {
+            filter_chunk(candidates)
+        } else {
+            let size = candidates.len().div_ceil(threads);
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = candidates
+                    .chunks(size)
+                    .map(|chunk| scope.spawn(|| filter_chunk(chunk)))
+                    .collect();
+                handles
+                    .into_iter()
+                    .flat_map(|handle| handle.join().expect("거르기 스레드가 멈췄다"))
+                    .collect()
+            })
+        };
+        FilterResult {
+            id: self.id,
+            text: self.text.clone(),
+            list_gen: self.list_gen,
+            matched,
+        }
+    }
+}
+
+/// 필터 거르기의 결과. [`FilterRequest::run`]만 만든다.
+#[derive(Debug)]
+pub struct FilterResult {
+    id: FilterId,
+    text: String,
+    list_gen: u64,
+    /// 맞은 항목의 목록 안 번호(오름차순).
+    matched: Vec<usize>,
+}
+
+impl FilterResult {
+    /// 어느 요청의 결과인가.
+    pub fn id(&self) -> FilterId {
+        self.id
+    }
+}
+
+/// 탭이 지금 적용한 필터: 글자와 맞은 이름들.
+#[derive(Debug)]
+struct Filter {
+    text: String,
+    matcher: NameMatcher,
+    /// 필터에 맞는 항목의 목록 안 번호(숨김 항목 포함, 오름차순)와 그것이 맞는 `list_gen`. 목록이 바뀌어 번호가 어긋나면
+    /// 버리고 이름으로 다시 맞춘다([`Tab::update_visible`]).
+    matched: Option<(Vec<usize>, u64)>,
+}
+
 /// 읽기 결과를 탭에 넘긴 결과.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadOutcome {
@@ -375,6 +475,14 @@ pub struct Tab {
     open_error: Option<OpenError>,
     /// 보이는 탭인가. 숨은 탭은 감시를 갖지 않는다.
     shown: bool,
+    /// 지금 적용한 필터. 위치를 바꾸면 풀린다.
+    filter: Option<Filter>,
+    /// 요청이 쓰는 항목 이름 한 벌과 그것이 맞는 `list_gen`. 목록이 바뀌면 다음 요청 때 다시 만든다.
+    names: Option<(u64, Arc<Vec<OsString>>)>,
+    /// 다음 필터 요청 번호. 이보다 앞선 요청의 결과는 버린다.
+    next_filter: u64,
+    /// 목록의 항목이나 순서가 바뀔 때(읽기 결과·변경·정렬)마다 커진다. 거르는 동안 목록이 바뀌었는지 안다.
+    list_gen: u64,
 }
 
 impl Tab {
@@ -408,6 +516,10 @@ impl Tab {
             relocation: None,
             open_error: None,
             shown: true,
+            filter: None,
+            names: None,
+            next_filter: 0,
+            list_gen: 0,
         }
     }
 
@@ -710,6 +822,7 @@ impl Tab {
             return ChangeOutcome::Reload;
         }
         if !batch.changes.is_empty() {
+            self.list_gen += 1;
             self.list.apply_changes(batch.changes);
             self.update_visible();
             self.prune_selection();
@@ -747,6 +860,7 @@ impl Tab {
             changes.push((original.clone(), None));
         }
         changes.push((name.clone(), edited.item.clone()));
+        self.list_gen += 1;
         self.list.apply_changes(changes);
         self.update_visible();
         if let Some(original) = &original {
@@ -900,6 +1014,12 @@ impl Tab {
             list.set_sort(self.sort);
         }
         self.list = list;
+        self.list_gen += 1;
+        if restored.is_some() {
+            // 다른 위치로 갔다: 필터가 풀린다.
+            self.filter = None;
+            self.next_filter += 1;
+        }
         self.update_visible();
         if let Some(view) = restored {
             self.selection = view.selection;
@@ -923,6 +1043,7 @@ impl Tab {
             return;
         }
         self.sort = sort;
+        self.list_gen += 1;
         self.list.set_sort(sort);
         self.update_visible();
         self.reindex();
@@ -941,18 +1062,138 @@ impl Tab {
     }
 
     fn update_visible(&mut self) {
-        self.visible = if self.show_hidden || !self.list.iter().any(|i| i.attributes.hidden) {
-            None
-        } else {
-            Some(
-                self.list
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, item)| !item.attributes.hidden)
-                    .map(|(i, _)| i)
-                    .collect(),
-            )
+        let hides = !self.show_hidden && self.list.iter().any(|i| i.attributes.hidden);
+        if self.filter.is_none() {
+            self.visible = if hides {
+                Some(
+                    self.list
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, item)| !item.attributes.hidden)
+                        .map(|(i, _)| i)
+                        .collect(),
+                )
+            } else {
+                None
+            };
+            return;
+        }
+        // 필터 중: 맞은 번호가 지금 목록의 것이 아니면(그 사이 목록이 바뀜) 이름으로 다시 맞춘다.
+        let gen_now = self.list_gen;
+        if let Some(filter) = &mut self.filter
+            && filter
+                .matched
+                .as_ref()
+                .is_none_or(|(_, gen_at)| *gen_at != gen_now)
+        {
+            let matched = self
+                .list
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| filter.matcher.is_match(&item.name))
+                .map(|(i, _)| i)
+                .collect();
+            filter.matched = Some((matched, gen_now));
+        }
+        let matched = self
+            .filter
+            .as_ref()
+            .and_then(|f| f.matched.as_ref())
+            .map(|(matched, _)| matched.as_slice())
+            .unwrap_or_default();
+        self.visible = Some(
+            matched
+                .iter()
+                .copied()
+                .filter(|&i| {
+                    self.show_hidden || self.list.get(i).is_some_and(|item| !item.attributes.hidden)
+                })
+                .collect(),
+        );
+    }
+
+    // --- 필터 ---
+
+    /// 지금 적용한 필터 글자. 필터가 없으면 `None`이다. 위치를 바꾸면(뒤로·앞으로·위로·주소창 포함) 풀린다.
+    pub fn filter(&self) -> Option<&str> {
+        self.filter.as_ref().map(|f| f.text.as_str())
+    }
+
+    /// 필터 글자를 정한다: 이미 읽은 목록만 거르고 파일 시스템을 다시 읽지 않는다. 글자가 비면 필터를 풀고
+    /// `None`이다(곧바로 반영). 아니면 거를 요청을 돌려주니, 일꾼 스레드에서 [`FilterRequest::run`]해 그 결과를
+    /// [`Tab::finish_filter`]에 넘긴다. 그동안 목록은 앞 필터 그대로다. 앞선 요청의 결과는 늦게 오면 버린다.
+    pub fn request_filter(&mut self, text: &str) -> Option<FilterRequest> {
+        if text.is_empty() {
+            self.clear_filter();
+            return None;
+        }
+        let id = FilterId(self.next_filter);
+        self.next_filter += 1;
+        // 앞 결과가 부분 일치였고 글자를 덧붙였으면 앞 결과 안에서만 거른다(와일드카드가 든 앞 글자는 덧붙여도
+        // 좁아진다고 할 수 없어 처음부터).
+        let narrowed = self.filter.as_ref().filter(|f| {
+            !has_wildcard(&f.text) && text.to_lowercase().starts_with(&f.text.to_lowercase())
+        });
+        let candidates = match narrowed.and_then(|f| f.matched.as_ref()) {
+            // 앞 결과의 번호가 지금 목록의 것일 때만 그 안에서 거른다.
+            Some((matched, gen_at)) if *gen_at == self.list_gen => Some(matched.clone()),
+            _ => None,
         };
+        let names = match &self.names {
+            Some((gen_at, names)) if *gen_at == self.list_gen => Arc::clone(names),
+            _ => {
+                let names = Arc::new(self.list.iter().map(|item| item.name.clone()).collect());
+                self.names = Some((self.list_gen, Arc::clone(&names)));
+                names
+            }
+        };
+        Some(FilterRequest {
+            id,
+            text: text.to_string(),
+            names,
+            candidates,
+            list_gen: self.list_gen,
+        })
+    }
+
+    /// 거르기 결과를 받는다. 마지막 요청의 결과일 때만 반영하고 `true`다. 늦게 온 앞선 요청의 결과는 버리고
+    /// `false`다. 거르는 동안 목록을 다시 읽었으면 새 목록을 처음부터 다시 거른다.
+    pub fn finish_filter(&mut self, result: FilterResult) -> bool {
+        if result.id.0 + 1 != self.next_filter {
+            return false;
+        }
+        // 거르는 동안 목록이 바뀌었으면 번호가 어긋나므로 이름으로 다시 맞춘다(`update_visible`).
+        let matched =
+            (result.list_gen == self.list_gen).then_some((result.matched, result.list_gen));
+        self.filter = Some(Filter {
+            matcher: NameMatcher::new(&result.text),
+            text: result.text,
+            matched,
+        });
+        self.after_filter_change();
+        true
+    }
+
+    /// 요청·결과 없이 곧바로 거른다(작은 목록과 시험용). 막으므로 큰 목록은 [`Tab::request_filter`]를 쓴다.
+    pub fn set_filter(&mut self, text: &str) {
+        if let Some(request) = self.request_filter(text) {
+            let result = request.run();
+            self.finish_filter(result);
+        }
+    }
+
+    /// 필터를 풀고 원래 목록으로 돌아간다. 기다리는 거르기 결과는 버린다.
+    pub fn clear_filter(&mut self) {
+        self.next_filter += 1;
+        if self.filter.take().is_some() {
+            self.after_filter_change();
+        }
+    }
+
+    fn after_filter_change(&mut self) {
+        self.update_visible();
+        self.prune_selection();
+        self.reindex();
     }
 
     // --- 선택·커서 ---
@@ -1247,6 +1488,14 @@ impl Tab {
 
     /// 상태 표시줄 수치: 항목 수, 선택 수, 선택한 파일 크기 합.
     pub fn status(&self) -> StatusSummary {
+        // 필터 중이면 전체 수: 필터가 없을 때 보일 항목(숨김 항목 설정은 그대로) 수.
+        let total_count = self.filter.as_ref().map(|_| {
+            if self.show_hidden {
+                self.list.len()
+            } else {
+                self.list.iter().filter(|i| !i.attributes.hidden).count()
+            }
+        });
         let selected_size = if self.selection.is_empty() {
             0
         } else {
@@ -1257,6 +1506,7 @@ impl Tab {
         };
         StatusSummary {
             item_count: self.len(),
+            total_count,
             selected_count: self.selection.len(),
             selected_size,
         }

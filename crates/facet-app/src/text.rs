@@ -62,6 +62,7 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::Undo => "실행취소",
         CommandId::Redo => "다시 실행",
         CommandId::ShowHistory => "작업 기록 보기",
+        CommandId::Filter => "필터",
         CommandId::Delete => "삭제",
         CommandId::DeletePermanently => "영구 삭제",
         CommandId::Copy => "복사",

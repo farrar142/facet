@@ -67,6 +67,8 @@ impl Pick {
 pub struct StatusSummary {
     /// 보이는 항목 수.
     pub item_count: usize,
+    /// 필터 중이면 필터 없이 보일 전체 항목 수(숨김 항목 설정은 그대로). 필터가 없으면 `None`.
+    pub total_count: Option<usize>,
     /// 선택한 항목 수.
     pub selected_count: usize,
     /// 선택한 파일의 크기 합(바이트). 폴더는 더하지 않는다.

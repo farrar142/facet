@@ -785,6 +785,8 @@ fn connect(ui: &AppWindow, w: WindowId) {
     });
     ui.on_candidate_pressed(move |index| with_view(w, |view| view.candidate_pressed(index)));
     ui.on_cancel_address_edit(move || with_view(w, View::close_address_edit));
+    ui.on_filter_edited(move |text| with_view(w, |view| view.filter_edited(&text)));
+    ui.on_cancel_filter(move || with_view(w, View::close_filter));
     ui.on_palette_edited(move |text| with_view(w, |view| view.palette_edited(&text)));
     ui.on_palette_step(move |step| with_view(w, |view| view.palette_step(step >= 0)));
     ui.on_palette_run(move |index| {
@@ -1190,6 +1192,9 @@ struct View {
     new_folder_tab: Cell<Option<TabId>>,
     /// 주소창을 고쳐 쓰는 중이면 그 상태. 화면의 `address-editing`과 함께 바뀐다.
     address: RefCell<Option<AddressEdit>>,
+    /// 필터 입력란이 열려 있으면 그 탭과 그때의 위치. 다른 탭·위치가 되면 입력란을 닫는다(코어는 위치를 바꾸면 필터를
+    /// 풀고, 탭마다 필터를 따로 갖는다).
+    filter_at: RefCell<Option<(TabId, facet_core::Location)>>,
     /// 자동 완성 후보의 이름.
     candidates: Rc<VecModel<SharedString>>,
     /// 명령 팔레트가 열려 있으면 그 검색 결과와 고른 줄.
@@ -1317,6 +1322,7 @@ impl View {
             drop_target: RefCell::default(),
             item_press: RefCell::default(),
             drop_menu: RefCell::default(),
+            filter_at: RefCell::default(),
         })
     }
 
@@ -1732,6 +1738,7 @@ impl View {
     /// 창(패널이 몇인가, 활성 패널, 분할 비율)과 패널마다 보이는 탭의 상태를 화면에 넣는다.
     fn render(&self) {
         let ui = &self.ui;
+        self.sync_filter_bar();
         {
             let app = self.app.borrow();
             let Some(window) = app.window(self.window) else {
@@ -1839,6 +1846,7 @@ impl View {
                 },
                 sort_descending: sort.direction == Direction::Descending,
                 item_count: count(status.item_count),
+                total_count: status.total_count.map_or(-1, count),
                 selected_count: count(status.selected_count),
                 selected_size: selected_size.into(),
             },
@@ -1899,6 +1907,7 @@ impl View {
     fn panel_switched(&self) {
         self.close_rename();
         self.close_address_edit();
+        self.restore_filter_bar();
         self.render();
     }
 
@@ -2019,6 +2028,7 @@ impl View {
                 }
             }
             Execution::ShowHistory => self.open_history(),
+            Execution::Filter => self.begin_filter(),
             Execution::ConfirmDelete(warning) => self.open_delete(warning),
             Execution::UndoRefused(_) | Execution::Disabled | Execution::WindowClosed => {}
         }
@@ -2301,6 +2311,7 @@ impl View {
         self.close_rename();
         self.close_address_edit();
         self.close_target();
+        self.restore_filter_bar();
         self.render();
         for panel in 0..MAX_PANELS {
             self.restore_scroll(panel);
@@ -2651,6 +2662,77 @@ impl View {
         if let Some(location) = location {
             self.go(location);
         }
+    }
+
+    /// 활성 패널에 필터 입력란을 열고 포커스를 준다(이미 열려 있으면 포커스만 다시 준다).
+    fn begin_filter(&self) {
+        self.close_rename();
+        self.close_address_edit();
+        if self.filter_at.borrow().is_none() {
+            self.show_filter_bar();
+        }
+        let ui = &self.ui;
+        ui.set_filter_focus(ui.get_filter_focus().wrapping_add(1));
+    }
+
+    /// 활성 탭을 기준으로 필터 입력란을 연다: 탭이 이미 가진 필터 글자를 채운다.
+    fn show_filter_bar(&self) {
+        let (id, location, text) = {
+            let app = self.app.borrow();
+            let tab = app.active_tab();
+            (
+                app.active_tab_id(),
+                tab.location().clone(),
+                tab.filter().unwrap_or_default().to_string(),
+            )
+        };
+        *self.filter_at.borrow_mut() = Some((id, location));
+        self.ui.set_filter_text(text.into());
+        self.ui.set_filter_open(true);
+    }
+
+    /// 입력란만 닫는다(필터는 그대로).
+    fn hide_filter_bar(&self) {
+        if self.filter_at.borrow_mut().take().is_some() {
+            self.ui.set_filter_open(false);
+            self.ui.set_filter_text(SharedString::new());
+        }
+    }
+
+    /// 활성 탭이 바뀌었다: 그 탭이 필터를 갖고 있으면 입력란을 그 글자로 열고, 아니면 닫는다.
+    fn restore_filter_bar(&self) {
+        self.hide_filter_bar();
+        if self.app.borrow().active_tab().filter().is_some() {
+            self.show_filter_bar();
+        }
+    }
+
+    /// 입력란을 연 탭·위치가 아니게 되었으면(다른 위치로 감: 코어가 필터를 풀었다) 입력란을 닫는다.
+    fn sync_filter_bar(&self) {
+        let stale = self
+            .filter_at
+            .borrow()
+            .as_ref()
+            .is_some_and(|(id, location)| {
+                let app = self.app.borrow();
+                app.active_tab_id() != *id || app.active_tab().location() != location
+            });
+        if stale {
+            self.hide_filter_bar();
+        }
+    }
+
+    /// 필터 글자가 바뀌었다: 곧바로 좁힌다(큰 목록은 일꾼 스레드에서 거르고 결과가 오면 그린다).
+    fn filter_edited(&self, text: &str) {
+        self.app.borrow_mut().set_filter(text);
+        self.render();
+    }
+
+    /// Esc: 필터를 지워 원래 목록으로 돌아가고 입력란을 닫는다.
+    fn close_filter(&self) {
+        self.app.borrow_mut().clear_filter();
+        self.hide_filter_bar();
+        self.render();
     }
 
     /// 주소창을 글자로 고쳐 쓰는 모드로 바꾼다. 지금 위치를 채우고, 화면이 전체를 선택한다.

@@ -100,6 +100,9 @@ pub enum CommandId {
     /// 작업 기록 보기: 작업 기록을 읽기 전용 목록으로 연다([`crate::window::Execution::ShowHistory`]). 기록이 없으면
     /// 꺼진다.
     ShowHistory,
+    /// 필터: 활성 패널에 필터 입력란을 열고 포커스를 준다([`crate::window::Execution::Filter`]). 치는 즉시 현재 폴더의
+    /// 목록이 이름으로 좁혀진다([`crate::window::App::set_filter`]). 늘 켜져 있다.
+    Filter,
     /// 삭제: 활성 탭의 선택(없으면 커서 항목)을 휴지통으로 보낸다. 묻지 않고 곧바로 휴지통 삭제 작업을 넣는다. 원본이
     /// 모두 휴지통이 없는 위치에 있으면 영구 삭제가 되므로 화면이 먼저 확인받는다
     /// ([`crate::window::Execution::ConfirmDelete`]). 원본이 없거나 위치가 실제 폴더가 아니면 꺼진다.
@@ -124,7 +127,7 @@ pub enum CommandId {
 
 impl CommandId {
     /// 모든 명령. 명령 팔레트는 검색어가 없으면 이 순서로 보인다.
-    pub const ALL: [CommandId; 47] = [
+    pub const ALL: [CommandId; 48] = [
         CommandId::Open,
         CommandId::Back,
         CommandId::Forward,
@@ -166,6 +169,7 @@ impl CommandId {
         CommandId::Undo,
         CommandId::Redo,
         CommandId::ShowHistory,
+        CommandId::Filter,
         CommandId::Delete,
         CommandId::DeletePermanently,
         CommandId::Copy,
@@ -220,6 +224,7 @@ impl CommandId {
             CommandId::Undo => "undo",
             CommandId::Redo => "redo",
             CommandId::ShowHistory => "show-history",
+            CommandId::Filter => "filter",
             CommandId::Delete => "delete",
             CommandId::DeletePermanently => "delete-permanently",
             CommandId::Copy => "copy",
@@ -322,6 +327,7 @@ impl CommandId {
             CommandId::Undo => const { &[key(letter('Z')).ctrl()] },
             CommandId::Redo => const { &[key(letter('Y')).ctrl()] },
             CommandId::ShowHistory => &[],
+            CommandId::Filter => const { &[key(letter('F')).ctrl().shift()] },
             CommandId::Delete => const { &[key(Key::Delete)] },
             CommandId::DeletePermanently => const { &[key(Key::Delete).shift()] },
             CommandId::Copy => const { &[key(letter('C')).ctrl()] },
@@ -390,7 +396,8 @@ impl CommandId {
             | CommandId::NewWindow
             | CommandId::Undo
             | CommandId::Redo
-            | CommandId::ShowHistory => true,
+            | CommandId::ShowHistory
+            | CommandId::Filter => true,
         }
     }
 

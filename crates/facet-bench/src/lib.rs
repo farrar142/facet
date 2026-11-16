@@ -17,6 +17,8 @@
 //!   ([`measure_clipboard`]). `cargo xtask ci`가 이것도 부른다.
 //! - 오른쪽 메뉴 구성 벤치마크: 선택 1만 개에서 메뉴를 만드는 시간([`MENU_LIMIT`])을 잰다([`measure_menu`]).
 //!   `cargo xtask ci`가 이것도 부른다.
+//! - 필터 벤치마크: 10만 항목 목록에서 필터 한 글자·두 글자를 정하는 시간([`FILTER_LIMIT`])을 잰다([`measure_filter`]).
+//!   `cargo xtask ci`가 이것도 부른다.
 //! - 복사 벤치마크: 작업 대기열의 복사 작업으로 256MiB 파일 하나의 처리량([`copy::COPY_THROUGHPUT_LIMIT`])과
 //!   4KiB 파일 2천 개가 든 폴더의 복사 시간([`copy::COPY_SMALL_LIMIT`])을 잰다. `cargo xtask ci`가 이것도 부른다.
 //!   같은 복사를 셸의 `IFileOperation`으로도 해 견주는 탐색기 비교 측정([`copy::compare`])은 사람이 잰다.
@@ -901,6 +903,118 @@ pub fn check_menu_limit(m: &MenuMeasurement, limit: Duration) -> Result<(), Stri
         if t.median() > limit {
             return Err(format!(
                 "{name} 구성 상한 초과: 선택 {}개 중앙값 {:.3}ms > 상한 {}ms (최악 {:.3}ms)",
+                t.item_count,
+                t.median().as_secs_f64() * 1000.0,
+                limit.as_millis(),
+                t.max().as_secs_f64() * 1000.0
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 필터 벤치마크에서 거르는 항목 수(기본 시험 폴더).
+pub const FILTER_COUNT: usize = 100_000;
+
+/// 10만 항목 목록에서 필터 한 글자를 정하는 시간의 로컬 기준(릴리스 빌드): 한 프레임(16ms).
+///
+/// 글자를 칠 때마다 목록이 좁혀지는 것이 한 프레임 안에 보여야 「치는 즉시」다. 시간은 UI 스레드가 하는 일(후보
+/// 요청 만들기 + 결과 받아 보이는 목록 다시 만들기)과 일꾼 스레드가 하는 거르기(이름 일치)를 모두 더한 것이다.
+pub const FILTER_TARGET: Duration = Duration::from_millis(16);
+
+/// CI가 실패시키는 필터 시간 상한: 로컬 기준 [`FILTER_TARGET`]의 10배([`LIST_LIMIT`]과 같은 까닭: 공유 러너의
+/// 편차를 견디면서 알고리즘이 한 단계 나빠지는 실수만 잡는다).
+pub const FILTER_LIMIT: Duration = Duration::from_millis(160);
+
+/// 필터 측정 글자: 빈 필터에서 한 글자, 그 한 글자에서 두 글자.
+pub const FILTER_STEPS: [&str; 2] = ["r", "re"];
+
+/// 필터 측정: 빈 필터에서 한 글자(`first`), 한 글자에서 두 글자(`second`).
+pub struct FilterMeasurement {
+    pub first: Measurement,
+    pub second: Measurement,
+}
+
+/// 시험 폴더(항목 [`FILTER_COUNT`]개)를 읽은 탭에서 필터 글자를 정하는 시간을 `runs`번씩 잰다(한 번 데운 뒤).
+/// 요청 만들기 → 거르기 → 결과 반영을 모두 더한 시간이다. 목록이 바뀐 뒤 첫 요청은 이름 한 벌을 모으느라 더 걸리고
+/// (그 한 번만, 탭이 나눠 쓴다) 이 측정은 한 번 데운 뒤의 값이다. [`Measurement::item_count`]는 남은 항목 수다.
+/// 거른 결과가 처음부터 거른 것과 다르거나 비면 실패한다.
+pub fn measure_filter(runs: usize) -> Result<FilterMeasurement, String> {
+    use facet_core::Location;
+    use facet_core::tab::{Navigation, ReadOutcome, Tab};
+
+    let path = std::env::temp_dir()
+        .join("facet-test-folders")
+        .join(format!("items-{FILTER_COUNT}"));
+    make_test_folder(&path, FILTER_COUNT).map_err(|e| e.to_string())?;
+    let mut tab = Tab::new(Location::file_system(&path), Sort::default(), true);
+    let request = tab
+        .navigate(Navigation::Refresh)
+        .ok_or("시험 폴더를 읽지 못했습니다")?;
+    if tab.finish(request.run()) != ReadOutcome::Committed {
+        return Err("시험 폴더를 읽지 못했습니다".to_owned());
+    }
+    if tab.len() != FILTER_COUNT {
+        return Err(format!(
+            "항목 수가 다릅니다: {FILTER_COUNT}개를 기대했지만 {}개",
+            tab.len()
+        ));
+    }
+    let apply = |tab: &mut Tab, text: &str| -> Result<Duration, String> {
+        let start = Instant::now();
+        let request = tab.request_filter(text).ok_or("거르기 요청이 없습니다")?;
+        let result = request.run();
+        let applied = tab.finish_filter(result);
+        let elapsed = start.elapsed();
+        if !applied {
+            return Err("거르기 결과를 반영하지 못했습니다".to_owned());
+        }
+        Ok(elapsed)
+    };
+    // 처음부터 거른 것과 같은지: 두 글자를 곧바로 걸어 본다.
+    tab.set_filter(FILTER_STEPS[1]);
+    let direct = tab.len();
+    tab.clear_filter();
+    let mut first = Vec::with_capacity(runs);
+    let mut second = Vec::with_capacity(runs);
+    let mut first_count = 0;
+    let mut second_count = 0;
+    for round in 0..=runs {
+        tab.clear_filter();
+        let a = apply(&mut tab, FILTER_STEPS[0])?;
+        first_count = tab.len();
+        let b = apply(&mut tab, FILTER_STEPS[1])?;
+        second_count = tab.len();
+        // 첫 회는 데우기다.
+        if round > 0 {
+            first.push(a);
+            second.push(b);
+        }
+    }
+    if second_count != direct || first_count == 0 || second_count == 0 || second_count > first_count
+    {
+        return Err(format!(
+            "필터 결과가 이상합니다: 한 글자 {first_count}개, 두 글자 {second_count}개, 처음부터 거르면 {direct}개"
+        ));
+    }
+    Ok(FilterMeasurement {
+        first: Measurement {
+            item_count: first_count,
+            times: first,
+        },
+        second: Measurement {
+            item_count: second_count,
+            times: second,
+        },
+    })
+}
+
+/// 필터 중앙값이 `limit`을 넘으면 넘은 수치를 담은 메시지를 돌려준다.
+pub fn check_filter_limit(m: &FilterMeasurement, limit: Duration) -> Result<(), String> {
+    for (name, t) in [("한 글자", &m.first), ("두 글자", &m.second)] {
+        if t.median() > limit {
+            return Err(format!(
+                "필터 {name} 상한 초과: 남은 {}개 중앙값 {:.2}ms > 상한 {}ms (최악 {:.2}ms)",
                 t.item_count,
                 t.median().as_secs_f64() * 1000.0,
                 limit.as_millis(),

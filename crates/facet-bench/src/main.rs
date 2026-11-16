@@ -51,6 +51,9 @@ const USAGE: &str = "\
   facet-bench menu [--runs N] [--limit-ms N]
       항목 1만 개 시험 폴더에서 1만 개를 선택한 상태로 오른쪽 메뉴(항목 메뉴·빈 곳 메뉴)를 만드는 시간을 각각
       N회(기본 5) 재어 중앙값이 상한(기본 10ms)을 넘으면 실패한다.
+  facet-bench filter [--runs N] [--limit-ms N]
+      항목 10만 개 시험 폴더를 읽은 탭에서 필터 한 글자(빈 필터에서)와 두 글자(한 글자에서)를 정하는 시간을
+      각각 N회(기본 5) 재어 중앙값이 상한(기본 160ms)을 넘으면 실패한다.
   facet-bench copy [--size-mb N] [--count N] [--runs N]
       임시 폴더에 큰 파일 하나(기본 256MiB)와 4KiB 파일 N개(기본 2000)가 든 폴더를 만들고, 작업 대기열의
       복사 작업으로 각각 N회(기본 3) 복사해(한 번 데운 뒤, 대상은 매번 지움) 큰 파일 처리량 중앙값이 하한
@@ -195,6 +198,7 @@ fn main() -> ExitCode {
         "session" => session(&args),
         "clipboard" => clipboard(&args),
         "menu" => menu(&args),
+        "filter" => filter(&args),
         "copy" => copy_bench(&args),
         "delete" => delete_bench(&args),
         "compare-recycle" => compare_recycle(&args),
@@ -586,6 +590,38 @@ fn menu(args: &Args) -> Result<(), String> {
         );
     }
     facet_bench::check_menu_limit(&m, limit)?;
+    println!("  상한 안: 통과");
+    Ok(())
+}
+
+fn filter(args: &Args) -> Result<(), String> {
+    if args.path.is_some() {
+        return Err(format!(
+            "filter 명령은 경로를 받지 않습니다
+
+{USAGE}"
+        ));
+    }
+    warn_debug();
+    let limit = args.limit.unwrap_or(facet_bench::FILTER_LIMIT);
+    let m = facet_bench::measure_filter(args.runs())?;
+    for (name, t) in [("한 글자", &m.first), ("두 글자", &m.second)] {
+        println!(
+            "필터: {name} ({}항목 중 {}개 남음, {}회):",
+            facet_bench::FILTER_COUNT,
+            t.item_count,
+            t.times.len()
+        );
+        print_times(t);
+        println!(
+            "  중앙값 {:.2}ms, 최악 {:.2}ms / 로컬 기준 {}ms, CI 상한 {}ms",
+            ms(t.median()),
+            ms(t.max()),
+            facet_bench::FILTER_TARGET.as_millis(),
+            limit.as_millis()
+        );
+    }
+    facet_bench::check_filter_limit(&m, limit)?;
     println!("  상한 안: 통과");
     Ok(())
 }

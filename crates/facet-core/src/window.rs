@@ -78,8 +78,8 @@ use crate::placement::Placement;
 use crate::selection::Pick;
 use crate::session::{PanelSession, Session, TabSession, WindowSession};
 use crate::tab::{
-    ChangeOutcome, ClosedTab, CompletionId, CompletionResult, Navigation, ReadOutcome, ReadRequest,
-    ReadResult, Tab,
+    ChangeOutcome, ClosedTab, CompletionId, CompletionResult, FilterResult, Navigation,
+    ReadOutcome, ReadRequest, ReadResult, Tab,
 };
 use crate::watch::ChangeBatch;
 use crate::work_area::WorkArea;
@@ -347,6 +347,10 @@ enum Message {
         tab: TabId,
         result: CompletionResult,
     },
+    Filtered {
+        tab: TabId,
+        result: FilterResult,
+    },
     /// 클립보드 스레드가 한 복사·경로 복사의 결과.
     ClipboardDone {
         tab: TabId,
@@ -408,6 +412,8 @@ pub enum Update {
         id: CompletionId,
         candidates: Option<Vec<Candidate>>,
     },
+    /// 필터 거르기의 결과([`App::set_filter`]): 반영했는가. 늦게 온 앞선 요청의 결과면 버렸다(`false`).
+    Filtered(bool),
     /// 이름바꾸기·새 폴더의 결과([`App::rename`]·[`App::new_folder`]). 성공했고 그 탭이 그 폴더를 보고 있으면 목록에
     /// 이미 반영했고, 바꾼(만든) 항목이 선택·커서다(새 폴더면 화면은 [`Tab::cursor`] 행에 이름 입력란을 연다).
     /// 실패면 까닭이고 아무것도 바뀌지 않았다.
@@ -471,6 +477,9 @@ pub enum Execution {
     UndoRefused(UndoError),
     /// 화면이 할 일: 작업 기록([`App::history`])을 읽기 전용 목록으로 연다.
     ShowHistory,
+    /// 화면이 할 일: 활성 패널에 필터 입력란을 열고 포커스를 준다. 친 글자는 [`App::set_filter`]에, Esc는
+    /// [`App::clear_filter`]에 넘긴다.
+    Filter,
     /// 화면이 할 일: 삭제를 실행하기 전에 되돌릴 수 없다는 경고와 항목을 보이고 확인받는다. 보일 원본은
     /// [`App::delete_plan`]이 주고, 확인하면 [`App::start_delete`]로 작업을 넣는다. 아직 아무것도 지우지 않았다.
     ConfirmDelete(DeleteWarning),
@@ -1458,6 +1467,12 @@ impl App {
                 };
                 (id, Update::Clipboard(result))
             }
+            Message::Filtered { tab: id, result } => {
+                let applied = self
+                    .tab_mut(id)
+                    .is_some_and(|tab| tab.finish_filter(result));
+                (id, Update::Filtered(applied))
+            }
             Message::Completed { tab: id, result } => {
                 let completion = result.id();
                 let candidates = self
@@ -1510,6 +1525,29 @@ impl App {
             .spawn(read)
             .expect("자동 완성 일꾼 스레드를 만들지 못했다");
         id
+    }
+
+    /// 활성 탭의 필터 글자를 정한다([`Tab::request_filter`]). 이미 읽은 목록만 일꾼 스레드에서 거르고 막지 않는다.
+    /// 결과는 [`Update::Filtered`]로 오고, 앞선 요청의 결과가 늦게 오면 버린다. 글자가 비면 곧바로 필터가 풀린다.
+    pub fn set_filter(&mut self, text: &str) {
+        let tab = self.active_tab_id();
+        let Some(request) = self.active_tab_mut().request_filter(text) else {
+            return;
+        };
+        let outbox = self.outbox.clone();
+        let run = move || {
+            let result = request.run();
+            outbox.send(Message::Filtered { tab, result });
+        };
+        thread::Builder::new()
+            .name("facet-filter".into())
+            .spawn(run)
+            .expect("필터 일꾼 스레드를 만들지 못했다");
+    }
+
+    /// 활성 탭의 필터를 푼다(Esc). 곧바로 원래 목록이 되고 기다리는 거르기 결과는 버린다.
+    pub fn clear_filter(&mut self) {
+        self.active_tab_mut().clear_filter();
     }
 
     /// 활성 탭의 정렬을 바꾼다. 다시 읽지 않는다.
@@ -1710,6 +1748,7 @@ impl App {
                 };
             }
             CommandId::ShowHistory => return Execution::ShowHistory,
+            CommandId::Filter => return Execution::Filter,
             CommandId::Delete | CommandId::DeletePermanently => {
                 let Some(plan) = self.delete_plan(command) else {
                     return Execution::Disabled;

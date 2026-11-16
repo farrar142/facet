@@ -17,6 +17,7 @@ mod location;
 pub mod measure;
 pub mod menu;
 pub mod name_input;
+pub mod name_match;
 pub mod placement;
 mod provider;
 pub mod selection;
