@@ -21,8 +21,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use facet_core::Location;
 use facet_core::measure::{
-    ENV_MENU, ENV_OPEN, ENV_OUT, ENV_RENAME, ENV_SCROLL_ROWS, ENV_START_US, ENV_WINDOWS,
-    ScreenReport,
+    ENV_MENU, ENV_OPEN, ENV_OUT, ENV_RENAME, ENV_SCROLL_ROWS, ENV_SEARCH, ENV_START_US,
+    ENV_WINDOWS, ScreenReport,
 };
 use slint::winit_030::winit::event::WindowEvent;
 use slint::{ComponentHandle, Model};
@@ -82,6 +82,8 @@ struct State {
     menu: bool,
     /// 오른쪽 메뉴를 재려고 전체 선택을 시작했다(그 프레임이 나가면 메뉴를 연다).
     menu_selecting: bool,
+    /// 첫 화면 뒤에 시작할 실시간 탐색의 이름 조각. 시작한 때는 `open_started`다.
+    search: Option<String>,
     /// 이 횟수보다 많이 목록이 들어온 뒤의 프레임만 센다. 이동한 폴더의 목록을 기다릴 때 쓴다.
     loads_seen: usize,
     report: ScreenReport,
@@ -145,6 +147,7 @@ pub fn frame_counter(ui: &AppWindow, key: u64) -> Option<impl FnMut(&WindowEvent
             .and_then(|v| v.split_once('|').map(|(a, b)| (a.to_owned(), b.to_owned()))),
         menu: std::env::var_os(ENV_MENU).is_some_and(|v| !v.is_empty()),
         menu_selecting: false,
+        search: std::env::var(ENV_SEARCH).ok().filter(|v| !v.is_empty()),
         loads_seen: 0,
         report: ScreenReport::default(),
         last_frame: None,
@@ -221,6 +224,20 @@ fn presented(weak: &slint::Weak<AppWindow>, state: &Mutex<State>) {
                 });
                 return;
             }
+            if let Some(query) = s.search.clone() {
+                // 결과 위치로 옮긴 빈 목록의 프레임은 세지 않는다(결과가 든 프레임을 기다림, 아래).
+                s.loads_seen = window_loads(s.key);
+                s.open_started = Some(Instant::now());
+                drop(s);
+                crate::with_first_view(|view| {
+                    if !view.measure_search(&query)
+                        && let Ok(mut s) = state.lock()
+                    {
+                        s.finish();
+                    }
+                });
+                return;
+            }
             if s.menu {
                 // 먼저 전체를 선택하고 그 프레임이 나가면 메뉴를 연다(선택을 그리는 비용이 메뉴 시간에 섞이지 않게).
                 s.loads_seen = window_loads(s.key);
@@ -253,6 +270,18 @@ fn presented(weak: &slint::Weak<AppWindow>, state: &Mutex<State>) {
             });
             return;
         } else if let Some(started) = s.open_started {
+            if s.search.is_some() {
+                let rows = ROWS.load(Ordering::Relaxed);
+                if rows == 0 {
+                    // 결과가 아직 없는 프레임(빈 결과 위치·진행만 바뀐 묶음): 다음 결과를 기다린다.
+                    s.loads_seen = window_loads(s.key);
+                    return;
+                }
+                s.report.search_frame = Some(now - started);
+                s.report.rows = rows;
+                s.finish();
+                return;
+            }
             if s.menu {
                 s.report.menu_frame = Some(now - started);
             } else if s.rename.is_some() {
