@@ -113,6 +113,7 @@ mod measure;
 mod palette;
 mod question;
 mod rename;
+mod search_bar;
 mod tab_drag;
 mod target;
 mod text;
@@ -735,6 +736,7 @@ fn connect(ui: &AppWindow, w: WindowId) {
             1 => Column::Modified,
             2 => Column::Type,
             3 => Column::Size,
+            4 => Column::Location,
             _ => Column::Name,
         };
         with_view(w, |view| view.execute(CommandId::sort_by(column)));
@@ -787,6 +789,9 @@ fn connect(ui: &AppWindow, w: WindowId) {
     ui.on_cancel_address_edit(move || with_view(w, View::close_address_edit));
     ui.on_filter_edited(move |text| with_view(w, |view| view.filter_edited(&text)));
     ui.on_cancel_filter(move || with_view(w, View::close_filter));
+    ui.on_search_submit(move |text| with_view(w, |view| view.search_submit(&text)));
+    ui.on_cancel_search(move || with_view(w, View::hide_search_bar));
+    ui.on_stop_search(move || with_view(w, |view| view.execute(CommandId::StopSearch)));
     ui.on_palette_edited(move |text| with_view(w, |view| view.palette_edited(&text)));
     ui.on_palette_step(move |step| with_view(w, |view| view.palette_step(step >= 0)));
     ui.on_palette_run(move |index| {
@@ -1747,7 +1752,7 @@ impl View {
             ui.set_split(window.is_split());
             ui.set_active_panel(count(window.active_panel_index()));
             ui.set_split_ratio(window.split_ratio());
-            ui.set_folder_title(window.active_panel().active_tab().title().into());
+            ui.set_folder_title(tab_title(window.active_panel().active_tab()).into());
         }
         let now = Instant::now();
         let mut redraw_at: Option<Instant> = None;
@@ -1788,10 +1793,14 @@ impl View {
         };
         self.render_tabs(ui, panel, shown);
         let tab = shown.active_tab();
-        let labels: Vec<SharedString> = provider_for(tab.location())
+        let labels: Vec<String> = provider_for(tab.location())
             .segments(tab.location())
             .into_iter()
-            .map(|segment| segment.label.into())
+            .map(|segment| segment.label)
+            .collect::<Vec<_>>();
+        let labels: Vec<SharedString> = segment_labels(tab.location(), labels)
+            .into_iter()
+            .map(Into::into)
             .collect();
         if !models.segments.iter().eq(labels.iter().cloned()) {
             models.segments.set_vec(labels);
@@ -1817,6 +1826,7 @@ impl View {
         };
         let sort = tab.sort();
         let status = tab.status();
+        let search_line = search_bar::line_of(tab.search());
         let selected_size = if status.selected_size > 0 {
             file_list::format_size(status.selected_size)
         } else {
@@ -1849,6 +1859,11 @@ impl View {
                 sort_descending: sort.direction == Direction::Descending,
                 item_count: count(status.item_count),
                 total_count: status.total_count.map_or(-1, count),
+                results: tab.location().is_search_results(),
+                search_status: search_line
+                    .map_or_else(String::new, text::search_line_text)
+                    .into(),
+                search_running: search_line.is_some_and(search_bar::Line::is_running),
                 selected_count: count(status.selected_count),
                 selected_size: selected_size.into(),
             },
@@ -1871,7 +1886,7 @@ impl View {
             .tabs()
             .enumerate()
             .map(|(i, (_, tab))| TabItem {
-                title: tab.title().into(),
+                title: tab_title(tab).into(),
                 path: tab.location().to_string().into(),
                 active: i == active,
             })
@@ -1910,6 +1925,7 @@ impl View {
         self.close_rename();
         self.close_address_edit();
         self.restore_filter_bar();
+        self.hide_search_bar();
         self.render();
     }
 
@@ -1941,6 +1957,16 @@ impl View {
         let key = shortcut.key;
         if let Some(command) = command::find_by_shortcut(shortcut) {
             self.execute(command);
+            return true;
+        }
+        // Esc: 탐색 중이면 멈춘다(결과는 남는다). 목록에 키보드가 있을 때만 여기로 온다.
+        if key == Key::Escape
+            && !ctrl
+            && !alt
+            && !shift
+            && self.app.borrow().can_execute(CommandId::StopSearch)
+        {
+            self.execute(CommandId::StopSearch);
             return true;
         }
         if alt {
@@ -2031,6 +2057,7 @@ impl View {
             }
             Execution::ShowHistory => self.open_history(),
             Execution::Filter => self.begin_filter(),
+            Execution::Search => self.begin_search(),
             Execution::ConfirmDelete(warning) => self.open_delete(warning),
             Execution::UndoRefused(_) | Execution::Disabled | Execution::WindowClosed => {}
         }
@@ -2314,6 +2341,7 @@ impl View {
         self.close_address_edit();
         self.close_target();
         self.restore_filter_bar();
+        self.hide_search_bar();
         self.render();
         for panel in 0..MAX_PANELS {
             self.restore_scroll(panel);
@@ -2663,6 +2691,46 @@ impl View {
         };
         if let Some(location) = location {
             self.go(location);
+        }
+    }
+
+    /// 활성 패널의 검색창을 열고 포커스를 준다(이미 열려 있으면 포커스만 다시 준다). 검색 결과 위치면 지금 검색어를 채운다.
+    fn begin_search(&self) {
+        self.close_rename();
+        self.close_address_edit();
+        let ui = &self.ui;
+        if !ui.get_search_open() {
+            let text = self
+                .app
+                .borrow()
+                .active_tab()
+                .location()
+                .search_scope()
+                .map(|scope| scope.query.clone())
+                .unwrap_or_default();
+            ui.set_search_text(text.into());
+            ui.set_search_open(true);
+        }
+        ui.set_search_focus(ui.get_search_focus().wrapping_add(1));
+    }
+
+    /// 검색창을 닫는다(탐색은 그대로 돈다).
+    fn hide_search_bar(&self) {
+        if self.ui.get_search_open() {
+            self.ui.set_search_open(false);
+            self.ui.set_search_text(SharedString::new());
+        }
+    }
+
+    /// 검색창에서 Enter: 현재 폴더 아래 실시간 탐색을 시작한다. 검색어가 비었거나 시작할 수 없는 위치면 아무 일도 없다.
+    fn search_submit(&self, text: &str) {
+        let Some(query) = search_bar::query_to_start(search_bar::Mode::Name, text) else {
+            return;
+        };
+        self.remember_scroll();
+        if self.app.borrow_mut().start_search(query) {
+            self.render();
+            self.restore_scroll(self.active_panel());
         }
     }
 
@@ -3470,6 +3538,24 @@ impl View {
     }
 }
 
+/// 탭 제목: 검색 결과 위치면 「검색: 검색어」, 아니면 폴더 이름.
+fn tab_title(tab: &Tab) -> String {
+    match tab.location().search_scope() {
+        Some(scope) => text::search_title(&scope.query),
+        None => tab.title(),
+    }
+}
+
+/// 주소창 경로 조각의 글자: 검색 결과 위치의 마지막 조각(검색어)은 「검색: 검색어」로 보인다.
+fn segment_labels(location: &Location, mut labels: Vec<String>) -> Vec<String> {
+    if location.is_search_results()
+        && let Some(last) = labels.last_mut()
+    {
+        *last = text::search_title(last);
+    }
+    labels
+}
+
 fn count(n: usize) -> i32 {
     i32::try_from(n).unwrap_or(i32::MAX)
 }
@@ -3765,6 +3851,13 @@ impl Model for TabRows {
             modified: details::modified_text(item).into(),
             kind: text::file_type_text(&details::file_type(item)).into(),
             size: details::size_text(item).into(),
+            location: if tab.location().is_search_results() {
+                tab.folder_of(row)
+                    .map_or_else(String::new, |folder| folder.display().to_string())
+                    .into()
+            } else {
+                SharedString::new()
+            },
             selected: tab.is_selected(row),
             cursor: tab.cursor() == Some(row),
             cut: !marks.is_empty()

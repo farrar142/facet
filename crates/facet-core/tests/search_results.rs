@@ -804,3 +804,22 @@ mod windows {
         }
     }
 }
+
+#[test]
+fn 검색_명령은_ctrl_f와_ctrl_e이고_한글_모드에서도_같다() {
+    use facet_core::command::Key;
+    use facet_core::command::find_by_shortcut;
+    let shortcuts = CommandId::Search.shortcuts();
+    assert_eq!(shortcuts.len(), 2);
+    assert_eq!(find_by_shortcut(shortcuts[0]), Some(CommandId::Search));
+    assert_eq!(find_by_shortcut(shortcuts[1]), Some(CommandId::Search));
+    assert_eq!(CommandId::from_id("search"), Some(CommandId::Search));
+    // 두벌식에서 F·E 자리의 「ㄹ」「ㄷ」도 같은 키다.
+    assert_eq!(Key::from_char('ㄹ'), Key::from_char('f'));
+    assert_eq!(Key::from_char('ㄷ'), Key::from_char('e'));
+    let dir = TempDir::new().unwrap();
+    let mut app = App::new(Some(Location::file_system(dir.path())));
+    app.wait(WAIT).expect("첫 읽기");
+    assert!(app.can_execute(CommandId::Search));
+    assert_eq!(app.execute(CommandId::Search), Execution::Search);
+}

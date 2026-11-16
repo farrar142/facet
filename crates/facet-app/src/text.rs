@@ -63,6 +63,7 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::Redo => "다시 실행",
         CommandId::ShowHistory => "작업 기록 보기",
         CommandId::Filter => "필터",
+        CommandId::Search => "검색",
         CommandId::Delete => "삭제",
         CommandId::DeletePermanently => "영구 삭제",
         CommandId::Copy => "복사",
@@ -441,6 +442,46 @@ pub fn remaining_text(left: std::time::Duration) -> String {
     }
 }
 
+/// 검색 결과 위치의 탭 제목·경로 조각: 검색어 앞에 「검색:」을 붙여 폴더와 구분한다.
+pub fn search_title(query: &str) -> String {
+    format!("검색: {query}")
+}
+
+/// 걸린 시간 글자: 1분 미만은 소수 한 자리 초(`1.5초`), 그 이상은 `분:초`.
+pub fn elapsed_text(elapsed: std::time::Duration) -> String {
+    if elapsed.as_secs() < 60 {
+        format!("{:.1}초", elapsed.as_secs_f64())
+    } else {
+        remaining_text(elapsed)
+    }
+}
+
+/// 탐색 상태 줄 글자(목록 위 띠): 탐색 중이면 찾은 수·훑은 폴더 수, 끝나면 찾은 수·건너뛴 폴더 수·걸린 시간.
+pub fn search_line_text(line: crate::search_bar::Line) -> String {
+    use crate::search_bar::Line;
+    let tail = |found: usize, skipped: usize, elapsed| {
+        format!(
+            "{found}개 찾음 · 건너뛴 폴더 {skipped}개 · {}",
+            elapsed_text(elapsed)
+        )
+    };
+    match line {
+        Line::Running { found, folders } => {
+            format!("탐색 중… {found}개 찾음 · 폴더 {folders}개 훑음")
+        }
+        Line::Finished {
+            found,
+            skipped,
+            elapsed,
+        } => format!("탐색 끝 · {}", tail(found, skipped, elapsed)),
+        Line::Stopped {
+            found,
+            skipped,
+            elapsed,
+        } => format!("중지함 · {}", tail(found, skipped, elapsed)),
+    }
+}
+
 /// 운영 체제가 준 오류 문장과 코드(HRESULT)를 한 글자로: `메시지 (0x80070005)`.
 /// 문장은 운영 체제의 언어로 오므로 번역하지 않는다.
 pub fn os_error_detail(message: &str, code: i32) -> String {
@@ -450,6 +491,29 @@ pub fn os_error_detail(message: &str, code: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 탐색_상태_줄_글자() {
+        use crate::search_bar::Line;
+        use std::time::Duration;
+        assert_eq!(
+            search_line_text(Line::Running {
+                found: 3,
+                folders: 9
+            }),
+            "탐색 중… 3개 찾음 · 폴더 9개 훑음"
+        );
+        assert_eq!(
+            search_line_text(Line::Finished {
+                found: 7,
+                skipped: 2,
+                elapsed: Duration::from_millis(1500)
+            }),
+            "탐색 끝 · 7개 찾음 · 건너뛴 폴더 2개 · 1.5초"
+        );
+        assert_eq!(elapsed_text(Duration::from_secs(125)), "2:05");
+        assert_eq!(search_title("보고서"), "검색: 보고서");
+    }
 
     #[test]
     fn 끄는_동안의_설명은_폴더_이름과_알맞은_조사() {
