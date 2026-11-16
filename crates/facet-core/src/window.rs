@@ -2141,6 +2141,12 @@ impl App {
         self.selected_sources()
     }
 
+    /// 항목을 끌 때 끄는 항목: 활성 탭의 선택(목록 순서), 없으면 커서 항목 하나의 경로. 위치가 실제 폴더가 아니거나
+    /// 둘 다 없으면 `None`. 앱은 항목 위에서 누를 때 그 항목이 선택에 들게 한 뒤 부른다. 이미 가진 목록만 본다.
+    pub fn drag_sources(&self) -> Option<Vec<PathBuf>> {
+        self.selected_sources()
+    }
+
     /// 활성 탭의 선택(목록 순서), 없으면 커서 항목 하나의 경로. 위치가 실제 폴더가 아니거나 둘 다 없으면 `None`.
     fn selected_sources(&self) -> Option<Vec<PathBuf>> {
         let tab = self.active_window().active_panel().active_tab();
