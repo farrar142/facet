@@ -9,6 +9,10 @@ use facet_bench::copy::{
     COPY_SMALL_COUNT, COPY_SMALL_LIMIT, COPY_SMALL_SIZE, COPY_SMALL_TARGET, COPY_THROUGHPUT_LIMIT,
     COPY_THROUGHPUT_TARGET, ComparePlan, CopyFixture, Engine,
 };
+use facet_bench::delete::{
+    self, DELETE_BENCH_COUNT, DELETE_BENCH_RUNS, DELETE_LIMIT, DELETE_TARGET, RECYCLE_COUNT,
+    UNDO_TARGET_LIMIT, UNDO_TARGET_RUNS, UNDO_TARGET_TARGET,
+};
 use facet_bench::screen::{self, DEFAULT_SCROLL_ROWS, Plan};
 use facet_bench::{
     BENCH_QUERY, BENCH_RESULT_LIMIT, BENCH_SORT, BENCH_SORTED_QUERY, BenchCaller, DEFAULT_COUNT,
@@ -45,6 +49,15 @@ const USAGE: &str = "\
       임시 폴더에 큰 파일 하나(기본 256MiB)와 4KiB 파일 N개(기본 2000)가 든 폴더를 만들고, 작업 대기열의
       복사 작업으로 각각 N회(기본 3) 복사해(한 번 데운 뒤, 대상은 매번 지움) 큰 파일 처리량 중앙값이 하한
       (10MB/s)보다 낮거나 작은 파일 복사 시간 중앙값이 상한(20000ms)을 넘으면 실패한다. Windows가 아니면 건너뛴다.
+  facet-bench delete [--count N] [--runs N]
+      임시 폴더에 4KiB 파일 N개(기본 10000)가 든 폴더를 만들고 작업 대기열의 영구 삭제 작업으로 지우는 시간을
+      N회(기본 5) 재어(한 번 데운 뒤, 회차마다 폴더를 새로 만듦) 중앙값이 상한(10000ms)을 넘으면 실패한다.
+      이어 작업 기록 100개(되돌릴 수 없는 것과 섞음)에서 실행취소 대상을 찾는 시간도 재어 중앙값이
+      상한(10ms)을 넘으면 실패한다. 삭제는 Windows가 아니면 건너뛴다.
+  facet-bench compare-recycle <폴더> [--count N] [--runs N] [--json <파일>]
+      폴더 안에 파일 N개(기본 10000)를 만들어 facet 휴지통 삭제 작업과 탐색기 엔진(IFileOperation 휴지통 보내기)이
+      번갈아 N회(기본 5)씩 휴지통에 보내는 시간을 표로 낸다(상한 없음, 비교만). --json이면 JSON도 쓴다. 휴지통에 넣은
+      항목은 끝나면 휴지통에서 지운다. Windows가 아니면 그렇다고 알리고 실패한다. 보통 `cargo xtask measure-recycle`로 부른다.
   facet-bench compare-copy <원본 폴더> <대상 폴더> [--size-mb N] [--count N] [--runs N] [--json <파일>]
       원본 폴더에 큰 파일 하나와 작은 파일 N개를 만들고 대상 폴더로 facet 엔진과 탐색기(IFileOperation)가
       번갈아 N회(기본 5)씩 복사해 시간·처리량을 표로 내고, --json이면 JSON도 쓴다. 큰 파일 처리량이 탐색기의
@@ -175,6 +188,8 @@ fn main() -> ExitCode {
         "mft" => mft(&args),
         "session" => session(&args),
         "copy" => copy_bench(&args),
+        "delete" => delete_bench(&args),
+        "compare-recycle" => compare_recycle(&args),
         "compare-copy" => compare_copy(&args),
         "screen" => make_folder(&args).and_then(|()| screen(&args)),
         other => Err(format!("알 수 없는 명령: {other}\n\n{USAGE}")),
@@ -635,4 +650,78 @@ fn compare_copy(args: &Args) -> Result<(), String> {
     } else {
         Err("통과 기준을 맞추지 못했습니다".to_owned())
     }
+}
+
+/// 영구 삭제 벤치마크와 실행취소 대상 찾기: CI가 상한을 지킨다.
+fn delete_bench(args: &Args) -> Result<(), String> {
+    if args.path.is_some() {
+        return Err(format!(
+            "delete 명령은 경로를 받지 않습니다
+
+{USAGE}"
+        ));
+    }
+    warn_debug();
+    let runs = args.runs.unwrap_or(DELETE_BENCH_RUNS);
+    let count = args.count.unwrap_or(DELETE_BENCH_COUNT);
+    if cfg!(windows) {
+        let root = std::env::temp_dir().join(format!("facet-bench-delete-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).map_err(|e| format!("{}: {e}", root.display()))?;
+        let result = delete::measure_permanent_delete(&root, count, runs);
+        let _ = std::fs::remove_dir_all(&root);
+        let m = result?;
+        println!(
+            "영구 삭제 (4KiB 파일 {count}개가 든 폴더, 항목 {}개, 작업 대기열, {}회):",
+            m.item_count,
+            m.times.len()
+        );
+        report_median("영구 삭제", &m, DELETE_TARGET, DELETE_LIMIT)?;
+    } else {
+        println!("영구 삭제 벤치마크: Windows가 아니므로 건너뜀(삭제 엔진은 Windows 전용)");
+    }
+    let m = delete::measure_undo_target(args.runs.unwrap_or(UNDO_TARGET_RUNS))?;
+    println!(
+        "실행취소 대상 찾기 (작업 기록 {}개, 되돌릴 수 없는 것과 섞음, {}회):",
+        m.item_count,
+        m.times.len()
+    );
+    print_times_us(&m);
+    println!(
+        "  중앙값 {:.1}µs, 최악 {:.1}µs / 로컬 기준 {}ms, CI 상한 {}ms",
+        ms(m.median()) * 1000.0,
+        ms(m.max()) * 1000.0,
+        UNDO_TARGET_TARGET.as_millis(),
+        UNDO_TARGET_LIMIT.as_millis()
+    );
+    facet_bench::check_median("실행취소 대상 찾기", &m, UNDO_TARGET_LIMIT)?;
+    println!("  상한 안: 통과");
+    Ok(())
+}
+
+fn print_times_us(m: &Measurement) {
+    for (n, t) in m.times.iter().enumerate() {
+        println!("  {}회: {:.1}µs", n + 1, ms(*t) * 1000.0);
+    }
+}
+
+/// 휴지통 보내기 비교: facet 휴지통 삭제 작업과 탐색기 엔진을 같은 기계에서 재어 견준다(상한 없음).
+fn compare_recycle(args: &Args) -> Result<(), String> {
+    let root = args.path.as_ref().ok_or("폴더가 없습니다")?;
+    if !cfg!(windows) {
+        return Err("휴지통 보내기 비교는 Windows에서만 잴 수 있습니다(IFileOperation)".into());
+    }
+    warn_debug();
+    let result = delete::compare_recycle(root, args.count.unwrap_or(RECYCLE_COUNT), args.runs())?;
+    println!(
+        "
+{}",
+        result.to_table()
+    );
+    if let Some(json) = &args.json {
+        std::fs::write(json, result.to_json())
+            .map_err(|e| format!("{}를 쓰지 못함: {e}", json.display()))?;
+        println!("JSON: {}", json.display());
+    }
+    Ok(())
 }

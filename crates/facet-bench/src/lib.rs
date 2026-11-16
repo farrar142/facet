@@ -18,6 +18,7 @@
 //!   같은 복사를 셸의 `IFileOperation`으로도 해 견주는 탐색기 비교 측정([`copy::compare`])은 사람이 잰다.
 
 pub mod copy;
+pub mod delete;
 pub mod screen;
 
 use std::collections::BTreeMap;

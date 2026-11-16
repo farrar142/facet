@@ -1457,9 +1457,22 @@ impl View {
                 self.restore_scroll(panel);
             }
         }
+        let edited_ok = edits.iter().any(|(_, result)| result.is_ok());
         for (tab, result) in edits {
             self.receive_edited(tab, result);
         }
+        if edited_ok {
+            // 새 이름이 목록에 들어갔음을 측정 모드에 알린다(이름 확정 프레임 측정).
+            self.mark_loaded();
+        }
+    }
+
+    /// 측정 모드: 활성 탭 폴더의 `from` 항목을 `to`로 바꾼다(이름 입력란 확정과 같은 코어 길). 시작했으면 `true`.
+    fn measure_rename(&self, from: &str, to: &str) -> bool {
+        self.app
+            .borrow_mut()
+            .rename(std::ffi::OsStr::new(from), to)
+            .is_ok()
     }
 
     /// 읽기 결과(목록이나 오류)가 창에 들어갔음을 측정 모드에 알린다.

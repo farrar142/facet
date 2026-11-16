@@ -12,7 +12,7 @@ use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use facet_core::measure::{
-    ENV_OPEN, ENV_OUT, ENV_SCROLL_ROWS, ENV_START_US, ENV_WINDOWS, ScreenReport,
+    ENV_OPEN, ENV_OUT, ENV_RENAME, ENV_SCROLL_ROWS, ENV_START_US, ENV_WINDOWS, ScreenReport,
 };
 
 /// 콜드 스타트 통과 기준: 중앙값이 이보다 짧아야 한다.
@@ -28,6 +28,10 @@ pub const SESSION_TABS_PER_PANEL: usize = 5;
 /// 「폴더 열기부터 첫 화면까지」 통과 기준: 중앙값이 이보다 짧아야 한다(spec #16).
 /// 이미 떠 있는 창에서 그 폴더로 이동을 시작한 때부터 목록이 든 첫 프레임이 나올 때까지다.
 pub const OPEN_LIMIT: Duration = Duration::from_millis(150);
+
+/// 「이름 확정부터 목록에 새 이름이 보이는 첫 프레임까지」 통과 기준: 중앙값이 한 프레임(16ms)보다 짧아야 한다.
+/// 이름바꾸기를 확정(코어 `App::rename`)한 때부터 새 이름이 든 목록의 첫 프레임이 화면에 나갈 때까지다.
+pub const RENAME_LIMIT: Duration = Duration::from_millis(16);
 
 /// 프레임 시간 통과 기준: 최악값이 한 프레임 시간의 이 배수 이하여야 한다.
 pub const FRAME_WORST_FACTOR: f64 = 2.0;
@@ -163,6 +167,8 @@ pub struct ScreenResult {
     pub session_starts: Vec<Duration>,
     /// 이미 떠 있는 창에서 폴더로 이동해 첫 화면이 나올 때까지(회차마다 하나).
     pub opens: Vec<Duration>,
+    /// 이름바꾸기를 확정한 때부터 새 이름이 든 첫 프레임까지(회차마다 하나).
+    pub renames: Vec<Duration>,
     /// 스크롤하는 동안의 프레임 시간들(스크롤 회차 전체).
     pub frames: Vec<Duration>,
     pub scroll_runs: usize,
@@ -182,6 +188,9 @@ pub struct Verdict {
     pub open_median: Duration,
     pub open_worst: Duration,
     pub open_pass: bool,
+    pub rename_median: Duration,
+    pub rename_worst: Duration,
+    pub rename_pass: bool,
     pub frame_median: Duration,
     pub frame_worst: Duration,
     /// 프레임 최악값의 상한(한 프레임의 두 배).
@@ -195,7 +204,7 @@ pub struct Verdict {
 
 impl Verdict {
     pub fn pass(&self) -> bool {
-        self.cold_pass && self.session_pass && self.open_pass && self.frame_pass
+        self.cold_pass && self.session_pass && self.open_pass && self.rename_pass && self.frame_pass
     }
 }
 
@@ -205,6 +214,7 @@ impl ScreenResult {
         let cold_median = median(&self.cold_starts);
         let open_median = median(&self.opens);
         let session_median = median(&self.session_starts);
+        let rename_median = median(&self.renames);
         let frame_worst = worst(&self.frames);
         let frame_worst_limit = frame_budget(self.spec.refresh_hz).mul_f64(FRAME_WORST_FACTOR);
         Verdict {
@@ -217,6 +227,9 @@ impl ScreenResult {
             open_median,
             open_worst: worst(&self.opens),
             open_pass: !self.opens.is_empty() && open_median < OPEN_LIMIT,
+            rename_median,
+            rename_worst: worst(&self.renames),
+            rename_pass: !self.renames.is_empty() && rename_median < RENAME_LIMIT,
             frame_median: median(&self.frames),
             frame_worst,
             frame_worst_limit,
@@ -320,6 +333,19 @@ impl ScreenResult {
         );
         let _ = writeln!(
             t,
+            "이름 확정 프레임 중앙값 ({}회)  {:<10}  < {}ms                   {}",
+            self.renames.len(),
+            ms(v.rename_median),
+            RENAME_LIMIT.as_millis(),
+            mark(v.rename_pass)
+        );
+        let _ = writeln!(
+            t,
+            "이름 확정 프레임 최악값   {:<10}  (참고)",
+            ms(v.rename_worst)
+        );
+        let _ = writeln!(
+            t,
             "프레임 시간 중앙값        {:<10}  (참고: 한 프레임 {})",
             ms(v.frame_median),
             ms(frame_budget(self.spec.refresh_hz))
@@ -408,6 +434,13 @@ impl ScreenResult {
         let _ = writeln!(j, "    \"limit_ms\": {},", OPEN_LIMIT.as_millis());
         let _ = writeln!(j, "    \"pass\": {}", v.open_pass);
         let _ = writeln!(j, "  }},");
+        let _ = writeln!(j, "  \"rename_commit\": {{");
+        let _ = writeln!(j, "    \"runs_ms\": [{}],", list(&self.renames));
+        let _ = writeln!(j, "    \"median_ms\": {},", ms(v.rename_median));
+        let _ = writeln!(j, "    \"worst_ms\": {},", ms(v.rename_worst));
+        let _ = writeln!(j, "    \"limit_ms\": {},", RENAME_LIMIT.as_millis());
+        let _ = writeln!(j, "    \"pass\": {}", v.rename_pass);
+        let _ = writeln!(j, "  }},");
         let _ = writeln!(j, "  \"scroll\": {{");
         let _ = writeln!(j, "    \"rows_per_frame\": {},", self.scroll_rows);
         let _ = writeln!(j, "    \"runs\": {},", self.scroll_runs);
@@ -470,10 +503,38 @@ pub fn run_app(
         .env(ENV_START_US, start_us.to_string())
         .env(ENV_SCROLL_ROWS, scroll_rows.to_string())
         .env_remove(ENV_OPEN)
+        .env_remove(ENV_RENAME)
         .stdin(Stdio::null());
     if let Some(open) = open {
         command.env(ENV_OPEN, open);
     }
+    run_to_report(command, &out, timeout)
+}
+
+/// 이름바꾸기 확정 프레임을 잰다: `folder`를 열어 첫 화면이 나오면 그 폴더의 `from` 항목을 `to`로 바꾸고(코어
+/// 이름바꾸기) 확정부터 목록에 새 이름이 든 첫 프레임까지를 앱이 알린다.
+pub fn run_app_rename(
+    app: &Path,
+    folder: &Path,
+    from: &str,
+    to: &str,
+    timeout: Duration,
+) -> io::Result<ScreenReport> {
+    let out = std::env::temp_dir().join(format!("facet-measure-{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&out);
+    let start_us = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_micros() as u64);
+    let mut command = Command::new(app);
+    command
+        .arg(folder)
+        .env_remove(ENV_WINDOWS)
+        .env(ENV_OUT, &out)
+        .env(ENV_START_US, start_us.to_string())
+        .env(ENV_SCROLL_ROWS, "0")
+        .env_remove(ENV_OPEN)
+        .env(ENV_RENAME, format!("{from}|{to}"))
+        .stdin(Stdio::null());
     run_to_report(command, &out, timeout)
 }
 
@@ -498,6 +559,7 @@ pub fn run_app_session(
         .env(ENV_WINDOWS, windows.to_string())
         .env(facet_core::session::ENV_PATH, session)
         .env_remove(ENV_OPEN)
+        .env_remove(ENV_RENAME)
         .stdin(Stdio::null());
     run_to_report(command, &out, timeout)
 }
@@ -586,6 +648,7 @@ pub fn measure(plan: &Plan<'_>) -> Result<ScreenResult, String> {
                 .ok_or("앱이 폴더 열기 첫 화면 시각을 알리지 않았습니다")?,
         );
     }
+    let renames = measure_renames(plan)?;
     let mut frames = Vec::new();
     for n in 1..=plan.scroll_runs {
         eprintln!("스크롤 {n}/{}…", plan.scroll_runs);
@@ -605,6 +668,7 @@ pub fn measure(plan: &Plan<'_>) -> Result<ScreenResult, String> {
         cold_starts,
         session_starts,
         opens,
+        renames,
         frames,
         scroll_runs: plan.scroll_runs,
         spec,
@@ -668,4 +732,30 @@ fn measure_session_restore(plan: &Plan<'_>) -> Result<Vec<Duration>, String> {
     })();
     let _ = std::fs::remove_dir_all(&dir);
     result
+}
+
+/// 이름 확정 프레임을 `plan.runs`번 잰다. 시험 폴더의 첫 항목([`crate::test_folder_entry`]`(0)`)을 새 이름으로
+/// 바꾸게 하고, 회차가 끝날 때마다(실패해도) 원래 이름으로 되돌려 시험 폴더가 그대로 남게 한다.
+fn measure_renames(plan: &Plan<'_>) -> Result<Vec<Duration>, String> {
+    let from = crate::test_folder_entry(0).name;
+    let to = "이름 바꾼 항목.txt";
+    let before = plan.folder.join(&from);
+    let after = plan.folder.join(to);
+    let mut renames = Vec::new();
+    for n in 1..=plan.runs {
+        eprintln!("이름 확정 프레임 {n}/{}…", plan.runs);
+        let r = run_app_rename(plan.app, plan.folder, &from, to, RUN_TIMEOUT);
+        // 앱이 바꿨든 아니든 원래 이름으로 돌려 놓는다.
+        let restored = if after.exists() {
+            std::fs::rename(&after, &before)
+        } else {
+            Ok(())
+        };
+        let r = r.map_err(|e| e.to_string())?;
+        restored.map_err(|e| format!("{}를 되돌리지 못함: {e}", after.display()))?;
+        renames.push(r.rename_frame.ok_or(
+            "앱이 이름 확정 프레임 시각을 알리지 않았습니다(항목을 바꾸지 못했을 수 있음)",
+        )?);
+    }
+    Ok(renames)
 }

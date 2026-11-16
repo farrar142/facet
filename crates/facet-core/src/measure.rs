@@ -10,6 +10,7 @@
 //! first_frame_us 123 # 측정 도구가 앱을 띄운 때부터 목록이 든 첫 프레임이 창에 나올 때까지(마이크로초)
 //! open_frame_us 45   # [`ENV_OPEN`]의 폴더로 이동을 시작한 때부터 그 목록이 든 첫 프레임이 나올 때까지
 //! windows 2          # [`ENV_WINDOWS`]를 줬을 때, 첫 프레임이 나온 창 수
+//! rename_frame_us 9 # [`ENV_RENAME`]의 이름바꾸기를 확정한 때부터 목록에 새 이름이 든 첫 프레임이 나올 때까지
 //! frame_us 16700     # 스크롤 중 프레임 하나의 시간(마이크로초). 프레임마다 한 줄
 //! ```
 
@@ -22,6 +23,10 @@ pub const ENV_START_US: &str = "FACET_MEASURE_START_US";
 /// 설정하면 첫 화면이 나온 뒤 이미 떠 있는 창에서 이 경로의 폴더로 이동하고, 그 목록이 든 첫 프레임이
 /// 나올 때까지를 잰다(폴더 열기부터 첫 화면까지). 이때 `rows`는 이동한 폴더의 항목 수이고 스크롤은 하지 않는다.
 pub const ENV_OPEN: &str = "FACET_MEASURE_OPEN";
+/// `옛 이름|새 이름`(`|`는 이름에 못 쓰는 글자라 구분자로 쓴다)을 주면 첫 화면 뒤에 활성 탭 폴더의 그 항목을 코어
+/// 이름바꾸기(`App::rename`, 이름 입력란 확정이 부르는 것과 같음)로 새 이름으로 바꾸고, 확정한 때부터 목록에 새
+/// 이름이 든 첫 프레임이 화면에 나갈 때까지를 잰다(`rename_frame`). 스크롤은 하지 않는다.
+pub const ENV_RENAME: &str = "FACET_MEASURE_RENAME";
 /// 2 이상이면 창이 이만큼 뜰 때까지를 첫 화면으로 잰다(세션 복원 콜드 스타트). 창마다 목록이 든 첫 프레임이
 /// 나온 뒤, 마지막 창의 첫 프레임까지의 시간이 `first_frame`이다. `rows`는 마지막 창이 읽은 항목 수이고 스크롤과
 /// 폴더 열기는 하지 않는다.
@@ -40,6 +45,8 @@ pub struct ScreenReport {
     pub first_frame: Option<Duration>,
     /// 이미 떠 있는 창에서 폴더로 이동을 시작한 때부터 그 목록이 든 첫 프레임이 창에 나올 때까지.
     pub open_frame: Option<Duration>,
+    /// 이름바꾸기를 확정한 때부터 목록에 새 이름이 든 첫 프레임이 창에 나올 때까지.
+    pub rename_frame: Option<Duration>,
     /// 스크롤하는 동안의 프레임 시간들.
     pub frames: Vec<Duration>,
 }
@@ -61,6 +68,13 @@ impl ScreenReport {
         if let Some(d) = self.open_frame {
             out.push_str(&format!(
                 "open_frame_us {}
+",
+                d.as_micros()
+            ));
+        }
+        if let Some(d) = self.rename_frame {
+            out.push_str(&format!(
+                "rename_frame_us {}
 ",
                 d.as_micros()
             ));
@@ -87,6 +101,7 @@ impl ScreenReport {
                 "windows" => report.windows = number as usize,
                 "first_frame_us" => report.first_frame = Some(Duration::from_micros(number)),
                 "open_frame_us" => report.open_frame = Some(Duration::from_micros(number)),
+                "rename_frame_us" => report.rename_frame = Some(Duration::from_micros(number)),
                 "frame_us" => report.frames.push(Duration::from_micros(number)),
                 _ => return Err(format!("모르는 항목: {line}")),
             }
@@ -106,6 +121,7 @@ mod tests {
             windows: 2,
             first_frame: Some(Duration::from_micros(123_456)),
             open_frame: Some(Duration::from_micros(45_678)),
+            rename_frame: Some(Duration::from_micros(9_000)),
             frames: vec![Duration::from_micros(16_700), Duration::from_micros(33_000)],
         };
         assert_eq!(ScreenReport::parse(&report.to_text()), Ok(report));
