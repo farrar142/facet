@@ -299,6 +299,7 @@ mod screen {
             session_starts: vec![ms(120)],
             opens: vec![ms(100)],
             renames: vec![ms(10)],
+            menus: vec![ms(20)],
             frames: frames.iter().map(|n| ms(*n)).collect(),
             scroll_runs: 1,
             spec: SystemSpec {
@@ -360,6 +361,28 @@ mod screen {
         assert!(!with_renames(base(), &[20]).verdict().pass());
         assert!(base().to_json().contains("\"rename_commit\""));
         assert_eq!(RENAME_LIMIT, ms(16));
+    }
+
+    fn with_menus(mut r: ScreenResult, menus: &[u64]) -> ScreenResult {
+        r.menus = menus.iter().map(|n| ms(*n)).collect();
+        r
+    }
+
+    #[test]
+    fn 오른쪽_메뉴는_중앙값이_50ms_미만일_때만_통과한다() {
+        use facet_bench::screen::MENU_LIMIT;
+        let base = || result(&[100], &[16], Some(60.0));
+        assert!(with_menus(base(), &[20, 45, 300]).verdict().menu_pass);
+        assert!(!with_menus(base(), &[20, 55, 60]).verdict().menu_pass);
+        assert!(!with_menus(base(), &[50]).verdict().menu_pass);
+        assert!(!with_menus(base(), &[]).verdict().menu_pass);
+        assert!(!with_menus(base(), &[80]).verdict().pass());
+        let r = with_menus(base(), &[20, 10, 30]);
+        let v = r.verdict();
+        assert_eq!((v.menu_median, v.menu_worst), (ms(20), ms(30)));
+        assert!(r.to_table().contains("오른쪽 메뉴 중앙값"));
+        assert!(r.to_json().contains("\"context_menu\""));
+        assert_eq!(MENU_LIMIT, ms(50));
     }
 
     fn with_sessions(mut r: ScreenResult, sessions: &[u64]) -> ScreenResult {

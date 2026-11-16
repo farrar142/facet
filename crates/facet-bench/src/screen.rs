@@ -12,7 +12,8 @@ use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use facet_core::measure::{
-    ENV_OPEN, ENV_OUT, ENV_RENAME, ENV_SCROLL_ROWS, ENV_START_US, ENV_WINDOWS, ScreenReport,
+    ENV_MENU, ENV_OPEN, ENV_OUT, ENV_RENAME, ENV_SCROLL_ROWS, ENV_START_US, ENV_WINDOWS,
+    ScreenReport,
 };
 
 /// 콜드 스타트 통과 기준: 중앙값이 이보다 짧아야 한다.
@@ -32,6 +33,11 @@ pub const OPEN_LIMIT: Duration = Duration::from_millis(150);
 /// 「이름 확정부터 목록에 새 이름이 보이는 첫 프레임까지」 통과 기준: 중앙값이 한 프레임(16ms)보다 짧아야 한다.
 /// 이름바꾸기를 확정(코어 `App::rename`)한 때부터 새 이름이 든 목록의 첫 프레임이 화면에 나갈 때까지다.
 pub const RENAME_LIMIT: Duration = Duration::from_millis(16);
+
+/// 「오른쪽 메뉴가 뜨는 시간」 통과 기준: 중앙값이 50ms보다 짧아야 한다. 시험 폴더 전체를 선택한 활성 탭에서 항목 메뉴를
+/// 열 때(오른쪽 클릭과 같은 길)부터 메뉴가 그려진 첫 프레임이 화면에 나갈 때까지다. 근거: 사람은 입력 뒤 약 100ms
+/// 안의 반응을 즉각으로 느끼고, 메뉴 구성(1ms 기준)과 한두 프레임 그리기에 쓰고도 절반이 남는 값이다.
+pub const MENU_LIMIT: Duration = Duration::from_millis(50);
 
 /// 프레임 시간 통과 기준: 최악값이 한 프레임 시간의 이 배수 이하여야 한다.
 pub const FRAME_WORST_FACTOR: f64 = 2.0;
@@ -169,6 +175,8 @@ pub struct ScreenResult {
     pub opens: Vec<Duration>,
     /// 이름바꾸기를 확정한 때부터 새 이름이 든 첫 프레임까지(회차마다 하나).
     pub renames: Vec<Duration>,
+    /// 시험 폴더 전체를 선택하고 항목 메뉴를 열어 그 프레임까지(회차마다 하나).
+    pub menus: Vec<Duration>,
     /// 스크롤하는 동안의 프레임 시간들(스크롤 회차 전체).
     pub frames: Vec<Duration>,
     pub scroll_runs: usize,
@@ -191,6 +199,9 @@ pub struct Verdict {
     pub rename_median: Duration,
     pub rename_worst: Duration,
     pub rename_pass: bool,
+    pub menu_median: Duration,
+    pub menu_worst: Duration,
+    pub menu_pass: bool,
     pub frame_median: Duration,
     pub frame_worst: Duration,
     /// 프레임 최악값의 상한(한 프레임의 두 배).
@@ -204,7 +215,12 @@ pub struct Verdict {
 
 impl Verdict {
     pub fn pass(&self) -> bool {
-        self.cold_pass && self.session_pass && self.open_pass && self.rename_pass && self.frame_pass
+        self.cold_pass
+            && self.session_pass
+            && self.open_pass
+            && self.rename_pass
+            && self.menu_pass
+            && self.frame_pass
     }
 }
 
@@ -215,6 +231,7 @@ impl ScreenResult {
         let open_median = median(&self.opens);
         let session_median = median(&self.session_starts);
         let rename_median = median(&self.renames);
+        let menu_median = median(&self.menus);
         let frame_worst = worst(&self.frames);
         let frame_worst_limit = frame_budget(self.spec.refresh_hz).mul_f64(FRAME_WORST_FACTOR);
         Verdict {
@@ -230,6 +247,9 @@ impl ScreenResult {
             rename_median,
             rename_worst: worst(&self.renames),
             rename_pass: !self.renames.is_empty() && rename_median < RENAME_LIMIT,
+            menu_median,
+            menu_worst: worst(&self.menus),
+            menu_pass: !self.menus.is_empty() && menu_median < MENU_LIMIT,
             frame_median: median(&self.frames),
             frame_worst,
             frame_worst_limit,
@@ -346,6 +366,19 @@ impl ScreenResult {
         );
         let _ = writeln!(
             t,
+            "오른쪽 메뉴 중앙값 ({}회)  {:<10}  < {}ms                   {}",
+            self.menus.len(),
+            ms(v.menu_median),
+            MENU_LIMIT.as_millis(),
+            mark(v.menu_pass)
+        );
+        let _ = writeln!(
+            t,
+            "오른쪽 메뉴 최악값        {:<10}  (참고)",
+            ms(v.menu_worst)
+        );
+        let _ = writeln!(
+            t,
             "프레임 시간 중앙값        {:<10}  (참고: 한 프레임 {})",
             ms(v.frame_median),
             ms(frame_budget(self.spec.refresh_hz))
@@ -441,6 +474,13 @@ impl ScreenResult {
         let _ = writeln!(j, "    \"limit_ms\": {},", RENAME_LIMIT.as_millis());
         let _ = writeln!(j, "    \"pass\": {}", v.rename_pass);
         let _ = writeln!(j, "  }},");
+        let _ = writeln!(j, "  \"context_menu\": {{");
+        let _ = writeln!(j, "    \"runs_ms\": [{}],", list(&self.menus));
+        let _ = writeln!(j, "    \"median_ms\": {},", ms(v.menu_median));
+        let _ = writeln!(j, "    \"worst_ms\": {},", ms(v.menu_worst));
+        let _ = writeln!(j, "    \"limit_ms\": {},", MENU_LIMIT.as_millis());
+        let _ = writeln!(j, "    \"pass\": {}", v.menu_pass);
+        let _ = writeln!(j, "  }},");
         let _ = writeln!(j, "  \"scroll\": {{");
         let _ = writeln!(j, "    \"rows_per_frame\": {},", self.scroll_rows);
         let _ = writeln!(j, "    \"runs\": {},", self.scroll_runs);
@@ -504,6 +544,7 @@ pub fn run_app(
         .env(ENV_SCROLL_ROWS, scroll_rows.to_string())
         .env_remove(ENV_OPEN)
         .env_remove(ENV_RENAME)
+        .env_remove(ENV_MENU)
         .stdin(Stdio::null());
     if let Some(open) = open {
         command.env(ENV_OPEN, open);
@@ -534,6 +575,29 @@ pub fn run_app_rename(
         .env(ENV_SCROLL_ROWS, "0")
         .env_remove(ENV_OPEN)
         .env(ENV_RENAME, format!("{from}|{to}"))
+        .env_remove(ENV_MENU)
+        .stdin(Stdio::null());
+    run_to_report(command, &out, timeout)
+}
+
+/// 오른쪽 메뉴를 잰다: `folder`를 열어 첫 화면이 나오면 그 폴더 전체를 선택하고 항목 메뉴를 열어, 여는 때부터 메뉴가
+/// 그려진 첫 프레임까지를 앱이 알린다.
+pub fn run_app_menu(app: &Path, folder: &Path, timeout: Duration) -> io::Result<ScreenReport> {
+    let out = std::env::temp_dir().join(format!("facet-measure-{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&out);
+    let start_us = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_micros() as u64);
+    let mut command = Command::new(app);
+    command
+        .arg(folder)
+        .env_remove(ENV_WINDOWS)
+        .env(ENV_OUT, &out)
+        .env(ENV_START_US, start_us.to_string())
+        .env(ENV_SCROLL_ROWS, "0")
+        .env_remove(ENV_OPEN)
+        .env_remove(ENV_RENAME)
+        .env(ENV_MENU, "1")
         .stdin(Stdio::null());
     run_to_report(command, &out, timeout)
 }
@@ -560,6 +624,7 @@ pub fn run_app_session(
         .env(facet_core::session::ENV_PATH, session)
         .env_remove(ENV_OPEN)
         .env_remove(ENV_RENAME)
+        .env_remove(ENV_MENU)
         .stdin(Stdio::null());
     run_to_report(command, &out, timeout)
 }
@@ -649,6 +714,16 @@ pub fn measure(plan: &Plan<'_>) -> Result<ScreenResult, String> {
         );
     }
     let renames = measure_renames(plan)?;
+    let mut menus = Vec::new();
+    for n in 1..=plan.runs {
+        eprintln!("오른쪽 메뉴 {n}/{}…", plan.runs);
+        let r = run_app_menu(plan.app, plan.folder, RUN_TIMEOUT).map_err(|e| e.to_string())?;
+        check_rows(&r)?;
+        menus.push(
+            r.menu_frame
+                .ok_or("앱이 오른쪽 메뉴 프레임 시각을 알리지 않았습니다")?,
+        );
+    }
     let mut frames = Vec::new();
     for n in 1..=plan.scroll_runs {
         eprintln!("스크롤 {n}/{}…", plan.scroll_runs);
@@ -669,6 +744,7 @@ pub fn measure(plan: &Plan<'_>) -> Result<ScreenResult, String> {
         session_starts,
         opens,
         renames,
+        menus,
         frames,
         scroll_runs: plan.scroll_runs,
         spec,
