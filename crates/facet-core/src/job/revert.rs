@@ -13,6 +13,12 @@
 //!   치우고(복사면 휴지통으로, 이동이면 원래 자리로 되옮김) 옛 파일을 휴지통에서 복원한다. 옛 파일의 휴지통 항목이
 //!   없으면(휴지통을 비움) [`RevertSkip::RecycledMissing`]로 건너뛴다. 다시 실행은 옛 파일을 다시 휴지통으로 보내고
 //!   다시 덮어쓴다(영구 덮어쓰기는 하지 않는다).
+//! - **휴지통 삭제**([`Step::Recycled`]): 실행취소는 휴지통 항목을 원래 자리로 복원한다(원래 자리에 같은 이름이
+//!   있으면 덮어쓰지 않고 [`RevertSkip::NameTaken`], 휴지통 항목이 없으면 [`RevertSkip::RecycledMissing`]). 다시
+//!   실행은 다시 휴지통으로 보낸다(휴지통에 넣을 수 없으면 영구 삭제하지 않고 [`RevertSkip::NotRecyclable`]). 같은
+//!   기록에서 휴지통에 들어가지 않아 영구 삭제로 진행한 항목([`Step::Deleted`])은 되살릴 것이 없어 실행취소가
+//!   [`RevertSkip::PermanentlyDeleted`]로 알리고, 기록은 휴지통에 보낸 항목과 함께 다시 실행 목록으로 간다(다시
+//!   실행은 그 항목에 할 일이 없다).
 //!
 //! 하기 전에 밖의 변경을 기록해 둔 모습([`Stamp`])으로 본다: 다룰 항목이 없거나 바뀌었거나, 되바꿀(만들·되옮길)
 //! 자리에 같은 이름이 있거나, 지울 폴더가 비어 있지 않으면 그 항목을 건너뛰고 까닭을 [`Summary::not_reverted`]에
@@ -105,9 +111,25 @@ impl RevertJob {
             }
             let path = current_path(step, self.reversal);
             run.copier.reporter.current = Some(path.to_path_buf());
+            if let Step::Deleted { path } = step {
+                // 휴지통 삭제가 영구 삭제로 진행한 항목: 되살릴 것이 없다. 실행취소는 그것을 알리고, 기록이 다시 실행
+                // 목록과 기록 사이를 함께 오가도록 항목은 「한 것」으로 넘긴다(기록에 남아 실행취소 대상을 막지 않게).
+                if self.reversal == Reversal::Undo {
+                    run.skip(path, RevertSkip::PermanentlyDeleted);
+                }
+                run.set_outcome(index, step.clone());
+                run.copier.reporter.items_done += 1;
+                run.copier.reporter.maybe_emit(context.control);
+                continue;
+            }
             loop {
                 match run.attempt(step, self.reversal) {
                     Attempt::Done(changed) => {
+                        if let (Reversal::Redo, Step::Recycled { item, .. }) =
+                            (self.reversal, &changed)
+                        {
+                            run.copier.summary.recycled.push(item.clone());
+                        }
                         if self.reversal == Reversal::Redo
                             && matches!(step, Step::Copied { .. } | Step::MovedFolder { .. })
                             && is_real_folder(changed.path()) == Some(true)
@@ -279,8 +301,10 @@ impl Run<'_, '_> {
                         stamp,
                     })
                 }),
-            // 영구 삭제는 되돌릴 수 없는 기록에만 있어 여기 오지 않는다. 와도 아무것도 하지 않는다.
-            (Step::Deleted { .. }, _) => Attempt::Skip(RevertSkip::Missing),
+            (Step::Recycled { path, item, .. }, Reversal::Undo) => restore_recycled(path, item),
+            (Step::Recycled { path, stamp, .. }, Reversal::Redo) => recycle_again(path, stamp),
+            // 영구 삭제한 항목은 `run`이 따로 다룬다(되돌릴 수 없는 기록의 것은 여기 오지 않는다).
+            (Step::Deleted { .. }, _) => Attempt::Skip(RevertSkip::PermanentlyDeleted),
         }
     }
 
@@ -761,7 +785,10 @@ fn current_path(step: &Step, reversal: Reversal) -> &Path {
             Step::Renamed { from, .. } | Step::Moved { from, .. } | Step::MovedFolder { from, .. },
             Reversal::Redo,
         ) => from,
-        (Step::CreatedFolder { path, .. } | Step::Deleted { path }, _)
+        (
+            Step::CreatedFolder { path, .. } | Step::Deleted { path } | Step::Recycled { path, .. },
+            _,
+        )
         | (Step::Copied { path, .. } | Step::Overwrote { path, .. }, Reversal::Undo) => path,
         (Step::Copied { source, .. } | Step::Overwrote { source, .. }, Reversal::Redo) => source,
     }
@@ -813,6 +840,57 @@ fn rename_back(source: &Path, target: &Path, stamp: &Stamp) -> Result<Stamp, Ref
             FileOpErrorKind::SourceMissing => Refusal::Skip(RevertSkip::Missing),
             kind => Refusal::Failed(kind),
         }),
+    }
+}
+
+/// 휴지통 삭제의 실행취소: 휴지통 항목 `item`을 원래 자리 `path`로 복원한다. 원래 자리에 같은 이름이 있으면
+/// 덮어쓰지 않고, 휴지통 항목이 없으면(휴지통을 비움) 건너뛴다.
+fn restore_recycled(path: &Path, item: &RecycledItem) -> Attempt {
+    if fs::symlink_metadata(item.recycled()).is_err() {
+        return Attempt::Skip(RevertSkip::RecycledMissing);
+    }
+    if fs::symlink_metadata(path).is_ok() {
+        return Attempt::Skip(RevertSkip::NameTaken);
+    }
+    match recycle::restore(item) {
+        // 미리 본 뒤 셸이 옮기기 직전에 같은 이름이 생기면 셸이 다른 이름으로 되돌린다: 다시 실행은 그 항목을 다룬다.
+        Ok(restored) => match Stamp::read(&restored) {
+            Some(stamp) => Attempt::Done(Step::Recycled {
+                path: restored,
+                item: item.clone(),
+                stamp,
+            }),
+            None => Attempt::Skip(RevertSkip::Missing),
+        },
+        Err(error) => match error.kind() {
+            FileOpErrorKind::SourceMissing => Attempt::Skip(RevertSkip::RecycledMissing),
+            FileOpErrorKind::TargetExists => Attempt::Skip(RevertSkip::NameTaken),
+            kind => Attempt::Failed(kind),
+        },
+    }
+}
+
+/// 휴지통 삭제의 다시 실행: 복원해 둔 `path`(복원한 뒤의 모습 `stamp`)를 다시 휴지통으로 보낸다. 없거나 바뀌었으면
+/// 건너뛰고, 휴지통에 넣을 수 없으면 영구 삭제하지 않고 건너뛴다.
+fn recycle_again(path: &Path, stamp: &Stamp) -> Attempt {
+    let Some(now) = Stamp::read(path) else {
+        return Attempt::Skip(RevertSkip::Missing);
+    };
+    if !stamp.matches(&now) {
+        return Attempt::Skip(RevertSkip::Changed);
+    }
+    match recycle::recycle(&[path.to_path_buf()]).pop() {
+        Some(RecycleOutcome::Recycled(item)) => Attempt::Done(Step::Recycled {
+            path: path.to_path_buf(),
+            item,
+            stamp: now,
+        }),
+        Some(RecycleOutcome::NotRecyclable) => Attempt::Skip(RevertSkip::NotRecyclable),
+        Some(RecycleOutcome::Failed(error)) if error.kind() == FileOpErrorKind::SourceMissing => {
+            Attempt::Skip(RevertSkip::Missing)
+        }
+        Some(RecycleOutcome::Failed(error)) => Attempt::Failed(error.kind()),
+        Some(RecycleOutcome::NotAttempted) | None => Attempt::Failed(FileOpErrorKind::Other),
     }
 }
 

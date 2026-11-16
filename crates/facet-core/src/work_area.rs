@@ -17,7 +17,7 @@ use crate::job::{JobEvent, JobId, JobKind, JobQuestion, JobState, Progress, Summ
 pub struct JobEntry {
     /// 작업.
     pub id: JobId,
-    /// 작업 종류(복사·이동·실행취소·다시 실행·삭제).
+    /// 작업 종류(복사·이동·실행취소·다시 실행·영구 삭제·휴지통 삭제).
     pub kind: JobKind,
     /// 대상 폴더. 삭제는 지우는 위치(첫 원본이 든 폴더)다.
     pub target: PathBuf,
@@ -29,7 +29,7 @@ pub struct JobEntry {
     pub progress: Option<Progress>,
     /// 결과 요약. 끝났으면 있다.
     pub summary: Option<Summary>,
-    /// 답을 기다리는 질문(이름 충돌·항목별 오류). 답하거나([`crate::window::App::answer_conflict`]·
+    /// 답을 기다리는 질문(이름 충돌·항목별 오류·휴지통에 들어가지 않는 항목). 답하거나([`crate::window::App::answer_conflict`]·
     /// [`crate::window::App::answer_error`]) 작업이 답 기다림을 벗어나면(취소·끝남 포함) 없어진다. 화면은 이것이
     /// 있으면 그 작업의 진행 표시에 질문 대화를 붙인다.
     pub question: Option<JobQuestion>,
@@ -81,6 +81,7 @@ impl WorkArea {
             | JobEvent::StateChanged { job, .. }
             | JobEvent::Conflict { job, .. }
             | JobEvent::ItemError { job, .. }
+            | JobEvent::NotRecyclable { job, .. }
             | JobEvent::Finished { job, .. } => *job,
         };
         let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) else {
@@ -101,6 +102,10 @@ impl WorkArea {
             JobEvent::ItemError { error, .. } => {
                 entry.state = JobState::AwaitingAnswer;
                 entry.question = Some(JobQuestion::Error(error.clone()));
+            }
+            JobEvent::NotRecyclable { item, .. } => {
+                entry.state = JobState::AwaitingAnswer;
+                entry.question = Some(JobQuestion::NotRecyclable(item.clone()));
             }
             JobEvent::Finished { summary, .. } => {
                 entry.summary = Some(summary.clone());

@@ -25,12 +25,15 @@
 //! 지금 있는 작업은 **복사**([`JobQueue::copy`])와 **이동**([`JobQueue::move_items`]), 그리고 작업 기록(복사·이동도
 //! 남는다, [`crate::window::App::start_transfer`])을 되돌리는
 //! **실행취소**·**다시 실행**([`crate::window::App::undo`]·[`crate::window::App::redo`])이다. 진행·이름 충돌·오류
-//! 처리의 자세한 규칙은 그 문서에 있다. 삭제 작업은 **영구 삭제**([`JobQueue::delete_permanently`])가 있다. 삭제와
-//! 실행취소·다시 실행은 대기열의 작업이지만 차례를 기다리지 않고 넣자마자 시작한다(「지금 시작」과 같은 길).
+//! 처리의 자세한 규칙은 그 문서에 있다. 삭제 작업은 **휴지통 삭제**([`JobQueue::recycle`])와 **영구 삭제**
+//! ([`JobQueue::delete_permanently`])가 있다. 휴지통이 없는 위치인지는 [`has_recycle_bin`]·[`deletes_permanently`]로
+//! 미리 안다. 삭제와 실행취소·다시 실행은 대기열의 작업이지만 차례를 기다리지 않고 넣자마자 시작한다(「지금 시작」과
+//! 같은 길).
 
 mod copy;
 mod delete;
 mod moving;
+mod recycle;
 mod revert;
 
 pub(crate) use revert::RevertJob;
@@ -44,6 +47,7 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 pub use facet_win::file_ops::FileOpErrorKind;
+pub use recycle::RECYCLE_CHUNK;
 
 /// 진행 사건 사이의 가장 짧은 간격. 작업마다 진행 사건은 초당 10번 이하다.
 pub const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
@@ -78,8 +82,10 @@ pub enum JobKind {
     Undo,
     /// 다시 실행: 실행취소한 작업을 다시 한다.
     Redo,
-    /// 삭제. 지금은 **영구 삭제**([`JobQueue::delete_permanently`])다. 차례를 기다리지 않고 곧바로 시작한다.
+    /// **영구 삭제**([`JobQueue::delete_permanently`]). 차례를 기다리지 않고 곧바로 시작한다.
     Delete,
+    /// **휴지통 삭제**([`JobQueue::recycle`]). 차례를 기다리지 않고 곧바로 시작한다.
+    Recycle,
 }
 
 /// 작업의 상태.
@@ -178,8 +184,12 @@ pub struct Summary {
     /// 따라 들어가지 않고 링크 자체를 대상에 만든 심볼릭 링크(파일·폴더)·정션 수. 링크로 덮어썼으면
     /// [`Summary::files_overwritten`]에도 든다. 이동이 이름 바꾸기로 옮긴 링크는 [`Summary::items_renamed`]에 든다.
     pub links_copied: u64,
-    /// 영구 삭제 작업이 지운 항목 수(파일·폴더·링크를 하나씩 센다). 다른 작업은 늘 0이다.
+    /// 영구 삭제 작업이 지운 항목 수(파일·폴더·링크를 하나씩 센다). 휴지통 삭제는 휴지통에 들어가지 않아 영구 삭제로
+    /// 진행한 항목에서 지운 수다. 다른 작업은 늘 0이다.
     pub items_deleted: u64,
+    /// 휴지통 삭제가 휴지통에 들어가지 않는 항목([`JobEvent::NotRecyclable`])에 건너뛰기로 답해 지우지 않고 남긴
+    /// 항목. [`Summary::items_skipped`]에 든다. 다른 작업은 늘 비어 있다.
+    pub not_recycled: Vec<PathBuf>,
     /// 항목별 오류에 건너뛰기(또는 「나머지 오류도 건너뛰기」)로 답해 건너뛴 항목과 그 오류(폴더면 그 아래는
     /// 따로 세지 않는다). 그 수는 [`Summary::errors_skipped`]. 하나라도 있으면 작업은 [`JobState::Failed`]로 끝난다.
     pub failures: Vec<ItemFailure>,
@@ -197,7 +207,8 @@ pub struct Summary {
     pub not_reverted: Vec<crate::history::NotReverted>,
     /// 휴지통으로 보낸 항목(원래 경로·휴지통 안 경로): 복사·이동의 덮어쓰기가 덮어쓰기 전에 보낸 원래 대상 파일,
     /// 복사(덮어쓰기 포함)의 실행취소가 보낸 복사본(폴더를 통째로 보냈으면 그 폴더 하나), 덮어쓰기의 다시 실행이 다시
-    /// 보낸 옛 파일. 휴지통을 거치지 않은 덮어쓰기는 들지 않는다.
+    /// 보낸 옛 파일, 휴지통 삭제가 보낸 항목(넘긴 원본마다 하나, 폴더면 그 폴더 하나)과 그 다시 실행이 다시 보낸
+    /// 항목. 휴지통을 거치지 않은 덮어쓰기·삭제는 들지 않는다.
     pub recycled: Vec<facet_win::recycle::RecycledItem>,
 }
 
@@ -208,9 +219,12 @@ impl Summary {
     }
 
     /// 건너뛴 항목 수: 이름 충돌로 건너뛴 것, 항목별 오류로 건너뛴 것(폴더면 그 폴더 하나로 센다), 실행취소·다시
-    /// 실행이 밖의 변경으로 건너뛴 것.
+    /// 실행이 밖의 변경으로 건너뛴 것, 휴지통 삭제가 휴지통에 들어가지 않아 남긴 것.
     pub fn items_skipped(&self) -> u64 {
-        self.conflicts_skipped + self.errors_skipped() + self.not_reverted.len() as u64
+        self.conflicts_skipped
+            + self.errors_skipped()
+            + self.not_reverted.len() as u64
+            + self.not_recycled.len() as u64
     }
 
     /// 끝낸 항목 수: 처리한 항목([`Summary::items_done`]) 가운데 건너뛰지 않은 것.
@@ -254,6 +268,15 @@ pub enum JobEvent {
         /// 오류가 난 원본 항목과 오류 종류.
         error: ItemFailure,
     },
+    /// 휴지통 삭제에서 셸이 휴지통 대신 영구 삭제하려 한 항목(휴지통보다 큼, 휴지통이 없는·끈 볼륨): 지우지 않고
+    /// 멈춰 영구 삭제로 진행할지 묻는다. [`JobState::AwaitingAnswer`]의 [`JobEvent::StateChanged`] 바로 뒤에 온다.
+    /// [`JobQueue::answer_not_recyclable`]로 답한다.
+    NotRecyclable {
+        /// 작업.
+        job: JobId,
+        /// 그 항목(경로·종류·크기·수정 시각).
+        item: ConflictItem,
+    },
     /// 작업이 끝났다. 마지막 상태의 [`JobEvent::StateChanged`] 바로 뒤에 온다. 이 작업의 마지막 사건이다.
     Finished {
         /// 작업.
@@ -271,6 +294,8 @@ pub enum JobQuestion {
     Conflict(Conflict),
     /// 항목별 오류. [`JobQueue::answer_error`]로 답한다.
     Error(ItemFailure),
+    /// 휴지통에 들어가지 않는 항목을 영구 삭제로 진행할지. [`JobQueue::answer_not_recyclable`]로 답한다.
+    NotRecyclable(ConflictItem),
 }
 
 /// 이름 충돌의 한 쪽 항목 종류.
@@ -374,10 +399,28 @@ pub enum ErrorAnswer {
     CancelJob,
 }
 
+/// 휴지통에 들어가지 않는 항목([`JobEvent::NotRecyclable`])에 대한 답.
+///
+/// 「나머지에도 적용」은 답마다 따로 둔다([`ErrorAnswer::SkipAll`]과 같은 꼴): 휴지통을 끈 볼륨에서 여러 항목을
+/// 지우면 모든 항목이 같은 질문을 하므로 한 번에 답할 수 있어야 한다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NotRecyclableAnswer {
+    /// 그 항목을 영구 삭제한다(영구 삭제 작업과 같은 엔진, [`JobQueue::delete_permanently`]). 그 항목은 되돌릴 수 없다.
+    DeletePermanently,
+    /// 그 항목과 그 작업의 남은 「휴지통에 들어가지 않는 항목」을 묻지 않고 영구 삭제한다.
+    DeleteAllPermanently,
+    /// 그 항목을 지우지 않고 남긴다([`Summary::not_recycled`]).
+    Skip,
+    /// 그 항목과 그 작업의 남은 「휴지통에 들어가지 않는 항목」을 묻지 않고 남긴다.
+    SkipAll,
+    /// 작업을 취소한다([`JobQueue::cancel`]과 같다: 이미 휴지통에 보낸 항목은 그대로 휴지통에 있다).
+    CancelJob,
+}
+
 /// 답을 받지 않은 까닭.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AnswerError {
-    /// 그 작업은 그 종류의 질문(이름 충돌, 항목별 오류)에 답을 기다리지 않는다(없는·끝난·취소 중인 작업, 다른
+    /// 그 작업은 그 종류의 질문(이름 충돌, 항목별 오류, 휴지통에 들어가지 않는 항목)에 답을 기다리지 않는다(없는·끝난·취소 중인 작업, 다른
     /// 종류의 질문을 기다리는 작업 포함).
     NotAsking,
     /// 파일과 폴더가 부딪힌 충돌에 덮어쓰기 답을 했다. 작업은 계속 답을 기다린다.
@@ -399,7 +442,7 @@ pub enum CopyRejection {
     TargetInsideSource(PathBuf),
 }
 
-/// 영구 삭제를 시작하기 전에 막은 까닭. 이때는 작업을 만들지 않는다.
+/// 영구 삭제·휴지통 삭제를 시작하기 전에 막은 까닭. 이때는 작업을 만들지 않는다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeleteRejection {
     /// 원본이 하나도 없다.
@@ -412,6 +455,7 @@ enum Job {
     Move(moving::MoveJob),
     Revert(revert::RevertJob),
     Delete(delete::DeleteJob),
+    Recycle(recycle::RecycleJob),
 }
 
 impl Job {
@@ -422,6 +466,7 @@ impl Job {
             Job::Move(job) => job.root_count(),
             Job::Revert(job) => job.root_count(),
             Job::Delete(job) => job.root_count(),
+            Job::Recycle(job) => job.root_count(),
         }
     }
 
@@ -432,6 +477,7 @@ impl Job {
             Job::Move(job) => job.run(context),
             Job::Revert(job) => job.run(context),
             Job::Delete(job) => job.run(context),
+            Job::Recycle(job) => job.run(context),
         }
     }
 }
@@ -499,6 +545,8 @@ enum Question {
     Conflict { can_overwrite: bool },
     /// 항목별 오류.
     Error,
+    /// 휴지통에 들어가지 않는 항목.
+    NotRecyclable,
 }
 
 /// 질문에 대한 답.
@@ -506,6 +554,7 @@ enum Question {
 enum Answer {
     Conflict(ConflictAnswer),
     Error(ErrorAnswer),
+    NotRecyclable(NotRecyclableAnswer),
 }
 
 impl Control {
@@ -583,7 +632,7 @@ impl Context<'_> {
         };
         match self.ask(question, event)? {
             Answer::Conflict(answer) => Some(answer),
-            Answer::Error(_) => None,
+            Answer::Error(_) | Answer::NotRecyclable(_) => None,
         }
     }
 
@@ -594,8 +643,21 @@ impl Context<'_> {
             error,
         };
         match self.ask(Question::Error, event)? {
-            Answer::Error(ErrorAnswer::CancelJob) | Answer::Conflict(_) => None,
+            Answer::Error(ErrorAnswer::CancelJob)
+            | Answer::Conflict(_)
+            | Answer::NotRecyclable(_) => None,
             Answer::Error(answer) => Some(answer),
+        }
+    }
+
+    /// 휴지통에 들어가지 않는 항목을 영구 삭제로 진행할지 묻고 답을 기다린다. 취소되면(작업 취소 답 포함) `None`.
+    fn ask_not_recyclable(&self, item: ConflictItem) -> Option<NotRecyclableAnswer> {
+        let event = JobEvent::NotRecyclable { job: self.id, item };
+        match self.ask(Question::NotRecyclable, event)? {
+            Answer::NotRecyclable(NotRecyclableAnswer::CancelJob)
+            | Answer::Conflict(_)
+            | Answer::Error(_) => None,
+            Answer::NotRecyclable(answer) => Some(answer),
         }
     }
 
@@ -849,7 +911,9 @@ impl JobQueue {
         match kind {
             JobKind::Copy => self.copy(sources, target),
             JobKind::Move => self.move_items(sources, target),
-            JobKind::Undo | JobKind::Redo | JobKind::Delete => Err(CopyRejection::NoSources),
+            JobKind::Undo | JobKind::Redo | JobKind::Delete | JobKind::Recycle => {
+                Err(CopyRejection::NoSources)
+            }
         }
     }
 
@@ -873,7 +937,7 @@ impl JobQueue {
                 job.plan.journal = Some(Arc::clone(&journal));
                 Job::Move(job)
             }
-            JobKind::Undo | JobKind::Redo | JobKind::Delete => {
+            JobKind::Undo | JobKind::Redo | JobKind::Delete | JobKind::Recycle => {
                 return Err(CopyRejection::NoSources);
             }
         };
@@ -925,6 +989,42 @@ impl JobQueue {
         let mut job = delete::DeleteJob::prepare(sources)?;
         job.journal = Some(Arc::clone(&journal));
         Ok((self.start_at_once(Job::Delete(job)), journal))
+    }
+
+    /// 원본 항목들(파일·폴더)을 **휴지통 삭제**하는(휴지통으로 보내는) 작업을 넣고 차례를 기다리지 않고 곧바로
+    /// 시작한다(영구 삭제와 같은 까닭과 길). 원본이 없으면 작업을 만들지 않는다([`DeleteRejection::NoSources`]).
+    ///
+    /// 휴지통으로 보내기는 셸의 휴지통 보내기([`facet_win::recycle::recycle`])이고 작업 스레드에서 부른다(UI 스레드가
+    /// 아니다). 넘긴 원본을 [`RECYCLE_CHUNK`]개씩 셸에 넘긴다. 사건·상태·취소·항목별 오류 질문(잠김·접근 거부 등:
+    /// 다시 시도·건너뛰기·나머지 오류도 건너뛰기·작업 취소)은 다른 작업과 같다.
+    ///
+    /// - **일시정지·취소는 셸 호출 사이(항목 묶음 경계)에서만** 듣는다: 셸의 파일 작업은 한 번 부르면 멈출 수 없고,
+    ///   휴지통으로 보내기는 같은 볼륨 안 이름 바꾸기라 묶음 하나가 금방 끝나기 때문이다. 영구 삭제로 진행한 항목을
+    ///   지우는 동안은 영구 삭제 작업처럼 항목마다 듣는다.
+    /// - 진행은 넘긴 원본 수로 센다(폴더는 하나, 바이트는 영구 삭제로 진행한 항목의 파일 크기만). 처음부터 다 센
+    ///   것이다.
+    /// - **휴지통에 들어가지 않는 항목**(셸이 영구 삭제로 바꾸려 한 항목)은 지우지 않고 멈춰
+    ///   [`JobEvent::NotRecyclable`]로 묻는다([`JobQueue::answer_not_recyclable`]): 영구 삭제로 진행하면 영구 삭제
+    ///   작업의 엔진으로 지우고(그 항목은 되돌릴 수 없다), 건너뛰면 남긴다([`Summary::not_recycled`]).
+    /// - 없는 항목(넘긴 원본이 이미 없음)은 이미 지워진 것으로 보고 묻지 않는다.
+    /// - 취소하면 이미 휴지통에 보낸 항목은 휴지통에 있다(실행취소로 되살린다).
+    ///
+    /// 휴지통에 보낸 항목은 [`Summary::recycled`]에 든다.
+    pub fn recycle(&mut self, sources: Vec<PathBuf>) -> Result<JobId, DeleteRejection> {
+        let job = recycle::RecycleJob::prepare(sources)?;
+        Ok(self.start_at_once(Job::Recycle(job)))
+    }
+
+    /// 휴지통 삭제 작업을 넣어 곧바로 시작하고([`JobQueue::recycle`]와 같다) 그 작업이 한 일을 적을 곳을 함께
+    /// 돌려준다(작업 기록에 남길 작업).
+    pub(crate) fn recycle_recorded(
+        &mut self,
+        sources: Vec<PathBuf>,
+    ) -> Result<(JobId, JournalSink), DeleteRejection> {
+        let journal = JournalSink::default();
+        let mut job = recycle::RecycleJob::prepare(sources)?;
+        job.journal = Some(Arc::clone(&journal));
+        Ok((self.start_at_once(Job::Recycle(job)), journal))
     }
 
     /// 작업을 넣고 차례를 기다리지 않고 곧바로 시작한다(실행취소·다시 실행, 삭제).
@@ -1125,6 +1225,41 @@ impl JobQueue {
         Ok(())
     }
 
+    /// 휴지통에 들어가지 않는 항목의 답을 기다리는 휴지통 삭제 작업에 답한다. 작업 취소가 아니면 작업은
+    /// [`JobState::Running`]이 되어(그 상태 사건을 보낸다) 그 자리에서 이어 돈다. 작업 취소면 [`JobQueue::cancel`]과
+    /// 같다.
+    ///
+    /// 그 질문의 답을 기다리지 않는 작업이면 [`AnswerError::NotAsking`].
+    pub fn answer_not_recyclable(
+        &mut self,
+        job: JobId,
+        answer: NotRecyclableAnswer,
+    ) -> Result<(), AnswerError> {
+        let mut board = self.shared.board();
+        let Some(slot) = board.jobs.get_mut(&job) else {
+            return Err(AnswerError::NotAsking);
+        };
+        if slot.cancelling
+            || slot.state != JobState::AwaitingAnswer
+            || slot.question != Some(Question::NotRecyclable)
+        {
+            return Err(AnswerError::NotAsking);
+        }
+        if answer == NotRecyclableAnswer::CancelJob {
+            drop(board);
+            self.cancel(job);
+            return Ok(());
+        }
+        slot.question = None;
+        slot.state = JobState::Running;
+        self.outbox.send(JobEvent::StateChanged {
+            job,
+            state: JobState::Running,
+        });
+        slot.control.set_answer(Answer::NotRecyclable(answer));
+        Ok(())
+    }
+
     /// 대기 중인 작업을 차례를 기다리지 않고 바로 시작한다. 이미 도는 작업과 나란히 돌고, 차례 실행은 그대로
     /// 이어진다(이 작업이 끝나도 차례의 다음 작업은 앞 작업이 끝나야 시작한다).
     ///
@@ -1216,6 +1351,22 @@ fn run_job(id: JobId, job: Job, control: &Control, shared: &Shared, outbox: &Out
     outbox.send(JobEvent::Finished { job: id, summary });
     drop(board);
     shared.changed.notify_all();
+}
+
+/// `path`가 있는 위치(볼륨)에 휴지통이 있는가. 경로가 아직 없어도 된다. 실행 전에 알 수 있는 위치 정보다: 로컬
+/// 고정 디스크는 있고, 이동식 디스크·네트워크 위치·볼륨을 알 수 없는 경로는 없다
+/// ([`facet_win::recycle::has_recycle_bin`]). 사용자가 휴지통을 꺼 두었거나 휴지통보다 큰 항목은 미리 알 수 없고,
+/// 휴지통 삭제가 그 항목에서 묻는다([`JobEvent::NotRecyclable`]).
+pub fn has_recycle_bin(path: &Path) -> bool {
+    facet_win::recycle::has_recycle_bin(path)
+}
+
+/// 원본들을 삭제하면 **영구 삭제**가 되는가: 원본이 있고 그 모두가 휴지통이 없는 위치에 있으면 `true`다. 앱은 삭제
+/// 전에 이것으로 「영구 삭제됩니다」를 알리고, [`crate::window::App::delete`]는 이것으로 영구 삭제 작업과 휴지통
+/// 삭제 작업을 고른다. 휴지통이 있는 위치와 없는 위치가 섞였으면 `false`다(휴지통 삭제가 휴지통에 들어가지 않는
+/// 항목마다 묻는다).
+pub fn deletes_permanently(sources: &[PathBuf]) -> bool {
+    !sources.is_empty() && sources.iter().all(|source| !has_recycle_bin(source))
 }
 
 /// 두 경로가 같은지(Windows는 대소문자를 가리지 않는다). 둘 다 정규화한 경로라야 한다.

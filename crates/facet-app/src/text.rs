@@ -147,9 +147,10 @@ pub fn operation_name(record: &Record) -> String {
         (OperationKind::Copy, None) => format!("항목 {n}개 복사"),
         (OperationKind::Move, Some(name)) => format!("「{name}」 이동"),
         (OperationKind::Move, None) => format!("항목 {n}개 이동"),
-        // 지금 있는 삭제는 영구 삭제뿐이다(휴지통 삭제는 뒤 티켓).
         (OperationKind::Delete, Some(name)) => format!("「{name}」 영구 삭제"),
         (OperationKind::Delete, None) => format!("항목 {n}개 영구 삭제"),
+        (OperationKind::Recycle, Some(name)) => format!("「{name}」 삭제"),
+        (OperationKind::Recycle, None) => format!("항목 {n}개 삭제"),
     }
 }
 
@@ -188,7 +189,8 @@ pub fn revert_skip_text(reason: RevertSkip) -> &'static str {
         RevertSkip::NameTaken => "그 자리에 같은 이름의 항목이 있습니다",
         RevertSkip::NotEmpty => "폴더가 비어 있지 않습니다",
         RevertSkip::NotRecyclable => "휴지통에 넣을 수 없어 지우지 않았습니다",
-        RevertSkip::RecycledMissing => "덮어쓴 파일이 휴지통에 없습니다",
+        RevertSkip::RecycledMissing => "휴지통에 없습니다",
+        RevertSkip::PermanentlyDeleted => "영구 삭제해 되살릴 수 없습니다",
     }
 }
 
