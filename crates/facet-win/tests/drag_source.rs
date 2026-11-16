@@ -57,9 +57,12 @@ fn 파일이나_허용_효과가_없으면_만들지_않는다() {
     );
 }
 
+/// 처리기가 받은 파일 목록들.
+type Seen = Rc<RefCell<Vec<Option<Vec<PathBuf>>>>>;
+
 /// 받은 파일을 적고, 정한 효과와 설명을 돌려주는 처리기.
 struct Labeled {
-    seen: Rc<RefCell<Vec<Option<Vec<PathBuf>>>>>,
+    seen: Seen,
     effect: Effect,
     label: Option<DropLabel>,
 }
@@ -82,10 +85,7 @@ impl DropHandler for Labeled {
     }
 }
 
-fn labeled(
-    effect: Effect,
-    label: Option<DropLabel>,
-) -> (TestTarget, Rc<RefCell<Vec<Option<Vec<PathBuf>>>>>) {
+fn labeled(effect: Effect, label: Option<DropLabel>) -> (TestTarget, Seen) {
     let seen = Rc::new(RefCell::new(Vec::new()));
     let target = TestTarget::new(Box::new(Labeled {
         seen: Rc::clone(&seen),

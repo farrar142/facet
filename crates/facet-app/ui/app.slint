@@ -1072,6 +1072,10 @@ component PanelView inherits Rectangle {
     // 빈 곳(목록 아래 -1, 행의 이름 글자 오른쪽 여백이면 그 행)을 왼쪽 버튼으로 눌렀다: 행, Ctrl, Shift, 창 기준 점.
     // 끌기 시작 문턱을 넘으면 사각형 선택, 아니면 누르기다(Rust가 정한다).
     callback marquee-press(int, bool, bool, length, length);
+    // 항목 위(아이콘·이름 글자)를 눌렀다: 행, 오른쪽 버튼인가, Ctrl, Shift, 창 기준 점. 끌기 시작 문턱을 넘으면 항목
+    // 끌기(OLE), 아니면 누르기(오른쪽이면 놓을 때 오른쪽 메뉴)다. 끄는 동안과 놓을 때는 Rust가 창의 마우스 이벤트로
+    // 따라간다.
+    callback item-press(int, bool, bool, bool, length, length);
     callback sort-by(int);
     // 이름 입력란: 확정(참이면 입력란을 닫았다), Esc(참이면 닫았다), 글자가 바뀜, 확장자 바꿈 확인의 답(참이면 닫았다).
     callback confirm-rename(string) -> bool;
@@ -1419,9 +1423,15 @@ component PanelView inherits Rectangle {
                                 root.activate();
                             }
                             root.pointer(event);
-                            // 오른쪽 클릭: 오른쪽 메뉴. 선택에 없는 항목이면 Rust가 그 항목 하나로 고른다.
+                            // 오른쪽 클릭: 오른쪽 메뉴. 선택에 없는 항목이면 Rust가 그 항목 하나로 고른다. 아이콘·이름 글자
+                            // 위면 끌면 오른쪽 끌기라 메뉴는 끌지 않고 놓을 때 연다.
                             if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right && i != root.editing) {
-                                root.context-menu(i, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                                if (self.mouse-x > min(28px + name-measure.preferred-width, root.name-width - 8px)) {
+                                    root.context-menu(i, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                                } else {
+                                    root.item-press(i, true, event.modifiers.control, event.modifiers.shift,
+                                        self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                                }
                                 root.focus-list();
                                 return;
                             }
@@ -1445,7 +1455,8 @@ component PanelView inherits Rectangle {
                                     root.marquee-press(i, event.modifiers.control, event.modifiers.shift,
                                         self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
                                 } else {
-                                    root.row-pressed(i, event.modifiers.control, event.modifiers.shift);
+                                    root.item-press(i, false, event.modifiers.control, event.modifiers.shift,
+                                        self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
                                 }
                                 root.focus-list();
                             }
@@ -1979,6 +1990,8 @@ export component AppWindow inherits Window {
     // 빈 곳을 왼쪽 버튼으로 눌렀다: 패널(0 왼쪽, 1 오른쪽), 행(목록 아래면 -1), Ctrl, Shift, 창 기준 점. 끄는 동안과 놓을
     // 때는 Rust가 창의 마우스 이벤트로 따라간다.
     callback marquee-press(int, int, bool, bool, length, length);
+    // 항목 위를 눌렀다: 패널, 행, 오른쪽 버튼인가, Ctrl, Shift, 창 기준 점(PanelView의 같은 콜백).
+    callback item-press(int, int, bool, bool, bool, length, length);
     // 열 머리글을 눌렀다: 열 번호.
     callback sort-by(int);
     // 마우스 뒤로(거짓)·앞로(참) 버튼.
@@ -2248,6 +2261,9 @@ export component AppWindow inherits Window {
             marquee-press(row, ctrl, shift, x, y) => {
                 root.marquee-press(0, row, ctrl, shift, x, y);
             }
+            item-press(row, right, ctrl, shift, x, y) => {
+                root.item-press(0, row, right, ctrl, shift, x, y);
+            }
             tab-drag-start(index, x, y) => {
                 root.tab-drag-start(0, index, x, y);
             }
@@ -2377,6 +2393,9 @@ export component AppWindow inherits Window {
             marquee: root.right-marquee;
             marquee-press(row, ctrl, shift, x, y) => {
                 root.marquee-press(1, row, ctrl, shift, x, y);
+            }
+            item-press(row, right, ctrl, shift, x, y) => {
+                root.item-press(1, row, right, ctrl, shift, x, y);
             }
             tab-drag-start(index, x, y) => {
                 root.tab-drag-start(1, index, x, y);

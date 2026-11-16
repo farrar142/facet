@@ -5,12 +5,15 @@
 
 use facet_core::command::{CommandId, Key, Shortcut};
 use facet_core::details::FileType;
+use facet_core::dragdrop::{DropEffect, Refusal};
 use facet_core::edit::EditError;
 use facet_core::history::{NotUndoable, OperationKind, Record, RevertSkip};
 use facet_core::job::{CopyRejection, Summary};
 use facet_core::name_input::{MAX_NAME_UNITS, NameError};
 use facet_core::window::{ClipboardDone, ClipboardFailure};
 use facet_win::clipboard::ClipboardError;
+use facet_win::drag_source::DragError;
+use facet_win::drop_target::DropLabel;
 use facet_win::file_ops::FileOpErrorKind;
 
 /// 명령 이름: 명령 팔레트에 보이고, 팔레트 검색은 이 이름에서 찾는다(코어는 ID만 갖는다).
@@ -164,6 +167,69 @@ pub fn drop_rejected_text(rejection: &CopyRejection) -> String {
             format!("폴더를 그 안으로 놓을 수 없습니다: {}", source.display())
         }
     }
+}
+
+/// 끄는 동안 커서 옆에 보일 설명(셸의 드롭 설명): 「〈폴더〉로 이동」「〈폴더〉로 복사」, 놓을 수 없으면 까닭.
+/// 셸은 `message`의 `%1`을 `insert`(폴더 이름, 강조)로 바꿔 보인다.
+pub fn drop_label(
+    effect: Option<DropEffect>,
+    folder: Option<&str>,
+    refusal: Option<Refusal>,
+) -> DropLabel {
+    match (effect, folder) {
+        (Some(effect), Some(folder)) => {
+            let verb = match effect {
+                DropEffect::Copy => "복사",
+                DropEffect::Move => "이동",
+            };
+            DropLabel {
+                message: format!("%1{} {verb}", direction_particle(folder)),
+                insert: folder.to_owned(),
+            }
+        }
+        _ => DropLabel {
+            message: match refusal {
+                Some(Refusal::IntoItself) => "폴더를 그 안으로 놓을 수 없음",
+                Some(Refusal::AlreadyThere) => "이미 이 폴더에 있음",
+                Some(Refusal::NotFiles) => "파일이 아님",
+                Some(Refusal::NotAFolder) => "여기에는 놓을 수 없음",
+                Some(Refusal::NoSources | Refusal::NoEffectAllowed) | None => "놓을 수 없음",
+            }
+            .to_owned(),
+            insert: String::new(),
+        },
+    }
+}
+
+/// 방향을 나타내는 조사: 마지막 글자가 받침 없는 한글이거나 ㄹ 받침이면 「로」, 다른 받침이면 「으로」, 한글이 아니면
+/// 「(으)로」.
+pub fn direction_particle(word: &str) -> &'static str {
+    match word.chars().last() {
+        Some(c @ '가'..='힣') => {
+            let jong = (c as u32 - '가' as u32) % 28;
+            if jong == 0 || jong == 8 {
+                "로"
+            } else {
+                "으로"
+            }
+        }
+        _ => "(으)로",
+    }
+}
+
+/// 오른쪽 끌기 고르기 메뉴의 줄 이름.
+pub fn drop_menu_name(entry: crate::drop_menu::Entry) -> &'static str {
+    match entry {
+        crate::drop_menu::Entry::CopyHere => "여기에 복사",
+        crate::drop_menu::Entry::MoveHere => "여기로 이동",
+        crate::drop_menu::Entry::Cancel => "취소",
+        crate::drop_menu::Entry::Separator => "",
+    }
+}
+
+/// 항목 끌기를 시작하지 못한 까닭(상태 줄).
+pub fn drag_failed_text(error: &DragError) -> String {
+    format!("항목을 끌 수 없습니다: {error}")
 }
 
 /// 클립보드를 쓰지 못한 까닭(상태 줄).
@@ -380,6 +446,23 @@ pub fn os_error_detail(message: &str, code: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 끄는_동안의_설명은_폴더_이름과_알맞은_조사() {
+        assert_eq!(direction_particle("사진"), "으로");
+        assert_eq!(direction_particle("문서"), "로");
+        assert_eq!(direction_particle("서울"), "로", "ㄹ 받침은 「로」");
+        assert_eq!(direction_particle("Downloads"), "(으)로");
+        assert_eq!(direction_particle(""), "(으)로");
+        let label = drop_label(Some(DropEffect::Move), Some("사진"), None);
+        assert_eq!(label.message, "%1으로 이동");
+        assert_eq!(label.insert, "사진");
+        let label = drop_label(Some(DropEffect::Copy), Some("C:"), None);
+        assert_eq!(label.message, "%1(으)로 복사");
+        let label = drop_label(None, Some("사진"), Some(Refusal::IntoItself));
+        assert_eq!(label.insert, "");
+        assert!(!label.message.contains("%1"));
+    }
 
     #[test]
     fn 명령마다_이름이_있고_겹치지_않는다() {

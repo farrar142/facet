@@ -91,6 +91,8 @@ use slint::{
 
 use crate::address::AddressEdit;
 use crate::context_menu::{ContextMenu, Outcome as MenuOutcome};
+use crate::drop_menu::{Choice as DropChoice, DropMenu};
+use crate::item_drag::{Button as ItemButton, ItemPress};
 use crate::marquee::Marquee;
 use crate::palette::Palette;
 use crate::rename::{Confirm, Rename};
@@ -99,10 +101,12 @@ use crate::target::{Section, TargetChooser};
 
 mod address;
 mod context_menu;
+mod drop_menu;
 mod file_drop;
 mod history_view;
 mod ime;
 mod instance;
+mod item_drag;
 mod keys;
 mod marquee;
 mod measure;
@@ -387,13 +391,25 @@ fn open_view(app: &Rc<RefCell<App>>, window: WindowId) -> Result<Rc<View>, slint
                         y: (position.y / scale) as f32,
                     };
                     marquee_event(window, move |view| view.marquee_moved(at));
+                    item_event(window, move |view| view.item_moved(at));
                 }
                 WindowEvent::MouseInput {
                     state: ElementState::Released,
                     button: MouseButton::Left,
                     ..
-                } => marquee_event(window, View::marquee_released),
-                WindowEvent::Focused(false) => marquee_event(window, View::marquee_cancel),
+                } => {
+                    marquee_event(window, View::marquee_released);
+                    item_event(window, |view| view.item_released(ItemButton::Left));
+                }
+                WindowEvent::MouseInput {
+                    state: ElementState::Released,
+                    button: MouseButton::Right,
+                    ..
+                } => item_event(window, |view| view.item_released(ItemButton::Right)),
+                WindowEvent::Focused(false) => {
+                    marquee_event(window, View::marquee_cancel);
+                    item_event(window, View::item_cancel);
+                }
                 _ => {}
             }
             if let WindowEvent::Focused(true) = event
@@ -458,6 +474,22 @@ fn marquee_event(window: WindowId, f: impl FnOnce(&View) + 'static) {
         return;
     }
     f(&view);
+}
+
+/// 창 `window`에 항목 위 누르기가 있으면 그 화면 상태로 `f`를 부른다. winit 이벤트 훅이 부르므로 코어를 다른 곳에서
+/// 빌리고 있으면 이벤트 루프로 돌아간 뒤 부른다. 부른 뒤 코어의 창 목록에 화면을 맞춘다.
+fn item_event(window: WindowId, f: impl FnOnce(&View) + 'static) {
+    let Some(view) = view_of(window) else { return };
+    if view.item_press.borrow().is_none() {
+        return;
+    }
+    if view.app.try_borrow_mut().is_err() {
+        Timer::single_shot(Duration::ZERO, move || item_event(window, f));
+        return;
+    }
+    f(&view);
+    drop(view);
+    sync_windows();
 }
 
 /// 첫 창(남아 있는 가장 먼저 연 창)의 화면 상태로 `f`를 부른다. 측정 모드가 쓴다.
@@ -691,6 +723,11 @@ fn connect(ui: &AppWindow, w: WindowId) {
     ui.on_marquee_press(move |panel, row, ctrl, shift, x, y| {
         with_view(w, |view| {
             view.marquee_press(panel, row, (ctrl, shift), Point { x, y });
+        });
+    });
+    ui.on_item_press(move |panel, row, right, ctrl, shift, x, y| {
+        with_view(w, |view| {
+            view.item_press(panel, row, right, (ctrl, shift), Point { x, y });
         });
     });
     ui.on_sort_by(move |column| {
@@ -1183,6 +1220,17 @@ struct View {
     jobs: Rc<VecModel<JobRow>>,
     /// 이 창의 OLE 드롭 대상 등록(다른 앱에서 끌어 온 파일). 창을 띄운 뒤 등록하고 화면 상태를 버리면 해제한다.
     drop_target: RefCell<Option<facet_win::drop_target::Registration>>,
+    /// 항목 위(아이콘·이름 글자)를 누른 뒤의 상태. 문턱을 넘으면 항목 끌기, 놓으면 누르기다.
+    item_press: RefCell<Option<ItemPress<TabId>>>,
+    /// 오른쪽 끌기로 놓은 뒤 연 고르기 메뉴. 열려 있으면 오른쪽 메뉴 화면 요소(`menu-open`)를 이것이 쓴다.
+    drop_menu: RefCell<Option<PendingDrop>>,
+}
+
+/// 오른쪽 끌기로 놓아 고르기를 기다리는 드롭: 메뉴 상태와 놓은 파일(복사해 둔 경로)·놓을 폴더.
+struct PendingDrop {
+    menu: DropMenu,
+    sources: Vec<PathBuf>,
+    target: PathBuf,
 }
 
 /// 사각형 선택 하나: 끌기 상태와 마지막으로 코어에 넘긴 걸친 행.
@@ -1261,6 +1309,8 @@ impl View {
             delete: RefCell::default(),
             jobs,
             drop_target: RefCell::default(),
+            item_press: RefCell::default(),
+            drop_menu: RefCell::default(),
         })
     }
 
@@ -2090,6 +2140,10 @@ impl View {
     }
 
     fn close_context_menu(&self) {
+        if self.drop_menu.borrow_mut().take().is_some() {
+            self.ui.set_menu_open(false);
+            self.ui.set_menu_sub_open(false);
+        }
         if self.context_menu.borrow_mut().take().is_some() {
             self.ui.set_menu_open(false);
             self.ui.set_menu_sub_open(false);
@@ -2101,6 +2155,12 @@ impl View {
         let Ok(index) = usize::try_from(index) else {
             return;
         };
+        if let Some(pending) = self.drop_menu.borrow_mut().as_mut() {
+            pending.menu.hover(index);
+            self.ui
+                .set_menu_selected(pending.menu.selected().map_or(-1, count));
+            return;
+        }
         if let Some(menu) = self.context_menu.borrow_mut().as_mut() {
             if sub {
                 menu.hover_sub(index);
@@ -2116,6 +2176,17 @@ impl View {
         let Ok(index) = usize::try_from(index) else {
             return;
         };
+        let chosen = self
+            .drop_menu
+            .borrow()
+            .as_ref()
+            .map(|pending| pending.menu.activate(index));
+        if let Some(chosen) = chosen {
+            if let Some(choice) = chosen {
+                self.finish_drop_menu(choice);
+            }
+            return;
+        }
         let outcome = match self.context_menu.borrow_mut().as_mut() {
             Some(menu) if sub => menu.activate_sub(index),
             Some(menu) => menu.activate(index),
@@ -2129,6 +2200,9 @@ impl View {
         let Some(key) = keys::key_of(text) else {
             return;
         };
+        if self.drop_menu.borrow().is_some() {
+            return self.drop_menu_key(key);
+        }
         let outcome = {
             let mut guard = self.context_menu.borrow_mut();
             let Some(menu) = guard.as_mut() else {
@@ -3543,17 +3617,16 @@ impl Model for TabRows {
 }
 
 impl View {
-    /// 다른 앱에서 끄는 파일을 화면 점(`state`)에 놓으면 할 일: 효과와 대상 폴더. 놓을 수 없으면 `None`이다. 놓일 폴더
-    /// 행을 드러내고(없으면 지운다), 코어를 다른 일로 빌려 쓰는 중이면 놓을 수 없음으로 답한다. 오른쪽 버튼 끌기는 고르기
-    /// 메뉴(다음 티켓)가 아직 없어 놓을 수 없음이다(docs/adr/0008).
+    /// 끄는 파일을 화면 점(`state`)에 놓으면 할 일: 코어 결정, 놓을 폴더, 커서 효과. 놓일 폴더 행을 드러낸다(놓을 수
+    /// 없으면 지운다). 창이 아직 화면에 없거나 코어를 다른 일로 빌려 쓰는 중이면 `None`(놓을 수 없음)이다. 다른 앱에서
+    /// 온 끌기와 facet 항목 끌기가 같은 길로 온다(docs/adr/0008, 0009).
     fn drop_place(
         &self,
         state: &facet_win::drop_target::DragState,
         sources: Option<&[PathBuf]>,
-    ) -> Option<(DropEffect, PathBuf)> {
-        let mut highlight = None;
-        let placed = self.drop_decision(state, sources, &mut highlight);
-        self.show_drop_row(placed.as_ref().and(highlight));
+    ) -> Option<DropPlace> {
+        let placed = self.drop_decision(state, sources);
+        self.show_drop_row(placed.as_ref().and_then(|p| p.highlight));
         placed
     }
 
@@ -3561,8 +3634,7 @@ impl View {
         &self,
         state: &facet_win::drop_target::DragState,
         sources: Option<&[PathBuf]>,
-        highlight: &mut Option<(usize, usize)>,
-    ) -> Option<(DropEffect, PathBuf)> {
+    ) -> Option<DropPlace> {
         use file_drop::{PanelArea, Place};
         let at = self.frame()?.to_window(ScreenPoint {
             x: f64::from(state.x),
@@ -3605,7 +3677,9 @@ impl View {
             }
             Place::FileRow | Place::Outside => None,
         };
-        let target = folder.map_or(DropTarget::NotAFolder, DropTarget::Folder);
+        let target = folder
+            .clone()
+            .map_or(DropTarget::NotAFolder, DropTarget::Folder);
         let (data, sources) = match sources {
             Some(sources) => (DropData::Files, sources),
             None => (DropData::Other, &[][..]),
@@ -3624,18 +3698,20 @@ impl View {
             },
             data,
         });
-        let effect = match decision {
-            dragdrop::Decision::Copy => DropEffect::Copy,
-            dragdrop::Decision::Move => DropEffect::Move,
-            dragdrop::Decision::Menu { .. } | dragdrop::Decision::Refuse(_) => return None,
+        let effect = folder
+            .as_deref()
+            .and_then(|folder| dragdrop::cursor_effect(decision, sources, folder));
+        let highlight = match place {
+            Place::FolderRow { panel, row } if effect.is_some() => Some((panel, row)),
+            _ => None,
         };
-        let DropTarget::Folder(folder) = target else {
-            return None;
-        };
-        if let Place::FolderRow { panel, row } = place {
-            *highlight = Some((panel, row));
-        }
-        Some((effect, folder))
+        Some(DropPlace {
+            decision,
+            folder,
+            effect,
+            highlight,
+            at: (at.x, at.y),
+        })
     }
 
     /// 끌어 온 파일이 놓일 폴더 행(패널, 항목 번호)을 드러낸다. `None`이면 지운다.
@@ -3648,13 +3724,288 @@ impl View {
             PanelUi::of(&self.ui, panel).set_drop_row(row);
         }
     }
+
+    /// 오른쪽 끌기로 놓은 자리(창 기준 점 `at`)에 「여기에 복사」「여기로 이동」「취소」 메뉴를 연다. 오른쪽 메뉴와 같은
+    /// 화면 요소로 그린다.
+    fn open_drop_menu(&self, pending: PendingDrop, at: (f32, f32)) {
+        self.close_context_menu();
+        self.close_rename();
+        self.close_address_edit();
+        let height = DropMenu::height();
+        let (x, y) = context_menu::place(at, (context_menu::WIDTH, height), self.logical_size());
+        self.ui.set_menu_x(x);
+        self.ui.set_menu_y(y);
+        self.ui.set_menu_width(context_menu::WIDTH);
+        self.ui.set_menu_height(height);
+        let rows: Vec<MenuRow> = drop_menu::ENTRIES
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| MenuRow {
+                name: text::drop_menu_name(*entry).into(),
+                shortcut: SharedString::new(),
+                enabled: pending.menu.enabled(i),
+                mark: SharedString::new(),
+                separator: *entry == drop_menu::Entry::Separator,
+                submenu: false,
+            })
+            .collect();
+        self.menu_rows.set_vec(rows);
+        self.ui
+            .set_menu_selected(pending.menu.selected().map_or(-1, count));
+        self.ui.set_menu_sub_open(false);
+        *self.drop_menu.borrow_mut() = Some(pending);
+        self.ui.set_menu_open(true);
+    }
+
+    /// 고르기 메뉴가 열린 동안의 키: ↑↓로 고르고 Enter·Space로 누르고 Esc로 닫는다(아무것도 하지 않음).
+    fn drop_menu_key(&self, key: Key) {
+        let choice = {
+            let mut guard = self.drop_menu.borrow_mut();
+            let Some(pending) = guard.as_mut() else {
+                return;
+            };
+            match key {
+                Key::Up => {
+                    pending.menu.step(-1);
+                    None
+                }
+                Key::Down => {
+                    pending.menu.step(1);
+                    None
+                }
+                Key::Enter | Key::Space => pending.menu.enter(),
+                Key::Escape => Some(DropChoice::Cancel),
+                _ => None,
+            }
+        };
+        match choice {
+            Some(choice) => self.finish_drop_menu(choice),
+            None => {
+                let selected = self
+                    .drop_menu
+                    .borrow()
+                    .as_ref()
+                    .and_then(|p| p.menu.selected());
+                self.ui.set_menu_selected(selected.map_or(-1, count));
+            }
+        }
+    }
+
+    /// 고르기 메뉴에서 골랐다: 메뉴를 닫고 복사·이동이면 작업을 넣는다(왼쪽 끌기로 놓은 것과 같은 길).
+    fn finish_drop_menu(&self, choice: DropChoice) {
+        let Some(pending) = self.drop_menu.borrow_mut().take() else {
+            return;
+        };
+        self.ui.set_menu_open(false);
+        let effect = match choice {
+            DropChoice::Copy => DropEffect::Copy,
+            DropChoice::Move => DropEffect::Move,
+            DropChoice::Cancel => return,
+        };
+        let started = self
+            .app
+            .borrow_mut()
+            .start_drop(effect, pending.sources, pending.target);
+        match started {
+            Ok(_) => {
+                refresh_jobs();
+                save_session();
+            }
+            Err(rejection) => self
+                .ui
+                .set_notice(text::drop_rejected_text(&rejection).into()),
+        }
+    }
+
+    /// 항목 위(아이콘·이름 글자)를 눌렀다. 왼쪽 버튼은 선택에 없는 항목이면 곧바로 고르고, 이미 선택된 항목은
+    /// 고르기를 놓을 때로 미룬다(여럿을 골라 둔 채 끌 수 있게). 오른쪽 버튼은 선택을 정하고(선택에 없으면 그 항목
+    /// 하나) 메뉴는 놓을 때 연다. 그 뒤 문턱을 넘게 끌면 항목 끌기다([`View::item_moved`]).
+    fn item_press(&self, panel: i32, row: i32, right: bool, modifiers: (bool, bool), at: Point) {
+        self.marquee_cancel();
+        self.item_press.borrow_mut().take();
+        let (Ok(panel), Ok(index)) = (usize::try_from(panel), usize::try_from(row)) else {
+            return;
+        };
+        let (ctrl, shift) = modifiers;
+        let mut deferred = None;
+        let button = if right {
+            self.close_context_menu();
+            self.remember_scroll();
+            let picked = self
+                .app
+                .borrow_mut()
+                .context_click(panel, Some(index))
+                .is_some();
+            if !picked {
+                return;
+            }
+            self.close_rename();
+            self.close_address_edit();
+            self.render();
+            ItemButton::Right
+        } else {
+            let selected = self.app.borrow().active_tab().is_selected(index);
+            if item_drag::defers_click(selected, shift) {
+                deferred = Some((ctrl, shift));
+            } else {
+                self.row_pressed(row, Pick::for_click(ctrl, shift));
+            }
+            ItemButton::Left
+        };
+        let Some(tab) = self.shown_tab_id(panel) else {
+            return;
+        };
+        *self.item_press.borrow_mut() = Some(ItemPress {
+            panel,
+            tab,
+            row: index,
+            button,
+            deferred,
+            pressed: at,
+        });
+    }
+
+    /// 항목을 누른 채 움직였다: 문턱을 넘으면 선택(누른 항목이 든)을 끄는 OLE 끌기를 시작한다. 끌기 루프는 창 이벤트
+    /// 처리 밖에서 돈다(`drag_source::run_soon`, 끄는 동안 창이 다시 그려지게).
+    fn item_moved(&self, at: Point) {
+        let press = {
+            let mut guard = self.item_press.borrow_mut();
+            match guard.as_ref() {
+                Some(press) if press.crossed(at) => guard.take(),
+                _ => None,
+            }
+        };
+        let Some(press) = press else {
+            return;
+        };
+        if self.shown_tab_id(press.panel) != Some(press.tab) {
+            return;
+        }
+        let Some(sources) = self.app.borrow().drag_sources() else {
+            return;
+        };
+        let window = self.window;
+        let button = press.button;
+        facet_win::drag_source::run_soon(Box::new(move || {
+            run_item_drag(window, &sources, button);
+        }));
+    }
+
+    /// 끌지 않고 놓았다: 미룬 클릭을 하거나(왼쪽) 오른쪽 메뉴를 연다(오른쪽).
+    fn item_released(&self, button: ItemButton) {
+        let press = {
+            let mut guard = self.item_press.borrow_mut();
+            if guard.as_ref().is_some_and(|p| p.released_by(button)) {
+                guard.take()
+            } else {
+                None
+            }
+        };
+        let Some(press) = press else {
+            return;
+        };
+        if self.shown_tab_id(press.panel) != Some(press.tab) {
+            return;
+        }
+        match press.button {
+            ItemButton::Left => {
+                if let Some((ctrl, shift)) = press.deferred {
+                    self.row_pressed(count(press.row), Pick::for_click(ctrl, shift));
+                }
+            }
+            ItemButton::Right => self.open_context_menu(
+                count(press.panel),
+                count(press.row),
+                (press.pressed.x, press.pressed.y),
+            ),
+        }
+    }
+
+    /// 창이 포커스를 잃었다: 누르기를 버린다.
+    fn item_cancel(&self) {
+        self.item_press.borrow_mut().take();
+    }
 }
 
-/// 창 하나의 OLE 드롭 대상 처리기: 다른 앱(탐색기 등)에서 끌어 온 파일을 받는다. OLE가 UI 스레드에서 부른다.
+/// 끄는 파일을 놓을 자리의 판단.
+struct DropPlace {
+    decision: dragdrop::Decision,
+    /// 놓을 폴더(폴더 행이나 패널 위치). 놓을 수 없는 곳이면 `None`.
+    folder: Option<PathBuf>,
+    /// 커서 효과. 놓을 수 없으면 `None`.
+    effect: Option<DropEffect>,
+    /// 드러낼 폴더 행(패널, 항목 번호).
+    highlight: Option<(usize, usize)>,
+    /// 창 기준 점.
+    at: (f32, f32),
+}
+
+impl DropPlace {
+    /// 커서 옆 설명: 「〈폴더〉로 이동/복사」, 놓을 수 없으면 까닭.
+    fn label(&self) -> facet_win::drop_target::DropLabel {
+        let name = self.folder.as_deref().map(folder_label);
+        let refusal = match self.decision {
+            dragdrop::Decision::Refuse(refusal) => Some(refusal),
+            _ => None,
+        };
+        text::drop_label(self.effect, name.as_deref(), refusal)
+    }
+}
+
+/// 설명에 넣을 폴더 이름: 마지막 이름, 드라이브 루트면 `C:`처럼.
+fn folder_label(folder: &std::path::Path) -> String {
+    match folder.file_name() {
+        Some(name) => name.to_string_lossy().into_owned(),
+        None => folder
+            .to_string_lossy()
+            .trim_end_matches(['\\', '/'])
+            .to_owned(),
+    }
+}
+
+/// facet 항목 끌기 루프를 돈다(창 이벤트 처리 밖에서 불린다). 놓는 쪽(facet 창이면 그 창의 드롭 대상)이 작업을
+/// 넣으므로 여기서는 결과를 기다리기만 한다. 최적화하지 않은 이동이 돌아와도 원본은 지우지 않는다(docs/adr/0009).
+fn run_item_drag(window: WindowId, sources: &[PathBuf], button: ItemButton) {
+    #[cfg(windows)]
+    {
+        use facet_win::drag_source::{DragButton, DragObject, run};
+        use facet_win::drop_target::Allowed;
+        let Some(handle) = view_of(window).and_then(|view| view.handle()) else {
+            return;
+        };
+        let allowed = Allowed {
+            copy: true,
+            mov: true,
+        };
+        let button = match button {
+            ItemButton::Left => DragButton::Left,
+            ItemButton::Right => DragButton::Right,
+        };
+        let result =
+            DragObject::new(sources, allowed).and_then(|object| run(handle, &object, button));
+        if let Err(error) = result
+            && let Some(view) = view_of(window)
+        {
+            view.ui.set_notice(text::drag_failed_text(&error).into());
+        }
+        // 놓은 쪽이 바꾼 화면(작업 영역·창 목록)을 이벤트 루프로 돌아간 뒤 맞춘다.
+        Timer::single_shot(Duration::ZERO, || {
+            refresh_jobs();
+            sync_windows();
+        });
+    }
+    #[cfg(not(windows))]
+    let _ = (window, sources, button);
+}
+
+/// 창 하나의 OLE 드롭 대상 처리기: 다른 앱(탐색기 등)과 facet 자신에서 끌어 온 파일을 받는다. OLE가 UI 스레드에서
+/// 부른다.
 struct FileDrop {
     window: WindowId,
     /// 끌기가 들어올 때 읽은 파일들. 파일 목록이 아니면 `None`.
     sources: RefCell<Option<Vec<PathBuf>>>,
+    /// 마지막 판단의 커서 옆 설명.
+    label: RefCell<Option<facet_win::drop_target::DropLabel>>,
 }
 
 fn drop_effect(effect: Option<DropEffect>) -> facet_win::drop_target::Effect {
@@ -3667,6 +4018,10 @@ fn drop_effect(effect: Option<DropEffect>) -> facet_win::drop_target::Effect {
 }
 
 impl facet_win::drop_target::DropHandler for FileDrop {
+    fn label(&self) -> Option<facet_win::drop_target::DropLabel> {
+        self.label.borrow().clone()
+    }
+
     fn enter(
         &self,
         data: &facet_win::drop_target::DragData,
@@ -3681,14 +4036,14 @@ impl facet_win::drop_target::DropHandler for FileDrop {
             return facet_win::drop_target::Effect::None;
         };
         let sources = self.sources.borrow();
-        drop_effect(
-            view.drop_place(state, sources.as_deref())
-                .map(|(effect, _)| effect),
-        )
+        let placed = view.drop_place(state, sources.as_deref());
+        *self.label.borrow_mut() = placed.as_ref().map(DropPlace::label);
+        drop_effect(placed.and_then(|p| p.effect))
     }
 
     fn leave(&self) {
         self.sources.borrow_mut().take();
+        self.label.borrow_mut().take();
         if let Some(view) = view_of(self.window) {
             view.show_drop_row(None);
         }
@@ -3700,13 +4055,45 @@ impl facet_win::drop_target::DropHandler for FileDrop {
         state: &facet_win::drop_target::DragState,
     ) -> facet_win::drop_target::Effect {
         self.sources.borrow_mut().take();
+        self.label.borrow_mut().take();
         let Some(view) = view_of(self.window) else {
             return facet_win::drop_target::Effect::None;
         };
         let placed = view.drop_place(state, data.files.as_deref());
         view.show_drop_row(None);
-        let (Some((effect, target)), Some(sources)) = (placed, data.files.clone()) else {
+        let (Some(placed), Some(sources)) = (placed, data.files.clone()) else {
             return facet_win::drop_target::Effect::None;
+        };
+        let Some(target) = placed.folder.clone() else {
+            return facet_win::drop_target::Effect::None;
+        };
+        if let dragdrop::Decision::Menu { copy, mov } = placed.decision {
+            // 오른쪽 끌기: 파일 목록(이미 복사한 경로)을 들고 먼저 돌아가 원본 앱을 붙잡지 않고, 이벤트 루프로 돌아간 뒤
+            // 놓은 자리에 고르기 메뉴를 연다. 원본 앱에는 아무 일도 없었다고 답한다(고른 뒤 facet이 직접 복사·이동한다).
+            let pending = PendingDrop {
+                menu: DropMenu::new(copy, mov, placed.effect == Some(DropEffect::Move)),
+                sources,
+                target,
+            };
+            let window = self.window;
+            let at = placed.at;
+            Timer::single_shot(Duration::ZERO, move || {
+                if let Some(view) = view_of(window) {
+                    if let Ok(mut app) = view.app.try_borrow_mut()
+                        && app.has_windows()
+                        && app.active_window_id() != window
+                    {
+                        app.activate_window(window);
+                    }
+                    view.open_drop_menu(pending, at);
+                }
+            });
+            return facet_win::drop_target::Effect::None;
+        }
+        let effect = match placed.decision {
+            dragdrop::Decision::Copy => DropEffect::Copy,
+            dragdrop::Decision::Move => DropEffect::Move,
+            _ => return facet_win::drop_target::Effect::None,
         };
         // 원본 앱이 기다리므로 작업은 넣기만 한다(시작 전 확인만 하고 복사·이동은 작업 대기열이 한다). 막히면 원본
         // 앱에 아무 일도 없었다고 답한다.
@@ -3751,6 +4138,7 @@ fn register_drop_target(view: &View) {
         let handler = FileDrop {
             window: view.window,
             sources: RefCell::default(),
+            label: RefCell::default(),
         };
         match facet_win::drop_target::register(handle, Box::new(handler)) {
             Ok(registration) => *view.drop_target.borrow_mut() = Some(registration),

@@ -466,8 +466,10 @@ fn parse_description(bytes: &[u8]) -> Option<(i32, String, String)> {
     let text = |start: usize| -> Option<String> {
         let units: Vec<u16> = bytes
             .get(start..start + 2 * DESCRIPTION_CHARS)?
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
             .take_while(|u| *u != 0)
             .collect();
         Some(String::from_utf16_lossy(&units))
