@@ -1193,6 +1193,7 @@ dependencies = [
 name = "facet-bench"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "facet-core",
  "facet-index",
  "facet-indexer",
@@ -1207,6 +1208,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "encoding_rs",
+ "facet-protocol",
  "facet-win",
  "regex",
  "serde",
