@@ -279,6 +279,8 @@ impl Run<'_, '_> {
                         stamp,
                     })
                 }),
+            // 영구 삭제는 되돌릴 수 없는 기록에만 있어 여기 오지 않는다. 와도 아무것도 하지 않는다.
+            (Step::Deleted { .. }, _) => Attempt::Skip(RevertSkip::Missing),
         }
     }
 
@@ -759,7 +761,7 @@ fn current_path(step: &Step, reversal: Reversal) -> &Path {
             Step::Renamed { from, .. } | Step::Moved { from, .. } | Step::MovedFolder { from, .. },
             Reversal::Redo,
         ) => from,
-        (Step::CreatedFolder { path, .. }, _)
+        (Step::CreatedFolder { path, .. } | Step::Deleted { path }, _)
         | (Step::Copied { path, .. } | Step::Overwrote { path, .. }, Reversal::Undo) => path,
         (Step::Copied { source, .. } | Step::Overwrote { source, .. }, Reversal::Redo) => source,
     }

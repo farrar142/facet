@@ -257,7 +257,7 @@ pub(super) struct Totals {
 }
 
 /// 훑기가 통로에 넣는 항목.
-enum Entry {
+pub(super) enum Entry {
     File {
         source: PathBuf,
         target: PathBuf,
@@ -285,7 +285,7 @@ enum Entry {
 }
 
 /// 항목을 센 것에 더한다. 넣기 전에 세어, 복사 쪽이 한 것이 센 것을 넘지 않는다.
-fn count(totals: &Totals, entry: &Entry) {
+pub(super) fn count(totals: &Totals, entry: &Entry) {
     match entry {
         // 폴더 끝은 항목이 아니라 표지다.
         Entry::FolderEnd { .. } => {}
@@ -319,8 +319,32 @@ fn scan(plans: Vec<Plan>, sender: &Sender<Entry>, totals: &Totals, control: &Con
     true
 }
 
+/// 원본들을 훑기 스레드가 훑는 동안 이미 센 항목부터 `handle`에 넘긴다(복사와 영구 삭제가 함께 쓴다). `handle`이
+/// `false`를 돌려주면(취소) 더 받지 않고 통로를 버려 훑기도 곧 멈춘다. 다 훑었으면 `true`.
+pub(super) fn pipeline(
+    plans: Vec<Plan>,
+    totals: &Totals,
+    control: &Control,
+    mut handle: impl FnMut(Entry) -> bool,
+) -> bool {
+    let (sender, receiver) = mpsc::channel();
+    thread::scope(|scope| {
+        let scanner = thread::Builder::new()
+            .name("facet-job-scan".into())
+            .spawn_scoped(scope, move || scan(plans, &sender, totals, control))
+            .expect("훑기 스레드를 띄우지 못했다");
+        // 훑기가 끝나 통로를 닫을 때까지 받는다.
+        for entry in receiver {
+            if !handle(entry) {
+                break;
+            }
+        }
+        scanner.join().unwrap_or(false)
+    })
+}
+
 /// 원본 항목 하나(폴더면 그 아래 전부)를 훑어 넣는다. 취소돼 멈췄으면 `false`.
-fn scan_one(
+pub(super) fn scan_one(
     source: PathBuf,
     target: Option<PathBuf>,
     send: &dyn Fn(Entry),
@@ -633,23 +657,15 @@ impl<'a> Copier<'a> {
     pub(super) fn run_pipeline(&mut self, plans: Vec<Plan>) -> bool {
         let control = self.context.control;
         let totals = Arc::clone(&self.reporter.totals);
-        let (sender, receiver) = mpsc::channel();
-        let scanned = thread::scope(|scope| {
-            let scanner = thread::Builder::new()
-                .name("facet-job-scan".into())
-                .spawn_scoped(scope, move || scan(plans, &sender, &totals, control))
-                .expect("훑기 스레드를 띄우지 못했다");
-            // 훑기가 끝나 통로를 닫을 때까지 받는다. 취소하면 통로를 버려 훑기도 곧 멈춘다.
-            for entry in receiver {
-                if !control.proceed() {
-                    self.cancelled = true;
-                }
-                if self.cancelled {
-                    break;
-                }
-                self.handle(entry);
+        let scanned = pipeline(plans, &totals, control, |entry| {
+            if !control.proceed() {
+                self.cancelled = true;
             }
-            scanner.join().unwrap_or(false)
+            if self.cancelled {
+                return false;
+            }
+            self.handle(entry);
+            true
         });
         if !scanned {
             self.cancelled = true;
@@ -1359,7 +1375,7 @@ pub(super) struct Reporter {
     start: Instant,
     last: Option<Instant>,
     pub(super) items_done: u64,
-    bytes_done: u64,
+    pub(super) bytes_done: u64,
     pub(super) current: Option<PathBuf>,
 }
 

@@ -17,9 +17,9 @@ use crate::job::{JobEvent, JobId, JobKind, JobQuestion, JobState, Progress, Summ
 pub struct JobEntry {
     /// 작업.
     pub id: JobId,
-    /// 복사·이동.
+    /// 작업 종류(복사·이동·실행취소·다시 실행·삭제).
     pub kind: JobKind,
-    /// 대상 폴더.
+    /// 대상 폴더. 삭제는 지우는 위치(첫 원본이 든 폴더)다.
     pub target: PathBuf,
     /// 넘긴 원본 항목 수(진행이 오기 전에 보인다).
     pub sources: usize,
