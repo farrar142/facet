@@ -794,14 +794,15 @@ mod windows {
         let running_first = position(&events, &state_changed(first, JobState::Running));
         let running_urgent = position(&events, &state_changed(urgent, JobState::Running));
         let finished_first = position(&events, &state_changed(first, JobState::Finished));
-        let finished_urgent = position(&events, &state_changed(urgent, JobState::Finished));
+        assert!(events.contains(&state_changed(urgent, JobState::Finished)));
         let running_later = position(&events, &state_changed(later, JobState::Running));
         // 두 작업이 동시에 실행 중인 순간이 있다.
         assert!(
             running_first < running_urgent && running_urgent < finished_first,
             "{events:?}"
         );
-        assert!(finished_urgent < finished_first, "{events:?}");
+        // 어느 쪽이 먼저 끝나는지는 보지 않는다: 캐시에 든 큰 파일은 100ms 안에 끝나 작은 작업의 마지막 진행
+        // (진행 간격 100ms)보다 먼저 끝나기도 한다. 겹쳐 돈 것은 위에서 확인했다.
         // 나란히 돌던 작업이 끝나도 차례의 다음 작업은 앞 작업을 기다린다.
         assert!(finished_first < running_later, "{events:?}");
         assert_same_content(&big, &targets[0].join("큰 파일.bin"));
