@@ -5,7 +5,8 @@
 //! ([`Record`])마다 작업 종류([`OperationKind`]), 항목별 결과(되돌릴 단위 [`Step`]: 원래 경로·새 경로·만든 항목과
 //! 그때의 크기·수정 시각 [`Stamp`]), 되돌릴 수 없으면 그 까닭([`NotUndoable`])을 갖는다. 이름바꾸기·새 폴더와
 //! 복사·이동(폴더 안의 항목도 하나씩, [`Step::Copied`]·[`Step::Moved`]·[`Step::MovedFolder`], 원래 대상을 휴지통으로
-//! 보내고 덮어쓴 파일은 그 휴지통 항목과 함께 [`Step::Overwrote`])이 기록된다.
+//! 보내고 덮어쓴 파일은 그 휴지통 항목과 함께 [`Step::Overwrote`])이 기록된다. **영구 삭제**는 되돌릴 수 없는
+//! 기록([`NotUndoable::PermanentDelete`], 넘긴 원본마다 [`Step::Deleted`])으로 남는다.
 //!
 //! - **실행취소 대상**은 끝난 작업 가운데 마지막 기록이다([`History::undo_target`]). 그것이 되돌릴 수 없는 작업이면
 //!   실행취소는 까닭을 돌려주고 그 앞 기록으로 넘어가지 않는다.
@@ -53,6 +54,8 @@ pub enum OperationKind {
     Copy,
     /// 이동(반대편 패널로, 이동 위치…). 항목은 [`Step::Moved`]·[`Step::MovedFolder`]다.
     Move,
+    /// 삭제. 영구 삭제면 되돌릴 수 없는 기록([`NotUndoable::PermanentDelete`])이고 항목은 [`Step::Deleted`]다.
+    Delete,
 }
 
 /// 되돌릴 수 없는 까닭의 종류.
@@ -155,16 +158,21 @@ pub enum Step {
         replaced: RecycledItem,
         replaced_stamp: Stamp,
     },
+    /// 영구 삭제가 넘긴 원본 `path`(나 그 안의 항목)를 지웠다. 폴더 안의 항목은 따로 들지 않는다: 되살릴 것이
+    /// 남지 않아 항목별 모습이 필요 없다(지운 항목 수는 [`Record::items_completed`]). 건너뛴 항목이 있어 폴더가
+    /// 남았어도 그 안에서 지운 것이 있으면 든다. 되돌릴 수 없는 기록에만 있다.
+    Deleted { path: PathBuf },
 }
 
 impl Step {
-    /// 작업 뒤에 그 항목이 있는 경로(실행취소가 다루는 경로).
+    /// 작업 뒤에 그 항목이 있는 경로(실행취소가 다루는 경로). 지운 항목은 지우기 전에 있던 경로다.
     pub fn path(&self) -> &Path {
         match self {
             Step::Renamed { to, .. } => to,
             Step::CreatedFolder { path, .. }
             | Step::Copied { path, .. }
-            | Step::Overwrote { path, .. } => path,
+            | Step::Overwrote { path, .. }
+            | Step::Deleted { path } => path,
             Step::Moved { to, .. } | Step::MovedFolder { to, .. } => to,
         }
     }
@@ -180,7 +188,10 @@ impl Step {
                 moved: true,
                 ..
             } => Some(source),
-            Step::CreatedFolder { .. } | Step::Copied { .. } | Step::Overwrote { .. } => None,
+            Step::CreatedFolder { .. }
+            | Step::Copied { .. }
+            | Step::Overwrote { .. }
+            | Step::Deleted { .. } => None,
         }
     }
 
@@ -206,6 +217,8 @@ pub struct Record {
     steps: Vec<Step>,
     not_undoable: Option<NotUndoable>,
     skipped: u64,
+    /// 끝낸 항목 수가 항목별 결과의 수와 다르면 그 수(영구 삭제: 폴더 안의 항목을 따로 담지 않는다).
+    completed: Option<u64>,
 }
 
 impl Record {
@@ -217,6 +230,7 @@ impl Record {
             steps,
             not_undoable: None,
             skipped: 0,
+            completed: None,
         }
     }
 
@@ -224,6 +238,13 @@ impl Record {
     /// ([`Step`])에 들지 않는다. 이름바꾸기·새 폴더는 늘 0이다.
     pub fn with_skipped(mut self, skipped: u64) -> Record {
         self.skipped = skipped;
+        self
+    }
+
+    /// 끝낸 항목 수를 따로 정한 기록: 항목별 결과([`Step`])에 폴더 안의 항목을 담지 않는 작업(영구 삭제)이 지운
+    /// 항목 수를 [`Record::items_completed`]로 보이게 한다.
+    pub fn with_completed(mut self, completed: u64) -> Record {
+        self.completed = Some(completed);
         self
     }
 
@@ -281,9 +302,9 @@ impl Record {
         self.not_undoable
     }
 
-    /// 끝낸 항목 수: 항목별 결과의 수.
+    /// 끝낸 항목 수: 항목별 결과의 수. 영구 삭제는 지운 항목 수다([`Record::with_completed`]).
     pub fn items_completed(&self) -> u64 {
-        self.steps.len() as u64
+        self.completed.unwrap_or(self.steps.len() as u64)
     }
 
     /// 맨 위 항목들: 다른 항목 아래에 있지 않은 항목(작업 이름에 쓸 것). 복사·이동은 폴더 안의 항목도 따로 들므로
@@ -579,6 +600,8 @@ impl History {
             steps,
             not_undoable: running.record.not_undoable,
             skipped: running.record.skipped,
+            // 되돌릴 수 있는 기록만 여기 오고, 그것들은 끝낸 항목 수를 따로 갖지 않는다.
+            completed: None,
         };
         let intact = running.generation == self.generation;
         match running.reversal {

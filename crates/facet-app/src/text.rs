@@ -147,6 +147,9 @@ pub fn operation_name(record: &Record) -> String {
         (OperationKind::Copy, None) => format!("항목 {n}개 복사"),
         (OperationKind::Move, Some(name)) => format!("「{name}」 이동"),
         (OperationKind::Move, None) => format!("항목 {n}개 이동"),
+        // 지금 있는 삭제는 영구 삭제뿐이다(휴지통 삭제는 뒤 티켓).
+        (OperationKind::Delete, Some(name)) => format!("「{name}」 영구 삭제"),
+        (OperationKind::Delete, None) => format!("항목 {n}개 영구 삭제"),
     }
 }
 
@@ -427,6 +430,21 @@ mod tests {
             NotUndoable::Overwritten,
         );
         assert_eq!(operation_name(&moved), "「옛.txt」 이동");
+        let deleted = |path: &str| facet_core::history::Step::Deleted {
+            path: std::path::PathBuf::from(path),
+        };
+        let delete = Record::not_undoable(
+            OperationKind::Delete,
+            vec![deleted(r"C:\a\폴더")],
+            NotUndoable::PermanentDelete,
+        );
+        assert_eq!(operation_name(&delete), "「폴더」 영구 삭제");
+        let deletes = Record::not_undoable(
+            OperationKind::Delete,
+            vec![deleted(r"C:\a\1.txt"), deleted(r"C:\a\2.txt")],
+            NotUndoable::PermanentDelete,
+        );
+        assert_eq!(operation_name(&deletes), "항목 2개 영구 삭제");
         assert_eq!(
             undo_refused_text(&moved, NotUndoable::Overwritten),
             "「옛.txt」 이동: 실행취소할 수 없습니다. 덮어쓴 파일은 되살릴 수 없습니다"

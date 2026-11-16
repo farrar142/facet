@@ -66,8 +66,8 @@ use crate::history::{
     History, NotUndoable, OperationKind, Outcomes, Record, RecordId, Reversal, UndoError,
 };
 use crate::job::{
-    AnswerError, ConflictAnswer, CopyRejection, ErrorAnswer, JobEvent, JobId, JobKind, JobQueue,
-    JournalSink, RevertJob,
+    AnswerError, ConflictAnswer, CopyRejection, DeleteRejection, ErrorAnswer, JobEvent, JobId,
+    JobKind, JobQueue, JournalSink, RevertJob,
 };
 use crate::launch::LaunchTarget;
 use crate::placement::Placement;
@@ -1751,7 +1751,7 @@ impl App {
             JobKind::Copy => CommandId::CopyTo,
             JobKind::Move => CommandId::MoveTo,
             // 실행취소·다시 실행은 원본을 골라 넣는 작업이 아니다.
-            JobKind::Undo | JobKind::Redo => return None,
+            JobKind::Undo | JobKind::Redo | JobKind::Delete => return None,
         };
         if !self.can_execute(command) {
             return None;
@@ -1840,6 +1840,31 @@ impl App {
         Ok(id)
     }
 
+    /// 고른 항목들(`sources`)을 **영구 삭제**하는 작업을 작업 대기열에 넣어 곧바로 시작하고(차례를 기다리지 않는다,
+    /// [`JobQueue::delete_permanently`]) 작업 영역에 더한다([`JobKind::Delete`], 대상 자리에는 지우는 위치: 첫 원본이
+    /// 든 폴더). 원본이 없으면 작업을 만들지 않고 까닭([`DeleteRejection`])을 돌려준다.
+    ///
+    /// 휴지통을 거치지 않으므로 되돌릴 수 없다. 실행 전에 그 사실을 알리고 확인받는 것은 화면 몫이다(이것은 확인을
+    /// 마친 뒤 부른다). 진행·항목별 오류 질문·취소·끝남은 다른 작업과 같고 [`App::poll_jobs`]가 받는다.
+    ///
+    /// 하나라도 지웠으면 끝날 때(끝남·실패·취소 모두) 작업 기록에 **되돌릴 수 없는 작업**(까닭:
+    /// [`NotUndoable::PermanentDelete`])으로 남는다. 그 뒤 실행취소는 까닭을 돌려주고 그 앞 작업을 되돌리지 않는다
+    /// ([`App::undo`]). 지운 위치를 보는 탭은 변경 감시로 갱신된다.
+    pub fn delete_permanently(&mut self, sources: Vec<PathBuf>) -> Result<JobId, DeleteRejection> {
+        let location = sources
+            .first()
+            .and_then(|source| source.parent())
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        let count = sources.len();
+        let (id, journal) = self.jobs.delete_permanently_recorded(sources)?;
+        self.journals.insert(id, (OperationKind::Delete, journal));
+        self.work_area.add(id, JobKind::Delete, location, count);
+        // 넣자마자 온 대기·실행 사건을 바로 반영한다.
+        self.poll_jobs();
+        Ok(id)
+    }
+
     /// 작업 대기열에서 온 사건을 모두 작업 영역에 반영한다. 무엇이든 바뀌었으면 `true`다(화면이 다시 그린다).
     pub fn poll_jobs(&mut self) -> bool {
         let mut changed = false;
@@ -1853,8 +1878,8 @@ impl App {
         changed
     }
 
-    /// 끝난 복사·이동(끝남·실패·취소 모두)을 작업 기록에 남긴다: 실제로 한 항목만 담고, 한 항목이 없으면 남기지
-    /// 않는다. 휴지통을 거치지 않고 영구 덮어쓴 파일이 있으면 되돌릴 수 없다고 남긴다(그 파일은 되살릴 수 없으므로).
+    /// 끝난 복사·이동·영구 삭제(끝남·실패·취소 모두)를 작업 기록에 남긴다: 실제로 한 항목만 담고, 한 항목이 없으면
+    /// 남기지 않는다. 영구 삭제는 하나라도 지웠으면 되돌릴 수 없는 작업([`NotUndoable::PermanentDelete`])으로 남긴다. 휴지통을 거치지 않고 영구 덮어쓴 파일이 있으면 되돌릴 수 없다고 남긴다(그 파일은 되살릴 수 없으므로).
     /// 휴지통으로 보내고 덮어쓴 파일은 되돌릴 수 있다(옛 파일을 휴지통에서 복원).
     fn record_transfer(&mut self, job: JobId, summary: &crate::job::Summary) {
         let Some((kind, journal)) = self.journals.remove(&job) else {
@@ -1864,7 +1889,11 @@ impl App {
         if journal.steps.is_empty() && !journal.overwrote {
             return;
         }
-        let record = if journal.overwrote {
+        let record = if kind == OperationKind::Delete {
+            // 영구 삭제: 되살릴 것이 남지 않는다. 항목별 결과는 넘긴 원본뿐이라 지운 항목 수를 따로 준다.
+            Record::not_undoable(kind, journal.steps, NotUndoable::PermanentDelete)
+                .with_completed(summary.items_deleted)
+        } else if journal.overwrote {
             Record::not_undoable(kind, journal.steps, NotUndoable::Overwritten)
         } else {
             Record::new(kind, journal.steps)

@@ -25,9 +25,11 @@
 //! 지금 있는 작업은 **복사**([`JobQueue::copy`])와 **이동**([`JobQueue::move_items`]), 그리고 작업 기록(복사·이동도
 //! 남는다, [`crate::window::App::start_transfer`])을 되돌리는
 //! **실행취소**·**다시 실행**([`crate::window::App::undo`]·[`crate::window::App::redo`])이다. 진행·이름 충돌·오류
-//! 처리의 자세한 규칙은 그 문서에 있다.
+//! 처리의 자세한 규칙은 그 문서에 있다. 삭제 작업은 **영구 삭제**([`JobQueue::delete_permanently`])가 있다. 삭제와
+//! 실행취소·다시 실행은 대기열의 작업이지만 차례를 기다리지 않고 넣자마자 시작한다(「지금 시작」과 같은 길).
 
 mod copy;
+mod delete;
 mod moving;
 mod revert;
 
@@ -64,7 +66,8 @@ impl JobId {
 }
 
 /// 작업의 종류: 복사([`JobQueue::copy`])나 이동([`JobQueue::move_items`]), 실행취소·다시 실행
-/// ([`crate::window::App::undo`]·[`crate::window::App::redo`]). [`JobQueue::submit`]이 이것으로 복사·이동을 고른다.
+/// ([`crate::window::App::undo`]·[`crate::window::App::redo`]), 삭제([`JobQueue::delete_permanently`]).
+/// [`JobQueue::submit`]이 이것으로 복사·이동을 고른다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum JobKind {
     /// 복사.
@@ -75,6 +78,8 @@ pub enum JobKind {
     Undo,
     /// 다시 실행: 실행취소한 작업을 다시 한다.
     Redo,
+    /// 삭제. 지금은 **영구 삭제**([`JobQueue::delete_permanently`])다. 차례를 기다리지 않고 곧바로 시작한다.
+    Delete,
 }
 
 /// 작업의 상태.
@@ -173,6 +178,8 @@ pub struct Summary {
     /// 따라 들어가지 않고 링크 자체를 대상에 만든 심볼릭 링크(파일·폴더)·정션 수. 링크로 덮어썼으면
     /// [`Summary::files_overwritten`]에도 든다. 이동이 이름 바꾸기로 옮긴 링크는 [`Summary::items_renamed`]에 든다.
     pub links_copied: u64,
+    /// 영구 삭제 작업이 지운 항목 수(파일·폴더·링크를 하나씩 센다). 다른 작업은 늘 0이다.
+    pub items_deleted: u64,
     /// 항목별 오류에 건너뛰기(또는 「나머지 오류도 건너뛰기」)로 답해 건너뛴 항목과 그 오류(폴더면 그 아래는
     /// 따로 세지 않는다). 그 수는 [`Summary::errors_skipped`]. 하나라도 있으면 작업은 [`JobState::Failed`]로 끝난다.
     pub failures: Vec<ItemFailure>,
@@ -392,11 +399,19 @@ pub enum CopyRejection {
     TargetInsideSource(PathBuf),
 }
 
+/// 영구 삭제를 시작하기 전에 막은 까닭. 이때는 작업을 만들지 않는다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DeleteRejection {
+    /// 원본이 하나도 없다.
+    NoSources,
+}
+
 /// 일꾼에게 넘기는 작업.
 enum Job {
     Copy(copy::CopyJob),
     Move(moving::MoveJob),
     Revert(revert::RevertJob),
+    Delete(delete::DeleteJob),
 }
 
 impl Job {
@@ -406,6 +421,7 @@ impl Job {
             Job::Copy(job) => job.root_count(),
             Job::Move(job) => job.root_count(),
             Job::Revert(job) => job.root_count(),
+            Job::Delete(job) => job.root_count(),
         }
     }
 
@@ -415,6 +431,7 @@ impl Job {
             Job::Copy(job) => job.run(context),
             Job::Move(job) => job.run(context),
             Job::Revert(job) => job.run(context),
+            Job::Delete(job) => job.run(context),
         }
     }
 }
@@ -820,8 +837,9 @@ impl JobQueue {
         Ok(self.enqueue(Job::Move(job)))
     }
 
-    /// 종류에 따라 복사([`JobQueue::copy`])나 이동([`JobQueue::move_items`]) 작업을 넣는다. 실행취소·다시 실행은
-    /// 원본·대상으로 넣는 작업이 아니라([`crate::window::App::undo`]) 작업을 만들지 않고 [`CopyRejection::NoSources`]다.
+    /// 종류에 따라 복사([`JobQueue::copy`])나 이동([`JobQueue::move_items`]) 작업을 넣는다. 실행취소·다시 실행과
+    /// 삭제는 원본·대상으로 넣는 작업이 아니라([`crate::window::App::undo`], [`JobQueue::delete_permanently`]) 작업을
+    /// 만들지 않고 [`CopyRejection::NoSources`]다.
     pub fn submit(
         &mut self,
         kind: JobKind,
@@ -831,7 +849,7 @@ impl JobQueue {
         match kind {
             JobKind::Copy => self.copy(sources, target),
             JobKind::Move => self.move_items(sources, target),
-            JobKind::Undo | JobKind::Redo => Err(CopyRejection::NoSources),
+            JobKind::Undo | JobKind::Redo | JobKind::Delete => Err(CopyRejection::NoSources),
         }
     }
 
@@ -855,7 +873,9 @@ impl JobQueue {
                 job.plan.journal = Some(Arc::clone(&journal));
                 Job::Move(job)
             }
-            JobKind::Undo | JobKind::Redo => return Err(CopyRejection::NoSources),
+            JobKind::Undo | JobKind::Redo | JobKind::Delete => {
+                return Err(CopyRejection::NoSources);
+            }
         };
         Ok((self.enqueue(job), journal))
     }
@@ -867,7 +887,49 @@ impl JobQueue {
     /// 순간에 끝나고 복사의 되돌리기는 휴지통으로 보내기(같은 볼륨 안 이름 바꾸기)라 다른 작업의 디스크를 거의 쓰지
     /// 않는다. 볼륨을 넘는 이동의 되돌리기는 다시 복사하지만, 그것도 사용자가 곧바로 되돌리기를 바란 것이다. 사건·일시정지·취소·항목별 오류 질문은 다른 작업과 같다.
     pub(crate) fn revert(&mut self, job: RevertJob) -> JobId {
-        let id = self.enqueue(Job::Revert(job));
+        self.start_at_once(Job::Revert(job))
+    }
+
+    /// 원본 항목들(파일·폴더)을 **영구 삭제**하는 작업을 넣고 차례를 기다리지 않고 곧바로 시작한다
+    /// ([`JobQueue::start_now`]와 같은 길: 이미 도는 작업과 나란히 돌고 차례 실행은 그대로 이어진다). 휴지통을 거치지
+    /// 않으므로 되돌릴 수 없다. 원본이 없으면 작업을 만들지 않는다([`DeleteRejection::NoSources`]).
+    ///
+    /// 곧바로 시작하는 까닭: 삭제는 사용자가 지금 눈앞의 항목을 치우려는 것이라, 앞에 큰 복사가 돌고 있다고 그 뒤로
+    /// 미루면 지운 항목이 목록에 남은 채 기다리게 된다. 지우기는 디스크를 거의 쓰지 않아 다른 작업을 늦추지 않는다.
+    ///
+    /// 사건·상태·일시정지·취소·항목별 오류 질문은 복사([`JobQueue::copy`])와 같다. 진행은 항목 수(파일·폴더·링크,
+    /// 넘긴 원본 자신 포함)와 파일 크기의 합으로 세고, 원본을 훑어 세는 동안 이미 센 항목부터 지운다.
+    ///
+    /// - 폴더는 안을 깊이 우선으로 지운 뒤 빈 폴더를 지운다. 읽기 전용 파일·폴더는 읽기 전용을 풀고 지운다.
+    /// - 심볼릭 링크(파일·폴더)·정션은 따라 들어가지 않고 링크만 지운다. 가리키던 곳의 내용은 그대로다.
+    /// - 잠긴 파일·접근 거부 등은 **항목별 오류**로 묻는다([`JobEvent::ItemError`], [`JobQueue::answer_error`]).
+    ///   건너뛴 항목([`Summary::failures`])과 그 상위 폴더는 남고(상위 폴더는 오류로 다시 묻지 않는다) 작업은
+    ///   [`JobState::Failed`]로 끝난다.
+    /// - 없는 항목(넘긴 원본이 이미 없음, 훑은 뒤 밖에서 지워짐)은 이미 지워진 것으로 보고 묻지 않는다.
+    /// - 취소하면 이미 지운 것만 지워져 있다.
+    /// - 260자를 넘는 경로도 지운다.
+    ///
+    /// 지운 항목 수는 [`Summary::items_deleted`]다.
+    pub fn delete_permanently(&mut self, sources: Vec<PathBuf>) -> Result<JobId, DeleteRejection> {
+        let job = delete::DeleteJob::prepare(sources)?;
+        Ok(self.start_at_once(Job::Delete(job)))
+    }
+
+    /// 영구 삭제 작업을 넣어 곧바로 시작하고([`JobQueue::delete_permanently`]와 같다) 그 작업이 한 일을 적을 곳을
+    /// 함께 돌려준다(작업 기록에 남길 작업). 작업이 끝난 뒤([`JobEvent::Finished`]) 꺼내 쓴다.
+    pub(crate) fn delete_permanently_recorded(
+        &mut self,
+        sources: Vec<PathBuf>,
+    ) -> Result<(JobId, JournalSink), DeleteRejection> {
+        let journal = JournalSink::default();
+        let mut job = delete::DeleteJob::prepare(sources)?;
+        job.journal = Some(Arc::clone(&journal));
+        Ok((self.start_at_once(Job::Delete(job)), journal))
+    }
+
+    /// 작업을 넣고 차례를 기다리지 않고 곧바로 시작한다(실행취소·다시 실행, 삭제).
+    fn start_at_once(&mut self, job: Job) -> JobId {
+        let id = self.enqueue(job);
         self.start_now(id);
         id
     }
