@@ -775,7 +775,8 @@ fn real_volume_service_install_index_query_uninstall() {
     assert!(service_exists());
 
     // 일반 클라이언트처럼(읽기와 데이터 쓰기만 청해) 붙고, 시험 볼륨이 준비될 때까지 상태 질의를
-    // 되풀이한다. 다른 볼륨(C: 등)은 아직 만드는 중이어도 된다.
+    // 되풀이한다. 다른 볼륨(C: 등)은 아직 만드는 중이어도 된다. 서비스는 볼륨을 고르기 전에
+    // 파이프부터 열므로 처음 상태에는 시험 볼륨이 아직 없을 수 있다(빈 목록, run 43929796209).
     let deadline = Instant::now() + Duration::from_secs(300);
     let mut pipe = loop {
         match OpenOptions::new()
@@ -807,16 +808,14 @@ fn real_volume_service_install_index_query_uninstall() {
             .volumes
             .iter()
             .find(|v| v.volume == volume)
-            .unwrap_or_else(|| panic!("상태에 {volume}이 없음: {status:?}"))
-            .state
-            .clone();
+            .map(|v| v.state.clone());
         match state {
-            VolumeState::Ready { items } => {
+            Some(VolumeState::Ready { items }) => {
                 assert!(items > 0);
                 break;
             }
-            VolumeState::Building { .. } => {}
-            other => panic!("{volume}의 상태가 {other:?}"),
+            Some(VolumeState::Building { .. }) | None => {}
+            Some(other) => panic!("{volume}의 상태가 {other:?}"),
         }
         assert!(
             Instant::now() < deadline,
