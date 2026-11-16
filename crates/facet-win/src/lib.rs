@@ -25,6 +25,8 @@
 //! - [`drop_target`]: 창 하나를 OLE 드롭 대상으로 등록해(`RegisterDragDrop`) 다른 앱에서 끌어 온 파일 목록(`CF_HDROP`,
 //!   [`clipboard::format`]으로 읽음)·원본이 허용한 효과·키를 처리기에 넘기고 처리기가 고른 효과를 돌려준다. 이동은 셸의
 //!   최적화된 이동 규약을 따른다. 창을 만든 UI 스레드(STA)에서만 등록한다. Windows가 아니면 「지원하지 않음」이다.
+//! - [`pipe_client`]: 이름 있는 파이프의 클라이언트 쪽(겹친 입출력). 읽는 쪽·쓰는 쪽을 다른 스레드에서 동시에 쓰고, 읽기에
+//!   마감 시각을 두고, 닫개로 기다리던 읽기를 깨운다. 코어의 인덱서 서비스 연결이 쓴다. Windows가 아니면 붙지 못한다.
 //! - [`shell_copy`]: **측정 전용** 셸 복사(`IFileOperation`, 전용 스레드의 COM, 대화 없음). 탐색기 비교 측정만 부르고
 //!   앱은 부르지 않는다. Windows가 아니면 「지원하지 않음」이다.
 
@@ -38,6 +40,7 @@ pub mod clipboard;
 pub mod drag_source;
 pub mod drop_target;
 pub mod file_ops;
+pub mod pipe_client;
 pub mod recycle;
 pub mod shell_copy;
 pub mod single_instance;
@@ -54,6 +57,8 @@ mod windows_file_ops;
 mod windows_impl;
 #[cfg(windows)]
 mod windows_instance;
+#[cfg(windows)]
+mod windows_pipe_client;
 #[cfg(windows)]
 mod windows_recycle;
 #[cfg(windows)]
