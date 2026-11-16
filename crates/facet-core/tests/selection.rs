@@ -287,6 +287,7 @@ fn 상태_표시줄은_항목_수와_선택_수와_파일_크기_합이다() {
         tab.status(),
         StatusSummary {
             item_count: 5,
+            total_count: None,
             selected_count: 0,
             selected_size: 0
         }
@@ -300,6 +301,7 @@ fn 상태_표시줄은_항목_수와_선택_수와_파일_크기_합이다() {
         tab.status(),
         StatusSummary {
             item_count: 5,
+            total_count: None,
             selected_count: 3,
             selected_size: 1010
         }
