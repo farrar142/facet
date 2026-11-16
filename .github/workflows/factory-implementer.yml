@@ -120,6 +120,8 @@ jobs:
           git switch -c "$BRANCH"
           mkdir -p .factory
           echo ".factory/" >> .git/info/exclude
+          # Logs the agent writes while checking (ci.log, run 43938463111) must not land in the PR.
+          echo "*.log" >> .git/info/exclude
 
       - uses: Swatinem/rust-cache@v2
         if: steps.guard.outputs.go == 'true'
@@ -188,6 +190,9 @@ jobs:
               echo "::warning::the agent left uncommitted changes; committing them"
               git add -A
               git commit -q -m "에이전트가 커밋하지 않은 변경을 남긴다"
+              # Line-ending conversion can leave the just-committed files "modified" again,
+              # which stops the rebase ("You have unstaged changes", run 43938463111).
+              git reset -q --hard
             else
               echo "::warning::the agent left uncommitted changes and made no commits; dropping them"
               git reset -q --hard
