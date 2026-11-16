@@ -21,7 +21,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use facet_core::Location;
 use facet_core::measure::{
-    ENV_OPEN, ENV_OUT, ENV_RENAME, ENV_SCROLL_ROWS, ENV_START_US, ENV_WINDOWS, ScreenReport,
+    ENV_MENU, ENV_OPEN, ENV_OUT, ENV_RENAME, ENV_SCROLL_ROWS, ENV_START_US, ENV_WINDOWS,
+    ScreenReport,
 };
 use slint::winit_030::winit::event::WindowEvent;
 use slint::{ComponentHandle, Model};
@@ -77,6 +78,10 @@ struct State {
     open_started: Option<Instant>,
     /// 첫 화면 뒤에 할 이름바꾸기(옛 이름, 새 이름). 시작한 때는 `open_started`다.
     rename: Option<(String, String)>,
+    /// 첫 화면 뒤에 오른쪽 메뉴를 잴 것인가.
+    menu: bool,
+    /// 오른쪽 메뉴를 재려고 전체 선택을 시작했다(그 프레임이 나가면 메뉴를 연다).
+    menu_selecting: bool,
     /// 이 횟수보다 많이 목록이 들어온 뒤의 프레임만 센다. 이동한 폴더의 목록을 기다릴 때 쓴다.
     loads_seen: usize,
     report: ScreenReport,
@@ -138,6 +143,8 @@ pub fn frame_counter(ui: &AppWindow, key: u64) -> Option<impl FnMut(&WindowEvent
         rename: std::env::var(ENV_RENAME)
             .ok()
             .and_then(|v| v.split_once('|').map(|(a, b)| (a.to_owned(), b.to_owned()))),
+        menu: std::env::var_os(ENV_MENU).is_some_and(|v| !v.is_empty()),
+        menu_selecting: false,
         loads_seen: 0,
         report: ScreenReport::default(),
         last_frame: None,
@@ -214,12 +221,41 @@ fn presented(weak: &slint::Weak<AppWindow>, state: &Mutex<State>) {
                 });
                 return;
             }
+            if s.menu {
+                // 먼저 전체를 선택하고 그 프레임이 나가면 메뉴를 연다(선택을 그리는 비용이 메뉴 시간에 섞이지 않게).
+                s.loads_seen = window_loads(s.key);
+                s.menu_selecting = true;
+                drop(s);
+                crate::with_first_view(|view| {
+                    if !view.measure_select_all()
+                        && let Ok(mut s) = state.lock()
+                    {
+                        s.finish();
+                    }
+                });
+                return;
+            }
             if s.scroll_rows == 0 {
                 s.finish();
                 return;
             }
+        } else if s.menu_selecting {
+            s.menu_selecting = false;
+            s.loads_seen = window_loads(s.key);
+            s.open_started = Some(Instant::now());
+            drop(s);
+            crate::with_first_view(|view| {
+                if !view.measure_open_menu()
+                    && let Ok(mut s) = state.lock()
+                {
+                    s.finish();
+                }
+            });
+            return;
         } else if let Some(started) = s.open_started {
-            if s.rename.is_some() {
+            if s.menu {
+                s.report.menu_frame = Some(now - started);
+            } else if s.rename.is_some() {
                 s.report.rename_frame = Some(now - started);
             } else {
                 s.report.open_frame = Some(now - started);

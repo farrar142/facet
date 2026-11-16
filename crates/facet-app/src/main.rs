@@ -1692,6 +1692,25 @@ impl View {
             .is_ok()
     }
 
+    /// 측정 모드: 활성 탭의 항목을 모두 선택하고 그 모습을 그린다. 그릴 것이 있으면 `true`.
+    fn measure_select_all(&self) -> bool {
+        self.app.borrow_mut().active_tab_mut().select_all();
+        if self.app.borrow().active_tab().is_empty() {
+            return false;
+        }
+        self.render();
+        self.mark_loaded();
+        true
+    }
+
+    /// 측정 모드: 첫 행의 항목 메뉴를 연다(오른쪽 클릭과 같은 길). 그 모습이 그려졌음을 알린다.
+    fn measure_open_menu(&self) -> bool {
+        let panel = self.active_panel();
+        self.open_context_menu(count(panel), 0, (100.0, 100.0));
+        self.mark_loaded();
+        self.context_menu.borrow().is_some()
+    }
+
     /// 읽기 결과(목록이나 오류)가 창에 들어갔음을 측정 모드에 알린다.
     fn mark_loaded(&self) {
         let app = self.app.borrow();
