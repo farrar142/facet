@@ -194,9 +194,12 @@ impl LiveSearch {
     }
 
     fn spawn(request: SearchRequest, waker: Option<Waker>) -> Result<LiveSearch, ListError> {
-        let root = request.root.file_system_path().ok_or_else(|| ListError::NotAFolder {
-            location: request.root.clone(),
-        })?;
+        let root = request
+            .root
+            .file_system_path()
+            .ok_or_else(|| ListError::NotAFolder {
+                location: request.root.clone(),
+            })?;
         let metadata =
             fs::metadata(root).map_err(|e| ListError::from_io(request.root.clone(), e))?;
         if !metadata.is_dir() {
@@ -332,6 +335,9 @@ fn scan(
         shared.folders_skipped.fetch_add(1, Ordering::SeqCst);
         (Vec::new(), Vec::new())
     };
+    if fault::listing_denied(folder) {
+        return skip();
+    }
     let Ok(entries) = fs::read_dir(folder) else {
         return skip();
     };
@@ -347,7 +353,8 @@ fn scan(
         let (Ok(metadata), Ok(kind)) = (entry.metadata(), entry.file_type()) else {
             continue;
         };
-        let Ok(item) = crate::file_system::make_item(entry.file_name(), &|| entry.path(), &metadata)
+        let Ok(item) =
+            crate::file_system::make_item(entry.file_name(), &|| entry.path(), &metadata)
         else {
             continue;
         };
@@ -442,4 +449,48 @@ fn batch(
         elapsed: start.elapsed(),
         end,
     }));
+}
+
+/// 시험용 오류 주입. 앱은 부르지 않는다.
+///
+/// CI 러너는 백업 권한이 켜진 관리자라 `icacls`로 목록 읽기를 거부해도 읽히므로, 건너뛰기와 그 수를 확인하려면
+/// 읽기 실패를 주입한다(`facet_win::file_ops::fault`와 같은 방식).
+pub mod fault {
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Mutex, MutexGuard};
+
+    static DENIED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    /// 주입한 폴더 수. 0이면 잠금 없이 지나간다(평소 탐색은 폴더마다 잠그지 않는다).
+    static COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    /// 돌려준 값이 살아 있는 동안 실시간 탐색은 `folder`(그 자신만, 하위는 아님)의 목록을 읽지 못한 것으로 본다.
+    #[must_use = "버리면 곧바로 주입이 풀린다"]
+    pub fn deny_listing(folder: &Path) -> ListingDenied {
+        let folder = folder.to_path_buf();
+        lock().push(folder.clone());
+        COUNT.fetch_add(1, Ordering::SeqCst);
+        ListingDenied(folder)
+    }
+
+    /// [`deny_listing`]의 주입. 버리면 풀린다.
+    pub struct ListingDenied(PathBuf);
+
+    impl Drop for ListingDenied {
+        fn drop(&mut self) {
+            let mut folders = lock();
+            if let Some(index) = folders.iter().position(|f| *f == self.0) {
+                folders.remove(index);
+                COUNT.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn lock() -> MutexGuard<'static, Vec<PathBuf>> {
+        DENIED.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(super) fn listing_denied(folder: &Path) -> bool {
+        COUNT.load(Ordering::SeqCst) > 0 && lock().iter().any(|f| f == folder)
+    }
 }

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use facet_core::Location;
 use facet_core::live_search::{
     BATCH_INTERVAL, Found, LiveSearch, MAX_THREADS, SearchEnd, SearchEvent, SearchProgress,
-    SearchRequest, SearchSummary, thread_count,
+    SearchRequest, SearchSummary, fault, thread_count,
 };
 
 const WAIT: Duration = Duration::from_secs(30);
@@ -54,10 +54,7 @@ fn run(search: &mut LiveSearch) -> Outcome {
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         match search.wait_event(left).expect("탐색이 끝나지 않았다") {
-            SearchEvent::Batch {
-                items,
-                progress: p,
-            } => {
+            SearchEvent::Batch { items, progress: p } => {
                 found.extend(items);
                 progress.push(p);
             }
@@ -109,12 +106,19 @@ const FILES: &[&str] = &[
 fn tree() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     for folder in FOLDERS {
-        fs::create_dir_all(dir.path().join(folder)).unwrap();
+        fs::create_dir_all(at(dir.path(), folder)).unwrap();
     }
     for file in FILES {
-        fs::write(dir.path().join(file), b"x").unwrap();
+        fs::write(at(dir.path(), file), b"x").unwrap();
     }
     dir
+}
+
+/// 시작점 아래 상대 경로(`/`로 나눔)를 구분자를 맞춘 경로로. `mklink`·`icacls`는 `/`를 받지 않는다.
+fn at(root: &Path, relative: &str) -> PathBuf {
+    relative
+        .split('/')
+        .fold(root.to_path_buf(), |p, part| p.join(part))
 }
 
 fn sorted(names: &[&str]) -> Vec<String> {
@@ -156,12 +160,12 @@ fn 빈_조건이면_시작점_아래_모든_항목이_빠짐없이_한_번씩_�
 #[test]
 fn 결과_항목은_든_폴더와_목록_항목_정보를_갖는다() {
     let dir = tree();
-    fs::write(dir.path().join("src/core/deep/sized.bin"), vec![7u8; 1234]).unwrap();
+    fs::write(at(dir.path(), "src/core/deep/sized.bin"), vec![7u8; 1234]).unwrap();
     let outcome = search(dir.path(), "sized", true);
     let [found] = outcome.found.as_slice() else {
         panic!("{:?}", outcome.relative(dir.path()));
     };
-    assert_eq!(&*found.folder, dir.path().join("src/core/deep").as_path());
+    assert_eq!(&*found.folder, at(dir.path(), "src/core/deep").as_path());
     assert_eq!(found.name(), "sized.bin");
     assert!(!found.item.is_folder);
     assert_eq!(found.item.size, 1234);
@@ -225,10 +229,13 @@ fn hide(path: &Path) {
 fn 숨김_항목은_보이기를_따르고_숨김_폴더_안으로는_들어가지_않는다() {
     let dir = tree();
     hide(&dir.path().join("readme.md"));
-    hide(&dir.path().join("src/core"));
+    hide(&at(dir.path(), "src/core"));
     let hidden = search(dir.path(), "", false).relative(dir.path());
     assert!(!hidden.contains(&"readme.md".to_owned()));
-    assert!(!hidden.iter().any(|p| p.starts_with("src/core")), "{hidden:?}");
+    assert!(
+        !hidden.iter().any(|p| p.starts_with("src/core")),
+        "{hidden:?}"
+    );
     assert!(hidden.contains(&"src/main.rs".to_owned()));
     let shown = search(dir.path(), "", true).relative(dir.path());
     assert_eq!(shown.len(), FOLDERS.len() + FILES.len());
@@ -280,7 +287,7 @@ fn 목록_읽기를_막은_폴더는_건너뛰고_수를_센다() {
     let dir = tree();
     let locks: Vec<Lock> = ["docs/2024", "src/core/deep/deeper"]
         .iter()
-        .filter_map(|f| Lock::new(&dir.path().join(f)))
+        .filter_map(|f| Lock::new(&at(dir.path(), f)))
         .collect();
     if locks.len() != 2 {
         println!("건너뜀: 이 프로세스는 폴더 읽기 거부를 무시한다(백업 권한)");
@@ -291,7 +298,10 @@ fn 목록_읽기를_막은_폴더는_건너뛰고_수를_센다() {
     // 막은 폴더 자신은 위 폴더 목록에 있으니 나오고, 그 안은 나오지 않는다.
     assert!(found.contains(&"docs/2024".to_owned()));
     assert!(found.contains(&"src/core/deep/deeper".to_owned()));
-    assert!(!found.iter().any(|p| p.starts_with("docs/2024/")), "{found:?}");
+    assert!(
+        !found.iter().any(|p| p.starts_with("docs/2024/")),
+        "{found:?}"
+    );
     assert!(
         !found.iter().any(|p| p.starts_with("src/core/deep/deeper/")),
         "{found:?}"
@@ -303,6 +313,30 @@ fn 목록_읽기를_막은_폴더는_건너뛰고_수를_센다() {
     // 막은 둘과 그 안의 「보고서 묶음」은 읽지 않았다.
     assert_eq!(summary.folders_scanned, FOLDERS.len() + 1 - 3);
     drop(locks);
+}
+
+#[test]
+fn 읽지_못한_폴더는_건너뛰고_수를_센다_주입() {
+    // CI 러너처럼 백업 권한이 켜져 icacls 거부가 듣지 않는 곳에서도 건너뛰기와 수를 본다.
+    let dir = tree();
+    let _denied = [
+        fault::deny_listing(&at(dir.path(), "docs/2024")),
+        fault::deny_listing(&at(dir.path(), "src/core/deep/deeper")),
+    ];
+    let outcome = search(dir.path(), "", true);
+    let found = outcome.relative(dir.path());
+    assert!(found.contains(&"docs/2024".to_owned()));
+    assert!(
+        !found.iter().any(|p| p.starts_with("docs/2024/")),
+        "{found:?}"
+    );
+    assert!(
+        !found.iter().any(|p| p.starts_with("src/core/deep/deeper/")),
+        "{found:?}"
+    );
+    assert_eq!(outcome.summary.folders_skipped, 2);
+    assert_eq!(outcome.summary.folders_scanned, FOLDERS.len() + 1 - 3);
+    assert_eq!(outcome.progress.last().unwrap().folders_skipped, 2);
 }
 
 #[cfg(windows)]
@@ -321,8 +355,8 @@ fn junction(link: &Path, target: &Path) -> bool {
 #[test]
 fn 자기_상위를_가리키는_정션이_있어도_끝나고_중복이_없다() {
     let dir = tree();
-    let made = junction(&dir.path().join("src/core/deep/위로"), dir.path())
-        && junction(&dir.path().join("docs/나"), &dir.path().join("docs"));
+    let made = junction(&at(dir.path(), "src/core/deep/위로"), dir.path())
+        && junction(&at(dir.path(), "docs/나"), &dir.path().join("docs"));
     if !made {
         println!("건너뜀: 정션을 만들 수 없는 환경이다");
         return;
@@ -417,6 +451,9 @@ fn 묶음_사이_간격은_상한을_지키고_깨우기가_사건마다_불린�
     let batches = &times[..outcome.progress.len()];
     for pair in batches.windows(2) {
         let gap = pair[1] - pair[0];
-        assert!(gap >= BATCH_INTERVAL, "묶음 간격 {gap:?} < {BATCH_INTERVAL:?}");
+        assert!(
+            gap >= BATCH_INTERVAL,
+            "묶음 간격 {gap:?} < {BATCH_INTERVAL:?}"
+        );
     }
 }
