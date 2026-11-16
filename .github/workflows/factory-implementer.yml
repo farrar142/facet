@@ -210,7 +210,14 @@ jobs:
       - name: Automated checks
         id: checks
         if: steps.guard.outputs.go == 'true'
-        run: cargo xtask ci
+        # Processes the agent left running (xtask, the app, test binaries) lock their
+        # executables, and cargo then cannot rebuild them ("failed to remove file
+        # target/xtask/debug/xtask.exe: Access is denied", run 43831682346).
+        run: |
+          for exe in xtask.exe facet.exe facet-bench.exe facet-indexer.exe facet-query.exe; do
+            taskkill //F //T //IM "$exe" >/dev/null 2>&1 || true
+          done
+          cargo xtask ci
 
       - name: Push and open draft PR
         if: steps.guard.outputs.go == 'true'
