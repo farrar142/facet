@@ -33,6 +33,8 @@ pub enum Column {
     Size,
     /// 위치: 항목이 든 폴더(검색 결과 위치에만 뜻이 있다). 폴더 목록에서는 모든 항목이 같은 폴더라 이름 순서다.
     Location,
+    /// 일치: 내용 검색 결과의 일치 수(검색 결과 위치에만 뜻이 있다). 일치가 없는 항목은 0으로 본다.
+    Matches,
 }
 
 /// 정렬 방향.
@@ -229,6 +231,17 @@ struct Entry {
     extension: Option<usize>,
     /// 검색 결과 항목이면 든 폴더. 폴더 목록의 항목은 `None`이다(모두 탭 위치 안).
     folder: Option<Folder>,
+    /// 내용 검색 결과 항목이면 첫 일치 줄과 일치 수.
+    hit: Option<Hit>,
+}
+
+/// 내용 검색 결과 항목의 일치: 첫 일치 줄과 일치 수.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hit {
+    /// 첫 일치 줄(앞뒤 공백을 걷고 잘린 것).
+    pub first_line: String,
+    /// 겹치지 않는 일치 수.
+    pub matches: u64,
 }
 
 impl Entry {
@@ -244,7 +257,12 @@ impl Entry {
             key,
             extension,
             folder,
+            hit: None,
         }
+    }
+
+    fn match_count(&self) -> u64 {
+        self.hit.as_ref().map_or(0, |hit| hit.matches)
     }
 
     fn folder_key(&self) -> Option<&[u8]> {
@@ -301,6 +319,7 @@ fn compare_entries(a: &Entry, b: &Entry, sort: Sort) -> Ordering {
         Column::Size if a.item.is_folder => Ordering::Equal,
         Column::Size => a.item.size.cmp(&b.item.size),
         Column::Location => a.folder_key().cmp(&b.folder_key()),
+        Column::Matches => a.match_count().cmp(&b.match_count()),
     };
     directed(key).then_with(|| a.compare_names(b))
 }
@@ -366,15 +385,22 @@ impl DetailsList {
     /// 검색 결과 항목들(든 폴더와 항목)을 더한다. 더한 것만 정렬해 이미 정렬된 목록과 합치므로 결과가 많아도 묶음마다
     /// 다시 정렬하지 않는다. 같은 폴더의 정렬 키는 한 번만 만든다.
     pub fn extend_found(&mut self, found: impl IntoIterator<Item = (Arc<Path>, Item)>) {
+        self.extend_hits(found.into_iter().map(|(path, item)| (path, item, None)));
+    }
+
+    /// [`DetailsList::extend_found`]와 같고 항목마다 내용 검색의 일치(첫 일치 줄·일치 수)를 함께 받는다.
+    pub fn extend_hits(&mut self, found: impl IntoIterator<Item = (Arc<Path>, Item, Option<Hit>)>) {
         let mut keys: HashMap<Arc<Path>, Arc<[u8]>> = HashMap::new();
         let mut added: Vec<Entry> = found
             .into_iter()
-            .map(|(path, item)| {
+            .map(|(path, item, hit)| {
                 let key = keys
                     .entry(Arc::clone(&path))
                     .or_insert_with(|| natural_key(&path.to_string_lossy()).into())
                     .clone();
-                Entry::in_folder(item, Some(Folder { path, key }))
+                let mut entry = Entry::in_folder(item, Some(Folder { path, key }));
+                entry.hit = hit;
+                entry
             })
             .collect();
         if added.is_empty() {
@@ -397,6 +423,11 @@ impl DetailsList {
             merged.extend(next);
         }
         self.entries = merged;
+    }
+
+    /// `index`번째 항목의 내용 검색 일치(첫 일치 줄·일치 수). 내용 검색 결과가 아니면 `None`이다.
+    pub fn hit(&self, index: usize) -> Option<&Hit> {
+        self.entries.get(index).and_then(|e| e.hit.as_ref())
     }
 
     /// `index`번째 항목이 든 폴더(검색 결과 항목). 폴더 목록의 항목은 `None`이다.
@@ -444,7 +475,9 @@ impl DetailsList {
                 .clone();
             let mut item = entry.item.clone();
             item.name = name;
+            let hit = entry.hit.take();
             *entry = Entry::in_folder(item, Some(Folder { path, key }));
+            entry.hit = hit;
             changed = true;
         }
         if changed {

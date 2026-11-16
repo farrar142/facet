@@ -137,6 +137,7 @@ fn 검색을_시작하면_탭이_결과_위치가_되고_결과가_들어오며_
         &Location::SearchResults(SearchScope {
             folder: root.to_path_buf(),
             query: "보고서".into(),
+            kind: facet_core::SearchKind::Name,
         })
     );
     assert_eq!(

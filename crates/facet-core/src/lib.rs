@@ -32,7 +32,7 @@ pub mod work_area;
 
 pub use facet_win::OpenError;
 pub use file_system::FileSystemProvider;
-pub use location::{Attributes, Item, ListError, Location, SearchScope};
+pub use location::{Attributes, Item, ListError, Location, SearchKind, SearchScope};
 pub use provider::{Candidate, PathSegment, Provider, ResolveError, Resolved, provider_for};
 
 /// 코어 크레이트의 버전.

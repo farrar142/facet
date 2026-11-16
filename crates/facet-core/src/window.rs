@@ -68,6 +68,7 @@ use facet_win::clipboard::{Clipboard, ClipboardError, ClipboardFiles};
 use facet_win::{OpenError, OpenResult, ShellWorker};
 
 use crate::command::{self, CommandId, CommandState};
+use crate::content_search::{self, ContentError, ContentMode, ContentSearch};
 use crate::details::Sort;
 use crate::edit::{self, EditError, Edited};
 use crate::history::{
@@ -340,7 +341,7 @@ impl Window {
 enum Message {
     Read {
         tab: TabId,
-        result: ReadResult,
+        result: Box<ReadResult>,
     },
     Changes {
         tab: TabId,
@@ -433,6 +434,17 @@ pub enum Update {
     Search,
 }
 
+/// 내용 검색을 시작하지 못한 까닭([`App::start_content_search`]). 위치는 바뀌지 않았다. 화면 문장은 앱 몫이다(ADR-0007).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContentSearchError {
+    /// 찾을 글자가 비었다.
+    EmptyText,
+    /// 정규식이 틀렸다. 까닭은 `regex` 크레이트의 설명이다.
+    Regex(String),
+    /// 찾을 폴더가 없다(활성 탭이 실제 폴더도 검색 결과 위치도 아님, 창이 없음).
+    NoFolder,
+}
+
 /// 클립보드 명령이 해낸 일.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClipboardDone {
@@ -492,6 +504,9 @@ pub enum Execution {
     Filter,
     /// 화면이 할 일: 활성 패널의 검색창에 포커스를 준다. 친 글자로 Enter를 누르면 [`App::start_search`]를 부른다.
     Search,
+    /// 화면이 할 일: 활성 패널의 검색창을 「내용」 검색으로 바꾸고 포커스를 준다. Enter를 누르면
+    /// [`App::start_content_search`]를 부른다.
+    ContentSearch,
     /// 화면이 할 일: 삭제를 실행하기 전에 되돌릴 수 없다는 경고와 항목을 보이고 확인받는다. 보일 원본은
     /// [`App::delete_plan`]이 주고, 확인하면 [`App::start_delete`]로 작업을 넣는다. 아직 아무것도 지우지 않았다.
     ConfirmDelete(DeleteWarning),
@@ -1384,7 +1399,10 @@ impl App {
             let result = request.run_watched(move |batch| {
                 changes.send(Message::Changes { tab, batch });
             });
-            outbox.send(Message::Read { tab, result });
+            outbox.send(Message::Read {
+                tab,
+                result: Box::new(result),
+            });
         };
         thread::Builder::new()
             .name("facet-read".into())
@@ -1421,6 +1439,17 @@ impl App {
         let Some(tab) = self.tab_mut(id) else {
             return;
         };
+        if let Some(request) = tab.content_request() {
+            match ContentSearch::start_with_waker(request, move || outbox.wake()) {
+                Ok(search) => {
+                    tab.attach_content_search(search);
+                }
+                Err(ContentError::Location(error)) => tab.search_failed(error),
+                // 글자가 비었거나 정규식이 틀린 위치는 `start_content_search`가 미리 막는다. 그래도 여기 오면 검색 없이 끝난다.
+                Err(_) => tab.stop_search_unstarted(),
+            }
+            return;
+        }
         let Some(request) = tab.search_request() else {
             return;
         };
@@ -1429,6 +1458,46 @@ impl App {
                 tab.attach_search(Box::new(search));
             }
             Err(error) => tab.search_failed(error),
+        }
+    }
+
+    /// 활성 탭에서 내용 검색을 시작한다: [`App::start_search`]와 같이 탭이 검색 결과 위치(지금 폴더 아래, 찾을 글자 `text`,
+    /// 방식 `mode`, 파일 이름 조건 `name_pattern`)로 가고, 그 이동이 확정되면 내용 검색이 결과를 흘려 넣는다. 글자가 비었거나
+    /// 정규식이 틀리면 위치를 바꾸지 않고 까닭을 돌려준다(화면 문장은 앱 몫). 찾을 폴더가 없으면(실제 폴더가 아님)
+    /// [`ContentSearchError::NoFolder`]다.
+    pub fn start_content_search(
+        &mut self,
+        text: &str,
+        mode: ContentMode,
+        name_pattern: &str,
+    ) -> Result<(), ContentSearchError> {
+        if text.is_empty() {
+            return Err(ContentSearchError::EmptyText);
+        }
+        if mode == ContentMode::Regex
+            && let Err(reason) = content_search::check_regex(text)
+        {
+            return Err(ContentSearchError::Regex(reason));
+        }
+        if !self.has_windows() {
+            return Err(ContentSearchError::NoFolder);
+        }
+        let location = self.active_tab().location();
+        let folder = match (location.file_system_path(), location.search_scope()) {
+            (Some(path), _) => path.to_path_buf(),
+            (None, Some(scope)) => scope.folder.clone(),
+            (None, None) => return Err(ContentSearchError::NoFolder),
+        };
+        let name_pattern = name_pattern.trim();
+        if self.navigate(Navigation::Go(Location::content_search_results(
+            folder,
+            text,
+            mode,
+            name_pattern,
+        ))) {
+            Ok(())
+        } else {
+            Err(ContentSearchError::NoFolder)
         }
     }
 
@@ -1491,7 +1560,7 @@ impl App {
         match message {
             Message::Read { tab: id, result } => {
                 let outcome = match self.tab_mut(id) {
-                    Some(tab) => tab.finish(result),
+                    Some(tab) => tab.finish(*result),
                     // 탭이 이미 닫혔다.
                     None => ReadOutcome::Stale,
                 };
@@ -1774,7 +1843,8 @@ impl App {
             | CommandId::SortByModified
             | CommandId::SortByType
             | CommandId::SortBySize
-            | CommandId::SortByLocation => {
+            | CommandId::SortByLocation
+            | CommandId::SortByMatches => {
                 if let Some(column) = command.sort_column() {
                     let sort = command::sort_toggled(self.active_tab().sort(), column);
                     self.set_sort(sort);
@@ -1847,6 +1917,7 @@ impl App {
             CommandId::ShowHistory => return Execution::ShowHistory,
             CommandId::Filter => return Execution::Filter,
             CommandId::Search => return Execution::Search,
+            CommandId::ContentSearch => return Execution::ContentSearch,
             CommandId::ShowInFolder => {
                 let id = self.active_tab_id();
                 return match self.active_tab_mut().show_in_folder() {

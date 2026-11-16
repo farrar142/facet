@@ -36,10 +36,19 @@ use crate::watch::{self, ChangeBatch, ChangeSink, Watch, WatchError};
 use crate::window::home_location;
 use facet_win::OpenError;
 
+use crate::content_search::{
+    ContentEnd, ContentEvent, ContentFound, ContentRequest, ContentSearch,
+};
+use crate::details::Hit;
 use crate::launch::LaunchTarget;
-use crate::live_search::{Found, SearchEvent, SearchRequest};
+use crate::live_search::{
+    Found, SearchEnd, SearchEvent, SearchProgress, SearchRequest, SearchSummary,
+};
+use crate::location::SearchKind;
 use crate::name_match::{NameMatcher, has_wildcard};
-use crate::search_results::{PathChange, SearchFeed, SearchStatus, is_within, rebase};
+use crate::search_results::{
+    ContentStatus, PathChange, SearchFeed, SearchStatus, is_within, rebase,
+};
 use crate::{Candidate, Item, ListError, Location, ResolveError, provider_for};
 
 /// 읽기가 이만큼 넘게 걸리면 탭이 「읽는 중」을 드러낸다([`Tab::is_reading`]).
@@ -366,6 +375,8 @@ struct Filter {
 struct Results {
     /// 결과를 흘려 넣는 것. 아직 붙이지 않았거나 끝났으면 `None`이다. 버리면 검색이 멈춘다.
     feed: Option<Box<dyn SearchFeed>>,
+    /// 내용 검색이 결과를 흘려 넣는 것(내용 검색 결과 위치만). 버리면 검색이 멈춘다.
+    content: Option<ContentSearch>,
     status: SearchStatus,
 }
 
@@ -373,6 +384,7 @@ impl std::fmt::Debug for Results {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Results")
             .field("feed", &self.feed.is_some())
+            .field("content", &self.content.is_some())
             .field("status", &self.status)
             .finish()
     }
@@ -1048,6 +1060,7 @@ impl Tab {
         // 갔으면 검색이 멈춘다.
         self.results = self.location.is_search_results().then(|| Results {
             feed: None,
+            content: None,
             status: SearchStatus {
                 show_hidden: self.show_hidden,
                 ..SearchStatus::default()
@@ -1195,15 +1208,64 @@ impl Tab {
     /// 고침)가 확정된 직후에만 있다. 숨김 항목 보이기는 그때의 탭 상태다.
     pub fn search_request(&self) -> Option<SearchRequest> {
         let results = self.results.as_ref()?;
-        if results.feed.is_some() || results.status.running || results.status.summary.is_some() {
+        if results.feed.is_some()
+            || results.content.is_some()
+            || results.status.running
+            || results.status.summary.is_some()
+        {
             return None;
         }
         let scope = self.location.search_scope()?;
+        if scope.kind != SearchKind::Name {
+            return None;
+        }
         Some(SearchRequest {
             root: Location::file_system(&scope.folder),
             pattern: scope.query.clone(),
             show_hidden: results.status.show_hidden,
         })
+    }
+
+    /// [`Tab::search_request`]의 내용 검색 판: 아직 검색을 붙이지 않은 내용 검색 결과 위치면 시작할 내용 검색.
+    pub fn content_request(&self) -> Option<ContentRequest> {
+        let results = self.results.as_ref()?;
+        if results.feed.is_some()
+            || results.content.is_some()
+            || results.status.running
+            || results.status.summary.is_some()
+        {
+            return None;
+        }
+        let scope = self.location.search_scope()?;
+        let SearchKind::Content { mode, name_pattern } = &scope.kind else {
+            return None;
+        };
+        let mut request =
+            ContentRequest::new(Location::file_system(&scope.folder), scope.query.clone());
+        request.mode = *mode;
+        request.name_pattern = name_pattern.clone();
+        request.show_hidden = results.status.show_hidden;
+        Some(request)
+    }
+
+    /// 내용 검색을 붙인다([`Tab::content_request`]로 시작한 검색). 검색 중이 된다. 내용 검색 결과 위치가 아니면 검색을
+    /// 버리고(멈춘다) `false`다.
+    pub fn attach_content_search(&mut self, search: ContentSearch) -> bool {
+        let is_content = self
+            .location
+            .search_scope()
+            .is_some_and(|scope| scope.kind != SearchKind::Name);
+        let Some(results) = &mut self.results else {
+            return false;
+        };
+        if !is_content {
+            return false;
+        }
+        results.content = Some(search);
+        results.status.running = true;
+        results.status.summary = None;
+        results.status.content = Some(ContentStatus::default());
+        true
     }
 
     /// 결과를 흘려 넣을 피드를 붙인다([`Tab::search_request`]로 시작한 검색). 검색 중이 된다. 검색 결과 위치가 아니면
@@ -1222,6 +1284,7 @@ impl Tab {
     pub fn search_failed(&mut self, error: ListError) {
         if let Some(results) = &mut self.results {
             results.feed = None;
+            results.content = None;
             results.status.running = false;
         }
         self.error = Some(error);
@@ -1230,6 +1293,9 @@ impl Tab {
     /// 붙인 피드에서 온 사건을 모두 받아 결과에 넣는다. 바뀐 것이 있으면 `true`다. 끝남 사건을 받으면 피드를 버리고
     /// 검색 중이 아니다.
     pub fn pump_search(&mut self) -> bool {
+        if self.results.as_ref().is_some_and(|r| r.content.is_some()) {
+            return self.pump_content_search();
+        }
         let Some(feed) = self.results.as_mut().and_then(|r| r.feed.as_mut()) else {
             return false;
         };
@@ -1260,6 +1326,86 @@ impl Tab {
         true
     }
 
+    /// [`Tab::pump_search`]의 내용 검색 판.
+    fn pump_content_search(&mut self) -> bool {
+        let Some(search) = self.results.as_mut().and_then(|r| r.content.as_mut()) else {
+            return false;
+        };
+        let events = search.poll();
+        if events.is_empty() {
+            return false;
+        }
+        for event in events {
+            match event {
+                ContentEvent::Batch { items, progress } => {
+                    self.add_content_results(items);
+                    if let Some(results) = &mut self.results {
+                        results.status.progress = SearchProgress {
+                            found: progress.found,
+                            folders_scanned: progress.folders_scanned,
+                            folders_skipped: progress.folders_skipped,
+                        };
+                        results.status.content = Some(ContentStatus {
+                            skipped: progress.skipped,
+                            files_read: progress.files_read,
+                            bytes_read: progress.bytes_read,
+                        });
+                    }
+                }
+                ContentEvent::Finished(summary) => {
+                    if let Some(results) = &mut self.results {
+                        results.content = None;
+                        results.status.running = false;
+                        let progress = summary.progress;
+                        results.status.progress = SearchProgress {
+                            found: progress.found,
+                            folders_scanned: progress.folders_scanned,
+                            folders_skipped: progress.folders_skipped,
+                        };
+                        results.status.content = Some(ContentStatus {
+                            skipped: progress.skipped,
+                            files_read: progress.files_read,
+                            bytes_read: progress.bytes_read,
+                        });
+                        results.status.summary = Some(SearchSummary {
+                            found: progress.found,
+                            folders_scanned: progress.folders_scanned,
+                            folders_skipped: progress.folders_skipped,
+                            elapsed: summary.elapsed,
+                            end: match summary.end {
+                                ContentEnd::Finished => SearchEnd::Finished,
+                                ContentEnd::Cancelled => SearchEnd::Cancelled,
+                            },
+                        });
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// 내용 검색으로 찾은 파일들(첫 일치 줄·일치 수 포함)을 결과 목록에 더한다. [`Tab::add_results`]와 같다.
+    pub fn add_content_results(&mut self, found: Vec<ContentFound>) {
+        if self.results.is_none() || found.is_empty() {
+            return;
+        }
+        self.list_gen += 1;
+        self.list.extend_hits(found.into_iter().map(|found| {
+            let hit = Hit {
+                first_line: found.first_line,
+                matches: found.matches as u64,
+            };
+            (found.folder, found.item, Some(hit))
+        }));
+        self.update_visible();
+        self.reindex();
+    }
+
+    /// 보이는 항목 `index`의 내용 검색 일치(첫 일치 줄·일치 수). 내용 검색 결과가 아니면 `None`이다.
+    pub fn hit(&self, index: usize) -> Option<&Hit> {
+        self.list.hit(self.list_index(index)?)
+    }
+
     /// 찾은 항목들을 결과 목록에 더한다(정렬을 지킨다). 선택·커서는 경로로 남는다. 검색 결과 위치가 아니면 아무것도
     /// 하지 않는다. 결과를 넣는 쪽(실시간 탐색, 즉시 검색)과 상관없이 쓴다.
     pub fn add_results(&mut self, found: Vec<Found>) {
@@ -1273,6 +1419,15 @@ impl Tab {
         self.reindex();
     }
 
+    /// 검색을 시작하지 못한 채 끝낸다(시작 전 오류가 있는데 위치만 바뀐 경우): 검색 중이 아니고 결과는 비어 있다.
+    pub fn stop_search_unstarted(&mut self) {
+        if let Some(results) = &mut self.results {
+            results.feed = None;
+            results.content = None;
+            results.status.running = false;
+        }
+    }
+
     /// 검색을 멈춘다(「검색 중지」): 지금까지의 결과는 남는다. 검색 중이 아니면 `false`다. 피드의 끝남 사건이 오면
     /// 요약([`SearchStatus::summary`])이 채워진다.
     pub fn stop_search(&mut self) -> bool {
@@ -1284,6 +1439,9 @@ impl Tab {
         }
         if let Some(feed) = &results.feed {
             feed.stop();
+        }
+        if let Some(search) = &results.content {
+            search.cancel();
         }
         results.status.running = false;
         true

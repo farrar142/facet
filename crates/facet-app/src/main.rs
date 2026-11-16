@@ -737,6 +737,7 @@ fn connect(ui: &AppWindow, w: WindowId) {
             2 => Column::Type,
             3 => Column::Size,
             4 => Column::Location,
+            5 => Column::Matches,
             _ => Column::Name,
         };
         with_view(w, |view| view.execute(CommandId::sort_by(column)));
@@ -792,6 +793,9 @@ fn connect(ui: &AppWindow, w: WindowId) {
     ui.on_search_submit(move |text| with_view(w, |view| view.search_submit(&text)));
     ui.on_cancel_search(move || with_view(w, View::hide_search_bar));
     ui.on_stop_search(move || with_view(w, |view| view.execute(CommandId::StopSearch)));
+    ui.on_search_mode_changed(move || {
+        with_view(w, |view| view.ui.set_search_problem(SharedString::new()))
+    });
     ui.on_palette_edited(move |text| with_view(w, |view| view.palette_edited(&text)));
     ui.on_palette_step(move |step| with_view(w, |view| view.palette_step(step >= 0)));
     ui.on_palette_run(move |index| {
@@ -1855,11 +1859,15 @@ impl View {
                     Column::Size => 3,
                     // 위치 열은 검색 결과 목록에만 있다(머리글은 아직 그리지 않는다).
                     Column::Location => 4,
+                    Column::Matches => 5,
                 },
                 sort_descending: sort.direction == Direction::Descending,
                 item_count: count(status.item_count),
                 total_count: status.total_count.map_or(-1, count),
                 results: tab.location().is_search_results(),
+                content_results: tab.location().search_scope().is_some_and(|scope| {
+                    matches!(scope.kind, facet_core::SearchKind::Content { .. })
+                }),
                 search_status: search_line
                     .map_or_else(String::new, text::search_line_text)
                     .into(),
@@ -2057,7 +2065,8 @@ impl View {
             }
             Execution::ShowHistory => self.open_history(),
             Execution::Filter => self.begin_filter(),
-            Execution::Search => self.begin_search(),
+            Execution::Search => self.begin_search(false),
+            Execution::ContentSearch => self.begin_search(true),
             Execution::ConfirmDelete(warning) => self.open_delete(warning),
             Execution::UndoRefused(_) | Execution::Disabled | Execution::WindowClosed => {}
         }
@@ -2695,22 +2704,41 @@ impl View {
     }
 
     /// 활성 패널의 검색창을 열고 포커스를 준다(이미 열려 있으면 포커스만 다시 준다). 검색 결과 위치면 지금 검색어를 채운다.
-    fn begin_search(&self) {
+    ///
+    /// `content`이면 「내용」으로 바꾼다(「내용 검색」 명령). 아니면 검색창이 새로 열릴 때 지금 검색 결과 위치의 종류를 따르고,
+    /// 이미 열려 있으면 고른 전환을 그대로 둔다.
+    fn begin_search(&self, content: bool) {
         self.close_rename();
         self.close_address_edit();
         let ui = &self.ui;
         if !ui.get_search_open() {
-            let text = self
-                .app
-                .borrow()
-                .active_tab()
-                .location()
-                .search_scope()
-                .map(|scope| scope.query.clone())
-                .unwrap_or_default();
+            let (text, names, is_content, regex) = {
+                let app = self.app.borrow();
+                match app.active_tab().location().search_scope() {
+                    Some(scope) => match &scope.kind {
+                        facet_core::SearchKind::Name => {
+                            (scope.query.clone(), String::new(), false, false)
+                        }
+                        facet_core::SearchKind::Content { mode, name_pattern } => (
+                            scope.query.clone(),
+                            name_pattern.clone(),
+                            true,
+                            *mode == facet_core::content_search::ContentMode::Regex,
+                        ),
+                    },
+                    None => (String::new(), String::new(), false, false),
+                }
+            };
             ui.set_search_text(text.into());
+            ui.set_search_names(names.into());
+            ui.set_search_content(is_content);
+            ui.set_search_regex(regex);
             ui.set_search_open(true);
         }
+        if content {
+            ui.set_search_content(true);
+        }
+        ui.set_search_problem(SharedString::new());
         ui.set_search_focus(ui.get_search_focus().wrapping_add(1));
     }
 
@@ -2719,16 +2747,49 @@ impl View {
         if self.ui.get_search_open() {
             self.ui.set_search_open(false);
             self.ui.set_search_text(SharedString::new());
+            self.ui.set_search_problem(SharedString::new());
         }
     }
 
     /// 검색창에서 Enter: 현재 폴더 아래 실시간 탐색을 시작한다. 검색어가 비었거나 시작할 수 없는 위치면 아무 일도 없다.
+    ///
+    /// 「내용」이면 같은 자리에서 내용 검색을 시작하고, 시작 전에 막히면(틀린 정규식 등) 위치를 바꾸지 않고 까닭을 검색창 곁에 보인다.
     fn search_submit(&self, text: &str) {
-        let Some(query) = search_bar::query_to_start(search_bar::Mode::Name, text) else {
+        let mode = search_bar::Mode::from_content(self.ui.get_search_content());
+        let Some(query) = search_bar::query_to_start(mode, text) else {
             return;
         };
         self.remember_scroll();
-        if self.app.borrow_mut().start_search(query) {
+        let started = match mode {
+            search_bar::Mode::Name => self.app.borrow_mut().start_search(query),
+            search_bar::Mode::Content => {
+                let regex = if self.ui.get_search_regex() {
+                    facet_core::content_search::ContentMode::Regex
+                } else {
+                    facet_core::content_search::ContentMode::Literal
+                };
+                let names = self.ui.get_search_names();
+                let result =
+                    self.app
+                        .borrow_mut()
+                        .start_content_search(query, regex, names.as_str());
+                match result {
+                    Ok(()) => {
+                        self.ui.set_search_problem(SharedString::new());
+                        true
+                    }
+                    Err(error) => {
+                        self.ui
+                            .set_search_problem(text::content_search_error_text(&error).into());
+                        false
+                    }
+                }
+            }
+        };
+        if started {
+            if mode == search_bar::Mode::Name {
+                self.ui.set_search_problem(SharedString::new());
+            }
             self.render();
             self.restore_scroll(self.active_panel());
         }
@@ -3858,6 +3919,9 @@ impl Model for TabRows {
             } else {
                 SharedString::new()
             },
+            matches: tab
+                .hit(row)
+                .map_or_else(SharedString::new, |hit| text::match_text(hit).into()),
             selected: tab.is_selected(row),
             cursor: tab.cursor() == Some(row),
             cut: !marks.is_empty()

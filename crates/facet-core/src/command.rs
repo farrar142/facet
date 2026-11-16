@@ -50,6 +50,8 @@ pub enum CommandId {
     SortBySize,
     /// 위치 열(항목이 든 폴더)로 정렬. 검색 결과 위치에서만 켜진다.
     SortByLocation,
+    /// 일치 수로 정렬(내용 검색 결과 위치에서만 켜짐).
+    SortByMatches,
     /// 새 탭: 지금 위치의 탭을 활성 탭 바로 뒤에 열고 활성으로 한다.
     NewTab,
     /// 탭 닫기: 활성 탭을 닫는다. 패널의 마지막 탭이면 패널이, 창의 마지막 패널이면 창이 닫힌다.
@@ -108,6 +110,10 @@ pub enum CommandId {
     /// 검색: 활성 패널의 검색창에 포커스를 준다([`crate::window::Execution::Search`]). 검색창에서 Enter를 누르면
     /// [`crate::window::App::start_search`]가 현재 폴더 아래 실시간 탐색을 시작한다. 늘 켜져 있다.
     Search,
+    /// 내용 검색: 활성 패널의 검색창을 「내용」으로 바꾸고 포커스를 준다([`crate::window::Execution::ContentSearch`]). Enter를
+    /// 누르면 [`crate::window::App::start_content_search`]가 현재 폴더 아래 파일의 내용을 찾는다. 늘 켜져 있다. 기본
+    /// 단축키는 없다.
+    ContentSearch,
     /// 삭제: 활성 탭의 선택(없으면 커서 항목)을 휴지통으로 보낸다. 묻지 않고 곧바로 휴지통 삭제 작업을 넣는다. 원본이
     /// 모두 휴지통이 없는 위치에 있으면 영구 삭제가 되므로 화면이 먼저 확인받는다
     /// ([`crate::window::Execution::ConfirmDelete`]). 원본이 없거나 위치가 실제 폴더가 아니면 꺼진다.
@@ -138,7 +144,7 @@ pub enum CommandId {
 
 impl CommandId {
     /// 모든 명령. 명령 팔레트는 검색어가 없으면 이 순서로 보인다.
-    pub const ALL: [CommandId; 52] = [
+    pub const ALL: [CommandId; 54] = [
         CommandId::Open,
         CommandId::Back,
         CommandId::Forward,
@@ -182,6 +188,7 @@ impl CommandId {
         CommandId::ShowHistory,
         CommandId::Filter,
         CommandId::Search,
+        CommandId::ContentSearch,
         CommandId::Delete,
         CommandId::DeletePermanently,
         CommandId::Copy,
@@ -189,6 +196,7 @@ impl CommandId {
         CommandId::Paste,
         CommandId::CopyPath,
         CommandId::SortByLocation,
+        CommandId::SortByMatches,
         CommandId::ShowInFolder,
         CommandId::StopSearch,
     ];
@@ -241,6 +249,7 @@ impl CommandId {
             CommandId::ShowHistory => "show-history",
             CommandId::Filter => "filter",
             CommandId::Search => "search",
+            CommandId::ContentSearch => "content-search",
             CommandId::Delete => "delete",
             CommandId::DeletePermanently => "delete-permanently",
             CommandId::Copy => "copy",
@@ -248,6 +257,7 @@ impl CommandId {
             CommandId::Paste => "paste",
             CommandId::CopyPath => "copy-path",
             CommandId::SortByLocation => "sort-by-location",
+            CommandId::SortByMatches => "sort-by-matches",
             CommandId::ShowInFolder => "show-in-folder",
             CommandId::StopSearch => "stop-search",
         }
@@ -266,6 +276,7 @@ impl CommandId {
             Column::Type => CommandId::SortByType,
             Column::Size => CommandId::SortBySize,
             Column::Location => CommandId::SortByLocation,
+            Column::Matches => CommandId::SortByMatches,
         }
     }
 
@@ -277,6 +288,7 @@ impl CommandId {
             CommandId::SortByType => Some(Column::Type),
             CommandId::SortBySize => Some(Column::Size),
             CommandId::SortByLocation => Some(Column::Location),
+            CommandId::SortByMatches => Some(Column::Matches),
             _ => None,
         }
     }
@@ -322,6 +334,8 @@ impl CommandId {
             | CommandId::SortByType
             | CommandId::SortBySize
             | CommandId::SortByLocation
+            | CommandId::SortByMatches
+            | CommandId::ContentSearch
             | CommandId::ShowInFolder
             | CommandId::StopSearch
             | CommandId::OpenInNewTab => &[],
@@ -403,6 +417,9 @@ impl CommandId {
             // 검색 결과 위치에는 만들 폴더가 없다.
             CommandId::NewFolder => tab.location().file_system_path().is_some(),
             CommandId::SortByLocation => tab.location().is_search_results(),
+            CommandId::SortByMatches => tab.location().search_scope().is_some_and(|scope| {
+                matches!(scope.kind, crate::location::SearchKind::Content { .. })
+            }),
             CommandId::ShowInFolder => {
                 tab.location().is_search_results() && tab.cursor_item().is_some()
             }
@@ -429,7 +446,8 @@ impl CommandId {
             | CommandId::Redo
             | CommandId::ShowHistory
             | CommandId::Filter
-            | CommandId::Search => true,
+            | CommandId::Search
+            | CommandId::ContentSearch => true,
         }
     }
 

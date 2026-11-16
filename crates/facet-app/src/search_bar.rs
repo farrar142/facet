@@ -3,6 +3,7 @@
 
 use std::time::Duration;
 
+use facet_core::content_search::Skipped;
 use facet_core::live_search::SearchEnd;
 use facet_core::search_results::SearchStatus;
 
@@ -12,47 +13,51 @@ pub enum Mode {
     /// 파일·폴더 이름(실시간 탐색).
     #[default]
     Name,
-    /// 파일 내용. 내용 검색이 생길 때까지 고를 수 없다(화면은 아직 이 값을 만들지 않는다).
-    #[allow(dead_code)]
+    /// 파일 내용(내용 검색). 찾을 글자·정규식 확인란·파일 이름 조건이 더해진다.
     Content,
 }
 
 impl Mode {
-    /// 고를 수 있는가. 「내용」은 내용 검색 티켓이 켤 때까지 꺼 둔다.
-    pub const fn is_available(self) -> bool {
-        match self {
-            Mode::Name => true,
-            Mode::Content => false,
-        }
+    /// 화면의 「내용」 전환 값에서.
+    pub const fn from_content(content: bool) -> Mode {
+        if content { Mode::Content } else { Mode::Name }
     }
 }
 
-/// 검색창이 한 번에 하는 일: 친 글자로 시작할 검색어. 앞뒤 공백을 걷고 비면 `None`이다(Enter를 눌러도 아무 일도 없다).
-/// 고를 수 없는 전환이면 `None`.
+/// 검색창이 한 번에 하는 일: 친 글자로 시작할 검색어. 이름 검색은 앞뒤 공백을 걷고 비면 `None`이다(Enter를 눌러도 아무 일도
+/// 없다). 내용 검색은 찾을 글자 그대로(공백도 글자다) 두되 공백뿐이면 `None`이다.
 pub fn query_to_start(mode: Mode, text: &str) -> Option<&str> {
-    if !mode.is_available() {
-        return None;
+    match mode {
+        Mode::Name => {
+            let query = text.trim();
+            (!query.is_empty()).then_some(query)
+        }
+        Mode::Content => (!text.trim().is_empty()).then_some(text),
     }
-    let query = text.trim();
-    (!query.is_empty()).then_some(query)
 }
 
 /// 탐색 상태 줄의 내용.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Line {
-    /// 탐색 중: 지금까지 찾은 수와 훑은 폴더 수.
-    Running { found: usize, folders: usize },
-    /// 끝났다: 찾은 수·건너뛴 폴더 수·걸린 시간.
+    /// 탐색 중: 지금까지 찾은 수와 훑은 폴더 수. 내용 검색이면 종류별 건너뛴 파일 수도 있다.
+    Running {
+        found: usize,
+        folders: usize,
+        files_skipped: Option<Skipped>,
+    },
+    /// 끝났다: 찾은 수·건너뛴 폴더 수·걸린 시간(내용 검색이면 종류별 건너뛴 파일 수도).
     Finished {
         found: usize,
         skipped: usize,
         elapsed: Duration,
+        files_skipped: Option<Skipped>,
     },
     /// 중지했다(결과는 남는다).
     Stopped {
         found: usize,
         skipped: usize,
         elapsed: Duration,
+        files_skipped: Option<Skipped>,
     },
 }
 
@@ -66,10 +71,12 @@ impl Line {
 /// 탭의 검색 상태에서 상태 줄을 정한다. 검색 결과 위치가 아니면(`None`) 줄이 없다.
 pub fn line_of(status: Option<&SearchStatus>) -> Option<Line> {
     let status = status?;
+    let files_skipped = status.content.map(|content| content.skipped);
     let Some(summary) = status.summary.filter(|_| !status.running) else {
         return Some(Line::Running {
             found: status.progress.found,
             folders: status.progress.folders_scanned,
+            files_skipped,
         });
     };
     let (found, skipped, elapsed) = (summary.found, summary.folders_skipped, summary.elapsed);
@@ -78,11 +85,13 @@ pub fn line_of(status: Option<&SearchStatus>) -> Option<Line> {
             found,
             skipped,
             elapsed,
+            files_skipped,
         },
         SearchEnd::Cancelled => Line::Stopped {
             found,
             skipped,
             elapsed,
+            files_skipped,
         },
     })
 }
@@ -91,12 +100,15 @@ pub fn line_of(status: Option<&SearchStatus>) -> Option<Line> {
 mod tests {
     use super::*;
     use facet_core::live_search::{SearchProgress, SearchSummary};
+    use facet_core::search_results::ContentStatus;
 
     #[test]
-    fn 내용_전환은_꺼져_있어_검색어가_있어도_시작하지_않는다() {
-        assert!(Mode::Name.is_available());
-        assert!(!Mode::Content.is_available());
-        assert_eq!(query_to_start(Mode::Content, "보고서"), None);
+    fn 내용_전환은_찾을_글자를_그대로_두고_공백뿐이면_시작하지_않는다() {
+        assert_eq!(Mode::from_content(true), Mode::Content);
+        assert_eq!(Mode::from_content(false), Mode::Name);
+        assert_eq!(query_to_start(Mode::Content, " 보고서 "), Some(" 보고서 "));
+        assert_eq!(query_to_start(Mode::Content, "   "), None);
+        assert_eq!(query_to_start(Mode::Content, ""), None);
     }
 
     #[test]
@@ -133,10 +145,29 @@ mod tests {
             line,
             Line::Running {
                 found: 3,
-                folders: 9
+                folders: 9,
+                files_skipped: None
             }
         );
         assert!(line.is_running());
+        let content = SearchStatus {
+            running: true,
+            content: Some(ContentStatus {
+                skipped: Skipped {
+                    binary: 2,
+                    ..Skipped::default()
+                },
+                ..ContentStatus::default()
+            }),
+            ..SearchStatus::default()
+        };
+        assert!(matches!(
+            line_of(Some(&content)),
+            Some(Line::Running {
+                files_skipped: Some(Skipped { binary: 2, .. }),
+                ..
+            })
+        ));
         let done = SearchStatus {
             summary: Some(summary(SearchEnd::Finished)),
             ..SearchStatus::default()
@@ -146,7 +177,8 @@ mod tests {
             Some(Line::Finished {
                 found: 7,
                 skipped: 2,
-                elapsed: Duration::from_millis(1500)
+                elapsed: Duration::from_millis(1500),
+                files_skipped: None
             })
         );
         let stopped = SearchStatus {
