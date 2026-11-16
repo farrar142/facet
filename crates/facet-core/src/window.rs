@@ -75,7 +75,7 @@ use crate::history::{
     History, NotUndoable, OperationKind, Outcomes, Record, RecordId, Reversal, UndoError,
 };
 use crate::indexer_client::{ClientOptions, Connection, IndexerClient, IndexerEvent};
-use crate::instant_search::Unavailable;
+use crate::instant_search::DemotionReason;
 use crate::job::{
     AnswerError, ConflictAnswer, CopyRejection, DeleteRejection, ErrorAnswer, JobEvent, JobId,
     JobKind, JobQueue, JournalSink, NotRecyclableAnswer, RevertJob,
@@ -1435,6 +1435,7 @@ impl App {
         }
         updates.extend(self.pump_searches());
         updates.extend(self.pump_indexer());
+        updates.extend(self.pump_demoted());
         for id in std::mem::take(&mut self.changed_results) {
             if !updates.contains(&(id, Update::Search)) {
                 updates.push((id, Update::Search));
@@ -1574,8 +1575,9 @@ impl App {
         true
     }
 
-    /// 탭 `id`가 아직 보내지 않은 즉시 검색 질의가 있으면 서비스에 보낸다(연결이 없으면 「서비스 없음」). 서비스는 질의
-    /// 하나만 이어 받으므로 다른 탭의 이어 받기는 끊긴다([`crate::instant_search`]).
+    /// 탭 `id`가 아직 보내지 않은 즉시 검색 질의가 있으면 서비스에 보낸다. 범위 볼륨의 인덱스를 아직 확인하지 않았으면 상태
+    /// 질의가 먼저이고(응답이 오면 질의를 보낸다), 서비스가 없거나 볼륨에 인덱스가 없으면 실시간 탐색으로 강등한다
+    /// ([`crate::instant_search`]). 서비스는 질의 하나만 이어 받으므로 다른 탭의 이어 받기는 끊긴다.
     fn start_instant(&mut self, id: TabId) {
         let Some(tab) = self.tab_mut(id) else {
             return;
@@ -1586,20 +1588,76 @@ impl App {
         let Some(query) = tab.instant_query() else {
             return;
         };
-        let request = self.indexer.as_ref().map(|client| client.query(query));
-        if request.is_some() {
-            for (other, tab) in self.tabs_mut() {
-                if other != id {
-                    tab.instant_superseded();
-                }
+        let needs_status = tab.instant_needs_status();
+        let Some(client) = &self.indexer else {
+            if let Some(tab) = self.tab_mut(id) {
+                tab.instant_demote(DemotionReason::NoService, Instant::now());
+            }
+            self.start_demoted(id);
+            return;
+        };
+        if needs_status {
+            let request = client.status();
+            if let Some(tab) = self.tab_mut(id) {
+                tab.instant_status_sent(request);
+            }
+            return;
+        }
+        let request = client.query(query);
+        for (other, tab) in self.tabs_mut() {
+            if other != id {
+                tab.instant_superseded();
             }
         }
         if let Some(tab) = self.tab_mut(id) {
-            match request {
-                Some(request) => tab.instant_sent(request),
-                None => tab.instant_unavailable(Unavailable::Connection(Connection::NoService)),
-            }
+            tab.instant_sent(request);
         }
+    }
+
+    /// 강등한 탭 `id`의 실시간 탐색을 시작한다. 시작할 때가 아직이면(이어 치는 입력) 그때 깨우도록 하고, 그 전에 입력이
+    /// 또 바뀌면 [`Tab::retarget_instant`]가 시작할 때를 지운다.
+    fn start_demoted(&mut self, id: TabId) {
+        let outbox = self.outbox.clone();
+        let Some(tab) = self.tab_mut(id) else {
+            return;
+        };
+        let Some(due) = tab.demoted_search_due() else {
+            return;
+        };
+        let now = Instant::now();
+        if due > now {
+            let wait = due - now;
+            thread::Builder::new()
+                .name("facet-demote-wake".into())
+                .spawn(move || {
+                    thread::sleep(wait);
+                    outbox.wake();
+                })
+                .expect("강등 깨우기 스레드를 만들지 못했다");
+            return;
+        }
+        let Some(request) = tab.demoted_search_request() else {
+            return;
+        };
+        match LiveSearch::start_with_waker(request, move || outbox.wake()) {
+            Ok(search) => tab.attach_demoted_search(Box::new(search)),
+            Err(StartError::Location(error)) => tab.demoted_search_failed(error),
+            Err(StartError::Regex(_)) => tab.stop_search_unstarted(),
+        }
+    }
+
+    /// 시작할 때가 된 강등한 탭의 실시간 탐색을 시작한다. 시작한 탭마다 [`Update::Search`].
+    fn pump_demoted(&mut self) -> Vec<(TabId, Update)> {
+        let now = Instant::now();
+        let due: Vec<TabId> = self
+            .tabs_mut()
+            .filter(|(_, tab)| tab.demoted_search_due().is_some_and(|at| at <= now))
+            .map(|(id, _)| id)
+            .collect();
+        for id in &due {
+            self.start_demoted(*id);
+        }
+        due.into_iter().map(|id| (id, Update::Search)).collect()
     }
 
     /// 인덱서 서비스 연결의 사건을 받아 탭에 넘긴다. 응답은 기다리는 탭의 결과에 들어가고(바뀐 탭마다
@@ -1611,6 +1669,7 @@ impl App {
         let events = client.poll();
         let mut updates = Vec::new();
         let mut requery = Vec::new();
+        let mut demoted = Vec::new();
         for event in events {
             match event {
                 IndexerEvent::Connection(Connection::Connected { .. }) => {
@@ -1623,7 +1682,27 @@ impl App {
                         updates.push((id, Update::Search));
                     }
                 }
-                IndexerEvent::Connection(_) => {}
+                IndexerEvent::Connection(connection) => {
+                    // 연결 판정을 기다리던 탭은 서비스 없음·버전 다름이면 강등한다.
+                    let reason = match connection {
+                        Connection::NoService => Some(DemotionReason::NoService),
+                        Connection::VersionMismatch { .. } => Some(DemotionReason::VersionMismatch),
+                        _ => None,
+                    };
+                    if let Some(reason) = reason {
+                        let now = Instant::now();
+                        let lost: Vec<TabId> = self
+                            .tabs_mut()
+                            .filter_map(|(id, tab)| {
+                                tab.instant_connection_lost(reason, now).then_some(id)
+                            })
+                            .collect();
+                        for id in lost {
+                            demoted.push(id);
+                            updates.push((id, Update::Search));
+                        }
+                    }
+                }
                 IndexerEvent::Reply { id, result } => {
                     let owner = self
                         .tabs_mut()
@@ -1639,12 +1718,19 @@ impl App {
                         InstantReply::Ignored => {}
                         InstantReply::Applied => updates.push((tab_id, Update::Search)),
                         InstantReply::Requery => requery.push(tab_id),
+                        InstantReply::Demoted => {
+                            demoted.push(tab_id);
+                            updates.push((tab_id, Update::Search));
+                        }
                     }
                 }
             }
         }
         for id in requery {
             self.start_instant(id);
+        }
+        for id in demoted {
+            self.start_demoted(id);
         }
         updates
     }

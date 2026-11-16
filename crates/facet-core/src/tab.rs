@@ -40,9 +40,10 @@ use crate::content_search::{
     ContentEnd, ContentEvent, ContentFound, ContentRequest, ContentSearch,
 };
 use crate::details::Hit;
-use crate::indexer_client::{Reply, RequestError, RequestId as IndexerRequestId};
+use crate::indexer_client::{Connection, Reply, RequestError, RequestId as IndexerRequestId};
 use crate::instant_search::{
-    self, Flight, InstantState, InstantStatus, PAGE_SIZE, Unavailable, found_from_hit,
+    self, DEMOTED_SEARCH_DELAY, Demotion, DemotionReason, Flight, InstantState, InstantStatus,
+    PAGE_SIZE, Unavailable, found_from_hit,
 };
 use crate::launch::LaunchTarget;
 use crate::live_search::{
@@ -1118,6 +1119,7 @@ impl Tab {
         if let Some(wanted) = instant_search::server_sort(sort)
             && let Some(instant) = self.results.as_mut().and_then(|r| r.instant.as_mut())
             && instant.sent
+            && instant.status.demotion.is_none()
             && instant.sent_sort != Some(wanted)
         {
             instant.sent = false;
@@ -1477,6 +1479,7 @@ impl Tab {
         if let Some(instant) = &mut results.instant {
             instant.in_flight = None;
             instant.next = None;
+            instant.live_due = None;
             instant.status.loading = false;
             instant.status.has_more = false;
         }
@@ -1571,6 +1574,12 @@ impl Tab {
                 instant.next = None;
                 instant.sent = false;
                 instant.status.has_more = false;
+                // 강등 중이던 앞선 실시간 탐색은 새 입력에서 멈춘다. 즉시 검색을 쓸 수 있는지는 다시 정한다.
+                instant.live_due = None;
+                instant.status.demotion = None;
+                if let Some(results) = self.results.as_mut() {
+                    results.feed = None;
+                }
             }
             return Retarget::Replaced;
         }
@@ -1644,7 +1653,7 @@ impl Tab {
         }
     }
 
-    /// 서비스에 질의를 보낼 수 없었다(연결 자체가 없음): 「서비스 없음」을 드러낸다.
+    /// 서비스에 질의를 보낼 수 없었다(연결 판정 중): 기다린다. 서비스 없음·버전 다름은 [`Tab::instant_demote`]다.
     pub fn instant_unavailable(&mut self, why: Unavailable) {
         if let Some(results) = &mut self.results
             && let Some(instant) = &mut results.instant
@@ -1657,6 +1666,131 @@ impl Tab {
             instant.status.has_more = false;
             results.status.running = false;
         }
+    }
+
+    /// 범위 볼륨의 인덱스를 아직 확인하지 않아 상태 질의를 먼저 보내야 하는가.
+    pub fn instant_needs_status(&self) -> bool {
+        self.results
+            .as_ref()
+            .and_then(|r| r.instant.as_ref())
+            .is_some_and(|i| !i.sent && !i.volume_checked && i.status.demotion.is_none())
+    }
+
+    /// 상태 질의를 요청 `id`로 보냈다.
+    pub fn instant_status_sent(&mut self, id: IndexerRequestId) {
+        if let Some(results) = &mut self.results
+            && let Some(instant) = &mut results.instant
+        {
+            instant.in_flight = Some((id, Flight::Status));
+            instant.sent = true;
+            instant.status.loading = true;
+            results.status.running = true;
+        }
+    }
+
+    /// 즉시 검색을 실시간 탐색으로 강등한다: 같은 조건 트리로 검색 전 폴더 아래를 훑는다(앱이 시작한다,
+    /// [`Tab::demoted_search_due`]). 범위가 모든 볼륨이었으면 폴더 아래로 좁아진다([`Demotion::narrowed_to_folder`]). 이어
+    /// 치는 중인 입력이면 [`DEMOTED_SEARCH_DELAY`] 뒤에 시작한다. 즉시 검색 결과 위치가 아니면 아무것도 하지 않는다.
+    pub fn instant_demote(&mut self, reason: DemotionReason, now: Instant) {
+        let Some(SearchKind::Instant { under }) =
+            self.location.search_scope().map(|s| s.kind.clone())
+        else {
+            return;
+        };
+        let Some(results) = &mut self.results else {
+            return;
+        };
+        let Some(instant) = &mut results.instant else {
+            return;
+        };
+        let delay = if instant.was_demoted {
+            DEMOTED_SEARCH_DELAY
+        } else {
+            Duration::ZERO
+        };
+        instant.was_demoted = true;
+        instant.sent = true;
+        instant.in_flight = None;
+        instant.next = None;
+        instant.live_due = Some(now + delay);
+        instant.status.loading = false;
+        instant.status.has_more = false;
+        instant.status.unavailable = None;
+        instant.status.total = None;
+        instant.status.total_is_upper_bound = false;
+        instant.status.building.clear();
+        instant.status.demotion = Some(Demotion {
+            reason,
+            narrowed_to_folder: !under,
+        });
+        results.feed = None;
+        results.status.running = true;
+        results.status.summary = None;
+    }
+
+    /// 강등한 실시간 탐색을 시작할 시각. 이미 시작했거나 강등 중이 아니면 `None`이다.
+    pub fn demoted_search_due(&self) -> Option<Instant> {
+        let results = self.results.as_ref()?;
+        if results.feed.is_some() {
+            return None;
+        }
+        results.instant.as_ref()?.live_due
+    }
+
+    /// 강등한 실시간 탐색의 요청: 즉시 검색과 같은 조건 트리를 검색 전 폴더에서 훑는다(「현재 폴더 아래만」의 폴더 조건은
+    /// 시작점이 이미 그 폴더라 더하지 않는다).
+    pub fn demoted_search_request(&self) -> Option<SearchRequest> {
+        self.demoted_search_due()?;
+        let results = self.results.as_ref()?;
+        let scope = self.location.search_scope()?;
+        let Ok(Parsed::Query(condition)) = query_syntax::parse(&scope.query, Today::now()) else {
+            return None;
+        };
+        Some(SearchRequest {
+            root: Location::file_system(&scope.folder),
+            condition,
+            show_hidden: results.status.show_hidden,
+        })
+    }
+
+    /// 강등한 실시간 탐색을 붙인다: 앞 결과(즉시 검색이나 앞선 탐색)는 비우고 새 탐색의 결과를 받는다.
+    pub fn attach_demoted_search(&mut self, feed: Box<dyn SearchFeed>) {
+        if self.results.is_none() {
+            return;
+        }
+        self.list_gen += 1;
+        self.list = DetailsList::new(Vec::new(), self.sort);
+        self.update_visible();
+        self.prune_selection();
+        self.reindex();
+        if let Some(results) = &mut self.results {
+            if let Some(instant) = &mut results.instant {
+                instant.live_due = None;
+            }
+            results.status.progress = SearchProgress::default();
+        }
+        self.attach_search(feed);
+    }
+
+    /// 강등한 실시간 탐색을 시작하지 못했다.
+    pub fn demoted_search_failed(&mut self, error: ListError) {
+        if let Some(instant) = self.results.as_mut().and_then(|r| r.instant.as_mut()) {
+            instant.live_due = None;
+        }
+        self.search_failed(error);
+    }
+
+    /// 서비스 연결이 서비스 없음·버전 다름으로 판정돼 기다리던 탭이면 강등하고 `true`다.
+    pub fn instant_connection_lost(&mut self, reason: DemotionReason, now: Instant) -> bool {
+        let waiting = self
+            .results
+            .as_ref()
+            .and_then(|r| r.instant.as_ref())
+            .is_some_and(|i| matches!(i.status.unavailable, Some(Unavailable::Connection(_))));
+        if waiting {
+            self.instant_demote(reason, now);
+        }
+        waiting
     }
 
     /// 서비스에 닿지 못해 멈춰 있던 탭이면 다시 보낼 질의로 바꾸고 `true`다(연결이 맺어지면 앱이 부른다).
@@ -1732,6 +1866,7 @@ impl Tab {
         id: IndexerRequestId,
         result: Result<Reply, RequestError>,
     ) -> InstantReply {
+        let folder = self.location.search_scope().map(|s| s.folder.clone());
         let Some(instant) = self.results.as_mut().and_then(|r| r.instant.as_mut()) else {
             return InstantReply::Ignored;
         };
@@ -1744,8 +1879,9 @@ impl Tab {
         let mut found = Vec::new();
         let mut replace = false;
         let mut requery = false;
+        let mut demote = None;
         match result {
-            Ok(Reply::Page(page)) => {
+            Ok(Reply::Page(page)) if flight != Flight::Status => {
                 instant.status.total = Some(page.total);
                 instant.status.total_is_upper_bound = page.total_is_upper_bound;
                 instant.status.building = page.building;
@@ -1755,7 +1891,20 @@ impl Tab {
                 replace = flight == Flight::Query;
                 found = page.hits.iter().map(found_from_hit).collect();
             }
-            Ok(Reply::Status(_)) | Err(RequestError::Unexpected) => {
+            Ok(Reply::Status(status)) if flight == Flight::Status => {
+                if folder
+                    .as_deref()
+                    .is_some_and(|folder| instant_search::volume_is_indexed(&status, folder))
+                {
+                    // 인덱스가 있다: 질의를 보낸다.
+                    instant.volume_checked = true;
+                    instant.sent = false;
+                    requery = true;
+                } else {
+                    demote = Some(DemotionReason::VolumeNotIndexed);
+                }
+            }
+            Ok(_) | Err(RequestError::Unexpected) => {
                 instant.status.unavailable = Some(Unavailable::Disconnected);
             }
             Err(RequestError::Service(error))
@@ -1778,16 +1927,23 @@ impl Tab {
                 instant.status.has_more = false;
                 instant.status.unavailable = Some(Unavailable::Service(error));
             }
+            Err(RequestError::NotConnected(Connection::NoService)) => {
+                demote = Some(DemotionReason::NoService);
+            }
+            Err(RequestError::NotConnected(Connection::VersionMismatch { .. })) => {
+                demote = Some(DemotionReason::VersionMismatch);
+            }
             Err(RequestError::NotConnected(connection)) => {
                 instant.next = None;
                 instant.status.has_more = false;
                 instant.status.unavailable = Some(Unavailable::Connection(connection));
             }
-            Err(RequestError::Disconnected) => {
-                instant.next = None;
-                instant.status.has_more = false;
-                instant.status.unavailable = Some(Unavailable::Disconnected);
-            }
+            // 답을 기다리다 서비스가 멈췄다: 탭이 멈추지 않고 그 질의를 강등한다.
+            Err(RequestError::Disconnected) => demote = Some(DemotionReason::NoService),
+        }
+        if let Some(reason) = demote {
+            self.instant_demote(reason, Instant::now());
+            return InstantReply::Demoted;
         }
         if let Some(results) = &mut self.results {
             results.status.running = false;
@@ -2478,6 +2634,8 @@ pub enum InstantReply {
     Ignored,
     /// 응답을 반영했다(결과·전체 개수·서비스 없음 등이 바뀜).
     Applied,
-    /// 이어 받기가 무효라 처음부터 다시 질의해야 한다.
+    /// 이어 받기가 무효라 처음부터 다시 질의해야 한다(범위 볼륨의 인덱스를 확인한 뒤 질의를 보낼 때도).
     Requery,
+    /// 서비스를 쓸 수 없어 실시간 탐색으로 강등했다([`Tab::demoted_search_due`]를 앱이 시작한다).
+    Demoted,
 }

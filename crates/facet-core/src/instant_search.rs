@@ -17,13 +17,17 @@
 //! - **질의는 하나씩**: 서비스는 연결 하나에 질의 하나만 이어 받게 두고 새 질의가 앞선 질의를 취소한다. 그래서 다른
 //!   탭이 질의를 보내면 앞 탭의 이어 받기는 끊긴다([`crate::tab::Tab::has_more_results`]가 `false`가 되고 전체 개수와
 //!   받은 수의 차이로 드러남).
+//! - **강등**: 서비스를 쓸 수 없으면(연결하지 못함·버전 다름·범위의 볼륨에 인덱스 없음·검색 중 서비스가 멈춤) 같은 조건 트리로
+//!   실시간 탐색([`crate::live_search`])을 띄워 같은 검색 결과 위치에 결과를 넣는다([`Demotion`], [`InstantStatus::demotion`]).
+//!   범위가 모든 볼륨이면 탐색 범위는 검색 전 폴더 아래로 좁아진다(`narrowed_to_folder`). 강등 중 입력이 바뀌면 앞선 탐색은
+//!   곧바로 멈추고 새 탐색은 [`DEMOTED_SEARCH_DELAY`] 뒤에 시작한다. 서비스가 다시 닿으면 다음 입력부터 즉시 검색이다.
 //! - 화면 문장은 없다(ADR-0007).
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
-use facet_protocol::{HitMessage, Order, SortKey};
+use facet_protocol::{HitMessage, Order, SortKey, StatusMessage, VolumeState};
 
 use crate::details::{Column, Direction, Sort};
 use crate::indexer_client::{Connection, RequestId};
@@ -36,6 +40,14 @@ use crate::{Attributes, Item};
 /// 번 더 받기 전에 끝에 닿지 않는다. 더 키우면 한 응답의 크기(경로 문자열 100개 ≈ 수 KB가 아니라 수십 KB)와 항목을 목록에
 /// 합치는 시간이 길어져 「치는 즉시」가 느려지고, 줄이면 스크롤 중 이어 받기가 잦다.
 pub const PAGE_SIZE: u32 = 100;
+
+/// 강등 중 입력이 바뀐 뒤 실시간 탐색을 시작하기까지 기다리는 시간.
+///
+/// 실시간 탐색은 큰 폴더를 훑으면 디스크와 코어를 쓰므로(10만 항목에 약 1초) 글자마다 새로 훑으면 치는 동안 앞선 훑기를
+/// 계속 버리고 다시 시작하게 된다. 보통 타자 간격은 100~200ms이고 잠깐 멈추면 그보다 길다. 250ms면 이어 치는 동안에는 훑지
+/// 않고, 멈추면 한 번 기다린 정도(체감 지연이 한 박자)로 시작한다. 처음 강등되는 입력(결과 위치로 막 간 첫 글자)과 검색 중
+/// 서비스가 멈춰 강등된 질의는 이어 치는 중이 아니므로 기다리지 않는다.
+pub const DEMOTED_SEARCH_DELAY: Duration = Duration::from_millis(250);
 
 /// 즉시 검색을 서비스에 보내는 정렬. 서비스가 모르는 열이면 `None`이다(받아 둔 결과만 정렬).
 pub fn server_sort(sort: Sort) -> Option<(SortKey, Order)> {
@@ -64,6 +76,25 @@ pub enum Unavailable {
     Service(facet_protocol::ErrorMessage),
 }
 
+/// 즉시 검색을 실시간 탐색으로 강등한 까닭.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DemotionReason {
+    /// 서비스가 없다(연결하지 못했거나 검색 중 멈췄다).
+    NoService,
+    /// 서비스가 이 클라이언트의 버전을 받지 않는다.
+    VersionMismatch,
+    /// 범위의 볼륨에 인덱스가 없다(서비스 상태에서 「인덱스 없음」이거나 그 볼륨이 없음: 네트워크·exFAT USB 등).
+    VolumeNotIndexed,
+}
+
+/// 강등 상태: 까닭과 범위를 좁혔는지.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Demotion {
+    pub reason: DemotionReason,
+    /// 범위가 모든 볼륨이었는데 검색 전 폴더 아래로 좁혔다.
+    pub narrowed_to_folder: bool,
+}
+
 /// 탭이 읽는 즉시 검색 상태.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InstantStatus {
@@ -73,8 +104,10 @@ pub struct InstantStatus {
     pub total_is_upper_bound: bool,
     /// 인덱스를 만드는 중이라 덜 찼을 수 있는 볼륨들(예: `C:`). 비어 있지 않으면 「덜 찼을 수 있음」이다.
     pub building: Vec<String>,
-    /// 서비스에 닿지 못했으면 그 까닭(탭에 「서비스 없음」을 드러낸다). 다음 티켓이 실시간 탐색으로 강등한다.
+    /// 서비스에 닿지 못해 기다리는 까닭(연결 판정 중 등). 서비스 없음·버전 다름은 기다리지 않고 [`Self::demotion`]이 된다.
     pub unavailable: Option<Unavailable>,
+    /// 실시간 탐색으로 강등했으면 그 까닭. 강등 중에는 결과가 실시간 탐색([`crate::tab::Tab::search`]의 진행·요약)에서 온다.
+    pub demotion: Option<Demotion>,
     /// 질의나 이어 받기의 응답을 기다리는 중인가.
     pub loading: bool,
     /// 남은 결과가 더 있는가(이어 받을 수 있다).
@@ -93,6 +126,8 @@ impl InstantStatus {
 pub(crate) enum Flight {
     Query,
     Resume,
+    /// 범위 볼륨의 인덱스 여부를 묻는 상태 질의.
+    Status,
 }
 
 /// 탭의 즉시 검색 내부 상태(검색 결과 위치가 즉시 검색일 때).
@@ -107,6 +142,38 @@ pub(crate) struct InstantState {
     pub(crate) sent_sort: Option<(SortKey, Order)>,
     /// 질의를 한 번이라도 보냈는가.
     pub(crate) sent: bool,
+    /// 범위 볼륨의 인덱스를 확인했는가(위치마다 한 번 상태 질의로).
+    pub(crate) volume_checked: bool,
+    /// 한 번이라도 강등했는가(이어 치는 중인 입력에는 실시간 탐색 시작을 미룬다).
+    pub(crate) was_demoted: bool,
+    /// 강등한 실시간 탐색을 시작할 시각. 시작했으면 `None`.
+    pub(crate) live_due: Option<Instant>,
+}
+
+/// 경로가 든 볼륨 이름(`C:`). 드라이브 문자가 없으면(UNC 등) `None`이다.
+pub(crate) fn volume_of(path: &Path) -> Option<String> {
+    use std::path::{Component, Prefix};
+    match path.components().next()? {
+        Component::Prefix(prefix) => match prefix.kind() {
+            Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+                Some(format!("{}:", (letter as char).to_ascii_uppercase()))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// 상태 질의의 응답에서 `folder`의 볼륨이 인덱스를 쓸 수 있는가(준비됨·만드는 중). 상태에 없거나 인덱스 없음이면 `false`.
+pub(crate) fn volume_is_indexed(status: &StatusMessage, folder: &Path) -> bool {
+    let Some(volume) = volume_of(folder) else {
+        return false;
+    };
+    status
+        .volumes
+        .iter()
+        .find(|v| v.volume.eq_ignore_ascii_case(&volume))
+        .is_some_and(|v| !matches!(v.state, VolumeState::NotIndexed(_)))
 }
 
 /// 결과 항목 하나로 목록 항목을 만든다(디스크를 다시 읽지 않는다). 경로가 폴더 없이 이름뿐이면 빈 폴더다.
@@ -155,6 +222,17 @@ mod tests {
         assert_eq!(unix, SystemTime::UNIX_EPOCH);
         let later = system_time((11_644_473_600 + 5) * 10_000_000 + 10);
         assert_eq!(later, SystemTime::UNIX_EPOCH + Duration::new(5, 1_000));
+    }
+
+    #[test]
+    fn 경로의_볼륨_이름을_드라이브_문자에서_읽는다() {
+        let bs = '\u{5c}';
+        let verbatim = format!("{bs}{bs}?{bs}D:{bs}a");
+        let unc = format!("{bs}{bs}server{bs}share{bs}a");
+        assert_eq!(volume_of(Path::new(&verbatim)), Some("D:".into()));
+        assert_eq!(volume_of(Path::new(&unc)), None);
+        assert_eq!(volume_of(Path::new("c:/a/b")), Some("C:".into()));
+        assert_eq!(volume_of(Path::new(r"\server\share\a")), None);
     }
 
     #[test]
