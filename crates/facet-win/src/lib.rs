@@ -19,6 +19,9 @@
 //! - [`recycle`]: 휴지통으로 보내기와 휴지통에서 복원하기(`IFileOperation`, 부를 때마다 띄우는 전용 STA 스레드, 시간
 //!   제한). 셸이 휴지통 대신 영구 삭제하려는 항목은 지우지 않고 멈춘다. 볼륨에 휴지통이 있는지 미리 묻기. Windows가
 //!   아니면 「지원하지 않음」이다.
+//! - [`clipboard`]: 클립보드를 소유하는 전용 STA 스레드([`clipboard::Clipboard`]: 파일 목록·글자 올리기와 읽기, 잘라내기
+//!   붙여넣기 뒤 알림과 비우기, 변경 알림 콜백)와 탐색기와 같은 형식([`clipboard::format`]). 메서드는 그 스레드를
+//!   기다리므로 UI 스레드에서 부르지 않는다. Windows가 아니면 「지원하지 않음」이다.
 //! - [`shell_copy`]: **측정 전용** 셸 복사(`IFileOperation`, 전용 스레드의 COM, 대화 없음). 탐색기 비교 측정만 부르고
 //!   앱은 부르지 않는다. Windows가 아니면 「지원하지 않음」이다.
 
@@ -28,11 +31,14 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 
+pub mod clipboard;
 pub mod file_ops;
 pub mod recycle;
 pub mod shell_copy;
 pub mod single_instance;
 mod watch;
+#[cfg(windows)]
+mod windows_clipboard;
 #[cfg(windows)]
 mod windows_file_ops;
 #[cfg(windows)]
