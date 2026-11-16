@@ -1130,7 +1130,9 @@ fn run_live_search(
             Some(SearchEvent::Batch { items, .. }) => found += items.len(),
             Some(SearchEvent::Finished(summary)) => {
                 if summary.end != SearchEnd::Finished || summary.found != found {
-                    return Err(format!("탐색 요약이 이상합니다: {summary:?}, 받은 {found}개"));
+                    return Err(format!(
+                        "탐색 요약이 이상합니다: {summary:?}, 받은 {found}개"
+                    ));
                 }
                 if summary.folders_skipped != 0 {
                     return Err(format!(
