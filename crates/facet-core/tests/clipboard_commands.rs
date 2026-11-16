@@ -89,6 +89,7 @@ fn 단축키는_ctrl_c_ctrl_v_ctrl_shift_c이고_한글_모드에서도_같다()
 fn name(command: CommandId) -> &'static str {
     match command {
         CommandId::Copy => "복사",
+        CommandId::Cut => "잘라내기",
         CommandId::Paste => "붙여넣기",
         CommandId::CopyPath => "경로 복사",
         other => other.as_str(),
@@ -436,4 +437,83 @@ mod windows {
             }
         }
     }
+}
+
+#[test]
+fn 잘라내기는_ctrl_x이고_한글_모드에서도_같고_원본이_있을_때만_켜진다() {
+    use CommandId::Cut;
+    let key = |c: char| Key::from_char(c).unwrap();
+    assert_eq!(Cut.shortcuts(), &[Shortcut::new(key('x')).ctrl()]);
+    assert_eq!(find_by_shortcut(Shortcut::new(key('ㅌ')).ctrl()), Some(Cut));
+    assert_eq!(Cut.as_str(), "cut");
+    assert_eq!(CommandId::from_id("cut"), Some(Cut));
+
+    let dir = tree();
+    let src = dir.path().join("src");
+    let mut app = app_at(&src);
+    assert!(!app.can_execute(Cut));
+    assert_eq!(app.execute(Cut), Execution::Disabled);
+    let file = index_of(app.active_tab(), "파일.txt");
+    app.active_tab_mut().select_only(file);
+    assert!(app.can_execute(Cut));
+    assert!(Cut.is_enabled(app.active_tab()));
+    let found = app.search_commands("잘라", name);
+    assert_eq!(found.len(), 1);
+    assert!(found[0].enabled);
+}
+
+#[test]
+fn 잘라낸_경로_집합은_클립보드_요약을_따르고_바뀌면_풀린다() {
+    let dir = tree();
+    let src = dir.path().join("src");
+    let mut app = app_at(&src);
+    assert!(app.cut_marks().is_empty());
+
+    // 잘라내기 표시가 있는 목록만 표시가 된다. 대소문자는 무시한다.
+    let cut_path = PathBuf::from(src.to_string_lossy().to_uppercase()).join("파일.txt");
+    app.set_clipboard_files(Some(files(&[cut_path], ClipboardOperation::Move)));
+    let marks = app.cut_marks();
+    assert_eq!(marks.len(), 1);
+    assert!(marks.contains(&src, "파일.txt".as_ref()));
+    assert!(marks.contains(&src, "파일.TXT".as_ref()));
+    // 다른 폴더의 같은 이름은 아니다.
+    assert!(!marks.contains(&src.join("a"), "파일.txt".as_ref()));
+    assert!(!marks.contains(&src, "b".as_ref()));
+
+    // 같은 요약이 다시 오면 표시는 그대로다(화면이 다시 그리지 않아도 된다).
+    app.set_clipboard_files(Some(files(
+        &[src.join("파일.txt")],
+        ClipboardOperation::Move,
+    )));
+    assert!(std::sync::Arc::ptr_eq(&marks, &app.cut_marks()));
+
+    // 복사로 바뀌면 풀린다.
+    app.set_clipboard_files(Some(files(
+        &[src.join("파일.txt")],
+        ClipboardOperation::Copy,
+    )));
+    assert!(app.cut_marks().is_empty());
+    // 다시 잘라낸 뒤 클립보드가 비면 풀린다.
+    app.set_clipboard_files(Some(files(&[src.join("b")], ClipboardOperation::Move)));
+    assert!(app.cut_marks().contains(&src, "b".as_ref()));
+    app.set_clipboard_files(None);
+    assert!(app.cut_marks().is_empty());
+}
+
+#[test]
+fn 잘라낸_경로가_1만_개여도_판정은_빠르다() {
+    use facet_core::clipboard::CutMarks;
+    let folder = Path::new(r"C:\큰 폴더");
+    let marks = CutMarks::new((0..10_000).map(|i| folder.join(format!("항목 {i}.txt"))));
+    let start = std::time::Instant::now();
+    let mut hits = 0;
+    for round in 0..10 {
+        for i in 0..10_000 {
+            let name = format!("항목 {}.txt", i + round * 5_000);
+            hits += usize::from(marks.contains(folder, name.as_ref()));
+        }
+    }
+    assert!(hits > 0);
+    // 10만 번 묻는 데 1초 넘게 걸리면 상수 시간 판정이 아니다(로컬은 수십 ms).
+    assert!(start.elapsed() < Duration::from_secs(1));
 }

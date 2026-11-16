@@ -15,6 +15,8 @@ export struct Row {
     selected: bool,
     // 커서 항목인가(키보드가 가리키는 항목. 선택과 다르다).
     cursor: bool,
+    // 잘라낸 항목인가(잘라내기 표시: 흐리게 그린다).
+    cut: bool,
 }
 
 // 명령 팔레트의 한 줄. 이름과 단축키 글자는 Rust가 넣고, 지금 실행할 수 없으면 꺼진 채로 그린다.
@@ -1438,9 +1440,11 @@ component PanelView inherits Rectangle {
                                 alignment: center;
                                 ItemIcon {
                                     folder: row.folder;
+                                    opacity: row.cut ? 0.45 : 1.0;
                                 }
                             }
                             if i != root.editing: Text {
+                                opacity: row.cut ? 0.45 : 1.0;
                                 text: row.name;
                                 overflow: elide;
                                 vertical-alignment: center;

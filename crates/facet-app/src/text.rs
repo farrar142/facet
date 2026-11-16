@@ -63,6 +63,7 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::DeletePermanently => "영구 삭제",
         CommandId::Copy => "복사",
         CommandId::Paste => "붙여넣기",
+        CommandId::Cut => "잘라내기",
         CommandId::CopyPath => "경로 복사",
     }
 }
@@ -127,6 +128,7 @@ pub fn rename_problem_text(problem: crate::rename::Problem) -> String {
 pub fn clipboard_done_text(done: &ClipboardDone) -> Option<String> {
     match done {
         ClipboardDone::Copied { items } => Some(format!("항목 {items}개를 복사했습니다")),
+        ClipboardDone::Cut { items } => Some(format!("항목 {items}개를 잘라냈습니다")),
         ClipboardDone::PathsCopied { items: 1 } => Some("경로를 복사했습니다".to_owned()),
         ClipboardDone::PathsCopied { items } => Some(format!("경로 {items}개를 복사했습니다")),
         ClipboardDone::Pasted { .. } => None,
