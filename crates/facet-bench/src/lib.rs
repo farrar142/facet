@@ -19,6 +19,8 @@
 //!   `cargo xtask ci`가 이것도 부른다.
 //! - 필터 벤치마크: 10만 항목 목록에서 필터 한 글자·두 글자를 정하는 시간([`FILTER_LIMIT`])을 잰다([`measure_filter`]).
 //!   `cargo xtask ci`가 이것도 부른다.
+//! - 실시간 탐색 벤치마크: 10만 항목 시험 나무([`make_test_tree`])를 실시간 탐색으로 끝까지 훑는 시간
+//!   ([`SEARCH_LIMIT`])을 잰다([`measure_live_search`]). `cargo xtask ci`가 이것도 부른다.
 //! - 복사 벤치마크: 작업 대기열의 복사 작업으로 256MiB 파일 하나의 처리량([`copy::COPY_THROUGHPUT_LIMIT`])과
 //!   4KiB 파일 2천 개가 든 폴더의 복사 시간([`copy::COPY_SMALL_LIMIT`])을 잰다. `cargo xtask ci`가 이것도 부른다.
 //!   같은 복사를 셸의 `IFileOperation`으로도 해 견주는 탐색기 비교 측정([`copy::compare`])은 사람이 잰다.
@@ -1023,4 +1025,156 @@ pub fn check_filter_limit(m: &FilterMeasurement, limit: Duration) -> Result<(), 
         }
     }
     Ok(())
+}
+
+/// 실시간 탐색 벤치마크의 항목 수(가지 폴더 포함).
+pub const SEARCH_COUNT: usize = 100_000;
+
+/// 시험 나무의 가지 폴더 갈래 수: 단계마다 10개씩 3단계(가지 10 + 100 + 1000 = 1110개, 마지막 단계 1000개가 잎).
+pub const TREE_FANOUT: usize = 10;
+
+/// 시험 나무의 가지 단계 수.
+pub const TREE_DEPTH: u32 = 3;
+
+/// 실시간 탐색 벤치마크의 이름 조건: 시험 항목 열 개 중 하나(「보고서 n.txt」)가 맞는 한글 부분 일치.
+pub const SEARCH_PATTERN: &str = "보고서";
+
+/// 10만 항목 나무의 실시간 탐색 전체 시간(시작부터 끝남 사건까지)의 로컬 기준(릴리스 빌드): 1초.
+///
+/// 나무에는 폴더가 약 2만 1천 개(가지 1110개와 시험 항목 열 개 중 두 개인 빈 폴더) 있어 폴더마다 여는 비용이
+/// 대부분이다. 2026-11-16 GitHub 호스트 Windows 러너(논리 코어 4개)에서 같은 나무를 스레드 하나로 재귀해 훑으면
+/// 약 1.6초, 이 엔진(일꾼 4개)은 중앙값 약 0.86초였다. 사람이 큰 폴더 나무에서 「다 찾았다」를 기다릴 만한 시간이고
+/// 코어가 더 많은 개발 기계에서는 이보다 빠르다.
+pub const SEARCH_TARGET: Duration = Duration::from_millis(1000);
+
+/// CI가 실패시키는 실시간 탐색 시간 상한: 로컬 기준 [`SEARCH_TARGET`]의 10배([`LIST_LIMIT`]과 같은 까닭: 공유
+/// 러너의 편차를 견디면서 한 단계 나빠지는 실수(항목마다 시스템 호출을 더 하기, 링크를 따라 들어가 같은 폴더를
+/// 되풀이해 훑기 등)만 잡는다). 러너 값의 약 12배라 스레드를 하나로 줄인 정도(러너에서 약 2배)는 잡지 못한다.
+pub const SEARCH_LIMIT: Duration = Duration::from_millis(10_000);
+
+/// 가지 폴더 수.
+fn tree_branch_count() -> usize {
+    (1..=TREE_DEPTH).map(|d| TREE_FANOUT.pow(d)).sum()
+}
+
+/// 잎 폴더(마지막 단계 가지) `leaf`번의 시작점 기준 경로.
+fn tree_leaf(root: &Path, leaf: usize) -> PathBuf {
+    let digits = format!("{leaf:0width$}", width = TREE_DEPTH as usize);
+    (1..=digits.len()).fold(root.to_path_buf(), |path, n| {
+        path.join(format!("가지 {}", &digits[..n]))
+    })
+}
+
+/// `path`에 항목 `count`개(가지 폴더 포함)가 든 시험 나무를 만든다: 가지 폴더가 단계마다 [`TREE_FANOUT`]개씩
+/// [`TREE_DEPTH`]단계이고, 나머지 항목은 시험 폴더 항목([`test_folder_entry`]의 0번부터, 폴더와 파일이 섞임)을 잎
+/// 폴더에 차례로 나눠 담는다. 빠진 항목만 만들고 크기가 다른 파일은 고치므로 다시 돌리면 결과가 같다. 이미 있는
+/// 항목의 종류가 다르면 실패한다(시험 나무에 없는 항목이 있는지는 탐색 벤치마크가 수로 확인한다).
+pub fn make_test_tree(path: &Path, count: usize) -> Result<MakeReport, TestFolderError> {
+    let branches = tree_branch_count();
+    let leaves = TREE_FANOUT.pow(TREE_DEPTH);
+    let mut report = MakeReport {
+        created: 0,
+        kept: 0,
+    };
+    for leaf in 0..leaves {
+        let leaf_path = tree_leaf(path, leaf);
+        fs::create_dir_all(&leaf_path).map_err(io_err(&leaf_path))?;
+    }
+    report.kept += branches;
+    for index in 0..count.saturating_sub(branches) {
+        let entry = test_folder_entry(index);
+        let item_path = tree_leaf(path, index % leaves).join(&entry.name);
+        let made = if entry.is_folder {
+            fs::create_dir(&item_path)
+        } else {
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&item_path)
+                .and_then(|f| f.set_len(entry.size))
+        };
+        match made {
+            Ok(()) => report.created += 1,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                keep_existing(&item_path, &entry)?;
+                report.kept += 1;
+            }
+            Err(e) => return Err(io_err(&item_path)(e)),
+        }
+    }
+    Ok(report)
+}
+
+/// 실시간 탐색 벤치마크의 시험 나무 자리: 임시 폴더 아래 `facet-test-folders/tree-N`(`target/` 밑이 아님).
+pub fn test_tree_path(count: usize) -> PathBuf {
+    std::env::temp_dir()
+        .join("facet-test-folders")
+        .join(format!("tree-{count}"))
+}
+
+/// 실시간 탐색을 끝까지 돌려 (찾은 수, 요약)을 낸다.
+fn run_live_search(
+    root: &Path,
+    pattern: &str,
+) -> Result<(usize, facet_core::live_search::SearchSummary), String> {
+    use facet_core::live_search::{LiveSearch, SearchEnd, SearchEvent, SearchRequest};
+    let mut search = LiveSearch::start(SearchRequest {
+        root: Location::file_system(root),
+        pattern: pattern.to_owned(),
+        show_hidden: true,
+    })
+    .map_err(|e| e.to_string())?;
+    let mut found = 0;
+    loop {
+        match search.wait_event(Duration::from_secs(120)) {
+            Some(SearchEvent::Batch { items, .. }) => found += items.len(),
+            Some(SearchEvent::Finished(summary)) => {
+                if summary.end != SearchEnd::Finished || summary.found != found {
+                    return Err(format!(
+                        "탐색 요약이 이상합니다: {summary:?}, 받은 {found}개"
+                    ));
+                }
+                if summary.folders_skipped != 0 {
+                    return Err(format!(
+                        "시험 나무에서 건너뛴 폴더가 있습니다: {}",
+                        summary.folders_skipped
+                    ));
+                }
+                return Ok((found, summary));
+            }
+            None => return Err("탐색이 끝나지 않았습니다".to_owned()),
+        }
+    }
+}
+
+/// 시험 나무(항목 `count`개, [`make_test_tree`])에서 [`SEARCH_PATTERN`]으로 실시간 탐색을 시작해 끝남 사건을 받을
+/// 때까지를 `runs`번 잰다(한 번 데운 뒤). 데울 때 빈 조건으로 훑어 나무의 항목 수가 `count`인지, 잴 때마다 찾은 수가
+/// 이름 일치 규칙으로 센 수와 같은지 확인하고 다르면 실패한다. [`Measurement::item_count`]는 찾은 수다.
+pub fn measure_live_search(path: &Path, count: usize, runs: usize) -> Result<Measurement, String> {
+    let (all, _) = run_live_search(path, "")?;
+    if all != count {
+        return Err(format!(
+            "시험 나무의 항목 수가 다릅니다: {count}개를 기대했지만 {all}개(다른 항목이 섞였으면 {}를 지우고 다시 돌리세요)",
+            path.display()
+        ));
+    }
+    let matcher = facet_core::name_match::NameMatcher::new(SEARCH_PATTERN);
+    let expected = (0..count.saturating_sub(tree_branch_count()))
+        .filter(|&i| matcher.is_match(std::ffi::OsStr::new(&test_folder_entry(i).name)))
+        .count();
+    let mut times = Vec::with_capacity(runs);
+    for _ in 0..runs {
+        let start = Instant::now();
+        let (found, _) = run_live_search(path, SEARCH_PATTERN)?;
+        times.push(start.elapsed());
+        if found != expected {
+            return Err(format!(
+                "찾은 수가 다릅니다: {expected}개를 기대했지만 {found}개"
+            ));
+        }
+    }
+    Ok(Measurement {
+        item_count: expected,
+        times,
+    })
 }

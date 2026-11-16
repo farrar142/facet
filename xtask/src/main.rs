@@ -1,7 +1,7 @@
 //! 저장소 작업 명령. `cargo xtask <명령>`으로 부른다.
 //!
 //! - `ci`: 형식 검사 → lint(경고를 오류로) → 빌드 → 테스트 → 실제 볼륨 테스트 → 코어 벤치마크
-//!   → 인덱스 벤치마크 → MFT 파싱 벤치마크 → 세션 읽기·해석 벤치마크 → 복사 벤치마크 → 삭제 벤치마크. CI와 로컬이 같은 명령을 쓴다. 실제 볼륨 테스트는 관리자일 때만 시험 VHD를
+//!   → 인덱스 벤치마크 → MFT 파싱 벤치마크 → 세션 읽기·해석 벤치마크 → 클립보드 형식·오른쪽 메뉴·필터·실시간 탐색 벤치마크 → 복사 벤치마크 → 삭제 벤치마크. CI와 로컬이 같은 명령을 쓴다. 실제 볼륨 테스트는 관리자일 때만 시험 VHD를
 //!   만들어 돌린다.
 //! - `test-folder`: 시험 폴더를 만든다(`facet-bench make-folder`).
 //! - `bench`: 벤치마크만 돌린다(`facet-bench list`·`facet-bench index`·`facet-bench mft`·`facet-bench session`·
@@ -17,7 +17,7 @@
 //! - `indexer <install|uninstall>`: 인덱서 서비스를 release로 빌드해 개발 기계에 설치하거나 지운다(관리자).
 //!
 //! 벤치마크 상한과 그 근거는 `crates/facet-bench/src/lib.rs`의 `LIST_LIMIT`·`QUERY_LIMIT`·
-//! `INDEX_MEMORY_LIMIT`·`MFT_PARSE_LIMIT`·`SESSION_PARSE_LIMIT`·`CLIPBOARD_LIMIT`·`MENU_LIMIT`, `crates/facet-bench/src/copy.rs`의
+//! `INDEX_MEMORY_LIMIT`·`MFT_PARSE_LIMIT`·`SESSION_PARSE_LIMIT`·`CLIPBOARD_LIMIT`·`MENU_LIMIT`·`FILTER_LIMIT`·`SEARCH_LIMIT`, `crates/facet-bench/src/copy.rs`의
 //! `COPY_THROUGHPUT_LIMIT`·`COPY_SMALL_LIMIT`, `crates/facet-bench/src/delete.rs`의 `DELETE_LIMIT`·
 //! `UNDO_TARGET_LIMIT`에 있다.
 
@@ -41,6 +41,7 @@ const USAGE: &str = "\
   bench                          10만 항목 시험 폴더를 만들거나 확인하고 코어 목록 읽기·읽기+정렬·정렬 바꾸기를 잰 뒤,
                                  합성 인덱스 100만 개의 메모리와 부분 일치 질의를 재고, MFT 조각을
                                  되풀이한 레코드 100만 개를 인덱스로 만드는 시간을 재고, 탭 100개 세션 파일을 읽고 해석하는 시간을 재고,
+                                 10만 항목 시험 나무를 실시간 탐색으로 끝까지 훑는 시간을 재고,
                                  임시 폴더에서 1GiB 파일 하나의 복사 처리량과 4KiB 파일 1만 개 폴더의 복사 시간을 재고,
                                  4KiB 파일 1만 개 폴더의 영구 삭제 시간과 작업 기록 100개에서 실행취소 대상 찾는 시간을 잰다(릴리스 빌드)
   measure [--count N] [--runs N] [--scroll-runs N] [--scroll-rows N] [--refresh-hz N] [--json 파일] [경로]
@@ -265,6 +266,7 @@ fn bench_steps() -> Vec<Step> {
         clipboard_bench_step(),
         menu_bench_step(),
         filter_bench_step(),
+        search_bench_step(),
         copy_bench_step(),
         delete_bench_step(),
     ]
@@ -358,6 +360,16 @@ fn filter_bench_step() -> Step {
     Step {
         name: "필터 벤치마크",
         args: facet_bench("filter"),
+        env: Vec::new(),
+    }
+}
+
+/// 10만 항목 시험 나무(임시 폴더의 `facet-test-folders/tree-100000`)를 만들거나 확인하고 실시간 탐색 전체 시간을
+/// 잰다. 수와 상한은 `facet-bench`의 기본값이다.
+fn search_bench_step() -> Step {
+    Step {
+        name: "실시간 탐색 벤치마크",
+        args: facet_bench("search"),
         env: Vec::new(),
     }
 }
