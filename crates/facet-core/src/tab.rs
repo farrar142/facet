@@ -42,8 +42,8 @@ use crate::content_search::{
 use crate::details::Hit;
 use crate::indexer_client::{Connection, Reply, RequestError, RequestId as IndexerRequestId};
 use crate::instant_search::{
-    self, DEMOTED_SEARCH_DELAY, Demotion, DemotionReason, Flight, InstantState, InstantStatus,
-    PAGE_SIZE, Unavailable, found_from_hit,
+    self, DEMOTED_SEARCH_DELAY, Demotion, DemotionReason, FOLLOW_INTERVAL, Flight, Follow,
+    InstantState, InstantStatus, PAGE_SIZE, Unavailable, found_from_hit,
 };
 use crate::launch::LaunchTarget;
 use crate::live_search::{
@@ -531,6 +531,8 @@ pub struct Tab {
     instant_under: bool,
     /// 마지막으로 넘긴 즉시 검색 글자가 틀린 까닭(결과·위치는 그대로다). 맞는 글자·검색 끝내기·다른 곳으로 이동이 지운다.
     instant_error: Option<ParseError>,
+    /// 마지막으로 결과에서 열려던 항목이 디스크에 없었으면 그 경로(그 항목은 결과에서 뺐다). 다음 열기가 지운다.
+    missing_item: Option<PathBuf>,
 }
 
 impl Tab {
@@ -571,6 +573,7 @@ impl Tab {
             results: None,
             instant_under: false,
             instant_error: None,
+            missing_item: None,
         }
     }
 
@@ -1123,6 +1126,7 @@ impl Tab {
             && instant.sent_sort != Some(wanted)
         {
             instant.sent = false;
+            instant.refresh = false;
         }
         self.update_visible();
         self.reindex();
@@ -1573,6 +1577,7 @@ impl Tab {
                 instant.in_flight = None;
                 instant.next = None;
                 instant.sent = false;
+                instant.refresh = false;
                 instant.status.has_more = false;
                 // 강등 중이던 앞선 실시간 탐색은 새 입력에서 멈춘다. 즉시 검색을 쓸 수 있는지는 다시 정한다.
                 instant.live_due = None;
@@ -1630,19 +1635,39 @@ impl Tab {
         } else {
             condition
         };
+        // 인덱스 변경을 따라 조용히 다시 받으면 스크롤로 이어 받은 만큼을 받는다.
+        let refresh = self
+            .results
+            .as_ref()
+            .and_then(|r| r.instant.as_ref())
+            .is_some_and(|instant| instant.refresh);
+        let limit = if refresh {
+            instant_search::refresh_limit(self.list.len())
+        } else {
+            PAGE_SIZE
+        };
         Some(facet_protocol::QueryMessage {
             condition,
             sort: instant_search::server_sort(self.sort),
-            limit: Some(PAGE_SIZE),
+            limit: Some(limit),
         })
     }
 
-    /// 질의를 요청 `id`로 보냈다: 그 응답을 기다린다(앞선 요청의 응답은 버린다).
+    /// 질의를 요청 `id`로 보냈다: 그 응답을 기다린다(앞선 요청의 응답은 버린다). 인덱스 변경을 따라 조용히 다시 받는
+    /// 질의면([`Tab::instant_follow`]) 기다리는 동안에도 앞 결과와 상태가 그대로이고 「받는 중」이 되지 않는다.
     pub fn instant_sent(&mut self, id: IndexerRequestId) {
         let sort = instant_search::server_sort(self.sort);
         if let Some(results) = &mut self.results
             && let Some(instant) = &mut results.instant
         {
+            if std::mem::take(&mut instant.refresh) {
+                instant.in_flight = Some((id, Flight::Refresh));
+                instant.sent = true;
+                instant.sent_sort = sort;
+                // 같은 연결의 새 질의는 서비스에서 앞 표지를 지운다.
+                instant.next = None;
+                return;
+            }
             instant.in_flight = Some((id, Flight::Query));
             instant.sent = true;
             instant.sent_sort = sort;
@@ -1710,6 +1735,7 @@ impl Tab {
         };
         instant.was_demoted = true;
         instant.sent = true;
+        instant.refresh = false;
         instant.in_flight = None;
         instant.next = None;
         instant.live_due = Some(now + delay);
@@ -1822,6 +1848,67 @@ impl Tab {
         }
     }
 
+    /// 인덱스 변경을 확인할 때([`instant_search::FOLLOW_INTERVAL`]): 보이는 즉시 검색 결과 탭이 결과를 받아 둔 채 아무
+    /// 응답도 기다리지 않을 때만 있다. 숨은 탭·강등한 탭·서비스에 닿지 못한 탭·결과가 아직 없는 탭은 `None`이다.
+    pub fn instant_follow_due(&self) -> Option<Instant> {
+        if !self.shown || !self.is_instant_search() {
+            return None;
+        }
+        let instant = self.results.as_ref()?.instant.as_ref()?;
+        if !instant.sent
+            || instant.refresh
+            || instant.in_flight.is_some()
+            || instant.live_due.is_some()
+            || instant.status.demotion.is_some()
+            || instant.status.unavailable.is_some()
+        {
+            return None;
+        }
+        Some(instant.checked_at? + FOLLOW_INTERVAL)
+    }
+
+    /// 인덱스가 바뀌었는지 확인할 요청: 이어 받기 표지가 있으면 결과 0개짜리 이어 받기, 없으면 같은 질의를 조용히 다시
+    /// 받기다. 시각은 보지 않는다(부르는 쪽이 [`Tab::instant_follow_due`]로 본다). 따라갈 결과가 없으면 `None`이다.
+    pub fn instant_follow(&self) -> Option<Follow> {
+        self.instant_follow_due()?;
+        let instant = self.results.as_ref()?.instant.as_ref()?;
+        Some(match instant.next {
+            Some(cursor) => Follow::Probe(facet_protocol::ResumeMessage { cursor, limit: 0 }),
+            None => Follow::Refresh,
+        })
+    }
+
+    /// 확인하는 이어 받기를 요청 `id`로 보냈다(앞 결과와 상태는 그대로다).
+    pub fn instant_probe_sent(&mut self, id: IndexerRequestId) {
+        if let Some(instant) = self.results.as_mut().and_then(|r| r.instant.as_mut()) {
+            instant.in_flight = Some((id, Flight::Probe));
+        }
+    }
+
+    /// 다음 질의를 인덱스 변경을 따라가는 조용한 다시 받기로 한다(받은 만큼, 앞 결과를 그대로 보이며). 보낼 질의가
+    /// 생겼으면 `true`이고 앱이 보낸다([`Tab::instant_needs_query`]).
+    pub fn request_instant_refresh(&mut self) -> bool {
+        let Some(instant) = self.results.as_mut().and_then(|r| r.instant.as_mut()) else {
+            return false;
+        };
+        if instant.in_flight.is_some() || instant.status.demotion.is_some() {
+            return false;
+        }
+        instant.refresh = true;
+        instant.sent = false;
+        true
+    }
+
+    /// 마지막으로 결과에서 열려던 항목(열기·새 탭에서 열기·「폴더에서 보기」)이 디스크에 없었으면 그 경로. 그 항목은
+    /// 결과에서 뺐다. 다음 열기가 지운다.
+    pub fn missing_item(&self) -> Option<&Path> {
+        self.missing_item.as_deref()
+    }
+
+    pub(crate) fn set_missing_item(&mut self, path: Option<PathBuf>) {
+        self.missing_item = path;
+    }
+
     /// 이어 받을 결과가 더 있고 지금 응답을 기다리지 않는가.
     pub fn has_more_results(&self) -> bool {
         self.instant_resume().is_some()
@@ -1875,6 +1962,9 @@ impl Tab {
             _ => return InstantReply::Ignored,
         };
         instant.in_flight = None;
+        if matches!(flight, Flight::Probe | Flight::Refresh) {
+            return self.instant_follow_reply(flight, result);
+        }
         instant.status.loading = false;
         let mut found = Vec::new();
         let mut replace = false;
@@ -1888,6 +1978,7 @@ impl Tab {
                 instant.status.unavailable = None;
                 instant.next = page.next;
                 instant.status.has_more = page.next.is_some();
+                instant.checked_at = Some(Instant::now());
                 replace = flight == Flight::Query;
                 found = page.hits.iter().map(found_from_hit).collect();
             }
@@ -1916,10 +2007,10 @@ impl Tab {
             Err(RequestError::Service(error))
                 if error.kind == facet_protocol::ErrorKind::StaleCursor =>
             {
-                // 인덱스가 바뀌어 이어 받기가 무효다: 처음부터 다시 질의한다.
+                // 인덱스가 바뀌어 이어 받기가 무효다: 받은 만큼 조용히 다시 받는다(그 뒤 이어 받는다).
                 instant.next = None;
-                instant.status.has_more = false;
                 instant.sent = false;
+                instant.refresh = true;
                 requery = true;
             }
             Err(RequestError::Service(error)) => {
@@ -1961,6 +2052,94 @@ impl Tab {
             self.list
                 .extend_found(found.into_iter().map(|found| (found.folder, found.item)));
         }
+        self.update_visible();
+        self.prune_selection();
+        self.reindex();
+        let loaded = self.list.len();
+        if let Some(results) = &mut self.results {
+            results.status.progress.found = loaded;
+        }
+        InstantReply::Applied
+    }
+
+    /// 인덱스 변경을 확인한 요청의 응답. 확인하는 이어 받기가 표지 무효로 답하면 조용히 다시 받고([`InstantReply::Requery`]),
+    /// 다시 받은 결과가 앞 결과와 다르면 바꾼다([`InstantReply::Applied`]). 선택·커서·범위 기준은 전체 경로로 남고 사라진
+    /// 항목은 빠진다. 연결·서비스 오류는 결과를 그대로 두고 다음 확인 때 다시 본다(강등하지 않는다: 질의를 기다리던 것이 아니다).
+    fn instant_follow_reply(
+        &mut self,
+        flight: Flight,
+        result: Result<Reply, RequestError>,
+    ) -> InstantReply {
+        let now = Instant::now();
+        let Some(instant) = self.results.as_mut().and_then(|r| r.instant.as_mut()) else {
+            return InstantReply::Ignored;
+        };
+        instant.checked_at = Some(now);
+        let page = match result {
+            Ok(Reply::Page(page)) => page,
+            Err(RequestError::Service(error))
+                if error.kind == facet_protocol::ErrorKind::StaleCursor =>
+            {
+                instant.next = None;
+                instant.refresh = true;
+                instant.sent = false;
+                return InstantReply::Requery;
+            }
+            Err(RequestError::Service(error))
+                if error.kind == facet_protocol::ErrorKind::Cancelled =>
+            {
+                return InstantReply::Ignored;
+            }
+            _ => {
+                // 표지는 그대로 쓸 수 있는지 모른다. 다음 확인은 같은 질의를 다시 받는다.
+                instant.next = None;
+                return InstantReply::Unchanged;
+            }
+        };
+        instant.next = page.next;
+        instant.status.has_more = page.next.is_some();
+        if flight == Flight::Probe {
+            // 표지가 아직 맞다: 인덱스가 그대로다.
+            return InstantReply::Unchanged;
+        }
+        let summary_changed = instant.status.total != Some(page.total)
+            || instant.status.total_is_upper_bound != page.total_is_upper_bound
+            || instant.status.building != page.building;
+        instant.status.total = Some(page.total);
+        instant.status.total_is_upper_bound = page.total_is_upper_bound;
+        instant.status.building = page.building;
+        let found: Vec<Found> = page.hits.iter().map(found_from_hit).collect();
+        let fingerprint = |folder: &Path, item: &Item| {
+            (
+                folder.join(&item.name),
+                item.is_folder,
+                item.size,
+                item.modified,
+                item.attributes.hidden,
+                item.attributes.system,
+                item.attributes.read_only,
+            )
+        };
+        let mut before: Vec<_> = (0..self.list.len())
+            .filter_map(|i| Some(fingerprint(self.list.folder(i)?, self.list.get(i)?)))
+            .collect();
+        let mut after: Vec<_> = found
+            .iter()
+            .map(|f| fingerprint(&f.folder, &f.item))
+            .collect();
+        before.sort();
+        after.sort();
+        if before == after {
+            return if summary_changed {
+                InstantReply::Applied
+            } else {
+                InstantReply::Unchanged
+            };
+        }
+        self.list_gen += 1;
+        self.list = DetailsList::new(Vec::new(), self.sort);
+        self.list
+            .extend_found(found.into_iter().map(|found| (found.folder, found.item)));
         self.update_visible();
         self.prune_selection();
         self.reindex();
@@ -2634,7 +2813,9 @@ pub enum InstantReply {
     Ignored,
     /// 응답을 반영했다(결과·전체 개수·서비스 없음 등이 바뀜).
     Applied,
-    /// 이어 받기가 무효라 처음부터 다시 질의해야 한다(범위 볼륨의 인덱스를 확인한 뒤 질의를 보낼 때도).
+    /// 인덱스 변경을 확인했지만 보이는 것은 바뀌지 않았다(인덱스가 그대로이거나 다시 받은 결과가 같음).
+    Unchanged,
+    /// 질의를 다시 보내야 한다: 이어 받기가 무효라 받은 만큼 조용히 다시 받거나, 범위 볼륨의 인덱스를 확인했다.
     Requery,
     /// 서비스를 쓸 수 없어 실시간 탐색으로 강등했다([`Tab::demoted_search_due`]를 앱이 시작한다).
     Demoted,

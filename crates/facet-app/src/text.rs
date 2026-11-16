@@ -241,6 +241,11 @@ pub fn drag_failed_text(error: &DragError) -> String {
     format!("항목을 끌 수 없습니다: {error}")
 }
 
+/// 검색 결과에서 열려던 항목이 디스크에 없어 결과에서 뺐다는 까닭(상태 줄).
+pub fn missing_item_text(path: &std::path::Path) -> String {
+    format!("항목이 더 이상 없어 결과에서 뺐습니다: {}", path.display())
+}
+
 /// 클립보드를 쓰지 못한 까닭(상태 줄).
 pub fn clipboard_error_text(error: &ClipboardError) -> String {
     match error {
