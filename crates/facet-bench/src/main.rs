@@ -54,6 +54,10 @@ const USAGE: &str = "\
   facet-bench filter [--runs N] [--limit-ms N]
       항목 10만 개 시험 폴더를 읽은 탭에서 필터 한 글자(빈 필터에서)와 두 글자(한 글자에서)를 정하는 시간을
       각각 N회(기본 5) 재어 중앙값이 상한(기본 160ms)을 넘으면 실패한다.
+  facet-bench search [경로] [--count N] [--runs N] [--limit-ms N]
+      항목 N개(기본 100000, 가지 폴더 1110개 포함)의 시험 나무(경로를 빼면 임시 폴더의 facet-test-folders/tree-N)를
+      만들거나 확인한 뒤, 「보고서」로 실시간 탐색을 시작해 끝날 때까지의 시간을 N회(기본 5) 재어 중앙값이
+      상한(기본 10000ms)을 넘으면 실패한다.
   facet-bench copy [--size-mb N] [--count N] [--runs N]
       임시 폴더에 큰 파일 하나(기본 256MiB)와 4KiB 파일 N개(기본 2000)가 든 폴더를 만들고, 작업 대기열의
       복사 작업으로 각각 N회(기본 3) 복사해(한 번 데운 뒤, 대상은 매번 지움) 큰 파일 처리량 중앙값이 하한
@@ -199,6 +203,7 @@ fn main() -> ExitCode {
         "clipboard" => clipboard(&args),
         "menu" => menu(&args),
         "filter" => filter(&args),
+        "search" => live_search(&args),
         "copy" => copy_bench(&args),
         "delete" => delete_bench(&args),
         "compare-recycle" => compare_recycle(&args),
@@ -622,6 +627,44 @@ fn filter(args: &Args) -> Result<(), String> {
         );
     }
     facet_bench::check_filter_limit(&m, limit)?;
+    println!("  상한 안: 통과");
+    Ok(())
+}
+
+fn live_search(args: &Args) -> Result<(), String> {
+    warn_debug();
+    let count = args.count.unwrap_or(facet_bench::SEARCH_COUNT);
+    let limit = args.limit.unwrap_or(facet_bench::SEARCH_LIMIT);
+    let path = args
+        .path
+        .clone()
+        .unwrap_or_else(|| facet_bench::test_tree_path(count));
+    println!("시험 나무: {} ({count}항목)", path.display());
+    let start = Instant::now();
+    let report = facet_bench::make_test_tree(&path, count).map_err(|e| e.to_string())?;
+    println!(
+        "  새로 만듦 {} / 이미 있음 {} ({:.1}s)",
+        report.created,
+        report.kept,
+        start.elapsed().as_secs_f64()
+    );
+    let m = facet_bench::measure_live_search(&path, count, args.runs())?;
+    println!(
+        "실시간 탐색: 「{}」 ({count}항목 나무에서 {}개 찾음, 일꾼 스레드 {}개, {}회):",
+        facet_bench::SEARCH_PATTERN,
+        m.item_count,
+        facet_core::live_search::thread_count(),
+        m.times.len()
+    );
+    print_times(&m);
+    println!(
+        "  중앙값 {:.1}ms, 최악 {:.1}ms / 로컬 기준 {}ms, CI 상한 {}ms",
+        ms(m.median()),
+        ms(m.max()),
+        facet_bench::SEARCH_TARGET.as_millis(),
+        limit.as_millis()
+    );
+    check_median("실시간 탐색", &m, limit)?;
     println!("  상한 안: 통과");
     Ok(())
 }
