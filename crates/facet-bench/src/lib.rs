@@ -13,6 +13,8 @@
 //!   시간([`MFT_PARSE_LIMIT`])을 잰다. `cargo xtask ci`가 이것도 부른다.
 //! - 세션 벤치마크: 탭 100개 세션 파일을 읽고 해석하는 시간([`SESSION_PARSE_LIMIT`])을 잰다
 //!   ([`measure_session`]). `cargo xtask ci`가 이것도 부른다.
+//! - 클립보드 형식 벤치마크: 파일 1만 개 목록을 `CF_HDROP` 바이트로 만들고 읽는 시간([`CLIPBOARD_LIMIT`])을 잰다
+//!   ([`measure_clipboard`]). `cargo xtask ci`가 이것도 부른다.
 //! - 복사 벤치마크: 작업 대기열의 복사 작업으로 256MiB 파일 하나의 처리량([`copy::COPY_THROUGHPUT_LIMIT`])과
 //!   4KiB 파일 2천 개가 든 폴더의 복사 시간([`copy::COPY_SMALL_LIMIT`])을 잰다. `cargo xtask ci`가 이것도 부른다.
 //!   같은 복사를 셸의 `IFileOperation`으로도 해 견주는 탐색기 비교 측정([`copy::compare`])은 사람이 잰다.
@@ -748,4 +750,79 @@ pub fn check_session_limit(m: &Measurement, limit: Duration) -> Result<(), Strin
             m.max().as_secs_f64() * 1000.0
         ))
     }
+}
+
+/// 클립보드 형식 벤치마크의 파일 수.
+pub const CLIPBOARD_COUNT: usize = 10_000;
+
+/// 파일 1만 개 목록을 `CF_HDROP` 바이트로 만들기·읽기 시간의 기준(로컬, 릴리스 빌드).
+///
+/// 1만 개는 경로 평균 60자 안팎이라 약 1.2MB다. 만들기는 글자 변환과 복사, 읽기는 한 번 훑으며 경로를 만드는 일이라
+/// 각각 5ms면 넉넉하다. 붙여넣기·끌어 놓기가 UI 응답에 끼어드는 일이라 한 프레임 안에 들어야 한다.
+pub const CLIPBOARD_TARGET: Duration = Duration::from_millis(5);
+
+/// CI가 실패시키는 클립보드 형식 시간 상한: 로컬 기준 [`CLIPBOARD_TARGET`]의 10배([`LIST_LIMIT`]과 같은 까닭).
+pub const CLIPBOARD_LIMIT: Duration = Duration::from_millis(50);
+
+/// 만들기와 읽기 각각의 측정.
+pub struct ClipboardMeasurement {
+    /// 목록을 바이트로 만드는 시간.
+    pub build: Measurement,
+    /// 바이트에서 목록을 읽는 시간.
+    pub parse: Measurement,
+}
+
+/// 파일 [`CLIPBOARD_COUNT`]개 목록의 `CF_HDROP` 만들기·읽기를 `runs`번씩 잰다(한 번 데운 뒤).
+/// 읽은 목록이 넣은 목록과 다르면 실패한다. [`Measurement::item_count`]는 경로 수다.
+pub fn measure_clipboard(runs: usize) -> Result<ClipboardMeasurement, String> {
+    let paths: Vec<PathBuf> = (0..CLIPBOARD_COUNT)
+        .map(|i| {
+            PathBuf::from(format!(
+                r"C:\사용자\홍길동\문서\프로젝트 {}\보고서 {i} 😀.txt",
+                i % 50
+            ))
+        })
+        .collect();
+    let bytes = facet_core::clipboard::hdrop_bytes(&paths);
+    if facet_core::clipboard::parse_hdrop(&bytes).map_err(|e| e.to_string())? != paths {
+        return Err("읽은 목록이 만든 목록과 다릅니다".to_owned());
+    }
+    let mut build = Vec::with_capacity(runs);
+    let mut parse = Vec::with_capacity(runs);
+    for _ in 0..runs {
+        let start = Instant::now();
+        let made = facet_core::clipboard::hdrop_bytes(&paths);
+        build.push(start.elapsed());
+        std::hint::black_box(&made);
+        let start = Instant::now();
+        let read = facet_core::clipboard::parse_hdrop(&bytes).map_err(|e| e.to_string())?;
+        parse.push(start.elapsed());
+        std::hint::black_box(&read);
+    }
+    Ok(ClipboardMeasurement {
+        build: Measurement {
+            item_count: paths.len(),
+            times: build,
+        },
+        parse: Measurement {
+            item_count: paths.len(),
+            times: parse,
+        },
+    })
+}
+
+/// 만들기·읽기 중앙값이 `limit`을 넘으면 넘은 수치를 담은 메시지를 돌려준다.
+pub fn check_clipboard_limit(m: &ClipboardMeasurement, limit: Duration) -> Result<(), String> {
+    for (name, t) in [("만들기", &m.build), ("읽기", &m.parse)] {
+        if t.median() > limit {
+            return Err(format!(
+                "클립보드 형식 {name} 상한 초과: 경로 {}개 중앙값 {:.2}ms > 상한 {}ms (최악 {:.2}ms)",
+                t.item_count,
+                t.median().as_secs_f64() * 1000.0,
+                limit.as_millis(),
+                t.max().as_secs_f64() * 1000.0
+            ));
+        }
+    }
+    Ok(())
 }
