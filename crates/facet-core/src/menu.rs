@@ -6,7 +6,7 @@
 //! 모듈이 주고, 하위 메뉴 이름은 [`SubmenuId`]를 앱이 문장으로 바꾼다.
 //!
 //! 할 수 없는 항목은 숨기지 않고 꺼서 자리를 고정한다: 같은 메뉴 종류([`MenuKind`])는 맥락이 달라도 항목 순서가
-//! 같다.
+//! 같다. 검색 결과 위치의 항목 메뉴만 첫머리에 「폴더에서 보기」와 구분선이 더 붙고 그 아래는 같은 순서다.
 
 use crate::command::CommandId;
 use crate::details::{Direction, Sort};
@@ -34,6 +34,9 @@ pub struct MenuContext {
     pub single_folder_selected: bool,
     /// 탭 위치가 실제 폴더인가.
     pub location_is_folder: bool,
+    /// 탭 위치가 검색 결과 위치인가. 결과 항목은 실제 파일 시스템 항목이라 파일 작업은 되고, 붙여넣기·새 폴더는
+    /// 꺼지며, 항목 메뉴 첫머리에 「폴더에서 보기」가 붙는다.
+    pub location_is_results: bool,
     /// 창의 패널 수(1 또는 2).
     pub panel_count: usize,
     /// 패널이 둘일 때 반대편 패널 위치가 실제 폴더인가. 패널이 하나면 쓰지 않는다.
@@ -137,13 +140,24 @@ const SORT_LAYOUT: [CommandId; 4] = [
 /// 맥락에서 메뉴를 만든다. 항목 순서는 맥락과 상관없이 [`MenuKind`]마다 같다.
 pub fn build(context: &MenuContext) -> Menu {
     let entries = match context.kind {
-        MenuKind::Item => ITEM_LAYOUT
-            .iter()
-            .map(|slot| match slot {
-                Some(id) => MenuEntry::Command(command(*id, context)),
-                None => MenuEntry::Separator,
-            })
-            .collect(),
+        MenuKind::Item => {
+            let results = context
+                .location_is_results
+                .then(|| {
+                    [
+                        MenuEntry::Command(command(CommandId::ShowInFolder, context)),
+                        MenuEntry::Separator,
+                    ]
+                })
+                .into_iter()
+                .flatten();
+            results
+                .chain(ITEM_LAYOUT.iter().map(|slot| match slot {
+                    Some(id) => MenuEntry::Command(command(*id, context)),
+                    None => MenuEntry::Separator,
+                }))
+                .collect()
+        }
         MenuKind::Background => vec![
             MenuEntry::Command(command(CommandId::Paste, context)),
             MenuEntry::Command(command(CommandId::NewFolder, context)),
@@ -166,7 +180,9 @@ pub fn build(context: &MenuContext) -> Menu {
 }
 
 fn command(id: CommandId, c: &MenuContext) -> MenuCommand {
-    let has_sources = c.location_is_folder && (c.selected_count > 0 || c.has_cursor);
+    // 결과 항목도 실제 파일 시스템 항목이다(제 폴더 경로가 있다).
+    let real_items = c.location_is_folder || c.location_is_results;
+    let has_sources = real_items && (c.selected_count > 0 || c.has_cursor);
     let enabled = match id {
         CommandId::Open => c.has_cursor,
         CommandId::OpenInNewTab => c.cursor_is_folder,
@@ -180,8 +196,10 @@ fn command(id: CommandId, c: &MenuContext) -> MenuCommand {
                 && c.clipboard_has_files
                 && (c.kind == MenuKind::Background || c.single_folder_selected)
         }
-        CommandId::CopyPath | CommandId::NewFolder => c.location_is_folder,
-        CommandId::Rename => c.location_is_folder && c.has_cursor,
+        CommandId::NewFolder => c.location_is_folder,
+        CommandId::CopyPath => real_items,
+        CommandId::Rename => real_items && c.has_cursor,
+        CommandId::ShowInFolder => c.location_is_results && c.has_cursor,
         CommandId::Delete => has_sources,
         _ => true,
     };

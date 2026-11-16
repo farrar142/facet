@@ -76,6 +76,10 @@ fn name(command: CommandId) -> &'static str {
         CommandId::Cut => "잘라내기",
         CommandId::Paste => "붙여넣기",
         CommandId::CopyPath => "경로 복사",
+        // 검색 결과 위치의 명령(자세한 확인은 tests/search_results.rs).
+        CommandId::SortByLocation => "위치로 정렬",
+        CommandId::ShowInFolder => "폴더에서 보기",
+        CommandId::StopSearch => "검색 중지",
     }
 }
 
@@ -177,7 +181,7 @@ fn s2_탭_명령과_기본_단축키() {
     // tests/edit.rs), 실행취소·다시 실행·작업 기록 보기(자세한 확인은 tests/history.rs), 삭제·영구 삭제가 전부다.
     assert_eq!(
         CommandId::ALL.len(),
-        14 + expected.len() + 2 + 2 + 3 + 2 + 3 + 1 + 1 // 잘라내기, 필터
+        14 + expected.len() + 2 + 2 + 3 + 2 + 3 + 1 + 1 + 3 // 잘라내기, 필터, 검색 결과 위치
     );
     assert_eq!(GoToTab(3).as_str(), "go-to-tab-3");
     assert_eq!(CommandId::from_id("go-to-tab-8"), Some(GoToTab(8)));
@@ -378,10 +382,17 @@ fn 명령_팔레트는_앱이_준_이름에서_부분_일치로_찾고_실행_�
             CommandId::SortByName,
             CommandId::SortByModified,
             CommandId::SortByType,
-            CommandId::SortBySize
+            CommandId::SortBySize,
+            CommandId::SortByLocation
         ]
     );
-    assert!(found.iter().all(|e| e.enabled && e.shortcuts.is_empty()));
+    assert!(found.iter().all(|e| e.shortcuts.is_empty()));
+    // 위치 열 정렬은 검색 결과 위치에서만 켜진다.
+    assert!(
+        found
+            .iter()
+            .all(|e| e.enabled == (e.command != CommandId::SortByLocation))
+    );
 
     // 단축키와 실행 가능 여부를 함께 준다. 꺼진 명령도 결과에 든다.
     let found = command::search("뒤로", name, &tab);

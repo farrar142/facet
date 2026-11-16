@@ -48,6 +48,8 @@ pub enum CommandId {
     SortByType,
     /// 크기 열로 정렬.
     SortBySize,
+    /// 위치 열(항목이 든 폴더)로 정렬. 검색 결과 위치에서만 켜진다.
+    SortByLocation,
     /// 새 탭: 지금 위치의 탭을 활성 탭 바로 뒤에 열고 활성으로 한다.
     NewTab,
     /// 탭 닫기: 활성 탭을 닫는다. 패널의 마지막 탭이면 패널이, 창의 마지막 패널이면 창이 닫힌다.
@@ -121,13 +123,19 @@ pub enum CommandId {
     /// 파일이 있다는 것은 앱 상태라 [`crate::window::App::can_execute`]가 본다(클립보드를 부르지 않는다).
     Paste,
     /// 경로 복사: 선택한 항목의 전체 경로를 큰따옴표로 감싸 줄마다 하나씩 글자로 클립보드에 올린다. 선택이 없으면 현재
-    /// 폴더 경로다. 위치가 실제 폴더일 때 켜진다.
+    /// 폴더 경로다(검색 결과 위치면 검색한 폴더). 위치가 실제 폴더이거나 검색 결과 위치일 때 켜진다.
     CopyPath,
+    /// 폴더에서 보기: 커서 결과 항목의 상위 폴더를 같은 탭에서 열고(기록에 남는다) 그 항목을 선택·커서로 둔다. 검색 결과
+    /// 위치에서 커서 항목이 있을 때만 켜진다.
+    ShowInFolder,
+    /// 검색 중지: 활성 탭의 검색을 멈추고 지금까지의 결과는 남긴다. 검색이 도는 중일 때만 켜진다. 기본 단축키는 없다
+    /// (Esc 등은 앱이 붙인다).
+    StopSearch,
 }
 
 impl CommandId {
     /// 모든 명령. 명령 팔레트는 검색어가 없으면 이 순서로 보인다.
-    pub const ALL: [CommandId; 48] = [
+    pub const ALL: [CommandId; 51] = [
         CommandId::Open,
         CommandId::Back,
         CommandId::Forward,
@@ -176,6 +184,9 @@ impl CommandId {
         CommandId::Cut,
         CommandId::Paste,
         CommandId::CopyPath,
+        CommandId::SortByLocation,
+        CommandId::ShowInFolder,
+        CommandId::StopSearch,
     ];
 
     /// 바뀌지 않는 ID 글자. 화면 문장이 아니다.
@@ -231,6 +242,9 @@ impl CommandId {
             CommandId::Cut => "cut",
             CommandId::Paste => "paste",
             CommandId::CopyPath => "copy-path",
+            CommandId::SortByLocation => "sort-by-location",
+            CommandId::ShowInFolder => "show-in-folder",
+            CommandId::StopSearch => "stop-search",
         }
     }
 
@@ -246,6 +260,7 @@ impl CommandId {
             Column::Modified => CommandId::SortByModified,
             Column::Type => CommandId::SortByType,
             Column::Size => CommandId::SortBySize,
+            Column::Location => CommandId::SortByLocation,
         }
     }
 
@@ -256,6 +271,7 @@ impl CommandId {
             CommandId::SortByModified => Some(Column::Modified),
             CommandId::SortByType => Some(Column::Type),
             CommandId::SortBySize => Some(Column::Size),
+            CommandId::SortByLocation => Some(Column::Location),
             _ => None,
         }
     }
@@ -300,6 +316,9 @@ impl CommandId {
             | CommandId::SortByModified
             | CommandId::SortByType
             | CommandId::SortBySize
+            | CommandId::SortByLocation
+            | CommandId::ShowInFolder
+            | CommandId::StopSearch
             | CommandId::OpenInNewTab => &[],
             CommandId::NewTab => const { &[key(letter('T')).ctrl()] },
             CommandId::CloseTab => const { &[key(letter('W')).ctrl()] },
@@ -370,12 +389,18 @@ impl CommandId {
             | CommandId::DeletePermanently
             | CommandId::Copy
             | CommandId::Cut => has_sources(tab),
-            // 붙여넣을 곳(현재 폴더)이 실제 폴더여야 한다. 클립보드에 파일이 있는지는 앱 상태다.
-            CommandId::Paste | CommandId::CopyPath => tab.location().file_system_path().is_some(),
-            CommandId::Rename => {
-                tab.location().file_system_path().is_some() && tab.cursor_item().is_some()
-            }
+            // 붙여넣을 곳(현재 폴더)이 실제 폴더여야 한다. 클립보드에 파일이 있는지는 앱 상태다. 검색 결과 위치에서는
+            // 붙여넣을 폴더가 없어 꺼진다.
+            CommandId::Paste => tab.location().file_system_path().is_some(),
+            CommandId::CopyPath => has_real_items(tab),
+            CommandId::Rename => has_real_items(tab) && tab.cursor_item().is_some(),
+            // 검색 결과 위치에는 만들 폴더가 없다.
             CommandId::NewFolder => tab.location().file_system_path().is_some(),
+            CommandId::SortByLocation => tab.location().is_search_results(),
+            CommandId::ShowInFolder => {
+                tab.location().is_search_results() && tab.cursor_item().is_some()
+            }
+            CommandId::StopSearch => tab.search().is_some_and(|status| status.running),
             CommandId::Refresh
             | CommandId::EditAddress
             | CommandId::ToggleHidden
@@ -462,10 +487,15 @@ impl CommandState for Window {
     }
 }
 
-/// 복사·이동·삭제할 원본이 있는가: 선택이나 커서 항목이 있고 탭 위치가 실제 폴더다.
+/// 복사·이동·삭제할 원본이 있는가: 선택이나 커서 항목이 있고, 탭의 항목이 실제 파일 시스템 항목이다(실제 폴더나
+/// 검색 결과 위치).
 fn has_sources(tab: &Tab) -> bool {
-    tab.location().file_system_path().is_some()
-        && (tab.selected_items().next().is_some() || tab.cursor_item().is_some())
+    has_real_items(tab) && (tab.selected_items().next().is_some() || tab.cursor_item().is_some())
+}
+
+/// 탭의 항목이 실제 파일 시스템 항목인가: 위치가 실제 폴더이거나 검색 결과 위치다(결과 항목은 제 폴더 경로가 있다).
+fn has_real_items(tab: &Tab) -> bool {
+    tab.location().file_system_path().is_some() || tab.location().is_search_results()
 }
 
 /// 열 머리글을 누른 것처럼 정렬을 바꾼다: 같은 열이면 방향을 뒤집고, 다른 열이면 그 열 오름차순.

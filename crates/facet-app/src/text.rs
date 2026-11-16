@@ -69,6 +69,9 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::Paste => "붙여넣기",
         CommandId::Cut => "잘라내기",
         CommandId::CopyPath => "경로 복사",
+        CommandId::SortByLocation => "위치로 정렬",
+        CommandId::ShowInFolder => "폴더에서 보기",
+        CommandId::StopSearch => "검색 중지",
     }
 }
 

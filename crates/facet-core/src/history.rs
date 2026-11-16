@@ -581,17 +581,25 @@ impl History {
     ///
     /// 되돌린 항목은 반대편 목록으로(실행취소면 다시 실행 목록, 다시 실행이면 기록), 되돌리지 못한 항목은 원래
     /// 목록의 끝으로 돌아간다. 실행취소하는 사이 새 작업이 기록됐으면 다시 실행 목록은 비운 채로 둔다.
+    #[cfg(test)]
     pub(crate) fn finish(&mut self, job: JobId) -> bool {
+        self.finish_reverted(job).is_some()
+    }
+
+    /// [`History::finish`]와 같고, 도는 실행취소·다시 실행이었으면 실제로 되돌린 항목이 파일 시스템에 준 변화
+    /// ([`crate::search_results::PathChange`], 검색 결과 목록에 반영할 것)를 돌려준다. 아니면 `None`이다.
+    pub(crate) fn finish_reverted(
+        &mut self,
+        job: JobId,
+    ) -> Option<Vec<crate::search_results::PathChange>> {
         if self
             .running
             .as_ref()
             .is_none_or(|running| running.job != job)
         {
-            return false;
+            return None;
         }
-        let Some(running) = self.running.take() else {
-            return false;
-        };
+        let running = self.running.take()?;
         let mut outcomes = running
             .outcomes
             .lock()
@@ -607,6 +615,13 @@ impl History {
             .steps
             .into_iter()
             .zip(outcomes.into_iter().chain(std::iter::repeat(None)))
+            .collect();
+        let changes = ordered
+            .iter()
+            .filter(|(_, outcome)| outcome.is_some())
+            .filter_map(|(step, _)| {
+                crate::search_results::PathChange::of_reverted(step, running.reversal)
+            })
             .collect();
         let mut moved = Vec::new();
         let mut stayed = Vec::new();
@@ -644,7 +659,7 @@ impl History {
                 }
             }
         }
-        true
+        Some(changes)
     }
 }
 

@@ -23,8 +23,10 @@
 //! 이 모듈은 스레드를 만들지 않는다. 일꾼 스레드로 읽고 결과를 탭에 넘기는 일은
 //! [`crate::window::App`]이 한다. 그래서 탭만 따로 화면 없이, 결과가 오는 순서를 정해 가며 시험할 수 있다.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -35,7 +37,9 @@ use crate::window::home_location;
 use facet_win::OpenError;
 
 use crate::launch::LaunchTarget;
+use crate::live_search::{Found, SearchEvent, SearchRequest};
 use crate::name_match::{NameMatcher, has_wildcard};
+use crate::search_results::{PathChange, SearchFeed, SearchStatus, is_within, rebase};
 use crate::{Candidate, Item, ListError, Location, ResolveError, provider_for};
 
 /// 읽기가 이만큼 넘게 걸리면 탭이 「읽는 중」을 드러낸다([`Tab::is_reading`]).
@@ -102,8 +106,10 @@ impl ReadRequest {
     fn read(&self, sink: Option<ChangeSink>) -> ReadResult {
         // 감시를 먼저 건다: 읽는 사이의 변경도 놓치지 않는다.
         let attempt = |location: &Location| {
+            // 검색 결과 위치는 탐색 시점의 것이라 감시하지 않는다.
             let watch = sink
                 .as_ref()
+                .filter(|_| !location.is_search_results())
                 .map(|sink| watch::start(location, self.id, Arc::clone(sink)));
             let list = provider_for(location)
                 .list(location)
@@ -356,6 +362,22 @@ struct Filter {
     matched: Option<(Vec<usize>, u64)>,
 }
 
+/// 검색 결과 위치의 상태: 결과를 넣는 피드와 진행.
+struct Results {
+    /// 결과를 흘려 넣는 것. 아직 붙이지 않았거나 끝났으면 `None`이다. 버리면 검색이 멈춘다.
+    feed: Option<Box<dyn SearchFeed>>,
+    status: SearchStatus,
+}
+
+impl std::fmt::Debug for Results {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Results")
+            .field("feed", &self.feed.is_some())
+            .field("status", &self.status)
+            .finish()
+    }
+}
+
 /// 읽기 결과를 탭에 넘긴 결과.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadOutcome {
@@ -483,6 +505,8 @@ pub struct Tab {
     next_filter: u64,
     /// 목록의 항목이나 순서가 바뀔 때(읽기 결과·변경·정렬)마다 커진다. 거르는 동안 목록이 바뀌었는지 안다.
     list_gen: u64,
+    /// 검색 결과 위치면 그 상태(피드·진행). 다른 위치로 가면 버려 검색이 멈춘다.
+    results: Option<Results>,
 }
 
 impl Tab {
@@ -520,6 +544,7 @@ impl Tab {
             names: None,
             next_filter: 0,
             list_gen: 0,
+            results: None,
         }
     }
 
@@ -614,6 +639,10 @@ impl Tab {
             return None;
         }
         self.shown = true;
+        // 검색 결과 위치는 다시 읽을 것이 없다: 결과는 숨은 동안에도 그대로이고 검색도 이어진다.
+        if self.location.is_search_results() && self.results.is_some() {
+            return None;
+        }
         self.reload()
     }
 
@@ -1015,6 +1044,15 @@ impl Tab {
         }
         self.list = list;
         self.list_gen += 1;
+        // 검색 결과 위치로 갔거나 다시 읽었으면 결과를 처음부터 받는다(앞 피드를 버려 앞 검색을 멈춘다). 다른 위치로
+        // 갔으면 검색이 멈춘다.
+        self.results = self.location.is_search_results().then(|| Results {
+            feed: None,
+            status: SearchStatus {
+                show_hidden: self.show_hidden,
+                ..SearchStatus::default()
+            },
+        });
         if restored.is_some() {
             // 다른 위치로 갔다: 필터가 풀린다.
             self.filter = None;
@@ -1061,8 +1099,14 @@ impl Tab {
         self.reindex();
     }
 
+    /// 숨김 항목을 보이는가: 검색 결과 위치는 탐색 시작 때의 상태를 따르므로(결과에 이미 반영됨) 모두 보인다.
+    fn shows_hidden(&self) -> bool {
+        self.show_hidden || self.location.is_search_results()
+    }
+
     fn update_visible(&mut self) {
-        let hides = !self.show_hidden && self.list.iter().any(|i| i.attributes.hidden);
+        let show_hidden = self.shows_hidden();
+        let hides = !show_hidden && self.list.iter().any(|i| i.attributes.hidden);
         if self.filter.is_none() {
             self.visible = if hides {
                 Some(
@@ -1106,10 +1150,228 @@ impl Tab {
                 .iter()
                 .copied()
                 .filter(|&i| {
-                    self.show_hidden || self.list.get(i).is_some_and(|item| !item.attributes.hidden)
+                    show_hidden || self.list.get(i).is_some_and(|item| !item.attributes.hidden)
                 })
                 .collect(),
         );
+    }
+
+    // --- 항목 경로 ---
+
+    /// 보이는 항목 `index`가 든 폴더: 검색 결과 항목이면 그 항목의 폴더, 폴더 목록이면 탭 위치(실제 폴더일 때).
+    pub fn folder_of(&self, index: usize) -> Option<&Path> {
+        let list_index = self.list_index(index)?;
+        match self.list.folder(list_index) {
+            Some(folder) => Some(folder),
+            None => self.location.file_system_path(),
+        }
+    }
+
+    /// 보이는 항목 `index`의 전체 경로([`Tab::folder_of`] 안의 이름). 실제 파일 시스템 항목이 아니면 `None`이다.
+    pub fn item_path(&self, index: usize) -> Option<PathBuf> {
+        Some(self.folder_of(index)?.join(&self.get(index)?.name))
+    }
+
+    /// 커서 항목의 전체 경로.
+    pub fn cursor_path(&self) -> Option<PathBuf> {
+        self.item_path(self.cursor()?)
+    }
+
+    /// 선택한 항목의 전체 경로들(정렬된 순서). 검색 결과면 항목마다 제 폴더 경로다.
+    pub fn selected_paths(&self) -> Vec<PathBuf> {
+        self.selected_indices()
+            .filter_map(|i| self.item_path(i))
+            .collect()
+    }
+
+    // --- 검색 결과 위치 ---
+
+    /// 검색 결과 위치면 검색 상태(검색 중인가, 진행, 끝난 요약). 다른 위치면 `None`이다.
+    pub fn search(&self) -> Option<&SearchStatus> {
+        self.results.as_ref().map(|results| &results.status)
+    }
+
+    /// 아직 결과 피드를 붙이지 않은 검색 결과 위치면 시작할 검색. 검색 결과 위치로 가는 읽기(이동·뒤로·앞으로·새로
+    /// 고침)가 확정된 직후에만 있다. 숨김 항목 보이기는 그때의 탭 상태다.
+    pub fn search_request(&self) -> Option<SearchRequest> {
+        let results = self.results.as_ref()?;
+        if results.feed.is_some() || results.status.running || results.status.summary.is_some() {
+            return None;
+        }
+        let scope = self.location.search_scope()?;
+        Some(SearchRequest {
+            root: Location::file_system(&scope.folder),
+            pattern: scope.query.clone(),
+            show_hidden: results.status.show_hidden,
+        })
+    }
+
+    /// 결과를 흘려 넣을 피드를 붙인다([`Tab::search_request`]로 시작한 검색). 검색 중이 된다. 검색 결과 위치가 아니면
+    /// 피드를 버리고(검색이 멈춘다) `false`다.
+    pub fn attach_search(&mut self, feed: Box<dyn SearchFeed>) -> bool {
+        let Some(results) = &mut self.results else {
+            return false;
+        };
+        results.feed = Some(feed);
+        results.status.running = true;
+        results.status.summary = None;
+        true
+    }
+
+    /// 검색을 시작하지 못했다(검색한 폴더가 사라짐 등): 까닭을 [`Tab::error`]에 둔다.
+    pub fn search_failed(&mut self, error: ListError) {
+        if let Some(results) = &mut self.results {
+            results.feed = None;
+            results.status.running = false;
+        }
+        self.error = Some(error);
+    }
+
+    /// 붙인 피드에서 온 사건을 모두 받아 결과에 넣는다. 바뀐 것이 있으면 `true`다. 끝남 사건을 받으면 피드를 버리고
+    /// 검색 중이 아니다.
+    pub fn pump_search(&mut self) -> bool {
+        let Some(feed) = self.results.as_mut().and_then(|r| r.feed.as_mut()) else {
+            return false;
+        };
+        let events = feed.poll();
+        if events.is_empty() {
+            return false;
+        }
+        for event in events {
+            match event {
+                SearchEvent::Batch { items, progress } => {
+                    self.add_results(items);
+                    if let Some(results) = &mut self.results {
+                        results.status.progress = progress;
+                    }
+                }
+                SearchEvent::Finished(summary) => {
+                    if let Some(results) = &mut self.results {
+                        results.feed = None;
+                        results.status.running = false;
+                        results.status.progress.found = summary.found;
+                        results.status.progress.folders_scanned = summary.folders_scanned;
+                        results.status.progress.folders_skipped = summary.folders_skipped;
+                        results.status.summary = Some(summary);
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// 찾은 항목들을 결과 목록에 더한다(정렬을 지킨다). 선택·커서는 경로로 남는다. 검색 결과 위치가 아니면 아무것도
+    /// 하지 않는다. 결과를 넣는 쪽(실시간 탐색, 즉시 검색)과 상관없이 쓴다.
+    pub fn add_results(&mut self, found: Vec<Found>) {
+        if self.results.is_none() || found.is_empty() {
+            return;
+        }
+        self.list_gen += 1;
+        self.list
+            .extend_found(found.into_iter().map(|found| (found.folder, found.item)));
+        self.update_visible();
+        self.reindex();
+    }
+
+    /// 검색을 멈춘다(「검색 중지」): 지금까지의 결과는 남는다. 검색 중이 아니면 `false`다. 피드의 끝남 사건이 오면
+    /// 요약([`SearchStatus::summary`])이 채워진다.
+    pub fn stop_search(&mut self) -> bool {
+        let Some(results) = &mut self.results else {
+            return false;
+        };
+        if !results.status.running {
+            return false;
+        }
+        if let Some(feed) = &results.feed {
+            feed.stop();
+        }
+        results.status.running = false;
+        true
+    }
+
+    /// facet이 한 작업의 변화를 결과 목록에 반영한다: 지우거나 옮긴 항목(폴더면 그 아래 결과까지)은 빠지고, 같은 폴더
+    /// 안에서 이름을 바꾼 항목은 새 이름이 된다(폴더면 그 아래 결과의 위치도 바뀐다). 선택·커서·범위 기준도 따라간다.
+    /// 검색 결과 위치가 아니면 아무것도 하지 않고 `false`다.
+    pub fn apply_path_changes(&mut self, changes: &[PathChange]) -> bool {
+        if self.results.is_none() || changes.is_empty() {
+            return false;
+        }
+        let renames: Vec<(&Path, &Path)> = changes
+            .iter()
+            .filter_map(|change| match change {
+                PathChange::Renamed { from, to } if same_parent(from, to) => {
+                    Some((from.as_path(), to.as_path()))
+                }
+                _ => None,
+            })
+            .collect();
+        let gone: Vec<&Path> = changes
+            .iter()
+            .filter_map(|change| match change {
+                PathChange::Removed(path) => Some(path.as_path()),
+                PathChange::Renamed { from, to } if !same_parent(from, to) => Some(from.as_path()),
+                PathChange::Renamed { .. } => None,
+            })
+            .collect();
+        let changed = self.list.apply_path_changes(
+            |folder, item| {
+                let path = folder.join(&item.name);
+                !gone.iter().any(|gone| is_within(&path, gone))
+            },
+            |folder, item| {
+                let path = folder.join(&item.name);
+                renames.iter().find_map(|(from, to)| {
+                    if is_within(from, &path) && is_within(&path, from) {
+                        // 그 항목의 이름이 바뀌었다.
+                        Some((Arc::from(folder), to.file_name()?.to_os_string()))
+                    } else {
+                        // 위 폴더의 이름이 바뀌었다.
+                        let folder = rebase(folder, from, to)?;
+                        Some((Arc::from(folder.as_path()), item.name.clone()))
+                    }
+                })
+            },
+        );
+        if !changed {
+            return false;
+        }
+        // 선택·커서·범위 기준이 기억하던 경로를 새 경로로 옮긴다.
+        let moved = |key: &OsString| -> Option<OsString> {
+            renames.iter().find_map(|(from, to)| {
+                rebase(Path::new(key), from, to).map(PathBuf::into_os_string)
+            })
+        };
+        self.selection = std::mem::take(&mut self.selection)
+            .into_iter()
+            .map(|key| moved(&key).unwrap_or(key))
+            .collect();
+        if let Some(anchor) = self.anchor.take() {
+            self.anchor = Some(moved(&anchor).unwrap_or(anchor));
+        }
+        if let Some((cursor, index)) = self.cursor.take() {
+            self.cursor = Some((moved(&cursor).unwrap_or(cursor), index));
+        }
+        self.list_gen += 1;
+        self.update_visible();
+        self.prune_selection();
+        self.reindex();
+        true
+    }
+
+    /// 「폴더에서 보기」: 커서 결과 항목의 상위 폴더로 가는 이동을 시작하고 읽기 요청을 돌려준다. 확정되면 기록에 남고
+    /// 그 항목이 선택·커서다. 검색 결과 위치가 아니거나 커서 항목이 없으면 `None`이다.
+    pub fn show_in_folder(&mut self) -> Option<ReadRequest> {
+        if !self.location.is_search_results() {
+            return None;
+        }
+        let index = self.cursor()?;
+        let folder = self.folder_of(index)?.to_path_buf();
+        let name = self.get(index)?.name.clone();
+        let request = self.navigate(Navigation::Go(Location::file_system(folder)))?;
+        if let Some(pending) = &mut self.pending {
+            pending.reselect = Some(name);
+        }
+        Some(request)
     }
 
     // --- 필터 ---
@@ -1210,9 +1472,29 @@ impl Tab {
         }
     }
 
-    /// 이름이 `name`인 보이는 항목의 번호. 항목 수만큼 훑는다.
-    fn position_of(&self, name: &OsStr) -> Option<usize> {
-        (0..self.len()).find(|&i| self.get(i).is_some_and(|item| item.name == name))
+    /// 보이는 항목 `index`의 `list` 안 번호.
+    fn list_index(&self, index: usize) -> Option<usize> {
+        match &self.visible {
+            Some(visible) => visible.get(index).copied(),
+            None => (index < self.list.len()).then_some(index),
+        }
+    }
+
+    /// 보이는 항목 `index`의 선택 열쇠: 폴더 목록이면 이름, 검색 결과면 전체 경로(다른 폴더의 같은 이름을 가른다).
+    fn key_ref(&self, index: usize) -> Option<Cow<'_, OsStr>> {
+        self.list.selection_key(self.list_index(index)?)
+    }
+
+    fn key(&self, index: usize) -> Option<OsString> {
+        self.key_ref(index).map(Cow::into_owned)
+    }
+
+    /// 열쇠가 `key`(폴더 목록이면 이름, 검색 결과면 전체 경로)인 보이는 항목의 번호. 항목 수만큼 훑는다.
+    fn position_of(&self, key: &OsStr) -> Option<usize> {
+        (0..self.len()).find(|&i| {
+            self.list_index(i)
+                .is_some_and(|list_index| self.list.has_key(list_index, key))
+        })
     }
 
     /// 보이지 않거나 사라진 항목을 선택·기준에서 뺀다. 이름 집합을 한 번 만들어 대조하므로 항목 수에 비례한다.
@@ -1221,7 +1503,8 @@ impl Tab {
         if !self.selection.is_empty() || !base_empty {
             let mut selection = std::mem::take(&mut self.selection);
             let mut base = self.marquee_base.take();
-            let present: HashSet<&OsStr> = self.items().map(|i| i.name.as_os_str()).collect();
+            let present: HashSet<Cow<'_, OsStr>> =
+                (0..self.len()).filter_map(|i| self.key_ref(i)).collect();
             selection.retain(|name| present.contains(name.as_os_str()));
             // 사각형 선택 중이면 끌기 전 선택에서도 뺀다.
             if let Some(base) = base.as_mut() {
@@ -1247,8 +1530,8 @@ impl Tab {
             return;
         }
         let index = self.position_of(&name).unwrap_or_else(|| old.min(len - 1));
-        if let Some(item) = self.get(index) {
-            self.cursor = Some((item.name.clone(), index));
+        if let Some(key) = self.key(index) {
+            self.cursor = Some((key, index));
         }
     }
 
@@ -1263,8 +1546,8 @@ impl Tab {
     }
 
     fn set_cursor(&mut self, index: usize) -> Option<usize> {
-        let name = self.get(index)?.name.clone();
-        self.cursor = Some((name, index));
+        let key = self.key(index)?;
+        self.cursor = Some((key, index));
         Some(index)
     }
 
@@ -1290,8 +1573,8 @@ impl Tab {
 
     /// `index`번째 항목이 선택됐는가.
     pub fn is_selected(&self, index: usize) -> bool {
-        self.get(index)
-            .is_some_and(|item| self.selection.contains(&item.name))
+        self.key_ref(index)
+            .is_some_and(|key| self.selection.contains(&*key))
     }
 
     /// 선택한 항목 수.
@@ -1301,13 +1584,17 @@ impl Tab {
 
     /// 선택한 항목을 정렬된 순서로.
     pub fn selected_items(&self) -> impl Iterator<Item = &Item> + '_ {
-        self.items()
-            .filter(|item| self.selection.contains(&item.name))
+        self.selected_indices().filter_map(|i| self.get(i))
+    }
+
+    /// 선택한 항목의 보이는 번호를 정렬된 순서로.
+    pub fn selected_indices(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..self.len()).filter(|&i| !self.selection.is_empty() && self.is_selected(i))
     }
 
     /// 단일 선택(클릭): `index`번째만 선택하고 커서와 범위 기준을 거기 둔다. 범위 밖이면 아무것도 안 한다.
     pub fn select_only(&mut self, index: usize) {
-        let Some(name) = self.get(index).map(|i| i.name.clone()) else {
+        let Some(name) = self.key(index) else {
             return;
         };
         self.selection.clear();
@@ -1329,10 +1616,8 @@ impl Tab {
             .or(self.cursor())
             .unwrap_or(index);
         let (from, to) = (anchor.min(index), anchor.max(index));
-        let names: HashSet<OsString> = (from..=to)
-            .filter_map(|i| self.get(i).map(|item| item.name.clone()))
-            .collect();
-        let anchor_name = self.get(anchor).map(|item| item.name.clone());
+        let names: HashSet<OsString> = (from..=to).filter_map(|i| self.key(i)).collect();
+        let anchor_name = self.key(anchor);
         self.selection = names;
         self.anchor = anchor_name;
         self.set_cursor(index);
@@ -1340,7 +1625,7 @@ impl Tab {
 
     /// Ctrl 토글: `index`번째의 선택을 뒤집고 커서와 범위 기준을 거기 둔다.
     pub fn toggle_select(&mut self, index: usize) {
-        let Some(name) = self.get(index).map(|i| i.name.clone()) else {
+        let Some(name) = self.key(index) else {
             return;
         };
         if !self.selection.remove(&name) {
@@ -1367,7 +1652,7 @@ impl Tab {
     pub fn move_cursor_picking(&mut self, movement: CursorMove, pick: Pick) -> Option<usize> {
         // 범위의 기준은 옮기기 전 커서다(기준이 없을 때).
         if pick == Pick::Range && self.anchor.is_none() {
-            self.anchor = self.cursor_item().map(|item| item.name.clone());
+            self.anchor = self.cursor().and_then(|index| self.key(index));
         }
         let index = self.move_cursor(movement)?;
         self.pick(index, pick);
@@ -1423,12 +1708,12 @@ impl Tab {
         {
             let (start, end) = (start.min(len - 1), end.min(len - 1));
             for i in start.min(end)..=start.max(end) {
-                if let Some(item) = self.get(i) {
-                    selection.insert(item.name.clone());
+                if let Some(key) = self.key(i) {
+                    selection.insert(key);
                 }
             }
             self.selection = selection;
-            self.anchor = self.get(end).map(|item| item.name.clone());
+            self.anchor = self.key(end);
             self.set_cursor(end);
         } else {
             self.selection = selection;
@@ -1442,7 +1727,7 @@ impl Tab {
 
     /// 보이는 항목을 모두 선택한다. 커서는 그대로다.
     pub fn select_all(&mut self) {
-        self.selection = self.items().map(|item| item.name.clone()).collect();
+        self.selection = (0..self.len()).filter_map(|i| self.key(i)).collect();
     }
 
     /// 선택을 모두 푼다. 커서는 그대로다.
@@ -1490,7 +1775,7 @@ impl Tab {
     pub fn status(&self) -> StatusSummary {
         // 필터 중이면 전체 수: 필터가 없을 때 보일 항목(숨김 항목 설정은 그대로) 수.
         let total_count = self.filter.as_ref().map(|_| {
-            if self.show_hidden {
+            if self.shows_hidden() {
                 self.list.len()
             } else {
                 self.list.iter().filter(|i| !i.attributes.hidden).count()
@@ -1510,6 +1795,14 @@ impl Tab {
             selected_count: self.selection.len(),
             selected_size,
         }
+    }
+}
+
+/// 두 경로가 같은 폴더 안인가(이름만 바꿈).
+fn same_parent(a: &Path, b: &Path) -> bool {
+    match (a.parent(), b.parent()) {
+        (Some(a), Some(b)) => is_within(a, b) && is_within(b, a),
+        _ => false,
     }
 }
 

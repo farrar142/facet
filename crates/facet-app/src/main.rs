@@ -1843,6 +1843,8 @@ impl View {
                     Column::Modified => 1,
                     Column::Type => 2,
                     Column::Size => 3,
+                    // 위치 열은 검색 결과 목록에만 있다(머리글은 아직 그리지 않는다).
+                    Column::Location => 4,
                 },
                 sort_descending: sort.direction == Direction::Descending,
                 item_count: count(status.item_count),

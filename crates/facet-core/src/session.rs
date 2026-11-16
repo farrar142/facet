@@ -517,9 +517,13 @@ impl FileV1 {
 
 impl TabV1 {
     fn from_tab(tab: &TabSession) -> Self {
-        let location = match &tab.location {
+        // 검색 결과 위치는 검색한 폴더로 남긴다(결과는 탐색 시점의 것이라 남기지 않는다).
+        let location = match tab.location.for_session() {
             Location::FileSystem(path) => {
                 LocationV1::FileSystem(path.to_string_lossy().into_owned())
+            }
+            Location::SearchResults(scope) => {
+                LocationV1::FileSystem(scope.folder.to_string_lossy().into_owned())
             }
         };
         TabV1 {
@@ -530,6 +534,9 @@ impl TabV1 {
                     Column::Modified => ColumnV1::Modified,
                     Column::Type => ColumnV1::Type,
                     Column::Size => ColumnV1::Size,
+                    // 위치 열은 검색 결과에만 뜻이 있고, 검색 결과 위치는 검색한 폴더로 남으므로 이름으로 남긴다(형식
+                    // 버전을 올리지 않으려고 열을 더하지 않는다).
+                    Column::Location => ColumnV1::Name,
                 },
                 direction: match tab.sort.direction {
                     Direction::Ascending => DirectionV1::Ascending,
