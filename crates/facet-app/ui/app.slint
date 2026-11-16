@@ -94,8 +94,15 @@ export struct PanelData {
 // 작업의 상태(코어의 `JobState`). 문장은 화면이 `@tr()`로 만든다.
 export enum JobStatus { queued, running, paused, awaiting-answer, finished, failed, cancelled }
 
-// 답을 기다리는 질문의 종류.
-export enum JobAsk { none, conflict, error }
+// 답을 기다리는 질문의 종류: 이름 충돌, 항목별 오류, 휴지통에 들어가지 않는 항목.
+export enum JobAsk { none, conflict, error, not-recyclable }
+
+// 작업의 종류(코어의 `JobKind`): 복사, 이동, 실행취소, 다시 실행, 삭제(휴지통), 영구 삭제.
+export enum JobType { copy, move, undo, redo, recycle, delete }
+
+// 이름 충돌 대화의 덮어쓰기 경고: 덮어쓸 수 없음(파일과 폴더), 덮어쓴 파일이 휴지통으로 감(되살릴 수 있음), 되살릴 수
+// 없음(대상 위치에 휴지통이 없음).
+export enum OverwriteNote { not-allowed, recyclable, permanent }
 
 // 이름 충돌의 한 쪽 항목. 크기·수정 시각 글자는 자세히 보기와 같은 서식으로 Rust가 만든다(폴더면 크기는 비어 있다,
 // 시각을 읽지 못했으면 비어 있다).
@@ -115,6 +122,8 @@ export enum ErrorReason { locked, access-denied, disk-full, source-missing, othe
 // 이름 충돌·항목별 오류 질문의 답.
 export enum ConflictChoice { overwrite, overwrite-if-newer, keep-both, skip }
 export enum ErrorChoice { retry, skip, skip-all, cancel-job }
+// 휴지통에 들어가지 않는 항목 질문의 답.
+export enum NotRecyclableChoice { delete, delete-all, skip, skip-all, cancel-job }
 
 // 작업 기록 보기의 줄 하나: 작업 이름, 끝낸·건너뛴 항목 수, 되돌릴 수 없으면 그 까닭(되돌릴 수 있으면 비어 있음).
 // 글자는 Rust의 문장 모듈이 만든다.
@@ -129,11 +138,9 @@ export struct HistoryRow {
 export struct JobRow {
     // 작업 번호(단추를 누르면 Rust에 돌려준다).
     id: int,
-    // 이동이면 참, 복사면 거짓.
-    moving: bool,
-    // 실행취소면 1, 다시 실행이면 2, 복사·이동이면 0. 대상은 되돌리는 항목이 있는 폴더다.
-    reverting: int,
-    // 대상 폴더.
+    // 작업 종류.
+    kind: JobType,
+    // 대상 폴더. 실행취소·다시 실행은 되돌리는 항목이 있는 폴더, 삭제는 지우는 위치다.
     target: string,
     status: JobStatus,
     // 더 바뀌지 않는 마지막 상태(끝남·실패·취소)인가.
@@ -160,20 +167,25 @@ export struct JobRow {
     not-done: string,
     // 답을 기다리는 질문(코어의 `JobQuestion`). 있으면 진행 표시 아래에 질문 대화가 붙는다.
     ask: JobAsk,
-    // 이름 충돌: 두 항목, 어느 쪽이 더 새것·더 큰지, 덮어쓰기를 고를 수 있는지, 덮어쓰면 되살릴 수 없는지.
+    // 이름 충돌: 두 항목, 어느 쪽이 더 새것·더 큰지, 덮어쓰기를 고를 수 있는지, 덮어쓰기 경고.
+    // 휴지통에 들어가지 않는 항목: 그 항목은 `source`다.
     source: ConflictSide,
     target-item: ConflictSide,
     newer: Compare,
     larger: Compare,
     can-overwrite: bool,
-    overwrite-permanent: bool,
+    overwrite-note: OverwriteNote,
     // 항목별 오류: 원본 경로와 까닭.
     error-path: string,
     error-reason: ErrorReason,
 }
 
 // 복사·이동 확인 줄에서 시작 전에 막힌 까닭(코어의 `CopyRejection`). 문장은 화면이 `@tr()`로 만든다.
-export enum TransferProblem { none, no-sources, target-missing, target-not-folder, into-itself, target-inside-source }
+export enum TransferProblem { none, no-sources, target-missing, target-not-folder, into-itself, target-inside-source, nothing-to-delete }
+
+// 삭제 확인 줄의 까닭(코어의 `DeleteWarning`): 확인 줄이 복사·이동이면 none, 영구 삭제(Shift+Delete), 휴지통이 없는 위치의
+// 삭제(Delete).
+export enum DeleteConfirm { none, permanent, no-recycle-bin }
 
 // 작은 단추: 진행 표시와 확인 줄에 쓴다. 눌러도 키보드 입력을 가져가지 않는다(창이 목록으로 돌린다).
 component SmallButton inherits Rectangle {
@@ -278,7 +290,8 @@ component QuestionHint inherits Text {
 }
 
 // **이름 충돌 질문 대화**: 원본과 대상의 경로·크기·수정 시각을 나란히 보이고(더 새것·더 큰 쪽을 드러냄) 덮어쓰기·더 새것만
-// 덮어쓰기·둘 다 유지·건너뛰기와 「나머지에도 적용」으로 답한다. 덮어쓰기 선택지 위에 되살릴 수 없다는 경고가 늘 보인다.
+// 덮어쓰기·둘 다 유지·건너뛰기와 「나머지에도 적용」으로 답한다. 덮어쓰기 선택지 위에 덮어쓴 파일이 어떻게 되는지 늘 보인다:
+// 대상 위치에 휴지통이 있으면 휴지통으로 가 실행취소로 되살릴 수 있고, 없으면 되살릴 수 없다.
 // 파일과 폴더가 부딪히면 덮어쓰기 계열은 꺼져 있다.
 //
 // 키보드: 대화에 포커스가 있으면 Tab·Shift+Tab·←→로 선택지를 고르고 Enter·Space로 누른다. Esc는 아무 답도 하지 않고
@@ -410,10 +423,10 @@ component ConflictQuestion inherits FocusScope {
                 }
             }
             Text {
-                text: !root.job.can-overwrite ? @tr("파일과 폴더는 서로 덮어쓸 수 없습니다. 둘 다 유지나 건너뛰기로 답하세요")
-                    : root.job.overwrite-permanent ? @tr("덮어쓰기: 덮어쓴 대상 파일은 되살릴 수 없습니다(영구 삭제)")
-                    : "";
-                color: #c42b1c;
+                text: root.job.overwrite-note == OverwriteNote.not-allowed ? @tr("파일과 폴더는 서로 덮어쓸 수 없습니다. 둘 다 유지나 건너뛰기로 답하세요")
+                    : root.job.overwrite-note == OverwriteNote.permanent ? @tr("덮어쓰기: 덮어쓴 대상 파일은 되살릴 수 없습니다(영구 삭제)")
+                    : @tr("덮어쓰기: 덮어쓴 대상 파일은 휴지통으로 가고 실행취소로 되살릴 수 있습니다");
+                color: root.job.overwrite-note == OverwriteNote.recyclable ? Palette.foreground.transparentize(30%) : #c42b1c;
                 overflow: elide;
             }
             HorizontalLayout {
@@ -564,6 +577,125 @@ component ErrorQuestion inherits FocusScope {
     }
 }
 
+// **휴지통에 들어가지 않는 항목 질문 대화**: 휴지통 삭제에서 셸이 휴지통 대신 영구 삭제하려 한 항목(휴지통보다 큼, 휴지통을 끈
+// 볼륨 등)의 경로·크기·수정 시각을 보이고, 아직 지우지 않았음과 영구 삭제하면 되살릴 수 없음을 알린다. 영구 삭제·나머지도
+// 영구 삭제·건너뛰기·나머지도 건너뛰기·작업 취소로 답한다. 키보드는 이름 충돌 질문 대화와 같고, 처음 고른 선택지는 잃는 것이
+// 없는 「건너뛰기」다.
+component NotRecyclableQuestion inherits FocusScope {
+    in property <JobRow> job;
+    in property <bool> autofocus;
+    callback answer(NotRecyclableChoice);
+    callback leave();
+    // 키보드로 고른 선택지: 0 영구 삭제, 1 나머지도 영구 삭제, 2 건너뛰기, 3 나머지도 건너뛰기, 4 작업 취소.
+    in-out property <int> choice: 2;
+
+    function press(i: int) {
+        root.answer(i == 0 ? NotRecyclableChoice.delete
+            : i == 1 ? NotRecyclableChoice.delete-all
+            : i == 2 ? NotRecyclableChoice.skip
+            : i == 3 ? NotRecyclableChoice.skip-all : NotRecyclableChoice.cancel-job);
+    }
+
+    init => {
+        if (root.autofocus) {
+            self.focus();
+        }
+    }
+    key-pressed(event) => {
+        if (event.text == Key.Escape) {
+            root.leave();
+        } else if (event.text == Key.Backtab || event.text == Key.LeftArrow
+            || (event.text == Key.Tab && event.modifiers.shift)) {
+            root.choice = Math.mod(root.choice + 4, 5);
+        } else if (event.text == Key.Tab || event.text == Key.RightArrow) {
+            root.choice = Math.mod(root.choice + 1, 5);
+        } else if (event.text == Key.Return || event.text == " ") {
+            root.press(root.choice);
+        }
+        accept
+    }
+
+    Rectangle {
+        border-width: 1px;
+        border-radius: 3px;
+        border-color: root.has-focus ? Palette.accent-background : #c42b1c;
+        background: #fde7e9.transparentize(40%);
+        TouchArea {
+            clicked => {
+                root.focus();
+            }
+        }
+        VerticalLayout {
+            padding: 6px;
+            spacing: 3px;
+            Text {
+                text: @tr("휴지통에 들어가지 않는 항목입니다(휴지통보다 크거나 휴지통을 쓰지 않는 위치). 아직 지우지 않았습니다");
+                font-weight: 700;
+                overflow: elide;
+            }
+            HorizontalLayout {
+                spacing: 12px;
+                Text {
+                    text: root.job.source.path;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                Text {
+                    text: root.job.source.folder ? @tr("폴더") : root.job.source.size;
+                    horizontal-alignment: right;
+                }
+                Text {
+                    text: root.job.source.modified;
+                }
+            }
+            Text {
+                text: @tr("영구 삭제로 진행하면 이 항목은 되살릴 수 없습니다(실행취소할 수 없음)");
+                color: #c42b1c;
+                overflow: elide;
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                ChoiceButton {
+                    text: @tr("영구 삭제");
+                    current: root.has-focus && root.choice == 0;
+                    clicked => {
+                        root.press(0);
+                    }
+                }
+                ChoiceButton {
+                    text: @tr("나머지도 영구 삭제");
+                    current: root.has-focus && root.choice == 1;
+                    clicked => {
+                        root.press(1);
+                    }
+                }
+                ChoiceButton {
+                    text: @tr("건너뛰기");
+                    current: root.has-focus && root.choice == 2;
+                    clicked => {
+                        root.press(2);
+                    }
+                }
+                ChoiceButton {
+                    text: @tr("나머지도 건너뛰기");
+                    current: root.has-focus && root.choice == 3;
+                    clicked => {
+                        root.press(3);
+                    }
+                }
+                ChoiceButton {
+                    text: @tr("작업 취소");
+                    current: root.has-focus && root.choice == 4;
+                    clicked => {
+                        root.press(4);
+                    }
+                }
+                QuestionHint { }
+            }
+        }
+    }
+}
+
 // **진행 표시**: 작업 영역의 작업 하나. 종류·대상·상태와 단추, 그 아래 항목 수·바이트·속도·남은 시간·지금 파일,
 // 끝났으면 결과(끝낸·건너뛴·남은 항목 수).
 component JobView inherits Rectangle {
@@ -577,6 +709,7 @@ component JobView inherits Rectangle {
     in property <bool> autofocus;
     callback answer-conflict(ConflictChoice, bool);
     callback answer-error(ErrorChoice);
+    callback answer-not-recyclable(NotRecyclableChoice);
     callback leave();
 
     border-width: 1px;
@@ -592,9 +725,11 @@ component JobView inherits Rectangle {
         HorizontalLayout {
             spacing: 8px;
             Text {
-                text: root.job.reverting == 1 ? @tr("실행취소: {}", root.job.target)
-                    : root.job.reverting == 2 ? @tr("다시 실행: {}", root.job.target)
-                    : root.job.moving ? @tr("이동 → {}", root.job.target) : @tr("복사 → {}", root.job.target);
+                text: root.job.kind == JobType.undo ? @tr("실행취소: {}", root.job.target)
+                    : root.job.kind == JobType.redo ? @tr("다시 실행: {}", root.job.target)
+                    : root.job.kind == JobType.recycle ? @tr("삭제: {}", root.job.target)
+                    : root.job.kind == JobType.delete ? @tr("영구 삭제: {}", root.job.target)
+                    : root.job.kind == JobType.move ? @tr("이동 → {}", root.job.target) : @tr("복사 → {}", root.job.target);
                 horizontal-stretch: 1;
                 overflow: elide;
                 vertical-alignment: center;
@@ -670,8 +805,8 @@ component JobView inherits Rectangle {
             }
         }
         if root.job.finished: Text {
-            text: root.job.reverting == 1 ? @tr("되돌린 항목 {} · 못 한 항목 {} · 남은 항목 {}", root.job.completed, root.job.skipped, root.job.left)
-                : root.job.reverting == 2 ? @tr("다시 한 항목 {} · 못 한 항목 {} · 남은 항목 {}", root.job.completed, root.job.skipped, root.job.left)
+            text: root.job.kind == JobType.undo ? @tr("되돌린 항목 {} · 못 한 항목 {} · 남은 항목 {}", root.job.completed, root.job.skipped, root.job.left)
+                : root.job.kind == JobType.redo ? @tr("다시 한 항목 {} · 못 한 항목 {} · 남은 항목 {}", root.job.completed, root.job.skipped, root.job.left)
                 : @tr("끝낸 항목 {} · 건너뛴 항목 {} · 남은 항목 {}", root.job.completed, root.job.skipped, root.job.left);
             overflow: elide;
             color: Palette.foreground.transparentize(30%);
@@ -698,6 +833,17 @@ component JobView inherits Rectangle {
             autofocus: root.autofocus;
             answer(choice) => {
                 root.answer-error(choice);
+            }
+            leave => {
+                root.leave();
+            }
+        }
+        if root.job.ask == JobAsk.not-recyclable: NotRecyclableQuestion {
+            vertical-stretch: 1;
+            job: root.job;
+            autofocus: root.autofocus;
+            answer(choice) => {
+                root.answer-not-recyclable(choice);
             }
             leave => {
                 root.leave();
@@ -1578,8 +1724,11 @@ export component AppWindow inherits Window {
     in property <bool> history-open;
     in property <[HistoryRow]> history-rows;
     callback history-close();
-    // 반대편 패널로 복사·이동의 확인 줄: 열려 있는가, 이동인가, 대상 폴더, 항목 수, 시작 전에 막힌 까닭과 그 경로.
+    // 확인 줄: 열려 있는가, 이동인가, 대상 폴더, 항목 수, 시작 전에 막힌 까닭과 그 경로. 삭제 확인이면 그 까닭
+    // (`confirm-delete`)과 항목이 하나일 때 그 이름(`confirm-name`, 여럿이면 비어 있고 항목 수를 보인다).
     in property <bool> confirm-open;
+    in property <DeleteConfirm> confirm-delete;
+    in property <string> confirm-name;
     in property <bool> confirm-moving;
     in property <string> confirm-target;
     in property <int> confirm-items;
@@ -1678,6 +1827,7 @@ export component AppWindow inherits Window {
     // 질문 대화의 답: 작업 번호와 답(이름 충돌은 「나머지에도 적용」도). 어느 창에서 답해도 한 번만 적용된다.
     callback job-answer-conflict(int, ConflictChoice, bool);
     callback job-answer-error(int, ErrorChoice);
+    callback job-answer-not-recyclable(int, NotRecyclableChoice);
 
     forward-focus: keys;
 
@@ -2045,7 +2195,8 @@ export component AppWindow inherits Window {
         }
     }
 
-    // 확인 줄: 반대편 패널로 복사·이동할 대상과 항목 수. 시작 전에 막히면 그 까닭을 보인다.
+    // 확인 줄: 반대편 패널로 복사·이동할 대상과 항목 수, 또는 영구 삭제 경고와 항목(하나면 이름, 여럿이면 수). 시작 전에
+    // 막히면 그 까닭을 보인다.
     if root.confirm-open: Rectangle {
         x: 8px;
         y: parent.height - 8px - root.work-height - 32px;
@@ -2053,15 +2204,23 @@ export component AppWindow inherits Window {
         height: 32px;
         border-radius: 4px;
         border-width: 1px;
-        border-color: root.confirm-problem == TransferProblem.none ? Palette.accent-background : #c42b1c;
-        background: root.confirm-problem == TransferProblem.none ? Palette.accent-background.transparentize(85%) : #fde7e9;
+        border-color: root.confirm-problem == TransferProblem.none && root.confirm-delete == DeleteConfirm.none ? Palette.accent-background : #c42b1c;
+        background: root.confirm-problem == TransferProblem.none && root.confirm-delete == DeleteConfirm.none ? Palette.accent-background.transparentize(85%) : #fde7e9;
         TouchArea { }
         HorizontalLayout {
             padding-left: 8px;
             padding-right: 8px;
             spacing: 8px;
             Text {
-                text: root.confirm-problem == TransferProblem.none
+                text: root.confirm-problem == TransferProblem.none && root.confirm-delete == DeleteConfirm.permanent
+                    ? (root.confirm-name != ""
+                        ? @tr("「{}」을(를) 영구 삭제합니다. 실행취소할 수 없습니다. Enter로 삭제, Esc로 취소", root.confirm-name)
+                        : @tr("{}개 항목을 영구 삭제합니다. 실행취소할 수 없습니다. Enter로 삭제, Esc로 취소", root.confirm-items))
+                    : root.confirm-problem == TransferProblem.none && root.confirm-delete == DeleteConfirm.no-recycle-bin
+                    ? (root.confirm-name != ""
+                        ? @tr("휴지통이 없는 위치라 「{}」이(가) 영구 삭제되며 실행취소할 수 없습니다. Enter로 삭제, Esc로 취소", root.confirm-name)
+                        : @tr("휴지통이 없는 위치라 {}개 항목이 영구 삭제되며 실행취소할 수 없습니다. Enter로 삭제, Esc로 취소", root.confirm-items))
+                    : root.confirm-problem == TransferProblem.none
                     ? (root.confirm-moving
                         ? @tr("{}개 항목을 {}(으)로 이동합니다. Enter로 시작, Esc로 취소", root.confirm-items, root.confirm-target)
                         : @tr("{}개 항목을 {}(으)로 복사합니다. Enter로 시작, Esc로 취소", root.confirm-items, root.confirm-target))
@@ -2069,16 +2228,17 @@ export component AppWindow inherits Window {
                     : root.confirm-problem == TransferProblem.target-missing ? @tr("대상 위치가 없습니다: {}", root.confirm-problem-path)
                     : root.confirm-problem == TransferProblem.target-not-folder ? @tr("대상이 폴더가 아닙니다: {}", root.confirm-problem-path)
                     : root.confirm-problem == TransferProblem.into-itself ? @tr("폴더를 그 폴더 자신으로 보낼 수 없습니다: {}", root.confirm-problem-path)
+                    : root.confirm-problem == TransferProblem.nothing-to-delete ? @tr("지울 항목이 없습니다")
                     : @tr("대상 위치가 원본 폴더 안에 있습니다: {}", root.confirm-problem-path);
                 horizontal-stretch: 1;
                 vertical-alignment: center;
                 overflow: elide;
-                color: root.confirm-problem == TransferProblem.none ? Palette.foreground : #c42b1c;
+                color: root.confirm-problem == TransferProblem.none && root.confirm-delete == DeleteConfirm.none ? Palette.foreground : #c42b1c;
             }
             if root.confirm-problem == TransferProblem.none: VerticalLayout {
                 alignment: center;
                 SmallButton {
-                    text: @tr("시작");
+                    text: root.confirm-delete == DeleteConfirm.none ? @tr("시작") : @tr("삭제");
                     clicked => {
                         root.confirm-accept();
                         keys.focus();
@@ -2120,6 +2280,10 @@ export component AppWindow inherits Window {
                     }
                     answer-error(choice) => {
                         root.job-answer-error(job.id, choice);
+                        keys.focus();
+                    }
+                    answer-not-recyclable(choice) => {
+                        root.job-answer-not-recyclable(job.id, choice);
                         keys.focus();
                     }
                     leave => {
@@ -2590,6 +2754,7 @@ export component ProgressWindow inherits Window {
     callback job-dismiss(int);
     callback job-answer-conflict(int, ConflictChoice, bool);
     callback job-answer-error(int, ErrorChoice);
+    callback job-answer-not-recyclable(int, NotRecyclableChoice);
 
     forward-focus: keys;
     keys := FocusScope {
@@ -2642,6 +2807,10 @@ export component ProgressWindow inherits Window {
                         }
                         answer-error(choice) => {
                             root.job-answer-error(job.id, choice);
+                            keys.focus();
+                        }
+                        answer-not-recyclable(choice) => {
+                            root.job-answer-not-recyclable(job.id, choice);
                             keys.focus();
                         }
                         leave => {

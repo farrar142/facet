@@ -1,4 +1,4 @@
-//! 질문 대화(이름 충돌·항목별 오류)에 넘길 값: 코어의 질문([`JobQuestion`])을 화면의 값으로 바꾸고, 화면의 답을
+//! 질문 대화(이름 충돌·항목별 오류·휴지통에 들어가지 않는 항목)에 넘길 값: 코어의 질문([`JobQuestion`])을 화면의 값으로 바꾸고, 화면의 답을
 //! 코어의 답으로 바꾼다. 문장은 화면(`@tr()`)이 만든다(ADR-0007).
 
 use std::time::SystemTime;
@@ -6,10 +6,13 @@ use std::time::SystemTime;
 use facet_core::file_list;
 use facet_core::job::{
     Conflict, ConflictAnswer, ConflictItem, ErrorAnswer, FileOpErrorKind, ItemKind, JobQuestion,
-    Resolution,
+    NotRecyclableAnswer, Resolution,
 };
 
-use crate::{Compare, ConflictChoice, ConflictSide, ErrorChoice, ErrorReason, JobAsk};
+use crate::{
+    Compare, ConflictChoice, ConflictSide, ErrorChoice, ErrorReason, JobAsk, NotRecyclableChoice,
+    OverwriteNote,
+};
 
 /// 화면의 질문 값. 질문이 없으면 [`QuestionView::default`](모두 비어 있음).
 #[derive(Debug, Clone, PartialEq)]
@@ -20,7 +23,7 @@ pub struct QuestionView {
     pub newer: Compare,
     pub larger: Compare,
     pub can_overwrite: bool,
-    pub overwrite_permanent: bool,
+    pub overwrite_note: OverwriteNote,
     pub error_path: String,
     pub error_reason: ErrorReason,
 }
@@ -34,7 +37,7 @@ impl Default for QuestionView {
             newer: Compare::Unknown,
             larger: Compare::Unknown,
             can_overwrite: false,
-            overwrite_permanent: false,
+            overwrite_note: OverwriteNote::NotAllowed,
             error_path: String::new(),
             error_reason: ErrorReason::Other,
         }
@@ -52,9 +55,11 @@ pub fn view(question: Option<&JobQuestion>) -> QuestionView {
             error_reason: error_reason(failure.kind),
             ..QuestionView::default()
         },
-        // 휴지통에 들어가지 않는 항목의 질문 대화는 뒤 티켓(앱의 Delete)이 그린다. 앱은 아직 휴지통 삭제 작업을
-        // 넣지 않으므로 이 질문이 오지 않는다.
-        Some(JobQuestion::NotRecyclable(_)) => QuestionView::default(),
+        Some(JobQuestion::NotRecyclable(item)) => QuestionView {
+            ask: JobAsk::NotRecyclable,
+            source: side(item),
+            ..QuestionView::default()
+        },
     }
 }
 
@@ -66,8 +71,20 @@ fn conflict_view(conflict: &Conflict) -> QuestionView {
         newer: newer(conflict.source.modified, conflict.target.modified),
         larger: larger(&conflict.source, &conflict.target),
         can_overwrite: conflict.can_overwrite,
-        overwrite_permanent: conflict.overwrite_is_permanent,
+        overwrite_note: overwrite_note(conflict),
         ..QuestionView::default()
+    }
+}
+
+/// 이름 충돌 대화의 덮어쓰기 경고: 덮어쓸 수 없으면(파일과 폴더) 그 안내, 대상 위치에 휴지통이 없으면 되살릴 수
+/// 없다는 경고, 있으면 덮어쓴 파일이 휴지통으로 가 실행취소로 되살릴 수 있다는 안내.
+pub fn overwrite_note(conflict: &Conflict) -> OverwriteNote {
+    if !conflict.can_overwrite {
+        OverwriteNote::NotAllowed
+    } else if conflict.overwrite_is_permanent {
+        OverwriteNote::Permanent
+    } else {
+        OverwriteNote::Recyclable
     }
 }
 
@@ -149,6 +166,17 @@ pub fn error_answer(choice: ErrorChoice) -> ErrorAnswer {
     }
 }
 
+/// 휴지통에 들어가지 않는 항목 질문 대화의 답.
+pub fn not_recyclable_answer(choice: NotRecyclableChoice) -> NotRecyclableAnswer {
+    match choice {
+        NotRecyclableChoice::Delete => NotRecyclableAnswer::DeletePermanently,
+        NotRecyclableChoice::DeleteAll => NotRecyclableAnswer::DeleteAllPermanently,
+        NotRecyclableChoice::Skip => NotRecyclableAnswer::Skip,
+        NotRecyclableChoice::SkipAll => NotRecyclableAnswer::SkipAll,
+        NotRecyclableChoice::CancelJob => NotRecyclableAnswer::CancelJob,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -212,6 +240,61 @@ mod tests {
         assert_eq!(view.newer, Compare::Source);
         assert_eq!(view.larger, Compare::Unknown);
         assert!(!view.can_overwrite);
+        assert_eq!(view.overwrite_note, OverwriteNote::NotAllowed);
+    }
+
+    #[test]
+    fn 덮어쓰기_경고는_대상_위치에_휴지통이_있는지에_따라_다르다() {
+        let conflict = |can_overwrite, overwrite_is_permanent| Conflict {
+            source: file(1, None),
+            target: file(2, None),
+            can_overwrite,
+            overwrite_is_permanent,
+        };
+        // 휴지통이 있는 위치: 덮어쓴 파일은 휴지통으로 가고 실행취소로 되살린다.
+        assert_eq!(
+            view(Some(&JobQuestion::Conflict(conflict(true, false)))).overwrite_note,
+            OverwriteNote::Recyclable
+        );
+        // 휴지통이 없는 위치: 되살릴 수 없다.
+        assert_eq!(
+            view(Some(&JobQuestion::Conflict(conflict(true, true)))).overwrite_note,
+            OverwriteNote::Permanent
+        );
+        assert_eq!(
+            overwrite_note(&conflict(false, false)),
+            OverwriteNote::NotAllowed
+        );
+    }
+
+    #[test]
+    fn 휴지통에_들어가지_않는_항목_질문의_화면_값과_답() {
+        let time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let view = view(Some(&JobQuestion::NotRecyclable(file(4096, Some(time)))));
+        assert_eq!(view.ask, JobAsk::NotRecyclable);
+        assert_eq!(view.source.path, r"C:\곳\메모.txt");
+        assert_eq!(view.source.size, "4.0 KB");
+        assert_eq!(view.source.modified, file_list::format_modified_local(time));
+        assert_eq!(
+            not_recyclable_answer(NotRecyclableChoice::Delete),
+            NotRecyclableAnswer::DeletePermanently
+        );
+        assert_eq!(
+            not_recyclable_answer(NotRecyclableChoice::DeleteAll),
+            NotRecyclableAnswer::DeleteAllPermanently
+        );
+        assert_eq!(
+            not_recyclable_answer(NotRecyclableChoice::Skip),
+            NotRecyclableAnswer::Skip
+        );
+        assert_eq!(
+            not_recyclable_answer(NotRecyclableChoice::SkipAll),
+            NotRecyclableAnswer::SkipAll
+        );
+        assert_eq!(
+            not_recyclable_answer(NotRecyclableChoice::CancelJob),
+            NotRecyclableAnswer::CancelJob
+        );
     }
 
     #[test]
