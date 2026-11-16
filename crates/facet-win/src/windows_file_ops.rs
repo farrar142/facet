@@ -159,7 +159,7 @@ pub(crate) fn copy_file(
     let source_wide = extended(source)?;
     let target_wide = extended(target)?;
     let mut flags = COPY_FILE_FAIL_IF_EXISTS;
-    if metadata.len() >= UNBUFFERED_COPY_THRESHOLD {
+    if metadata.len() >= UNBUFFERED_COPY_THRESHOLD && !same_volume(source, target) {
         flags |= COPY_FILE_NO_BUFFERING;
     }
     let mut context = Context {
@@ -208,6 +208,19 @@ pub(crate) fn copy_file(
         return Err(error);
     }
     Ok(())
+}
+
+/// 원본과 대상 폴더가 같은 볼륨인가. 알 수 없으면 `false`(무버퍼 경로를 유지한다).
+///
+/// 같은 디스크 안에서 무버퍼 읽기와 쓰기는 한 디스크를 번갈아 기다려 처리량이 절반 무렵으로 떨어진다(#150).
+fn same_volume(source: &Path, target: &Path) -> bool {
+    let Some(parent) = target.parent() else {
+        return false;
+    };
+    match (file_id(source), file_id(parent)) {
+        (Ok(a), Ok(b)) => a.volume_serial == b.volume_serial,
+        _ => false,
+    }
 }
 
 /// 만들다 만 대상을 지운다. 실패해도 더 할 수 있는 것이 없다.
