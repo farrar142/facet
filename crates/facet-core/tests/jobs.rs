@@ -624,12 +624,19 @@ mod windows {
             .copy(vec![next_source.clone()], next_target.clone())
             .unwrap();
         let mut events = Vec::new();
-        wait_for(&mut queue, &mut events, |e| match e {
-            JobEvent::Progress { job, progress } => {
-                *job == id && progress.current.as_deref() == Some(big.as_path())
-            }
-            _ => false,
-        });
+        // 진행 사건은 100ms 간격으로 솎아 큰 파일 복사가 그 안에 끝나면 오지 않으므로(캐시에 든 파일), 사건 대신
+        // 대상에 큰 파일이 생기는 것을 보고 곧바로 멈춘 뒤 취소해 복사하는 도중에 취소한다.
+        let started = target.join("원본").join("b 큰 파일.bin");
+        let deadline = std::time::Instant::now() + JOB_TIMEOUT;
+        while !started.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "큰 파일 복사가 시작하지 않았다: {events:?}"
+            );
+            events.append(&mut queue.poll());
+            std::thread::sleep(std::time::Duration::from_micros(200));
+        }
+        assert!(queue.pause(id), "큰 파일 복사가 이미 끝났다: {events:?}");
         assert!(queue.cancel(id));
         assert!(!queue.cancel(id), "취소 중인 작업은 다시 취소하지 않는다");
         assert!(!queue.pause(id), "취소 중인 작업은 일시정지하지 않는다");
@@ -785,25 +792,40 @@ mod windows {
         wait_for(&mut queue, &mut events, |e| {
             *e == state_changed(first, JobState::Running)
         });
+        // 복사 속도에 기대지 않도록 앞 작업을 멈춰 순서를 고정한다(차례를 쥔 채 멈춤).
+        assert!(queue.pause(first), "앞 작업이 이미 끝났다: {events:?}");
         assert!(queue.start_now(urgent));
         assert!(!queue.start_now(urgent), "이미 시작한 작업");
         assert!(!queue.start_now(first), "실행 중인 작업");
-        let mut rest = collect_until_finished(&mut queue, &[first, urgent, later]);
+        // 앞 작업이 멈춰 있는 채로 급한 작업이 끝난다: 나란히 돈 것이다.
+        wait_for(
+            &mut queue,
+            &mut events,
+            |e| matches!(e, JobEvent::Finished { job, .. } if *job == urgent),
+        );
+        assert!(
+            !events.contains(&state_changed(first, JobState::Finished)),
+            "{events:?}"
+        );
+        assert!(
+            !events.contains(&state_changed(later, JobState::Running)),
+            "멈춘 앞 작업이 차례를 쥐고 있는데 다음 작업이 시작했다: {events:?}"
+        );
+        assert!(targets[1].join("급한 파일.txt").is_file());
+        // 앞 작업을 이어 가면 끝나고, 그제야 차례의 다음 작업이 돈다.
+        assert!(queue.resume(first));
+        let mut rest = collect_until_finished(&mut queue, &[first, later]);
         events.append(&mut rest);
 
         let running_first = position(&events, &state_changed(first, JobState::Running));
         let running_urgent = position(&events, &state_changed(urgent, JobState::Running));
+        let finished_urgent = position(&events, &state_changed(urgent, JobState::Finished));
         let finished_first = position(&events, &state_changed(first, JobState::Finished));
-        assert!(events.contains(&state_changed(urgent, JobState::Finished)));
         let running_later = position(&events, &state_changed(later, JobState::Running));
-        // 두 작업이 동시에 실행 중인 순간이 있다.
         assert!(
-            running_first < running_urgent && running_urgent < finished_first,
+            running_first < running_urgent && finished_urgent < finished_first,
             "{events:?}"
         );
-        // 어느 쪽이 먼저 끝나는지는 보지 않는다: 캐시에 든 큰 파일은 100ms 안에 끝나 작은 작업의 마지막 진행
-        // (진행 간격 100ms)보다 먼저 끝나기도 한다. 겹쳐 돈 것은 위에서 확인했다.
-        // 나란히 돌던 작업이 끝나도 차례의 다음 작업은 앞 작업을 기다린다.
         assert!(finished_first < running_later, "{events:?}");
         assert_same_content(&big, &targets[0].join("큰 파일.bin"));
         assert!(targets[1].join("급한 파일.txt").is_file());
