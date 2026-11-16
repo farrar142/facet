@@ -2081,6 +2081,7 @@ impl View {
             Execution::Search => self.begin_search(false),
             Execution::ContentSearch => self.begin_search(true),
             Execution::ConfirmDelete(warning) => self.open_delete(warning),
+            Execution::ItemMissing => self.show_missing_item(),
             Execution::UndoRefused(_) | Execution::Disabled | Execution::WindowClosed => {}
         }
     }
@@ -2596,6 +2597,18 @@ impl View {
         };
         if self.app.borrow_mut().open_in_new_tab(index).is_some() {
             self.render();
+        } else if self.app.borrow().active_tab().missing_item().is_some() {
+            // 검색 결과의 폴더가 디스크에 없어 결과에서 뺐다.
+            self.render();
+            self.show_missing_item();
+        }
+    }
+
+    /// 검색 결과에서 열려던 항목이 디스크에 없어 결과에서 뺐다는 까닭을 상태 줄에 보인다.
+    fn show_missing_item(&self) {
+        let app = self.app.borrow();
+        if let Some(path) = app.active_tab().missing_item() {
+            self.ui.set_notice(text::missing_item_text(path).into());
         }
     }
 
