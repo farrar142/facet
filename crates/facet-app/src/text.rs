@@ -7,8 +7,10 @@ use facet_core::command::{CommandId, Key, Shortcut};
 use facet_core::details::FileType;
 use facet_core::edit::EditError;
 use facet_core::history::{NotUndoable, OperationKind, Record, RevertSkip};
-use facet_core::job::Summary;
+use facet_core::job::{CopyRejection, Summary};
 use facet_core::name_input::{MAX_NAME_UNITS, NameError};
+use facet_core::window::{ClipboardDone, ClipboardFailure};
+use facet_win::clipboard::ClipboardError;
 use facet_win::file_ops::FileOpErrorKind;
 
 /// 명령 이름: 명령 팔레트에 보이고, 팔레트 검색은 이 이름에서 찾는다(코어는 ID만 갖는다).
@@ -59,6 +61,9 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::ShowHistory => "작업 기록 보기",
         CommandId::Delete => "삭제",
         CommandId::DeletePermanently => "영구 삭제",
+        CommandId::Copy => "복사",
+        CommandId::Paste => "붙여넣기",
+        CommandId::CopyPath => "경로 복사",
     }
 }
 
@@ -115,6 +120,49 @@ pub fn rename_problem_text(problem: crate::rename::Problem) -> String {
     match problem {
         crate::rename::Problem::Name(error) => name_error_text(error),
         crate::rename::Problem::Edit(error) => edit_error_text(error),
+    }
+}
+
+/// 복사·경로 복사를 마쳤을 때(상태 줄). 붙여넣기는 작업 영역이 보이므로 글자가 없다.
+pub fn clipboard_done_text(done: &ClipboardDone) -> Option<String> {
+    match done {
+        ClipboardDone::Copied { items } => Some(format!("항목 {items}개를 복사했습니다")),
+        ClipboardDone::PathsCopied { items: 1 } => Some("경로를 복사했습니다".to_owned()),
+        ClipboardDone::PathsCopied { items } => Some(format!("경로 {items}개를 복사했습니다")),
+        ClipboardDone::Pasted { .. } => None,
+    }
+}
+
+/// 클립보드 명령이 실패한 까닭(상태 줄).
+pub fn clipboard_failure_text(failure: &ClipboardFailure) -> String {
+    match failure {
+        ClipboardFailure::Clipboard(error) => clipboard_error_text(error),
+        ClipboardFailure::NothingToPaste => "클립보드에 붙여넣을 파일이 없습니다".to_owned(),
+        ClipboardFailure::Rejected(rejection) => match rejection {
+            CopyRejection::NoSources => "붙여넣을 항목이 없습니다".to_owned(),
+            CopyRejection::TargetMissing => "붙여넣을 폴더를 찾을 수 없습니다".to_owned(),
+            CopyRejection::TargetNotFolder => "붙여넣을 위치가 폴더가 아닙니다".to_owned(),
+            CopyRejection::IntoItself(source) | CopyRejection::TargetInsideSource(source) => {
+                format!(
+                    "폴더를 그 안으로 붙여넣을 수 없습니다: {}",
+                    source.display()
+                )
+            }
+        },
+    }
+}
+
+/// 클립보드를 쓰지 못한 까닭(상태 줄).
+pub fn clipboard_error_text(error: &ClipboardError) -> String {
+    match error {
+        ClipboardError::Busy => "다른 프로그램이 클립보드를 쓰고 있어 열 수 없습니다".to_owned(),
+        ClipboardError::Stopped => {
+            "클립보드를 쓸 수 없습니다(클립보드 스레드가 없습니다)".to_owned()
+        }
+        ClipboardError::Unsupported => "이 환경에서는 클립보드를 쓸 수 없습니다".to_owned(),
+        ClipboardError::Failed { code } => {
+            format!("클립보드 오류입니다(0x{:08X})", *code as u32)
+        }
     }
 }
 
