@@ -360,6 +360,8 @@ pub struct Tab {
     cursor: Option<(OsString, usize)>,
     /// Shift 범위의 기준 항목 이름.
     anchor: Option<OsString>,
+    /// 사각형 선택 중이면 사각형과 상관없이 남는 선택(Ctrl로 더하면 끌기 전 선택, 아니면 비어 있음).
+    marquee_base: Option<HashSet<OsString>>,
     /// 화면이 맨 위에 보이는 행 번호. 화면이 알려 주는 값을 그대로 보관한다.
     scroll: usize,
     type_ahead: TypeAhead,
@@ -398,6 +400,7 @@ impl Tab {
             selection: HashSet::new(),
             cursor: None,
             anchor: None,
+            marquee_base: None,
             scroll: 0,
             type_ahead: TypeAhead::default(),
             watching: None,
@@ -956,6 +959,8 @@ impl Tab {
 
     /// 지금 보기 상태를 꺼내 간다(기록에 남길 때). 선택·커서·기준은 비고 스크롤은 0이 된다.
     fn take_view(&mut self) -> ViewState {
+        // 다른 위치로 가면 사각형 선택은 끝난다(앞 위치의 이름을 들고 가지 않는다).
+        self.marquee_base = None;
         ViewState {
             selection: std::mem::take(&mut self.selection),
             cursor: self.cursor.take().map(|(name, _)| name),
@@ -971,11 +976,18 @@ impl Tab {
 
     /// 보이지 않거나 사라진 항목을 선택·기준에서 뺀다. 이름 집합을 한 번 만들어 대조하므로 항목 수에 비례한다.
     fn prune_selection(&mut self) {
-        if !self.selection.is_empty() {
+        let base_empty = self.marquee_base.as_ref().is_none_or(HashSet::is_empty);
+        if !self.selection.is_empty() || !base_empty {
             let mut selection = std::mem::take(&mut self.selection);
+            let mut base = self.marquee_base.take();
             let present: HashSet<&OsStr> = self.items().map(|i| i.name.as_os_str()).collect();
             selection.retain(|name| present.contains(name.as_os_str()));
+            // 사각형 선택 중이면 끌기 전 선택에서도 뺀다.
+            if let Some(base) = base.as_mut() {
+                base.retain(|name| present.contains(name.as_os_str()));
+            }
             self.selection = selection;
+            self.marquee_base = base;
         }
         if let Some(anchor) = &self.anchor
             && self.position_of(anchor).is_none()
@@ -1134,6 +1146,57 @@ impl Tab {
         if let Some(index) = self.cursor() {
             self.toggle_select(index);
         }
+    }
+
+    /// 사각형 선택(빈 곳에서 시작한 끌기)을 시작한다. `add`(Ctrl)면 지금 선택에 더하고, 아니면 사각형이 걸친 행만
+    /// 선택한다. 끄는 동안 [`Tab::marquee_select`]로 걸친 행을 알리고, 놓으면 [`Tab::end_marquee`]를 부른다.
+    ///
+    /// 선택은 이름으로 기억하므로 끄는 동안이나 뒤에 정렬·새로 고침해도 고른 항목이 그대로 남는다.
+    pub fn begin_marquee(&mut self, add: bool) {
+        let base = if add {
+            self.selection.clone()
+        } else {
+            HashSet::new()
+        };
+        self.marquee_base = Some(base);
+    }
+
+    /// 사각형 선택 중이면 참이다.
+    pub fn is_marquee_active(&self) -> bool {
+        self.marquee_base.is_some()
+    }
+
+    /// 사각형이 걸친 행으로 선택을 바꾼다: 선택은 시작할 때 남긴 선택(Ctrl이면 끌기 전 선택)과 `rows`의 행이다.
+    /// `rows`는 (시작한 점 쪽 행, 끄는 점 쪽 행)이고 둘 다 든다(순서는 어느 쪽이든 된다). 목록 밖 번호는 끝 행으로
+    /// 자른다. `None`이면 걸친 행이 없다(목록 아래 빈 곳만 감쌈).
+    ///
+    /// 커서와 범위 기준은 걸친 행 가운데 끄는 점 쪽 끝 행에 둔다(탐색기처럼 끄는 쪽 마지막 항목이 커서가 되어
+    /// 이어서 Shift 클릭·Shift+화살표가 거기서 시작한다). 걸친 행이 없으면 커서와 기준은 그대로다.
+    ///
+    /// [`Tab::begin_marquee`] 없이 부르면 바꾸기(Ctrl 없음)로 시작한 것으로 본다.
+    pub fn marquee_select(&mut self, rows: Option<(usize, usize)>) {
+        let mut selection = self.marquee_base.get_or_insert_with(HashSet::new).clone();
+        let len = self.len();
+        if let Some((start, end)) = rows
+            && len > 0
+        {
+            let (start, end) = (start.min(len - 1), end.min(len - 1));
+            for i in start.min(end)..=start.max(end) {
+                if let Some(item) = self.get(i) {
+                    selection.insert(item.name.clone());
+                }
+            }
+            self.selection = selection;
+            self.anchor = self.get(end).map(|item| item.name.clone());
+            self.set_cursor(end);
+        } else {
+            self.selection = selection;
+        }
+    }
+
+    /// 사각형 선택을 끝낸다. 선택은 마지막 [`Tab::marquee_select`] 그대로 남는다.
+    pub fn end_marquee(&mut self) {
+        self.marquee_base = None;
     }
 
     /// 보이는 항목을 모두 선택한다. 커서는 그대로다.
