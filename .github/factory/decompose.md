@@ -29,8 +29,8 @@ Publish one issue per ticket, **blockers first**, so each ticket's edges can ref
 - **Do not apply `ready-for-agent`** yourself. When you finish, the workflow labels every open ticket of the spec and starts implementing them in order, without human review. So every ticket must be implementable as written.
 - Apply exactly one **model label** to each ticket, choosing the model the Implementer run will use:
   - `model:sonnet` (the default): the ticket follows a pattern the codebase already has, its acceptance criteria are mechanical to check, or it is mostly tooling, docs or wiring.
-  - `model:opus`: the ticket sets a new pattern later tickets will copy (a first public interface, a first UI screen), needs design judgement the spec leaves open, touches concurrency, unsafe code or Windows APIs, or has acceptance criteria that tests can only partly check.
-  When unsure, pick `model:opus`. Record each choice and its reason in the report.
+  - `model:opus`: only hard tickets — the ticket touches concurrency, unsafe code, Windows APIs or OLE/COM safety, or sets a first public interface later tickets will copy while the spec leaves its design open.
+  Most tickets are `model:sonnet`, including UI and app wiring on top of an existing pattern (decision 2026-11-16). When unsure, pick `model:sonnet`: a code failure retries on Opus anyway. Never Fable. Record each choice and its reason in the report.
 - Do not close, edit or relabel the spec issue.
 - Avoid specific file paths and code snippets in ticket bodies; they go stale.
 

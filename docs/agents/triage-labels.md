@@ -23,4 +23,4 @@ These are not triage roles. The software factory uses them (see `docs/adr/0001-s
 | `spec`        | A spec issue. Triggers the Decompose task. A spec issue never gets `ready-for-agent`, even when `/to-spec` says to apply it. |
 | `in-progress` | An Implementer run has claimed this ticket. The run removes `ready-for-agent` and adds this. |
 | `model:sonnet` | The Implementer run uses Sonnet (also the default when a ticket has no model label). Set by the Decompose run. |
-| `model:opus`   | The Implementer run uses Opus. Set by the Decompose run. A retry after a failed run always uses Opus. |
+| `model:opus`   | The Implementer run uses Opus. Set by the Decompose run. A retry after a code failure (checks or merge) uses Opus; a runner or network failure retries on the same model. |

@@ -35,7 +35,7 @@ facet은 Windows 파일 탐색기를 대체할 앱이다. 스택은 아직 정�
 | Decompose | `spec` 라벨, 또는 수동 실행(`workflow_dispatch`, spec 번호) | spec을 하위 이슈(티켓)로 나누고 blocked-by(native dependency)를 기록한다. 지시는 `.github/factory/decompose.md` | 에이전트가 끝나면 workflow가 새 티켓 모두에 `ready-for-agent`를 붙이고 Implementer 사슬을 시작한다(대표 결정 2026-11-15: 분해 결과 검토 없음) | 없음. 관리 세션이 분해 결과와 실패를 지켜본다 | spec 번호로 concurrency group. 하위 이슈가 이미 있으면 에이전트를 부르기 전에 종료한다 |
 | Explore | 이슈 생성 (`needs-triage`) | 코드베이스와 대조해 분류한다 | 쉬운 건은 `ready-for-agent`, 나머지는 `ready-for-human` / `needs-info` / `wontfix` | 라벨 변경 | 이슈 번호로 concurrency group. `needs-triage`가 있을 때만 실행한다 |
 
-**모델 배정**: Decompose가 티켓마다 `model:sonnet` 또는 `model:opus` 라벨을 하나 붙인다. 기준은 `.github/factory/decompose.md`에 있다. Implementer는 그 라벨대로 모델을 쓰고, 라벨이 없으면 Sonnet을 쓴다. 한 번이라도 실패한 티켓을 다시 돌릴 때는 Opus로 올린다. Decompose 자신은 Opus로 돈다.
+**모델 배정**: Decompose가 티켓마다 `model:sonnet` 또는 `model:opus` 라벨을 하나 붙인다. 기준은 `.github/factory/decompose.md`에 있다. Implementer는 그 라벨대로 모델을 쓰고, 라벨이 없으면 Sonnet을 쓴다. 기본은 Sonnet이고 Opus는 동시성·unsafe·Windows API·OLE 안전성처럼 어려운 티켓에만 붙인다(2026-11-16). 코드 실패(자동 검사·병합 실패)로 다시 돌릴 때는 Opus로 올리고, 코드와 무관한 실패(러너·네트워크·설치)는 같은 모델로 다시 돌린다(세 번이면 관리 세션으로). Fable은 쓰지 않는다. Decompose 자신은 Opus로 돈다.
 
 같은 티켓에서 실패한 run이 2번 쌓이면 더 돌리지 않고 `ready-for-human`을 붙인다. 이 라벨은 「공장 밖에서 관리 세션이 처리」라는 뜻이다. 대표에게 넘기지 않는다(대표 지시 2026-11-15). 관리 세션이 원인을 찾아 공장을 고치거나 직접(Opus 서브에이전트로) 구현한다. 「사람이 손으로 확인할 것」 목록과 측정 티켓도 관리 세션이 이 기계에서 앱을 띄워 처리한다. 대표에게는 제품 방향처럼 결정이 필요한 것만 묻는다.
 

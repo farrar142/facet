@@ -93,7 +93,9 @@ jobs:
           fi
           echo "go=$go" >> "$GITHUB_OUTPUT"
           # Model: the ticket's model label (set by Decompose), Sonnet when there is none,
-          # and Opus for any retry after a failed run.
+          # and Opus for any retry after a code failure (checks or merge failed; an
+          # infrastructure failure retries on the same model, see "Record failure").
+          # Opus only for hard tickets (Windows API, OLE, concurrency safety); never Fable.
           model=claude-sonnet-5-5
           case ",$labels," in *,model:opus,*) model=claude-opus-5-5;; esac
           fails=$(gh issue view "$N" --repo "$REPO" --json comments --jq '[.comments[].body | select(contains("<!-- factory-implementer-failed -->"))] | length')
@@ -189,6 +191,7 @@ jobs:
 
       # Deterministic gate: the agent's word is not enough.
       - name: Automated checks
+        id: checks
         if: steps.guard.outputs.go == 'true'
         run: cargo xtask ci
 
@@ -218,6 +221,7 @@ jobs:
       # check again and retry. A rebase conflict at this point fails the run; the retry
       # run (on Opus) starts from today's main.
       - name: Merge
+        id: merge
         if: steps.guard.outputs.go == 'true'
         run: |
           base=$(git rev-parse origin/main)
@@ -254,19 +258,27 @@ jobs:
           gh workflow run ci.yml --repo "$REPO" --ref main || echo "::warning::could not dispatch ci.yml"
           gh workflow run release.yml --repo "$REPO" --ref main || echo "::warning::could not dispatch release.yml"
 
-      # One failure: put the ticket back in the queue; the retry runs on Opus.
-      # Two failures: leave it to the managing session (`ready-for-human`, ADR-0001).
+      # A code failure (the automated checks or the merge failed) counts toward the model
+      # rule: one puts the ticket back in the queue and the retry runs on Opus, two leave
+      # it to the managing session (`ready-for-human`, ADR-0001).
+      # Any other failure (runner, network, installer, agent action crash) has nothing to do
+      # with the code: retry on the same model (decision 2026-11-16), and hand the ticket
+      # to the managing session only after three of them.
       - name: Record failure
         if: failure() && steps.guard.outputs.go == 'true'
         run: |
-          marker='<!-- factory-implementer-failed -->'
+          if [ "${{ steps.checks.outcome }}" = failure ] || [ "${{ steps.merge.outcome }}" = failure ]; then
+            marker='<!-- factory-implementer-failed -->'; limit=2; what="code"
+          else
+            marker='<!-- factory-implementer-infra-failed -->'; limit=3; what="infrastructure"
+          fi
           gh issue comment "$N" --repo "$REPO" --body "$marker
-          Implementer run failed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          Implementer run failed ($what): ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           fails=$(gh issue view "$N" --repo "$REPO" --json comments --jq "[.comments[].body | select(contains(\"$marker\"))] | length")
           gh issue edit "$N" --repo "$REPO" --remove-label in-progress
-          if [ "$fails" -ge 2 ]; then
+          if [ "$fails" -ge "$limit" ]; then
             gh issue edit "$N" --repo "$REPO" --add-label ready-for-human
-            gh issue comment "$N" --repo "$REPO" --body "Implementer failed $fails times. The managing session takes this ticket out of the factory."
+            gh issue comment "$N" --repo "$REPO" --body "Implementer failed $fails times ($what). The managing session takes this ticket out of the factory."
           else
             gh issue edit "$N" --repo "$REPO" --add-label ready-for-agent
           fi
