@@ -4,6 +4,7 @@
 //! 번역 방식이 정해지면 이 모듈을 바꾼다.
 
 use facet_core::command::{CommandId, Key, Shortcut};
+use facet_core::content_search::Skipped;
 use facet_core::details::FileType;
 use facet_core::dragdrop::{DropEffect, Refusal};
 use facet_core::edit::EditError;
@@ -64,6 +65,7 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::ShowHistory => "작업 기록 보기",
         CommandId::Filter => "필터",
         CommandId::Search => "검색",
+        CommandId::ContentSearch => "내용 검색",
         CommandId::Delete => "삭제",
         CommandId::DeletePermanently => "영구 삭제",
         CommandId::Copy => "복사",
@@ -71,6 +73,7 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::Cut => "잘라내기",
         CommandId::CopyPath => "경로 복사",
         CommandId::SortByLocation => "위치로 정렬",
+        CommandId::SortByMatches => "일치로 정렬",
         CommandId::ShowInFolder => "폴더에서 보기",
         CommandId::StopSearch => "검색 중지",
     }
@@ -459,26 +462,74 @@ pub fn elapsed_text(elapsed: std::time::Duration) -> String {
 /// 탐색 상태 줄 글자(목록 위 띠): 탐색 중이면 찾은 수·훑은 폴더 수, 끝나면 찾은 수·건너뛴 폴더 수·걸린 시간.
 pub fn search_line_text(line: crate::search_bar::Line) -> String {
     use crate::search_bar::Line;
-    let tail = |found: usize, skipped: usize, elapsed| {
+    let tail = |found: usize, skipped: usize, elapsed, files: Option<Skipped>| {
         format!(
-            "{found}개 찾음 · 건너뛴 폴더 {skipped}개 · {}",
-            elapsed_text(elapsed)
+            "{found}개 찾음 · 건너뛴 폴더 {skipped}개 · {}{}",
+            elapsed_text(elapsed),
+            skipped_files_text(files)
         )
     };
     match line {
-        Line::Running { found, folders } => {
-            format!("탐색 중… {found}개 찾음 · 폴더 {folders}개 훑음")
-        }
+        Line::Running {
+            found,
+            folders,
+            files_skipped,
+        } => format!(
+            "탐색 중… {found}개 찾음 · 폴더 {folders}개 훑음{}",
+            skipped_files_text(files_skipped)
+        ),
         Line::Finished {
             found,
             skipped,
             elapsed,
-        } => format!("탐색 끝 · {}", tail(found, skipped, elapsed)),
+            files_skipped,
+        } => format!("탐색 끝 · {}", tail(found, skipped, elapsed, files_skipped)),
         Line::Stopped {
             found,
             skipped,
             elapsed,
-        } => format!("중지함 · {}", tail(found, skipped, elapsed)),
+            files_skipped,
+        } => format!("중지함 · {}", tail(found, skipped, elapsed, files_skipped)),
+    }
+}
+
+/// 내용 검색이 건너뛴 파일의 종류별 수(상태 줄 끝에 붙는다). 건너뛴 것이 없거나 내용 검색이 아니면 비어 있다.
+pub fn skipped_files_text(skipped: Option<Skipped>) -> String {
+    let Some(skipped) = skipped.filter(|skipped| skipped.total() > 0) else {
+        return String::new();
+    };
+    let kinds = [
+        ("바이너리", skipped.binary),
+        ("온라인 전용", skipped.online_only),
+        ("큰 파일", skipped.too_large),
+        ("읽지 못함", skipped.unreadable),
+    ];
+    let parts: Vec<String> = kinds
+        .into_iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(name, count)| format!("{name} {count}"))
+        .collect();
+    format!(" · 건너뛴 파일: {}", parts.join(", "))
+}
+
+/// 내용 검색 결과 항목의 「일치」 열 글자: 일치 수와 첫 일치 줄.
+pub fn match_text(hit: &facet_core::details::Hit) -> String {
+    format!("{}회 · {}", hit.matches, hit.first_line)
+}
+
+/// 내용 검색을 시작하지 못한 까닭(검색창 곁에 보인다).
+pub fn content_search_error_text(error: &facet_core::window::ContentSearchError) -> String {
+    use facet_core::window::ContentSearchError;
+    match error {
+        ContentSearchError::EmptyText => "찾을 글자를 입력하세요".to_owned(),
+        ContentSearchError::Regex(reason) => {
+            // regex 크레이트의 설명은 여러 줄이라 마지막 줄(오류 요지)만 보인다(한 줄 자리).
+            let last = reason.lines().rev().find(|line| !line.trim().is_empty());
+            let last = last.unwrap_or("").trim();
+            let last = last.strip_prefix("error: ").unwrap_or(last);
+            format!("정규식이 올바르지 않습니다: {last}")
+        }
+        ContentSearchError::NoFolder => "여기서는 검색할 수 없습니다".to_owned(),
     }
 }
 
@@ -499,7 +550,8 @@ mod tests {
         assert_eq!(
             search_line_text(Line::Running {
                 found: 3,
-                folders: 9
+                folders: 9,
+                files_skipped: None
             }),
             "탐색 중… 3개 찾음 · 폴더 9개 훑음"
         );
@@ -507,10 +559,28 @@ mod tests {
             search_line_text(Line::Finished {
                 found: 7,
                 skipped: 2,
-                elapsed: Duration::from_millis(1500)
+                elapsed: Duration::from_millis(1500),
+                files_skipped: None
             }),
             "탐색 끝 · 7개 찾음 · 건너뛴 폴더 2개 · 1.5초"
         );
+        let files = Skipped {
+            binary: 2,
+            online_only: 1,
+            too_large: 0,
+            unreadable: 3,
+        };
+        assert_eq!(
+            search_line_text(Line::Finished {
+                found: 1,
+                skipped: 0,
+                elapsed: Duration::from_millis(1500),
+                files_skipped: Some(files)
+            }),
+            "탐색 끝 · 1개 찾음 · 건너뛴 폴더 0개 · 1.5초 · 건너뛴 파일: 바이너리 2, 온라인 전용 1, 읽지 못함 3"
+        );
+        assert_eq!(skipped_files_text(Some(Skipped::default())), "");
+        assert_eq!(skipped_files_text(None), "");
         assert_eq!(elapsed_text(Duration::from_secs(125)), "2:05");
         assert_eq!(search_title("보고서"), "검색: 보고서");
     }

@@ -48,13 +48,22 @@ pub const BINARY_SNIFF_LEN: usize = 8 * 1024;
 pub const MAX_LINE_CHARS: usize = 200;
 
 /// 찾는 방식.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ContentMode {
     /// 대소문자를 무시하는 글자 일치(기본).
     #[default]
     Literal,
     /// 정규식(`regex` 크레이트 문법, 선형 시간).
     Regex,
+}
+
+/// 정규식 `text`가 맞는지 본다(내용 검색을 시작하기 전에 까닭을 미리 알려 줄 때). 틀리면 `regex` 크레이트의 설명이다.
+pub fn check_regex(text: &str) -> Result<(), String> {
+    RegexBuilder::new(text)
+        .multi_line(true)
+        .build()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// 내용 검색 요청.

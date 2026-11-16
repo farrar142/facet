@@ -13,6 +13,8 @@ export struct Row {
     size: string,
     // 검색 결과 항목이 든 폴더 경로(폴더 목록에서는 비어 있다).
     location: string,
+    // 내용 검색 결과 항목의 「일치」 열 글자(일치 수와 첫 일치 줄, 내용 검색 결과가 아니면 비어 있다).
+    matches: string,
     // 선택한 항목인가.
     selected: bool,
     // 커서 항목인가(키보드가 가리키는 항목. 선택과 다르다).
@@ -104,6 +106,8 @@ export struct PanelData {
     total-count: int,
     // 검색 결과 위치인가(위치 열을 보인다), 탐색 상태 띠 글자(비면 띠 없음), 탐색 중인가(중지 단추).
     results: bool,
+    // 내용 검색 결과인가(「일치」 열을 보인다).
+    content-results: bool,
     search-status: string,
     search-running: bool,
     selected-count: int,
@@ -1057,57 +1061,143 @@ component FilterBar inherits Rectangle {
     }
 }
 
-// 검색창: 이름을 쳐 Enter로 현재 폴더 아래 실시간 탐색을 시작한다. 「이름」「내용」 전환이 있고 「내용」은 내용 검색이
-// 생길 때까지 꺼 둔다. 한글 IME의 조합 글자는 TextInput이 처리하고 Enter가 확정한다. 열릴 때와 `focus-count`가
-// 바뀔 때(명령을 또 눌렀다) 포커스를 받고 전체를 선택한다.
+// 검색창: 글자를 쳐 Enter로 현재 폴더 아래 검색을 시작한다. 「이름」「내용」 전환이 있다. 「이름」이면 이름을 실시간으로
+// 찾고, 「내용」이면 찾을 글자·파일 이름 조건·정규식 확인란이 보여 파일 안의 글자를 찾는다. 한글 IME의 조합 글자는
+// TextInput이 처리하고 Enter가 확정한다(타자마다 시작하지 않는다). 열릴 때와 `focus-count`가 바뀔 때(명령을 또 눌렀다)
+// 포커스를 받고 전체를 선택한다. 시작하지 못한 까닭(`problem`, 틀린 정규식 등)은 줄 아래에 보인다.
 component SearchBar inherits Rectangle {
     in-out property <string> text <=> input.text;
     in property <int> focus-count;
+    // 「내용」 검색인가, 정규식인가, 파일 이름 조건, 시작하지 못한 까닭(비면 없음).
+    in-out property <bool> content;
+    in-out property <bool> regex;
+    in-out property <string> names <=> names-input.text;
+    in property <string> problem;
     callback submit(string);
     callback escape();
+    callback mode-changed();
 
-    height: 28px;
+    height: problem == "" ? 28px : 48px;
     background: Palette.background;
     border-width: 1px;
     border-radius: 3px;
     border-color: Palette.accent-background;
     clip: true;
 
-    HorizontalLayout {
-        padding-left: 6px;
-        padding-right: 6px;
-        spacing: 8px;
-        input := TextInput {
-            horizontal-stretch: 1;
-            single-line: true;
-            vertical-alignment: center;
-            color: Palette.foreground;
-            init => {
-                self.focus();
-                self.select-all();
-            }
-            accepted => {
-                root.submit(self.text);
-            }
-            key-pressed(event) => {
-                if (event.text == Key.Escape) {
-                    root.escape();
-                    return accept;
+    VerticalLayout {
+        HorizontalLayout {
+            height: 26px;
+            padding-left: 6px;
+            padding-right: 6px;
+            spacing: 8px;
+            input := TextInput {
+                horizontal-stretch: 1;
+                single-line: true;
+                vertical-alignment: center;
+                color: Palette.foreground;
+                init => {
+                    self.focus();
+                    self.select-all();
                 }
-                reject
+                accepted => {
+                    root.submit(self.text);
+                }
+                key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.escape();
+                        return accept;
+                    }
+                    reject
+                }
+            }
+            Rectangle {
+                width: root.content ? 130px : 0px;
+                clip: true;
+                border-width: root.content ? 1px : 0px;
+                border-radius: 3px;
+                border-color: Palette.border;
+                names-input := TextInput {
+                    x: 4px;
+                    width: parent.width - 8px;
+                    single-line: true;
+                    vertical-alignment: center;
+                    color: Palette.foreground;
+                    accepted => {
+                        root.submit(input.text);
+                    }
+                    key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            root.escape();
+                            return accept;
+                        }
+                        reject
+                    }
+                }
+                if names-input.text == "": Text {
+                    x: 4px;
+                    text: @tr("파일 이름 조건 (예: *.txt)");
+                    overflow: elide;
+                    width: parent.width - 8px;
+                    vertical-alignment: center;
+                    color: Palette.foreground.transparentize(60%);
+                }
+            }
+            Rectangle {
+                width: root.content ? 64px : 0px;
+                clip: true;
+                Text {
+                    text: root.regex ? @tr("☑ 정규식") : @tr("☐ 정규식");
+                    vertical-alignment: center;
+                    color: Palette.foreground;
+                }
+                TouchArea {
+                    enabled: root.content;
+                    clicked => {
+                        root.regex = !root.regex;
+                        root.mode-changed();
+                        input.focus();
+                    }
+                }
+            }
+            Rectangle {
+                width: 28px;
+                Text {
+                    text: @tr("이름");
+                    vertical-alignment: center;
+                    font-weight: root.content ? 400 : 700;
+                    color: root.content ? Palette.foreground.transparentize(60%) : Palette.accent-background;
+                }
+                TouchArea {
+                    clicked => {
+                        root.content = false;
+                        root.mode-changed();
+                        input.focus();
+                    }
+                }
+            }
+            Rectangle {
+                width: 28px;
+                Text {
+                    text: @tr("내용");
+                    vertical-alignment: center;
+                    font-weight: root.content ? 700 : 400;
+                    color: root.content ? Palette.accent-background : Palette.foreground.transparentize(60%);
+                }
+                TouchArea {
+                    clicked => {
+                        root.content = true;
+                        root.mode-changed();
+                        input.focus();
+                    }
+                }
             }
         }
-        Text {
-            text: @tr("이름");
+        if root.problem != "": Text {
+            height: 20px;
+            text: root.problem;
+            overflow: elide;
             vertical-alignment: center;
-            font-weight: 700;
-            color: Palette.accent-background;
-        }
-        // 내용 검색은 아직 없다: 꺼 둔다.
-        Text {
-            text: @tr("내용");
-            vertical-alignment: center;
-            color: Palette.foreground.transparentize(60%);
+            color: #b00020;
         }
     }
 
@@ -1143,6 +1233,11 @@ component PanelView inherits Rectangle {
     in property <bool> search-open;
     in-out property <string> search-text;
     in property <int> search-focus;
+    in-out property <bool> search-content;
+    in-out property <bool> search-regex;
+    in-out property <string> search-names;
+    in property <string> search-problem;
+    callback search-mode-changed();
     in property <int> editing: -1;
     in-out property <string> edit-text;
     // 이름 입력란을 열 때 고를 범위(UTF-8 바이트), 곁에 보일 까닭(Rust의 문장 모듈이 만든다), 확장자 바꿈을 묻는 중인가.
@@ -1158,6 +1253,7 @@ component PanelView inherits Rectangle {
     in-out property <length> type-width;
     in-out property <length> size-width;
     in-out property <length> location-width;
+    in-out property <length> matches-width;
     in-out property <length> content-y <=> list.content-y;
     out property <length> view-height: list.visible-height;
     out property <length> tab-width: clamp(tab-strip.width / max(1, root.tabs.length), 90px, 200px);
@@ -1464,6 +1560,13 @@ component PanelView inherits Rectangle {
         if root.search-open: SearchBar {
             text <=> root.search-text;
             focus-count: root.search-focus;
+            content <=> root.search-content;
+            regex <=> root.search-regex;
+            names <=> root.search-names;
+            problem: root.search-problem;
+            mode-changed => {
+                root.search-mode-changed();
+            }
             submit(text) => {
                 root.search-submit(text);
                 root.focus-keys();
@@ -1607,6 +1710,17 @@ component PanelView inherits Rectangle {
                 sort => {
                     root.activate();
                     root.sort-by(4);
+                    root.focus-list();
+                }
+            }
+            if root.data.content-results: Header {
+                text: @tr("일치");
+                column-width <=> root.matches-width;
+                sorted: root.data.sort-column == 5;
+                descending: root.data.sort-descending;
+                sort => {
+                    root.activate();
+                    root.sort-by(5);
                     root.focus-list();
                 }
             }
@@ -1799,6 +1913,16 @@ component PanelView inherits Rectangle {
                             padding-right: 8px;
                             Text {
                                 text: row.location;
+                                overflow: elide;
+                                vertical-alignment: center;
+                                color: row.selected ? Palette.selection-foreground : Palette.foreground;
+                            }
+                        }
+                        if root.data.content-results: HorizontalLayout {
+                            width: root.matches-width;
+                            padding-right: 8px;
+                            Text {
+                                text: row.matches;
                                 overflow: elide;
                                 vertical-alignment: center;
                                 color: row.selected ? Palette.selection-foreground : Palette.foreground;
@@ -2116,6 +2240,11 @@ export component AppWindow inherits Window {
     in property <bool> search-open;
     in-out property <string> search-text;
     in property <int> search-focus;
+    in-out property <bool> search-content;
+    in-out property <bool> search-regex;
+    in-out property <string> search-names;
+    in property <string> search-problem;
+    callback search-mode-changed();
     // 자동 완성 후보(하위 폴더 이름)와 Tab·화살표로 고른 후보의 번호(없으면 -1).
     in property <[string]> candidates;
     in property <int> candidate-highlight: -1;
@@ -2193,6 +2322,7 @@ export component AppWindow inherits Window {
     in-out property <length> type-width: 120px;
     in-out property <length> size-width: 90px;
     in-out property <length> location-width: 240px;
+    in-out property <length> matches-width: 320px;
 
     // 키 입력 하나: 키의 글자와 수식 키. Rust가 명령이나 커서 이동으로 처리했으면 참을 돌려준다.
     // 거짓이면 글자 입력으로 보고 `typed`로 넘어온다(한글은 IME가 조합을 끝낸 뒤).
@@ -2482,6 +2612,13 @@ export component AppWindow inherits Window {
             search-open: root.search-open && self.active;
             search-text <=> root.search-text;
             search-focus: root.search-focus;
+            search-content <=> root.search-content;
+            search-regex <=> root.search-regex;
+            search-names <=> root.search-names;
+            search-problem: root.search-problem;
+            search-mode-changed => {
+                root.search-mode-changed();
+            }
             editing: self.active ? root.editing : -1;
             edit-text <=> root.edit-text;
             edit-selection-start: root.edit-selection-start;
@@ -2495,6 +2632,7 @@ export component AppWindow inherits Window {
             type-width <=> root.type-width;
             size-width <=> root.size-width;
             location-width <=> root.location-width;
+            matches-width <=> root.matches-width;
             activate => {
                 root.panel-pressed(0);
             }
@@ -2642,6 +2780,13 @@ export component AppWindow inherits Window {
             search-open: root.search-open && self.active;
             search-text <=> root.search-text;
             search-focus: root.search-focus;
+            search-content <=> root.search-content;
+            search-regex <=> root.search-regex;
+            search-names <=> root.search-names;
+            search-problem: root.search-problem;
+            search-mode-changed => {
+                root.search-mode-changed();
+            }
             editing: self.active ? root.editing : -1;
             edit-text <=> root.edit-text;
             edit-selection-start: root.edit-selection-start;
@@ -2655,6 +2800,7 @@ export component AppWindow inherits Window {
             type-width <=> root.type-width;
             size-width <=> root.size-width;
             location-width <=> root.location-width;
+            matches-width <=> root.matches-width;
             activate => {
                 root.panel-pressed(1);
             }

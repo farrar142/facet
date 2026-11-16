@@ -214,6 +214,19 @@ pub struct SearchStatus {
     pub summary: Option<crate::live_search::SearchSummary>,
     /// 검색을 시작할 때의 숨김 항목 보이기. 결과 목록은 이 상태를 따른다(뒤에 바꿔도 결과는 그대로다).
     pub show_hidden: bool,
+    /// 내용 검색이면 읽은 파일 수·바이트와 종류별 건너뛴 수. 이름 검색이면 `None`이다.
+    pub content: Option<ContentStatus>,
+}
+
+/// 내용 검색 결과 위치의 진행: 읽은 파일과 종류별 건너뛴 수(바이너리·온라인 전용·큰 파일·읽지 못함).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ContentStatus {
+    /// 종류별로 건너뛴 파일 수.
+    pub skipped: crate::content_search::Skipped,
+    /// 읽은 파일 수.
+    pub files_read: usize,
+    /// 읽은 바이트.
+    pub bytes_read: u64,
 }
 
 #[cfg(test)]

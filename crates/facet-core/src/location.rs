@@ -28,8 +28,25 @@ pub enum Location {
 pub struct SearchScope {
     /// 검색한 폴더(실제 폴더). 결과 항목은 이 아래에 있다.
     pub folder: PathBuf,
-    /// 검색어: 이름 조건([`crate::name_match`]의 규칙, 필터와 같음).
+    /// 검색어: 이름 검색이면 이름 조건([`crate::name_match`]의 규칙, 필터와 같음), 내용 검색이면 찾을 글자(방식이 정규식이면
+    /// 정규식).
     pub query: String,
+    /// 검색 종류: 이름(실시간 탐색)인가 내용인가.
+    pub kind: SearchKind,
+}
+
+/// 검색 종류.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SearchKind {
+    /// 이름 검색(실시간 탐색): 검색어가 이름 조건이다.
+    Name,
+    /// 내용 검색: 검색어가 찾을 글자이고, 방식과 파일 이름 조건이 더해진다.
+    Content {
+        /// 글자 일치(대소문자 무시)인가 정규식인가.
+        mode: crate::content_search::ContentMode,
+        /// 파일 이름 조건([`crate::name_match`]의 규칙). 비우면 모든 파일.
+        name_pattern: String,
+    },
 }
 
 impl Location {
@@ -43,6 +60,24 @@ impl Location {
         Self::SearchResults(SearchScope {
             folder: folder.into(),
             query: query.into(),
+            kind: SearchKind::Name,
+        })
+    }
+
+    /// 폴더 `folder` 아래 파일의 내용에서 `text`를 찾은 검색 결과 위치(`name_pattern`은 파일 이름 조건, 비우면 모든 파일).
+    pub fn content_search_results(
+        folder: impl Into<PathBuf>,
+        text: impl Into<String>,
+        mode: crate::content_search::ContentMode,
+        name_pattern: impl Into<String>,
+    ) -> Self {
+        Self::SearchResults(SearchScope {
+            folder: folder.into(),
+            query: text.into(),
+            kind: SearchKind::Content {
+                mode,
+                name_pattern: name_pattern.into(),
+            },
         })
     }
 
