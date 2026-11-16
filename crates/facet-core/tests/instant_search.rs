@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use facet_core::command::CommandId;
 use facet_core::details::{Column, Direction, Sort};
 use facet_core::indexer_client::{CONNECT_TIMEOUT, ClientOptions};
-use facet_core::instant_search::{PAGE_SIZE, Unavailable};
+use facet_core::instant_search::PAGE_SIZE;
 use facet_core::menu::MenuKind;
 use facet_core::tab::{Navigation, ReadOutcome, Tab};
 use facet_core::window::{App, Execution};
@@ -548,19 +548,16 @@ fn 만드는_중인_볼륨이_있으면_덜_찼을_수_있음이_드러난다() 
 }
 
 #[test]
-fn 서비스에_닿지_못하면_서비스_없음이_드러나고_닿으면_질의를_다시_보낸다() {
+fn 서비스에_닿지_못하면_실시간_탐색으로_강등하고_닿으면_다음_입력이_즉시_검색이다() {
     let dir = TempDir::new().unwrap();
     let mut app = App::new(Some(Location::file_system(dir.path())));
     app.wait(WAIT).expect("첫 읽기");
 
-    // 연결을 띄우지 않았다.
+    // 연결을 띄우지 않았다: 강등(자세한 시험은 `instant_demotion.rs`).
     app.set_instant_query("보고서");
     wait_read(&mut app);
     let status = app.active_tab().instant().unwrap();
-    assert!(matches!(
-        status.unavailable,
-        Some(Unavailable::Connection(_))
-    ));
+    assert!(status.demotion.is_some());
     assert_eq!(app.active_tab().len(), 0);
     app.end_instant_search();
     wait_read(&mut app);
@@ -570,27 +567,31 @@ fn 서비스에_닿지_못하면_서비스_없음이_드러나고_닿으면_질�
     app.enable_indexer(options(&pipe));
     app.set_instant_query("보고서");
     wait_read(&mut app);
-    wait_settled(&mut app);
-    assert!(matches!(
-        app.active_tab().instant().unwrap().unavailable,
-        Some(Unavailable::Connection(_))
-    ));
+    wait_until(&mut app, "강등하지 않았다", |tab| {
+        tab.instant().is_some_and(|s| s.demotion.is_some())
+    });
 
-    // 서비스가 뜨면 연결이 맺어지고 멈춰 있던 질의를 다시 보낸다.
+    // 서비스가 뜨고 연결이 맺어지면 다음 입력부터 즉시 검색이다.
     let (volume, index) = index_for(dir.path());
     let backend = Arc::new(SampleBackend(Volumes::with_index(&volume, index)));
     let _server = PipeServer::start(&pipe, backend).unwrap();
+    let deadline = Instant::now() + WAIT;
+    while !matches!(
+        app.indexer_connection(),
+        Some(facet_core::indexer_client::Connection::Connected { .. })
+    ) {
+        app.poll();
+        assert!(Instant::now() < deadline, "서비스에 다시 붙지 못했다");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    app.set_instant_query("보고서 1");
     wait_until(
         &mut app,
         "서비스가 뜬 뒤 결과가 오지 않았다",
         |tab| {
             tab.instant()
-                .is_some_and(|s| s.unavailable.is_none() && s.total.is_some() && !s.loading)
+                .is_some_and(|s| s.demotion.is_none() && s.total.is_some() && !s.loading)
         },
-    );
-    assert_eq!(
-        app.active_tab().instant().unwrap().total,
-        Some(REPORTS + OUTSIDE)
     );
 }
 
@@ -599,6 +600,7 @@ fn 전체_개수가_상한이면_구분하고_이어_받기가_무효면_다시_
     let pipe = unique_pipe();
     let listener = Arc::new(Listener::bind(&pipe).unwrap());
     let dir = TempDir::new().unwrap();
+    let (volume, _) = index_for(dir.path());
     let server = {
         let listener = Arc::clone(&listener);
         std::thread::spawn(move || {
@@ -627,6 +629,20 @@ fn 전체_개수가_상한이면_구분하고_이어_받기가_무효면_다시_
                 modified: 1,
                 attributes: 0x20,
             };
+            // 범위 볼륨의 인덱스 확인(상태 질의): 인덱스가 있다.
+            let Request::Status = read_message::<Request>(&mut reader).unwrap() else {
+                panic!("상태 질의가 아니다");
+            };
+            write_message(
+                &mut writer,
+                &Response::Status(facet_protocol::StatusMessage {
+                    volumes: vec![facet_protocol::VolumeStatus {
+                        volume,
+                        state: facet_protocol::VolumeState::Ready { items: 1 },
+                    }],
+                }),
+            )
+            .unwrap();
             // 첫 질의: 권한 거르기 전 상한 7개, 이어 받을 것이 있다.
             let Request::Query(_) = read_message::<Request>(&mut reader).unwrap() else {
                 panic!("질의가 아니다");
