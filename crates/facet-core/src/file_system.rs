@@ -263,7 +263,7 @@ fn expand_variables(text: &str) -> Result<String, ResolveError> {
 
 /// 이름과 메타데이터(링크를 따라가지 않은 것)로 항목을 만든다. Windows에서는 시스템 호출을 더 하지 않고
 /// 경로도 만들지 않는다. `path`는 Windows가 아닌 곳에서 링크의 대상을 볼 때만 부른다.
-fn make_item(
+pub(crate) fn make_item(
     name: std::ffi::OsString,
     path: &dyn Fn() -> PathBuf,
     metadata: &Metadata,

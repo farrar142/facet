@@ -13,6 +13,7 @@ mod file_system;
 pub mod history;
 pub mod job;
 pub mod launch;
+pub mod live_search;
 mod location;
 pub mod measure;
 pub mod menu;
