@@ -107,11 +107,21 @@ pub enum CommandId {
     /// 영구 삭제: 활성 탭의 선택(없으면 커서 항목)을 휴지통을 거치지 않고 지운다. 늘 화면이 먼저 확인받는다
     /// ([`crate::window::Execution::ConfirmDelete`]). 켜지는 조건은 삭제와 같다.
     DeletePermanently,
+    /// 복사: 활성 탭의 선택(없으면 커서 항목)을 클립보드에 복사 형식으로 올린다([`crate::window::App::execute`]가 클립보드
+    /// 스레드에 맡긴다). 원본이 없으면 꺼진다. 잘라내기는 아직 없다.
+    Copy,
+    /// 붙여넣기: 클립보드의 파일을 활성 탭에 붙여넣는다(대상은 선택이 폴더 하나면 그 안, 아니면 현재 폴더,
+    /// [`crate::window::App::paste_target`]). 복사면 복사 작업, 잘라내기 표시가 있으면 이동 작업을 넣는다. 클립보드에
+    /// 파일이 있다는 것은 앱 상태라 [`crate::window::App::can_execute`]가 본다(클립보드를 부르지 않는다).
+    Paste,
+    /// 경로 복사: 선택한 항목의 전체 경로를 큰따옴표로 감싸 줄마다 하나씩 글자로 클립보드에 올린다. 선택이 없으면 현재
+    /// 폴더 경로다. 위치가 실제 폴더일 때 켜진다.
+    CopyPath,
 }
 
 impl CommandId {
     /// 모든 명령. 명령 팔레트는 검색어가 없으면 이 순서로 보인다.
-    pub const ALL: [CommandId; 43] = [
+    pub const ALL: [CommandId; 46] = [
         CommandId::Open,
         CommandId::Back,
         CommandId::Forward,
@@ -155,6 +165,9 @@ impl CommandId {
         CommandId::ShowHistory,
         CommandId::Delete,
         CommandId::DeletePermanently,
+        CommandId::Copy,
+        CommandId::Paste,
+        CommandId::CopyPath,
     ];
 
     /// 바뀌지 않는 ID 글자. 화면 문장이 아니다.
@@ -205,6 +218,9 @@ impl CommandId {
             CommandId::ShowHistory => "show-history",
             CommandId::Delete => "delete",
             CommandId::DeletePermanently => "delete-permanently",
+            CommandId::Copy => "copy",
+            CommandId::Paste => "paste",
+            CommandId::CopyPath => "copy-path",
         }
     }
 
@@ -303,6 +319,9 @@ impl CommandId {
             CommandId::ShowHistory => &[],
             CommandId::Delete => const { &[key(Key::Delete)] },
             CommandId::DeletePermanently => const { &[key(Key::Delete).shift()] },
+            CommandId::Copy => const { &[key(letter('C')).ctrl()] },
+            CommandId::Paste => const { &[key(letter('V')).ctrl()] },
+            CommandId::CopyPath => const { &[key(letter('C')).ctrl().shift()] },
         }
     }
 
@@ -315,7 +334,9 @@ impl CommandId {
     /// - 이름 바꾸기: 커서 항목이 있고 탭 위치가 실제 폴더일 때. 새 폴더: 탭 위치가 실제 폴더일 때.
     /// - 반대편 패널로 복사·이동: 원본(선택, 없으면 커서 항목)이 있고 탭 위치가 실제 폴더일 때. 반대편 패널은
     ///   [`CommandId::is_enabled_in_window`]가 본다.
-    /// - 삭제·영구 삭제: 원본(선택, 없으면 커서 항목)이 있고 탭 위치가 실제 폴더일 때.
+    /// - 삭제·영구 삭제·복사: 원본(선택, 없으면 커서 항목)이 있고 탭 위치가 실제 폴더일 때.
+    /// - 붙여넣기·경로 복사: 탭 위치가 실제 폴더일 때(붙여넣기는 클립보드에 파일이 있을 때도, 앱 상태라
+    ///   [`crate::window::App::can_execute`]가 본다).
     /// - 나머지는 늘 켜져 있다. 다음·이전·n번째 탭은 탭 하나만 보아서는 모르므로 켜져 있다고 하고, 패널의 탭
     ///   수는 [`CommandId::is_enabled_in`]이 본다. 닫은 탭 되살리기도 켜져 있다고 하고, 닫은 탭 목록은
     ///   [`crate::window::App::can_execute`]가 본다. 패널 나누기/합치기와 활성 패널 바꾸기도 켜져 있다고 하고, 창의
@@ -334,7 +355,10 @@ impl CommandId {
             | CommandId::CopyTo
             | CommandId::MoveTo
             | CommandId::Delete
-            | CommandId::DeletePermanently => has_sources(tab),
+            | CommandId::DeletePermanently
+            | CommandId::Copy => has_sources(tab),
+            // 붙여넣을 곳(현재 폴더)이 실제 폴더여야 한다. 클립보드에 파일이 있는지는 앱 상태다.
+            CommandId::Paste | CommandId::CopyPath => tab.location().file_system_path().is_some(),
             CommandId::Rename => {
                 tab.location().file_system_path().is_some() && tab.cursor_item().is_some()
             }

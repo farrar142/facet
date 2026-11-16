@@ -57,6 +57,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use facet_win::clipboard::format::ClipboardOperation;
+use facet_win::clipboard::{Clipboard, ClipboardError, ClipboardFiles};
 use facet_win::{OpenError, OpenResult, ShellWorker};
 
 use crate::command::{self, CommandId, CommandState};
@@ -342,6 +344,17 @@ enum Message {
         tab: TabId,
         result: CompletionResult,
     },
+    /// 클립보드 스레드가 한 복사·경로 복사의 결과.
+    ClipboardDone {
+        tab: TabId,
+        result: Result<ClipboardDone, ClipboardError>,
+    },
+    /// 붙여넣기가 읽은 클립보드의 파일 목록(없으면 `None`)과 붙여넣을 폴더.
+    Pasted {
+        tab: TabId,
+        target: PathBuf,
+        result: Result<Option<ClipboardFiles>, ClipboardError>,
+    },
     Edited {
         tab: TabId,
         result: Result<Edited, EditError>,
@@ -366,6 +379,10 @@ impl Outbox {
         if self.sender.send(message).is_err() {
             return;
         }
+        self.wake();
+    }
+
+    fn wake(&self) {
         let waker = self.waker.lock().ok().and_then(|w| w.clone());
         if let Some(waker) = waker {
             waker();
@@ -392,6 +409,31 @@ pub enum Update {
     /// 이미 반영했고, 바꾼(만든) 항목이 선택·커서다(새 폴더면 화면은 [`Tab::cursor`] 행에 이름 입력란을 연다).
     /// 실패면 까닭이고 아무것도 바뀌지 않았다.
     Edited(Result<Edited, EditError>),
+    /// 복사·경로 복사·붙여넣기의 결과([`App::execute`]의 [`CommandId::Copy`]·[`CommandId::CopyPath`]·
+    /// [`CommandId::Paste`]). 화면은 실패하면 까닭을 상태 줄에 보인다.
+    Clipboard(Result<ClipboardDone, ClipboardFailure>),
+}
+
+/// 클립보드 명령이 해낸 일.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardDone {
+    /// 항목 `items`개를 복사 형식으로 올렸다(복사).
+    Copied { items: usize },
+    /// 항목 `items`개의 경로를 글자로 올렸다(경로 복사. 선택이 없으면 현재 폴더 하나).
+    PathsCopied { items: usize },
+    /// 붙여넣기 작업을 작업 대기열에 넣었다.
+    Pasted { job: JobId, kind: JobKind },
+}
+
+/// 클립보드 명령이 실패한 까닭. 화면 문장은 없다(ADR-0007).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardFailure {
+    /// 클립보드 스레드가 없거나(띄우지 못함) 클립보드를 열지 못했다.
+    Clipboard(ClipboardError),
+    /// 붙여넣으려는데 그 사이 클립보드에서 파일이 사라졌다(다른 앱이 바꿈).
+    NothingToPaste,
+    /// 시작 전에 작업을 막았다(자기 하위로 붙여넣기 등).
+    Rejected(CopyRejection),
 }
 
 /// 명령을 실행한 결과.
@@ -530,6 +572,14 @@ pub struct App {
     history: History,
     /// 도는 복사·이동 작업이 한 일을 적는 곳. 끝나면 작업 기록으로 옮긴다.
     journals: HashMap<JobId, (OperationKind, JournalSink)>,
+    /// 클립보드 스레드([`App::enable_clipboard`]). 띄우지 못했거나 아직이면 `None`.
+    clipboard: Option<Arc<Clipboard>>,
+    /// 클립보드 변경 알림이 알려 준 「파일이 있음」 요약. 붙여넣기를 켜고 끄는 데 쓴다(명령 실행 여부를 볼 때
+    /// 클립보드를 부르지 않는다).
+    clipboard_files: Arc<Mutex<Option<ClipboardFiles>>>,
+    /// 잘라내기 표시가 있던 클립보드를 이동으로 붙여넣은 작업과 그때 읽은 클립보드 차례 번호. 끝나면 셸 규약을
+    /// 알리고 클립보드를 비운다.
+    cut_pastes: HashMap<JobId, u32>,
     outbox: Outbox,
     receiver: Receiver<Message>,
 }
@@ -729,6 +779,9 @@ impl App {
             work_area: WorkArea::new(),
             history: History::new(),
             journals: HashMap::new(),
+            clipboard: None,
+            clipboard_files: Arc::default(),
+            cut_pastes: HashMap::new(),
             outbox: Outbox {
                 sender,
                 waker: Arc::default(),
@@ -1373,6 +1426,30 @@ impl App {
                 }
                 (id, Update::Edited(result))
             }
+            Message::ClipboardDone { tab: id, result } => (
+                id,
+                Update::Clipboard(result.map_err(ClipboardFailure::Clipboard)),
+            ),
+            Message::Pasted {
+                tab: id,
+                target,
+                result,
+            } => {
+                let result = match result {
+                    Ok(Some(files)) => {
+                        let kind = match files.operation {
+                            ClipboardOperation::Copy => JobKind::Copy,
+                            ClipboardOperation::Move => JobKind::Move,
+                        };
+                        self.paste_files(files, target)
+                            .map(|job| ClipboardDone::Pasted { job, kind })
+                            .map_err(ClipboardFailure::Rejected)
+                    }
+                    Ok(None) => Err(ClipboardFailure::NothingToPaste),
+                    Err(error) => Err(ClipboardFailure::Clipboard(error)),
+                };
+                (id, Update::Clipboard(result))
+            }
             Message::Completed { tab: id, result } => {
                 let completion = result.id();
                 let candidates = self
@@ -1446,6 +1523,9 @@ impl App {
             CommandId::Undo => self.history.undo_target().is_some(),
             CommandId::Redo => self.history.redo_target().is_some(),
             CommandId::ShowHistory => !self.history.is_empty(),
+            CommandId::Paste => {
+                self.clipboard_has_files() && command.is_enabled_in_window(self.active_window())
+            }
             command => command.is_enabled_in_window(self.active_window()),
         }
     }
@@ -1574,6 +1654,33 @@ impl App {
                         Err(_) => Execution::Disabled,
                     },
                 };
+            }
+            CommandId::Copy => {
+                if let Some(paths) = self.selected_sources() {
+                    let items = paths.len();
+                    self.clipboard_task(move |clipboard| {
+                        clipboard.set_files(&paths, ClipboardOperation::Copy)?;
+                        Ok(ClipboardDone::Copied { items })
+                    });
+                }
+                return Execution::Done;
+            }
+            CommandId::CopyPath => {
+                if let Some(text) = self.copy_path_text() {
+                    let items = text.lines().count();
+                    self.clipboard_task(move |clipboard| {
+                        clipboard.set_text(&text)?;
+                        Ok(ClipboardDone::PathsCopied { items })
+                    });
+                }
+                return Execution::Done;
+            }
+            CommandId::Paste => {
+                let Some(target) = self.paste_target() else {
+                    return Execution::Disabled;
+                };
+                self.start_paste(target);
+                return Execution::Done;
             }
             CommandId::NewWindow => {
                 let location = if !self.has_windows() {
@@ -1766,6 +1873,157 @@ impl App {
                 outbox.send(Message::Edited { tab, result, merge });
             })
             .expect("이름바꾸기·새 폴더 일꾼 스레드를 만들지 못했다");
+    }
+
+    /// 클립보드 스레드를 띄우고 변경 알림을 건다([`Clipboard::start`]). 앱(화면)이 시작한 뒤 한 번 부른다: 코어는
+    /// 시험이 진짜 클립보드를 건드리지 않게 스스로 띄우지 않는다. 띄우지 못하면 까닭을 돌려주고 앱은 계속 돈다
+    /// (복사·붙여넣기 명령은 [`ClipboardFailure::Clipboard`]로 실패한다). 이미 띄웠으면 아무것도 하지 않는다.
+    pub fn enable_clipboard(&mut self) -> Result<(), ClipboardError> {
+        if self.clipboard.is_some() {
+            return Ok(());
+        }
+        let files = Arc::clone(&self.clipboard_files);
+        let outbox = self.outbox.clone();
+        let clipboard = Clipboard::start(move |summary| {
+            *files.lock().unwrap_or_else(|e| e.into_inner()) = summary;
+            outbox.wake();
+        })?;
+        self.clipboard = Some(Arc::new(clipboard));
+        Ok(())
+    }
+
+    /// 클립보드에 붙여넣을 파일이 있다고 알고 있는가(변경 알림이 알려 준 값). 클립보드를 부르지 않는다.
+    pub fn clipboard_has_files(&self) -> bool {
+        self.clipboard_files
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
+
+    /// 클립보드 변경 알림이 하는 일을 직접 한다: 「파일이 있음」 요약을 바꾼다. 시험이 클립보드를 흉내 낼 때 쓴다.
+    pub fn set_clipboard_files(&mut self, files: Option<ClipboardFiles>) {
+        *self
+            .clipboard_files
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = files;
+    }
+
+    /// 붙여넣을 폴더: 활성 탭의 선택이 폴더 하나면 그 안, 아니면 현재 폴더. 위치가 실제 폴더가 아니면 `None`.
+    pub fn paste_target(&self) -> Option<PathBuf> {
+        let tab = self.active_tab();
+        let folder = tab.location().file_system_path()?;
+        let mut selected = tab.selected_items();
+        match (selected.next(), selected.next()) {
+            (Some(item), None) if item.is_folder => Some(folder.join(&item.name)),
+            _ => Some(folder.to_path_buf()),
+        }
+    }
+
+    /// 경로 복사의 글자([`crate::clipboard::copy_as_path_text`]): 선택한 항목의 전체 경로(목록 순서, 경로마다 큰따옴표로
+    /// 감싸 줄마다 하나), 선택이 없으면 현재 폴더 경로 하나. 위치가 실제 폴더가 아니면 `None`.
+    pub fn copy_path_text(&self) -> Option<String> {
+        let tab = self.active_tab();
+        let folder = tab.location().file_system_path()?;
+        let mut paths: Vec<PathBuf> = tab
+            .selected_items()
+            .map(|item| folder.join(&item.name))
+            .collect();
+        if paths.is_empty() {
+            paths.push(folder.to_path_buf());
+        }
+        Some(crate::clipboard::copy_as_path_text(&paths))
+    }
+
+    /// 클립보드 스레드에 일을 맡기고 결과를 [`Update::Clipboard`]로 받는다. 스레드가 없으면 곧바로 실패로 알린다.
+    fn clipboard_task(
+        &self,
+        work: impl FnOnce(&Clipboard) -> Result<ClipboardDone, ClipboardError> + Send + 'static,
+    ) {
+        let tab = self.active_tab_id();
+        let outbox = self.outbox.clone();
+        let Some(clipboard) = self.clipboard.clone() else {
+            outbox.send(Message::ClipboardDone {
+                tab,
+                result: Err(ClipboardError::Stopped),
+            });
+            return;
+        };
+        thread::Builder::new()
+            .name("facet-clipboard".into())
+            .spawn(move || {
+                let result = work(&clipboard);
+                outbox.send(Message::ClipboardDone { tab, result });
+            })
+            .expect("클립보드 일꾼 스레드를 만들지 못했다");
+    }
+
+    /// 붙여넣기: 일꾼 스레드에서 클립보드를 읽고, 결과가 오면([`App::poll`]) 복사·이동 작업을 넣는다.
+    fn start_paste(&self, target: PathBuf) {
+        let tab = self.active_tab_id();
+        let outbox = self.outbox.clone();
+        let Some(clipboard) = self.clipboard.clone() else {
+            outbox.send(Message::ClipboardDone {
+                tab,
+                result: Err(ClipboardError::Stopped),
+            });
+            return;
+        };
+        thread::Builder::new()
+            .name("facet-paste".into())
+            .spawn(move || {
+                let result = clipboard.files();
+                outbox.send(Message::Pasted {
+                    tab,
+                    target,
+                    result,
+                });
+            })
+            .expect("붙여넣기 일꾼 스레드를 만들지 못했다");
+    }
+
+    /// 클립보드에서 읽은 파일 목록을 `target` 폴더에 붙여넣는다: 복사면 복사 작업, 잘라내기 표시가 있으면 이동 작업을
+    /// [`App::start_transfer`]와 같은 길로 넣는다(작업 영역·이름 충돌·항목별 오류 질문·작업 기록과 실행취소. 같은
+    /// 폴더로 복사하면 「- 복사본」). 이동 작업이 끝나면 셸 규약을 알리고 클립보드를 비운다
+    /// ([`Clipboard::finish_cut_paste`]). 붙여넣기 명령이 클립보드를 읽은 뒤 부르고, 시험은 클립보드를 흉내 낸
+    /// [`ClipboardFiles`]로 부른다.
+    pub fn paste_files(
+        &mut self,
+        files: ClipboardFiles,
+        target: PathBuf,
+    ) -> Result<JobId, CopyRejection> {
+        let kind = match files.operation {
+            ClipboardOperation::Copy => JobKind::Copy,
+            ClipboardOperation::Move => JobKind::Move,
+        };
+        let id = self.start_transfer(&TransferPlan {
+            kind,
+            sources: files.paths,
+            target,
+        })?;
+        if kind == JobKind::Move {
+            self.cut_pastes.insert(id, files.sequence);
+        }
+        Ok(id)
+    }
+
+    /// 잘라내기 붙여넣기(이동)가 모두 끝났으면 셸 규약을 알리고 클립보드를 비운다(일꾼 스레드에서).
+    fn finish_cut_paste(&mut self, job: JobId, summary: &crate::job::Summary) {
+        let Some(sequence) = self.cut_pastes.remove(&job) else {
+            return;
+        };
+        // 건너뛰거나 못 옮긴 항목이 있으면 원본이 남았으므로 클립보드를 그대로 둔다(다시 붙여넣을 수 있다).
+        if summary.items_remaining != 0 || summary.items_skipped() != 0 {
+            return;
+        }
+        if let Some(clipboard) = self.clipboard.clone() {
+            let spawned = thread::Builder::new()
+                .name("facet-clipboard-finish".into())
+                .spawn(move || {
+                    // 그 사이 클립보드가 바뀌었으면 아무것도 하지 않는다. 실패해도 이미 옮긴 뒤라 할 일이 없다.
+                    let _ = clipboard.finish_cut_paste(sequence);
+                });
+            drop(spawned);
+        }
     }
 
     /// 반대편 패널로 복사·이동할 내용: 원본은 활성 창의 활성 탭의 선택(목록 순서, 없으면 커서 항목 하나), 대상은
@@ -2001,6 +2259,7 @@ impl App {
             if let JobEvent::Finished { job, summary } = &event {
                 self.history.finish(*job);
                 self.record_transfer(*job, summary);
+                self.finish_cut_paste(*job, summary);
             }
             changed |= self.work_area.apply(&event);
         }

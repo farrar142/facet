@@ -71,8 +71,8 @@ use facet_core::selection::{CursorMove, Pick};
 use facet_core::session::{self, Loaded, SAVE_DELAY, Saver};
 use facet_core::tab::{AutoRefresh, Navigation, ReadOutcome, Relocation, Tab};
 use facet_core::window::{
-    App, DeletePlan, DeleteWarning, Execution, MAX_PANELS, Panel, TabDestination, TabId,
-    TargetError, TransferPlan, Update, WindowId,
+    App, ClipboardDone, DeletePlan, DeleteWarning, Execution, MAX_PANELS, Panel, TabDestination,
+    TabId, TargetError, TransferPlan, Update, WindowId,
 };
 use facet_core::work_area::JobEntry;
 use facet_core::{ListError, Location, OpenError, ResolveError, provider_for};
@@ -170,6 +170,14 @@ fn main() -> Result<(), slint::PlatformError> {
         view.ui
             .window()
             .with_winit_window(|winit| winit.focus_window());
+    }
+    // 클립보드 스레드(복사·붙여넣기, 붙여넣기를 켜고 끄는 변경 알림). 측정 모드는 띄우지 않는다. 띄우지 못하면 까닭을
+    // 보이고 앱은 계속 돈다(복사·붙여넣기 명령은 실행할 때 같은 까닭으로 실패한다).
+    if !measure::is_enabled()
+        && let Err(error) = app.borrow_mut().enable_clipboard()
+    {
+        view.ui
+            .set_notice(text::clipboard_error_text(&error).into());
     }
     drop(view);
 
@@ -573,7 +581,22 @@ fn poll_all() {
         let mut app = app.borrow_mut();
         (app.poll(), app.poll_jobs())
     };
-    if jobs {
+    // 붙여넣기가 작업을 넣었으면 작업 영역을 다시 그린다. 클립보드 결과의 글자는 활성 창의 상태 줄에 보인다.
+    let mut pasted = false;
+    for (_, update) in &updates {
+        if let Update::Clipboard(result) = update {
+            pasted |= matches!(result, Ok(ClipboardDone::Pasted { .. }));
+            let notice = match result {
+                Ok(done) => text::clipboard_done_text(done),
+                Err(failure) => Some(text::clipboard_failure_text(failure)),
+            };
+            if let Some(notice) = notice {
+                let active = app.borrow().active_window_id();
+                with_view(active, |view| view.ui.set_notice(notice.into()));
+            }
+        }
+    }
+    if jobs || pasted {
         for view in &views {
             view.render_jobs();
         }

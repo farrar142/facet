@@ -199,6 +199,19 @@ mod tests {
     }
 
     #[test]
+    fn 복사_붙여넣기_경로_복사_키는_한글_모드에서도_같다() {
+        let command = |text: &str, ctrl, shift| {
+            shortcut_of(text, ctrl, false, shift).and_then(find_by_shortcut)
+        };
+        assert_eq!(command("c", true, false), Some(CommandId::Copy));
+        assert_eq!(command("ㅊ", true, false), Some(CommandId::Copy));
+        assert_eq!(command("v", true, false), Some(CommandId::Paste));
+        assert_eq!(command("ㅍ", true, false), Some(CommandId::Paste));
+        assert_eq!(command("C", true, true), Some(CommandId::CopyPath));
+        assert_eq!(command("ㅊ", true, true), Some(CommandId::CopyPath));
+    }
+
+    #[test]
     fn 탭_명령_키() {
         let command = |text: &str, ctrl, shift| {
             shortcut_of(text, ctrl, false, shift).and_then(find_by_shortcut)
