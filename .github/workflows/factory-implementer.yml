@@ -159,6 +159,23 @@ jobs:
         id: rebase
         if: steps.guard.outputs.go == 'true'
         run: |
+          # The agent sometimes ends with staged or unstaged edits it never committed
+          # (run 43823742621), which stops the rebase. If it committed work, add the
+          # leftovers on top (the automated checks below still judge the result). If it
+          # made no commits it may have stopped on purpose (implementer.md section 4),
+          # so drop them and let "the agent made no commits" fail the run.
+          if [ -n "$(git status --porcelain)" ]; then
+            git status --short
+            if [ "$(git rev-list --count origin/main..HEAD)" -gt 0 ]; then
+              echo "::warning::the agent left uncommitted changes; committing them"
+              git add -A
+              git commit -q -m "에이전트가 커밋하지 않은 변경을 남긴다"
+            else
+              echo "::warning::the agent left uncommitted changes and made no commits; dropping them"
+              git reset -q --hard
+              git clean -fdq
+            fi
+          fi
           git fetch origin main
           if git rebase origin/main; then
             echo "conflict=false" >> "$GITHUB_OUTPUT"
