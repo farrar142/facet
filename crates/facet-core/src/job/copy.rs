@@ -225,7 +225,7 @@ pub(super) fn temp_path(target: &Path) -> PathBuf {
 }
 
 /// 이름 충돌의 한 쪽 항목 정보. 링크는 가리키는 쪽의 종류로 본다(읽지 못하면 링크 자신).
-fn conflict_item(path: &Path) -> ConflictItem {
+pub(super) fn conflict_item(path: &Path) -> ConflictItem {
     let metadata = fs::metadata(path)
         .or_else(|_| fs::symlink_metadata(path))
         .ok();

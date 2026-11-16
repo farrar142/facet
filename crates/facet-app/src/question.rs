@@ -52,6 +52,9 @@ pub fn view(question: Option<&JobQuestion>) -> QuestionView {
             error_reason: error_reason(failure.kind),
             ..QuestionView::default()
         },
+        // 휴지통에 들어가지 않는 항목의 질문 대화는 뒤 티켓(앱의 Delete)이 그린다. 앱은 아직 휴지통 삭제 작업을
+        // 넣지 않으므로 이 질문이 오지 않는다.
+        Some(JobQuestion::NotRecyclable(_)) => QuestionView::default(),
     }
 }
 

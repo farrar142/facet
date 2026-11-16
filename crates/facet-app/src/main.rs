@@ -904,7 +904,7 @@ fn job_row(entry: &JobEntry) -> JobRow {
         moving: entry.kind == JobKind::Move,
         reverting: match entry.kind {
             // 삭제 작업의 진행 표시는 뒤 티켓(앱)이 따로 그린다. 그때까지는 종류 표시 없이 보인다.
-            JobKind::Copy | JobKind::Move | JobKind::Delete => 0,
+            JobKind::Copy | JobKind::Move | JobKind::Delete | JobKind::Recycle => 0,
             JobKind::Undo => 1,
             JobKind::Redo => 2,
         },

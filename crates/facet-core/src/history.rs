@@ -6,7 +6,8 @@
 //! 그때의 크기·수정 시각 [`Stamp`]), 되돌릴 수 없으면 그 까닭([`NotUndoable`])을 갖는다. 이름바꾸기·새 폴더와
 //! 복사·이동(폴더 안의 항목도 하나씩, [`Step::Copied`]·[`Step::Moved`]·[`Step::MovedFolder`], 원래 대상을 휴지통으로
 //! 보내고 덮어쓴 파일은 그 휴지통 항목과 함께 [`Step::Overwrote`])이 기록된다. **영구 삭제**는 되돌릴 수 없는
-//! 기록([`NotUndoable::PermanentDelete`], 넘긴 원본마다 [`Step::Deleted`])으로 남는다.
+//! 기록([`NotUndoable::PermanentDelete`], 넘긴 원본마다 [`Step::Deleted`])으로 남는다. **휴지통 삭제**는 휴지통에
+//! 보낸 항목마다 [`Step::Recycled`](원래 경로와 휴지통 항목)로 남고, 실행취소는 휴지통에서 복원한다.
 //!
 //! - **실행취소 대상**은 끝난 작업 가운데 마지막 기록이다([`History::undo_target`]). 그것이 되돌릴 수 없는 작업이면
 //!   실행취소는 까닭을 돌려주고 그 앞 기록으로 넘어가지 않는다.
@@ -55,7 +56,11 @@ pub enum OperationKind {
     /// 이동(반대편 패널로, 이동 위치…). 항목은 [`Step::Moved`]·[`Step::MovedFolder`]다.
     Move,
     /// 삭제. 영구 삭제면 되돌릴 수 없는 기록([`NotUndoable::PermanentDelete`])이고 항목은 [`Step::Deleted`]다.
+    /// 휴지통 삭제가 휴지통에 보낸 것 없이 모든 항목을 영구 삭제로 진행했으면 이것이다.
     Delete,
+    /// **휴지통 삭제**. 항목은 휴지통에 보낸 [`Step::Recycled`]이고, 휴지통에 들어가지 않아 영구 삭제로 진행한
+    /// 항목은 [`Step::Deleted`]로 함께 든다(그 항목만 되돌릴 수 없고 기록 전체는 되돌릴 수 있다).
+    Recycle,
 }
 
 /// 되돌릴 수 없는 까닭의 종류.
@@ -162,6 +167,18 @@ pub enum Step {
     /// 남지 않아 항목별 모습이 필요 없다(지운 항목 수는 [`Record::items_completed`]). 건너뛴 항목이 있어 폴더가
     /// 남았어도 그 안에서 지운 것이 있으면 든다. 되돌릴 수 없는 기록에만 있다.
     Deleted { path: PathBuf },
+    /// 휴지통 삭제가 `path`의 항목(폴더면 그 아래 전부)을 휴지통으로 보냈다(휴지통 항목 `item`). `stamp`는 보내기
+    /// 전의 모습이다.
+    ///
+    /// 되돌리기는 휴지통에서 `path`로 복원하기다(원래 자리에 같은 이름이 있으면 [`RevertSkip::NameTaken`], 휴지통
+    /// 항목이 없으면 [`RevertSkip::RecycledMissing`]으로 건너뛴다). 다시 하기는 다시 휴지통으로 보내기다(영구 삭제는
+    /// 하지 않는다). 실행취소한 뒤의 이 항목(다시 실행 목록)에서 `item`은 이미 복원한 휴지통 항목이라 쓰지 않고,
+    /// `stamp`는 복원한 뒤의 모습이다.
+    Recycled {
+        path: PathBuf,
+        item: RecycledItem,
+        stamp: Stamp,
+    },
 }
 
 impl Step {
@@ -172,7 +189,8 @@ impl Step {
             Step::CreatedFolder { path, .. }
             | Step::Copied { path, .. }
             | Step::Overwrote { path, .. }
-            | Step::Deleted { path } => path,
+            | Step::Deleted { path }
+            | Step::Recycled { path, .. } => path,
             Step::Moved { to, .. } | Step::MovedFolder { to, .. } => to,
         }
     }
@@ -183,6 +201,7 @@ impl Step {
             Step::Renamed { from, .. }
             | Step::Moved { from, .. }
             | Step::MovedFolder { from, .. } => Some(from),
+            Step::Recycled { path, .. } => Some(path),
             Step::Overwrote {
                 source,
                 moved: true,
@@ -371,9 +390,12 @@ pub enum RevertSkip {
     NotEmpty,
     /// 휴지통에 넣을 수 없어(휴지통보다 큼, 휴지통이 없는·끈 볼륨) 지우지 않았다. 실행취소는 영구 삭제하지 않는다.
     NotRecyclable,
-    /// 덮어쓴 옛 파일의 휴지통 항목이 없다(휴지통을 비웠거나 휴지통에서 지웠다): 되살릴 것이 없어 새 파일도 그대로
-    /// 둔다.
+    /// 휴지통 항목이 없다(휴지통을 비웠거나 휴지통에서 지웠다): 덮어쓴 옛 파일이면 되살릴 것이 없어 새 파일도
+    /// 그대로 두고, 휴지통 삭제한 항목이면 되살릴 것이 없다.
     RecycledMissing,
+    /// 휴지통 삭제가 휴지통에 들어가지 않아 영구 삭제로 진행한 항목이다: 되살릴 것이 남지 않았다. 같은 기록의 휴지통에
+    /// 보낸 항목은 되돌아간다.
+    PermanentlyDeleted,
 }
 
 /// 밖의 변경으로 건너뛴 항목: 그 경로와 까닭.

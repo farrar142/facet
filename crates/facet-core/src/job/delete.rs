@@ -55,44 +55,28 @@ impl DeleteJob {
 
     /// 작업 스레드에서 끝까지(또는 취소될 때까지) 실행하고 결과 요약과 취소로 멈췄는지를 돌려준다.
     pub(super) fn run(self, context: &Context<'_>) -> (Summary, bool) {
-        let mut deleter = Deleter {
-            // 질문·진행·결과 요약은 복사 엔진의 것을 쓴다.
-            engine: Copier::new(context, false),
-            open: Vec::new(),
-            root: None,
-            journal: self.journal,
-        };
-        // 훑기는 원본마다 대상 경로를 함께 나르지만 삭제는 대상이 없다. 이름이 없는 원본(드라이브 루트 등)은
-        // 지울 수 없어 항목별 오류로 묻는다.
-        let plans = self
-            .sources
-            .into_iter()
-            .map(|source| {
-                let target = source.file_name().map(|_| source.clone());
-                (source, target)
-            })
-            .collect();
-        let control = context.control;
-        let totals = Arc::clone(&deleter.engine.reporter.totals);
-        let scanned = pipeline(plans, &totals, control, |entry| {
-            if !control.proceed() {
-                deleter.engine.cancelled = true;
-            }
-            if deleter.engine.cancelled {
-                return false;
-            }
-            deleter.handle(entry);
-            true
-        });
+        // 질문·진행·결과 요약은 복사 엔진의 것을 쓴다.
+        let mut engine = Copier::new(context, false);
+        let totals = Arc::clone(&engine.reporter.totals);
+        let scanned = Deleter::new(&mut engine, self.journal).run(self.sources);
         if scanned {
             totals.counted.store(true, Ordering::Release);
-        } else {
-            deleter.engine.cancelled = true;
         }
-        // 취소로 멈춘 원본도 그 안에서 지운 것이 있으면 적는다.
-        deleter.close_root();
-        deleter.engine.finish()
+        engine.finish()
     }
+}
+
+/// 항목 하나(폴더면 그 아래 전부)를 영구 삭제한다: 휴지통 삭제가 휴지통에 들어가지 않는 항목을 「영구 삭제로 진행」하는
+/// 길이다. 규칙은 영구 삭제 작업과 같고 질문·진행·결과 요약은 `engine`의 것이다. 그 항목에서 지운 것이 있으면
+/// `journal`에 [`Step::Deleted`]를 적는다. 진행의 항목 수는 이 항목 하나로 친다(안의 항목을 세어도 되돌린다).
+/// 취소로 멈췄으면 `engine.cancelled`가 선다.
+pub(super) fn delete_one(engine: &mut Copier<'_>, journal: Option<JournalSink>, source: PathBuf) {
+    let totals = Arc::clone(&engine.reporter.totals);
+    let items_total = totals.items.load(Ordering::Acquire);
+    let items_done = engine.reporter.items_done;
+    Deleter::new(engine, journal).run(vec![source]);
+    totals.items.store(items_total, Ordering::Release);
+    engine.reporter.items_done = items_done + 1;
 }
 
 /// 넘긴 원본 하나를 다루는 동안의 상태.
@@ -103,8 +87,8 @@ struct Root {
 }
 
 /// 훑은 항목을 받아 지운다.
-struct Deleter<'a> {
-    engine: Copier<'a>,
+struct Deleter<'e, 'a> {
+    engine: &'e mut Copier<'a>,
     /// 들어가 있는 폴더(바깥부터): 그 안에 남은 항목이 있는지(건너뛴 항목, 남긴 하위 폴더). 남은 항목이 있는 폴더는
     /// 지우려 하지 않는다.
     open: Vec<bool>,
@@ -114,7 +98,48 @@ struct Deleter<'a> {
     journal: Option<JournalSink>,
 }
 
-impl Deleter<'_> {
+impl<'e, 'a> Deleter<'e, 'a> {
+    fn new(engine: &'e mut Copier<'a>, journal: Option<JournalSink>) -> Self {
+        Deleter {
+            engine,
+            open: Vec::new(),
+            root: None,
+            journal,
+        }
+    }
+
+    /// 원본들을 훑는 동안 이미 센 항목부터 지운다. 다 훑었으면 `true`(취소로 멈췄으면 `false`이고 `cancelled`가
+    /// 선다).
+    fn run(&mut self, sources: Vec<PathBuf>) -> bool {
+        // 훑기는 원본마다 대상 경로를 함께 나르지만 삭제는 대상이 없다. 이름이 없는 원본(드라이브 루트 등)은
+        // 지울 수 없어 항목별 오류로 묻는다.
+        let plans = sources
+            .into_iter()
+            .map(|source| {
+                let target = source.file_name().map(|_| source.clone());
+                (source, target)
+            })
+            .collect();
+        let control = self.engine.context.control;
+        let totals = Arc::clone(&self.engine.reporter.totals);
+        let scanned = pipeline(plans, &totals, control, |entry| {
+            if !control.proceed() {
+                self.engine.cancelled = true;
+            }
+            if self.engine.cancelled {
+                return false;
+            }
+            self.handle(entry);
+            true
+        });
+        if !scanned {
+            self.engine.cancelled = true;
+        }
+        // 취소로 멈춘 원본도 그 안에서 지운 것이 있으면 적는다.
+        self.close_root();
+        scanned
+    }
+
     fn handle(&mut self, entry: Entry) {
         if self.open.is_empty() && self.root.is_none() {
             let (Entry::File { source, .. }
