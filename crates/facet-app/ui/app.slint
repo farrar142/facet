@@ -136,6 +136,17 @@ export enum ErrorChoice { retry, skip, skip-all, cancel-job }
 // 휴지통에 들어가지 않는 항목 질문의 답.
 export enum NotRecyclableChoice { delete, delete-all, skip, skip-all, cancel-job }
 
+// 오른쪽 메뉴의 줄 하나: 이름, 단축키 글자(없으면 비어 있음), 켜졌는가, 표시(「✓」「▲」「▼」 또는 비어 있음), 구분선인가,
+// 하위 메뉴를 여는 줄인가. 글자는 Rust의 문장 모듈이 만든다(코어의 메뉴 구성을 그대로 그린다).
+export struct MenuRow {
+    name: string,
+    shortcut: string,
+    enabled: bool,
+    mark: string,
+    separator: bool,
+    submenu: bool,
+}
+
 // 작업 기록 보기의 줄 하나: 작업 이름, 끝낸·건너뛴 항목 수, 되돌릴 수 없으면 그 까닭(되돌릴 수 있으면 비어 있음).
 // 글자는 Rust의 문장 모듈이 만든다.
 export struct HistoryRow {
@@ -1049,6 +1060,8 @@ component PanelView inherits Rectangle {
     callback row-pressed(int, bool, bool);
     callback row-opened(int);
     callback row-middle-pressed(int);
+    // 오른쪽 버튼을 눌렀다: 행(목록 아래 빈 곳이면 -1), 창 기준 점. 오른쪽 메뉴를 연다.
+    callback context-menu(int, length, length);
     callback tab-pressed(int);
     // 탭 끌기: 탭을 눌렀다(탭 번호, 창 기준 점), 누른 채 움직였다, 놓았다(누르기였으면 참: 그 탭으로 간다), 끌기가
     // 끊겼다.
@@ -1406,6 +1419,12 @@ component PanelView inherits Rectangle {
                                 root.activate();
                             }
                             root.pointer(event);
+                            // 오른쪽 클릭: 오른쪽 메뉴. 선택에 없는 항목이면 Rust가 그 항목 하나로 고른다.
+                            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right && i != root.editing) {
+                                root.context-menu(i, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                                root.focus-list();
+                                return;
+                            }
                             // 휠 클릭: 폴더를 새 탭에서 연다. 선택과 커서는 그대로다.
                             if (event.kind == PointerEventKind.down && event.button == PointerEventButton.middle) {
                                 root.row-middle-pressed(i);
@@ -1557,6 +1576,11 @@ component PanelView inherits Rectangle {
                         root.activate();
                     }
                     root.pointer(event);
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                        root.context-menu(-1, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                        root.focus-list();
+                        return;
+                    }
                     if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
                         root.marquee-press(-1, event.modifiers.control, event.modifiers.shift,
                             self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
@@ -1691,6 +1715,80 @@ component PanelView inherits Rectangle {
         }
     }
 
+}
+
+// 오른쪽 메뉴 한 칸(메인이나 하위): 줄들을 위에서 아래로 그린다. 줄 높이는 Rust의 `context_menu::ROW_HEIGHT`·
+// `SEPARATOR_HEIGHT`·`PADDING`과 같다. 꺼진 줄은 흐리게 보이고 고를 수 없다.
+component ContextMenuView inherits Rectangle {
+    in property <[MenuRow]> rows;
+    in property <int> selected: -1;
+    callback hover(int);
+    callback activate(int);
+    background: Palette.background;
+    border-width: 1px;
+    border-color: Palette.border;
+    border-radius: 6px;
+    drop-shadow-blur: 8px;
+    drop-shadow-color: #00000060;
+    // 메뉴 안을 누르면 바깥 누르기로 닫히지 않게 받는다.
+    TouchArea { }
+    VerticalLayout {
+        padding-top: 4px;
+        padding-bottom: 4px;
+        alignment: start;
+        for row[i] in root.rows: Rectangle {
+            height: row.separator ? 9px : 28px;
+            if row.separator: Rectangle {
+                y: 4px;
+                height: 1px;
+                background: Palette.border;
+            }
+            if !row.separator: Rectangle {
+                x: 4px;
+                width: parent.width - 8px;
+                background: i == root.selected ? Palette.selection-background : transparent;
+                border-radius: 4px;
+                HorizontalLayout {
+                    padding-left: 6px;
+                    padding-right: 8px;
+                    spacing: 6px;
+                    Text {
+                        width: 16px;
+                        text: row.mark;
+                        vertical-alignment: center;
+                        color: (i == root.selected ? Palette.selection-foreground : Palette.foreground)
+                            .transparentize(row.enabled ? 0% : 60%);
+                    }
+                    Text {
+                        text: row.name;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        color: (i == root.selected ? Palette.selection-foreground : Palette.foreground)
+                            .transparentize(row.enabled ? 0% : 60%);
+                    }
+                    Text {
+                        text: row.submenu ? "▶" : row.shortcut;
+                        vertical-alignment: center;
+                        color: (i == root.selected ? Palette.selection-foreground : Palette.foreground)
+                            .transparentize(row.enabled ? 40% : 70%);
+                    }
+                }
+                row-touch := TouchArea {
+                    changed has-hover => {
+                        if (self.has-hover && row.enabled) {
+                            root.hover(i);
+                        }
+                    }
+                    clicked => {
+                        if (row.enabled) {
+                            root.activate(i);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 export component AppWindow inherits Window {
@@ -1847,6 +1945,28 @@ export component AppWindow inherits Window {
     // 행을 두 번 눌렀다: 열기.
     callback row-opened(int);
     // 행을 휠 클릭했다: 폴더면 새 탭에서 연다.
+    // 오른쪽 버튼을 눌렀다: 패널, 행(빈 곳이면 -1), 창 기준 점. Rust가 선택을 고르고 메뉴를 연다.
+    callback context-menu(int, int, length, length);
+    // 오른쪽 메뉴: 열려 있는가, 자리와 크기(Rust가 창 안으로 맞춘다), 줄, 고른 줄, 하위 메뉴(열려 있는가·자리·크기·줄·고른 줄).
+    // 줄 높이·너비는 Rust의 `context_menu` 모듈과 같아야 한다.
+    in property <bool> menu-open;
+    in property <length> menu-x;
+    in property <length> menu-y;
+    in property <length> menu-width;
+    in property <length> menu-height;
+    in property <[MenuRow]> menu-rows;
+    in property <int> menu-selected: -1;
+    in property <bool> menu-sub-open;
+    in property <length> menu-sub-x;
+    in property <length> menu-sub-y;
+    in property <length> menu-sub-width;
+    in property <length> menu-sub-height;
+    in property <[MenuRow]> menu-sub-rows;
+    in property <int> menu-sub-selected: -1;
+    callback menu-hover(bool, int);
+    callback menu-activate(bool, int);
+    callback menu-key(string);
+    callback menu-close();
     callback row-middle-pressed(int);
     // 탭 줄의 탭을 눌렀다: 그 탭으로 간다.
     callback tab-pressed(int);
@@ -1972,6 +2092,11 @@ export component AppWindow inherits Window {
         color: transparent;
         selection-background-color: transparent;
         key-pressed(event) => {
+            // 오른쪽 메뉴가 열려 있으면 ↑↓→←·Enter·Esc가 메뉴를 고른다.
+            if (root.menu-open) {
+                root.menu-key(event.text);
+                return accept;
+            }
             if (root.palette-open || root.target-open) {
                 return accept;
             }
@@ -2110,6 +2235,9 @@ export component AppWindow inherits Window {
             row-middle-pressed(row) => {
                 root.row-middle-pressed(row);
             }
+            context-menu(row, x, y) => {
+                root.context-menu(0, row, x, y);
+            }
             tab-pressed(index) => {
                 root.tab-pressed(index);
             }
@@ -2236,6 +2364,9 @@ export component AppWindow inherits Window {
             }
             row-middle-pressed(row) => {
                 root.row-middle-pressed(row);
+            }
+            context-menu(row, x, y) => {
+                root.context-menu(1, row, x, y);
             }
             tab-pressed(index) => {
                 root.tab-pressed(index);
@@ -2376,7 +2507,7 @@ export component AppWindow inherits Window {
                     height: parent.height - 4px;
                     job: job;
                     // 다른 입력(이름 입력란, 주소창, 팔레트, 확인 줄, 정보 화면)이 열려 있으면 키보드를 뺏지 않는다.
-                    autofocus: root.editing < 0 && !root.address-editing && !root.palette-open && !root.target-open && !root.confirm-open && !root.show-about && !root.history-open;
+                    autofocus: root.editing < 0 && !root.address-editing && !root.palette-open && !root.target-open && !root.confirm-open && !root.show-about && !root.history-open && !root.menu-open;
                     answer-conflict(choice, rest) => {
                         root.job-answer-conflict(job.id, choice, rest);
                         keys.focus();
@@ -2787,6 +2918,48 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // 오른쪽 메뉴: 창 위에 직접 그린다. 키보드는 키 입력란에 남고, 바깥 누르기로 닫는다.
+    if root.menu-open: Rectangle {
+        TouchArea {
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down) {
+                    root.menu-close();
+                    keys.focus();
+                }
+            }
+        }
+        ContextMenuView {
+            x: root.menu-x;
+            y: root.menu-y;
+            width: root.menu-width;
+            height: root.menu-height;
+            rows: root.menu-rows;
+            selected: root.menu-selected;
+            hover(i) => {
+                root.menu-hover(false, i);
+            }
+            activate(i) => {
+                root.menu-activate(false, i);
+                keys.focus();
+            }
+        }
+        if root.menu-sub-open: ContextMenuView {
+            x: root.menu-sub-x;
+            y: root.menu-sub-y;
+            width: root.menu-sub-width;
+            height: root.menu-sub-height;
+            rows: root.menu-sub-rows;
+            selected: root.menu-sub-selected;
+            hover(i) => {
+                root.menu-hover(true, i);
+            }
+            activate(i) => {
+                root.menu-activate(true, i);
+                keys.focus();
             }
         }
     }

@@ -293,6 +293,25 @@ pub fn not_done_text(summary: &Summary) -> String {
 }
 
 /// 단축키의 글자: `Ctrl+Shift+P`, `Alt+←`. 키 이름은 번역하지 않는다.
+/// 오른쪽 메뉴의 하위 메뉴 이름.
+pub fn submenu_name(id: facet_core::menu::SubmenuId) -> &'static str {
+    match id {
+        facet_core::menu::SubmenuId::SortBy => "정렬 기준",
+    }
+}
+
+/// 오른쪽 메뉴 줄의 표시 글자: 켜진 상태는 「✓」, 지금 정렬은 방향 화살표다. 글자가 아니라 기호라 번역하지 않는다.
+pub fn menu_mark_text(mark: facet_core::menu::Mark) -> &'static str {
+    use facet_core::details::Direction;
+    use facet_core::menu::Mark;
+    match mark {
+        Mark::None => "",
+        Mark::Checked => "✓",
+        Mark::Sorted(Direction::Ascending) => "▲",
+        Mark::Sorted(Direction::Descending) => "▼",
+    }
+}
+
 pub fn shortcut_text(shortcut: &Shortcut) -> String {
     let key = match shortcut.key {
         Key::Letter(c) => c.to_string(),
