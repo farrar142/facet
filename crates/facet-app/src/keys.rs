@@ -113,6 +113,18 @@ pub fn shortcut_at(
     })
 }
 
+/// 오른쪽 메뉴를 여는 키인가: 메뉴 키(Apps 키)이거나 Shift+F10이다(Ctrl·Alt가 함께 눌렸으면 아니다).
+pub fn is_context_menu_key(text: &str, ctrl: bool, alt: bool, shift: bool) -> bool {
+    if ctrl || alt {
+        return false;
+    }
+    let mut chars = text.chars();
+    let (Some(c), None) = (chars.next(), chars.next()) else {
+        return false;
+    };
+    c == char::from(SlintKey::Menu) || (shift && c == char::from(SlintKey::F10))
+}
+
 /// 키 이벤트의 글자(`event.text`)를 키로. 글자가 하나가 아니거나 코어가 모르는 키면 `None`이다.
 pub fn key_of(text: &str) -> Option<Key> {
     let mut chars = text.chars();
@@ -132,6 +144,18 @@ pub fn key_of(text: &str) -> Option<Key> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn menu_key_and_shift_f10_open_the_context_menu() {
+        let menu = char::from(SlintKey::Menu).to_string();
+        let f10 = char::from(SlintKey::F10).to_string();
+        assert!(is_context_menu_key(&menu, false, false, false));
+        assert!(is_context_menu_key(&f10, false, false, true));
+        assert!(!is_context_menu_key(&f10, false, false, false));
+        assert!(!is_context_menu_key(&f10, true, false, true));
+        assert!(!is_context_menu_key("a", false, false, true));
+    }
+
     use facet_core::command::{CommandId, Shortcut, find_by_shortcut};
 
     fn text(key: SlintKey) -> String {

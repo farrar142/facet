@@ -71,6 +71,7 @@ use facet_core::job::{
     NotRecyclableAnswer, Remaining,
 };
 use facet_core::launch::{LaunchTarget, resolve_launch};
+use facet_core::menu::MenuEntry;
 use facet_core::placement::{self, Monitor, Rect, WindowState};
 use facet_core::selection::{CursorMove, Pick};
 use facet_core::session::{self, Loaded, SAVE_DELAY, Saver};
@@ -89,6 +90,7 @@ use slint::{
 };
 
 use crate::address::AddressEdit;
+use crate::context_menu::{ContextMenu, Outcome as MenuOutcome};
 use crate::marquee::Marquee;
 use crate::palette::Palette;
 use crate::rename::{Confirm, Rename};
@@ -96,6 +98,7 @@ use crate::tab_drag::{Frame, Hover, Point, ScreenPoint, Strip, TabDrag, Target};
 use crate::target::{Section, TargetChooser};
 
 mod address;
+mod context_menu;
 mod file_drop;
 mod history_view;
 mod ime;
@@ -751,6 +754,13 @@ fn connect(ui: &AppWindow, w: WindowId) {
     });
     ui.on_palette_close(move || with_view(w, View::close_palette));
     ui.on_history_close(move || with_view(w, View::close_history));
+    ui.on_context_menu(move |panel, row, x, y| {
+        with_view(w, |view| view.open_context_menu(panel, row, (x, y)));
+    });
+    ui.on_menu_hover(move |sub, index| with_view(w, |view| view.menu_hover(sub, index)));
+    ui.on_menu_activate(move |sub, index| with_view(w, |view| view.menu_activate(sub, index)));
+    ui.on_menu_key(move |text| with_view(w, |view| view.menu_key(&text)));
+    ui.on_menu_close(move || with_view(w, View::close_context_menu));
     ui.on_target_edited(move |text| with_view(w, |view| view.target_edited(&text)));
     ui.on_target_step(move |step| {
         let mut end = -1;
@@ -1007,6 +1017,24 @@ fn job_number(job: JobId) -> i32 {
     i32::try_from(job.get()).unwrap_or(i32::MAX)
 }
 
+/// 메뉴의 명령 항목을 화면 줄로: 이름은 앱의 명령 이름, 단축키 글자는 팔레트와 같다.
+fn menu_row(command: &facet_core::menu::MenuCommand) -> MenuRow {
+    MenuRow {
+        name: text::command_name(command.id).into(),
+        shortcut: command
+            .id
+            .shortcuts()
+            .first()
+            .map(text::shortcut_text)
+            .unwrap_or_default()
+            .into(),
+        enabled: command.enabled,
+        mark: text::menu_mark_text(command.mark).into(),
+        separator: false,
+        submenu: false,
+    }
+}
+
 fn count64(n: u64) -> i32 {
     i32::try_from(n).unwrap_or(i32::MAX)
 }
@@ -1128,6 +1156,11 @@ struct View {
     palette: RefCell<Option<Palette>>,
     /// 명령 팔레트의 검색 결과 줄.
     palette_rows: Rc<VecModel<PaletteRow>>,
+    /// 열려 있는 오른쪽 메뉴. 화면의 `menu-open`과 함께 바뀐다.
+    context_menu: RefCell<Option<ContextMenu>>,
+    /// 오른쪽 메뉴의 줄과 열린 하위 메뉴의 줄.
+    menu_rows: Rc<VecModel<MenuRow>>,
+    menu_sub_rows: Rc<VecModel<MenuRow>>,
     /// 「읽는 중」을 드러낼 때 다시 그리는 타이머.
     reading_timer: Timer,
     /// 켜져 있으면 다음 `render`가 행 모델을 reset하지 않는다(행 눌러 고르기가 바뀐 행만 알리는 동안).
@@ -1195,6 +1228,10 @@ impl View {
         ui.set_candidates(ModelRc::from(Rc::clone(&candidates)));
         let palette_rows = Rc::new(VecModel::default());
         ui.set_palette_rows(ModelRc::from(Rc::clone(&palette_rows)));
+        let menu_rows = Rc::new(VecModel::default());
+        ui.set_menu_rows(ModelRc::from(Rc::clone(&menu_rows)));
+        let menu_sub_rows = Rc::new(VecModel::default());
+        ui.set_menu_sub_rows(ModelRc::from(Rc::clone(&menu_sub_rows)));
         let target_rows = Rc::new(VecModel::default());
         ui.set_target_rows(ModelRc::from(Rc::clone(&target_rows)));
         let jobs = Rc::new(VecModel::default());
@@ -1210,6 +1247,9 @@ impl View {
             candidates,
             palette: RefCell::default(),
             palette_rows,
+            context_menu: RefCell::default(),
+            menu_rows,
+            menu_sub_rows,
             reading_timer: Timer::default(),
             keep_rows: Cell::new(false),
             tab_drag: RefCell::default(),
@@ -1805,6 +1845,10 @@ impl View {
 
     /// 키 입력 하나. 명령이나 커서 이동으로 처리했으면 `true`, 글자 입력이면 `false`다.
     fn key(&self, text: &str, ctrl: bool, alt: bool, shift: bool) -> bool {
+        if keys::is_context_menu_key(text, ctrl, alt, shift) {
+            self.open_context_menu_at_cursor();
+            return true;
+        }
         let Some(shortcut) = keys::shortcut_of(text, ctrl, alt, shift) else {
             return false;
         };
@@ -1923,6 +1967,209 @@ impl View {
                 .redo_target()
                 .map(|record| (text::redo_notice(record), None)),
             _ => None,
+        }
+    }
+
+    /// 오른쪽 버튼을 눌렀다: 그 패널을 활성 패널로 하고 선택을 정한 뒤(코어 [`App::context_click`]) 메뉴를 연다.
+    /// `row`가 -1이거나 목록 밖이면 빈 곳 메뉴다. `at`은 창 기준 점이다.
+    fn open_context_menu(&self, panel: i32, row: i32, at: (f32, f32)) {
+        let Ok(panel) = usize::try_from(panel) else {
+            return;
+        };
+        self.close_context_menu();
+        self.remember_scroll();
+        let kind = self
+            .app
+            .borrow_mut()
+            .context_click(panel, usize::try_from(row).ok());
+        let Some(kind) = kind else {
+            return;
+        };
+        self.close_rename();
+        self.close_address_edit();
+        self.render();
+        let menu = ContextMenu::new(self.app.borrow().context_menu(kind));
+        let (x, y) = context_menu::place(
+            at,
+            (context_menu::WIDTH, menu.height()),
+            self.logical_size(),
+        );
+        self.ui.set_menu_x(x);
+        self.ui.set_menu_y(y);
+        self.ui.set_menu_width(context_menu::WIDTH);
+        self.ui.set_menu_height(menu.height());
+        let rows: Vec<MenuRow> = menu
+            .menu()
+            .entries
+            .iter()
+            .map(|entry| match entry {
+                MenuEntry::Command(command) => menu_row(command),
+                MenuEntry::Submenu(sub) => MenuRow {
+                    name: text::submenu_name(sub.id).into(),
+                    shortcut: SharedString::new(),
+                    enabled: sub.enabled,
+                    mark: SharedString::new(),
+                    separator: false,
+                    submenu: true,
+                },
+                MenuEntry::Separator => MenuRow {
+                    name: SharedString::new(),
+                    shortcut: SharedString::new(),
+                    enabled: false,
+                    mark: SharedString::new(),
+                    separator: true,
+                    submenu: false,
+                },
+            })
+            .collect();
+        self.menu_rows.set_vec(rows);
+        *self.context_menu.borrow_mut() = Some(menu);
+        self.sync_menu();
+        self.ui.set_menu_open(true);
+    }
+
+    /// 창 안쪽 크기(논리 픽셀).
+    fn logical_size(&self) -> (f32, f32) {
+        let size = self.ui.window().size();
+        let scale = self.ui.window().scale_factor().max(f32::EPSILON);
+        (size.width as f32 / scale, size.height as f32 / scale)
+    }
+
+    /// Shift+F10·메뉴 키: 커서 항목 옆(커서가 없으면 목록 왼쪽 위)에 연다.
+    fn open_context_menu_at_cursor(&self) {
+        let panel = self.active_panel();
+        let cursor = self.app.borrow().active_tab().cursor();
+        if let Some(index) = cursor {
+            self.show_row(index);
+        }
+        let list = PanelUi::of(&self.ui, panel);
+        let at = match cursor {
+            Some(index) => (
+                list.list_left() + 40.0,
+                list.list_top() + list.content_y() + (index + 1) as f32 * self.ui.get_row_height(),
+            ),
+            None => (list.list_left(), list.list_top()),
+        };
+        let row = cursor.map_or(-1, count);
+        self.open_context_menu(count(panel), row, at);
+    }
+
+    /// 고른 줄과 열린 하위 메뉴를 화면에 맞춘다.
+    fn sync_menu(&self) {
+        let guard = self.context_menu.borrow();
+        let Some(menu) = guard.as_ref() else {
+            return;
+        };
+        let ui = &self.ui;
+        ui.set_menu_selected(menu.selected().map_or(-1, count));
+        match menu.open_submenu() {
+            Some(row) => {
+                if let Some(MenuEntry::Submenu(sub)) = menu.menu().entries.get(row) {
+                    let height = menu.sub_height();
+                    let (x, y) = context_menu::place_sub(
+                        ui.get_menu_x(),
+                        context_menu::WIDTH,
+                        ui.get_menu_y() + menu.row_top(row),
+                        (context_menu::SUB_WIDTH, height),
+                        self.logical_size(),
+                    );
+                    ui.set_menu_sub_x(x);
+                    ui.set_menu_sub_y(y);
+                    ui.set_menu_sub_width(context_menu::SUB_WIDTH);
+                    ui.set_menu_sub_height(height);
+                    ui.set_menu_sub_selected(menu.sub_selected().map_or(-1, count));
+                    if !ui.get_menu_sub_open() {
+                        self.menu_sub_rows
+                            .set_vec(sub.entries.iter().map(menu_row).collect::<Vec<_>>());
+                    }
+                    ui.set_menu_sub_open(true);
+                }
+            }
+            None => ui.set_menu_sub_open(false),
+        }
+    }
+
+    fn close_context_menu(&self) {
+        if self.context_menu.borrow_mut().take().is_some() {
+            self.ui.set_menu_open(false);
+            self.ui.set_menu_sub_open(false);
+        }
+    }
+
+    /// 메뉴 줄(`sub`면 하위 메뉴 줄) 위로 마우스가 왔다.
+    fn menu_hover(&self, sub: bool, index: i32) {
+        let Ok(index) = usize::try_from(index) else {
+            return;
+        };
+        if let Some(menu) = self.context_menu.borrow_mut().as_mut() {
+            if sub {
+                menu.hover_sub(index);
+            } else {
+                menu.hover(index);
+            }
+        }
+        self.sync_menu();
+    }
+
+    /// 메뉴 줄(`sub`면 하위 메뉴 줄)을 눌렀다: 명령이면 메뉴를 닫고 실행한다.
+    fn menu_activate(&self, sub: bool, index: i32) {
+        let Ok(index) = usize::try_from(index) else {
+            return;
+        };
+        let outcome = match self.context_menu.borrow_mut().as_mut() {
+            Some(menu) if sub => menu.activate_sub(index),
+            Some(menu) => menu.activate(index),
+            None => return,
+        };
+        self.finish_menu(outcome);
+    }
+
+    /// 메뉴가 열려 있는 동안의 키: ↑↓로 고르고 →로 하위 메뉴를 열고 ←로 닫고 Enter로 누르고 Esc로 닫는다.
+    fn menu_key(&self, text: &str) {
+        let Some(key) = keys::key_of(text) else {
+            return;
+        };
+        let outcome = {
+            let mut guard = self.context_menu.borrow_mut();
+            let Some(menu) = guard.as_mut() else {
+                return;
+            };
+            match key {
+                Key::Up => {
+                    menu.step(-1);
+                    MenuOutcome::None
+                }
+                Key::Down => {
+                    menu.step(1);
+                    MenuOutcome::None
+                }
+                Key::Right => {
+                    menu.open_sub();
+                    MenuOutcome::None
+                }
+                Key::Left => {
+                    menu.close_sub();
+                    MenuOutcome::None
+                }
+                Key::Enter | Key::Space => menu.enter(),
+                Key::Escape => {
+                    drop(guard);
+                    return self.close_context_menu();
+                }
+                _ => MenuOutcome::None,
+            }
+        };
+        self.finish_menu(outcome);
+    }
+
+    /// 메뉴 안에서 한 일을 반영한다: 명령이면 닫고 실행한다(기존 명령 실행 길), 아니면 화면만 맞춘다.
+    fn finish_menu(&self, outcome: MenuOutcome) {
+        match outcome {
+            MenuOutcome::Run(command) => {
+                self.close_context_menu();
+                self.execute(command);
+            }
+            MenuOutcome::None => self.sync_menu(),
         }
     }
 

@@ -15,6 +15,8 @@
 //!   ([`measure_session`]). `cargo xtask ci`가 이것도 부른다.
 //! - 클립보드 형식 벤치마크: 파일 1만 개 목록을 `CF_HDROP` 바이트로 만들고 읽는 시간([`CLIPBOARD_LIMIT`])을 잰다
 //!   ([`measure_clipboard`]). `cargo xtask ci`가 이것도 부른다.
+//! - 오른쪽 메뉴 구성 벤치마크: 선택 1만 개에서 메뉴를 만드는 시간([`MENU_LIMIT`])을 잰다([`measure_menu`]).
+//!   `cargo xtask ci`가 이것도 부른다.
 //! - 복사 벤치마크: 작업 대기열의 복사 작업으로 256MiB 파일 하나의 처리량([`copy::COPY_THROUGHPUT_LIMIT`])과
 //!   4KiB 파일 2천 개가 든 폴더의 복사 시간([`copy::COPY_SMALL_LIMIT`])을 잰다. `cargo xtask ci`가 이것도 부른다.
 //!   같은 복사를 셸의 `IFileOperation`으로도 해 견주는 탐색기 비교 측정([`copy::compare`])은 사람이 잰다.
@@ -817,6 +819,88 @@ pub fn check_clipboard_limit(m: &ClipboardMeasurement, limit: Duration) -> Resul
         if t.median() > limit {
             return Err(format!(
                 "클립보드 형식 {name} 상한 초과: 경로 {}개 중앙값 {:.2}ms > 상한 {}ms (최악 {:.2}ms)",
+                t.item_count,
+                t.median().as_secs_f64() * 1000.0,
+                limit.as_millis(),
+                t.max().as_secs_f64() * 1000.0
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 오른쪽 메뉴 구성 벤치마크에서 선택하는 항목 수.
+pub const MENU_SELECTED: usize = 10_000;
+
+/// 선택 1만 개에서 오른쪽 메뉴를 만드는 시간의 기준(로컬, 릴리스 빌드).
+///
+/// 구성은 이미 가진 상태만 보는 순수 함수라 선택 수와 상관없이 항목 열댓 개를 늘어놓는 일이다. 값은 마이크로초 아래이고,
+/// 선택한 항목을 훑는 실수(선택 수에 비례)만 잡으려는 기준이다. 오른쪽 클릭에서 메뉴가 뜨기까지는 한 프레임 안이어야 하므로
+/// 1ms면 넉넉하다.
+pub const MENU_TARGET: Duration = Duration::from_millis(1);
+
+/// CI가 실패시키는 메뉴 구성 시간 상한: 로컬 기준 [`MENU_TARGET`]의 10배([`LIST_LIMIT`]과 같은 까닭).
+pub const MENU_LIMIT: Duration = Duration::from_millis(10);
+
+/// 항목 메뉴와 빈 곳 메뉴 구성의 측정. 둘 다 선택 [`MENU_SELECTED`]개에서 재고, 맥락을 모으는 시간을 포함한다.
+pub struct MenuMeasurement {
+    pub item: Measurement,
+    pub background: Measurement,
+}
+
+/// 시험 폴더(항목 [`MENU_SELECTED`]개)를 열어 모두 선택한 활성 탭에서 오른쪽 메뉴를 만드는 시간을 `runs`번씩 잰다
+/// (한 번 데운 뒤). 선택 수가 다르거나 메뉴가 비면 실패한다. [`Measurement::item_count`]는 선택 수다.
+pub fn measure_menu(runs: usize) -> Result<MenuMeasurement, String> {
+    use facet_core::Location;
+    use facet_core::menu::MenuKind;
+    use facet_core::window::App;
+
+    let path = std::env::temp_dir()
+        .join("facet-test-folders")
+        .join(format!("items-{MENU_SELECTED}"));
+    make_test_folder(&path, MENU_SELECTED).map_err(|e| e.to_string())?;
+    let mut app = App::new(Some(Location::file_system(&path)));
+    app.wait(Duration::from_secs(60))
+        .ok_or("시험 폴더를 읽지 못했습니다")?;
+    {
+        let tab = app.active_tab_mut();
+        tab.select_only(0);
+        tab.select_range(MENU_SELECTED - 1);
+        if tab.selected_count() != MENU_SELECTED {
+            return Err(format!(
+                "선택 수가 다릅니다: {MENU_SELECTED}개를 기대했지만 {}개",
+                tab.selected_count()
+            ));
+        }
+    }
+    let measure = |kind: MenuKind| -> Result<Measurement, String> {
+        if app.context_menu(kind).entries.is_empty() {
+            return Err("메뉴가 비었습니다".to_owned());
+        }
+        let mut times = Vec::with_capacity(runs);
+        for _ in 0..runs {
+            let start = Instant::now();
+            let menu = app.context_menu(kind);
+            times.push(start.elapsed());
+            std::hint::black_box(&menu);
+        }
+        Ok(Measurement {
+            item_count: MENU_SELECTED,
+            times,
+        })
+    };
+    Ok(MenuMeasurement {
+        item: measure(MenuKind::Item)?,
+        background: measure(MenuKind::Background)?,
+    })
+}
+
+/// 항목 메뉴·빈 곳 메뉴 구성 중앙값이 `limit`을 넘으면 넘은 수치를 담은 메시지를 돌려준다.
+pub fn check_menu_limit(m: &MenuMeasurement, limit: Duration) -> Result<(), String> {
+    for (name, t) in [("항목 메뉴", &m.item), ("빈 곳 메뉴", &m.background)] {
+        if t.median() > limit {
+            return Err(format!(
+                "{name} 구성 상한 초과: 선택 {}개 중앙값 {:.3}ms > 상한 {}ms (최악 {:.3}ms)",
                 t.item_count,
                 t.median().as_secs_f64() * 1000.0,
                 limit.as_millis(),

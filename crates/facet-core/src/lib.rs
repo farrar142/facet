@@ -15,6 +15,7 @@ pub mod job;
 pub mod launch;
 mod location;
 pub mod measure;
+pub mod menu;
 pub mod name_input;
 pub mod placement;
 mod provider;
