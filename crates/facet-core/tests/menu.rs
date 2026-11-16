@@ -23,6 +23,7 @@ fn context(kind: MenuKind) -> MenuContext {
         cursor_is_folder: false,
         single_folder_selected: false,
         location_is_folder: true,
+        location_is_results: false,
         panel_count: 1,
         opposite_is_folder: false,
         clipboard_has_files: false,

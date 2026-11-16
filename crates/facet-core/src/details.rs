@@ -9,9 +9,12 @@
 //! 유형 열은 화면 문장이 아니라 [`FileType`]으로 돌려준다(ADR-0007). 「파일 폴더」·「TXT 파일」
 //! 같은 글자는 앱이 만든다. 크기와 날짜는 수와 단위만이라 여기서 글자로 만든다.
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::HashSet;
-use std::ffi::OsString;
+use std::collections::{HashMap, HashSet};
+use std::ffi::{OsStr, OsString};
+use std::path::Path;
+use std::sync::Arc;
 
 use crate::Item;
 use crate::file_list::format_modified_local;
@@ -28,6 +31,8 @@ pub enum Column {
     Type,
     /// 크기.
     Size,
+    /// 위치: 항목이 든 폴더(검색 결과 위치에만 뜻이 있다). 폴더 목록에서는 모든 항목이 같은 폴더라 이름 순서다.
+    Location,
 }
 
 /// 정렬 방향.
@@ -207,6 +212,13 @@ fn is_caseless(c: char) -> bool {
     matches!(c, '\u{3000}'..='\u{9FFF}' | '\u{AC00}'..='\u{D7A3}' | '\u{1F300}'..='\u{1FAFF}')
 }
 
+/// 검색 결과 항목이 든 폴더와 그 폴더 경로의 자연 정렬 키(위치 열 정렬). 같은 폴더의 항목끼리 나눠 쓴다.
+#[derive(Debug, Clone)]
+struct Folder {
+    path: Arc<Path>,
+    key: Arc<[u8]>,
+}
+
 /// 정렬에 쓰는 값을 미리 계산해 둔 항목.
 #[derive(Debug, Clone)]
 struct Entry {
@@ -215,16 +227,47 @@ struct Entry {
     key: Vec<u8>,
     /// 확장자의 키가 `key` 안에서 시작하는 위치. 폴더와 확장자 없는 파일은 `None`.
     extension: Option<usize>,
+    /// 검색 결과 항목이면 든 폴더. 폴더 목록의 항목은 `None`이다(모두 탭 위치 안).
+    folder: Option<Folder>,
 }
 
 impl Entry {
     fn new(item: Item) -> Self {
+        Self::in_folder(item, None)
+    }
+
+    fn in_folder(item: Item, folder: Option<Folder>) -> Self {
         let (key, extension) = natural_key_and_extension(&item.name.to_string_lossy());
         let extension = extension.filter(|_| !item.is_folder);
         Entry {
             item,
             key,
             extension,
+            folder,
+        }
+    }
+
+    fn folder_key(&self) -> Option<&[u8]> {
+        self.folder.as_ref().map(|folder| &*folder.key)
+    }
+
+    /// 선택·커서가 이 항목을 기억하는 열쇠: 폴더 목록이면 이름, 검색 결과면 전체 경로.
+    fn selection_key(&self) -> Cow<'_, OsStr> {
+        match &self.folder {
+            None => Cow::Borrowed(self.item.name.as_os_str()),
+            Some(folder) => Cow::Owned(folder.path.join(&self.item.name).into_os_string()),
+        }
+    }
+
+    /// 열쇠가 이 항목의 것인가. 경로를 만들지 않고 비교한다.
+    fn has_key(&self, key: &OsStr) -> bool {
+        match &self.folder {
+            None => self.item.name == key,
+            Some(folder) => {
+                let path = Path::new(key);
+                path.file_name() == Some(self.item.name.as_os_str())
+                    && path.parent() == Some(&*folder.path)
+            }
         }
     }
 
@@ -257,6 +300,7 @@ fn compare_entries(a: &Entry, b: &Entry, sort: Sort) -> Ordering {
         // 폴더는 크기를 보이지 않으므로 크기로 가르지 않는다.
         Column::Size if a.item.is_folder => Ordering::Equal,
         Column::Size => a.item.size.cmp(&b.item.size),
+        Column::Location => a.folder_key().cmp(&b.folder_key()),
     };
     directed(key).then_with(|| a.compare_names(b))
 }
@@ -317,6 +361,96 @@ impl DetailsList {
         let sort = self.sort;
         self.entries
             .sort_unstable_by(|a, b| compare_entries(a, b, sort));
+    }
+
+    /// 검색 결과 항목들(든 폴더와 항목)을 더한다. 더한 것만 정렬해 이미 정렬된 목록과 합치므로 결과가 많아도 묶음마다
+    /// 다시 정렬하지 않는다. 같은 폴더의 정렬 키는 한 번만 만든다.
+    pub fn extend_found(&mut self, found: impl IntoIterator<Item = (Arc<Path>, Item)>) {
+        let mut keys: HashMap<Arc<Path>, Arc<[u8]>> = HashMap::new();
+        let mut added: Vec<Entry> = found
+            .into_iter()
+            .map(|(path, item)| {
+                let key = keys
+                    .entry(Arc::clone(&path))
+                    .or_insert_with(|| natural_key(&path.to_string_lossy()).into())
+                    .clone();
+                Entry::in_folder(item, Some(Folder { path, key }))
+            })
+            .collect();
+        if added.is_empty() {
+            return;
+        }
+        let sort = self.sort;
+        added.sort_unstable_by(|a, b| compare_entries(a, b, sort));
+        let old = std::mem::take(&mut self.entries);
+        let mut merged = Vec::with_capacity(old.len() + added.len());
+        let mut old = old.into_iter().peekable();
+        let mut added = added.into_iter().peekable();
+        loop {
+            let take_old = match (old.peek(), added.peek()) {
+                (Some(a), Some(b)) => compare_entries(a, b, sort) != Ordering::Greater,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => break,
+            };
+            let next = if take_old { old.next() } else { added.next() };
+            merged.extend(next);
+        }
+        self.entries = merged;
+    }
+
+    /// `index`번째 항목이 든 폴더(검색 결과 항목). 폴더 목록의 항목은 `None`이다.
+    pub fn folder(&self, index: usize) -> Option<&Arc<Path>> {
+        self.entries
+            .get(index)
+            .and_then(|e| e.folder.as_ref())
+            .map(|folder| &folder.path)
+    }
+
+    /// `index`번째 항목의 선택 열쇠: 폴더 목록이면 이름, 검색 결과면 전체 경로.
+    pub(crate) fn selection_key(&self, index: usize) -> Option<Cow<'_, OsStr>> {
+        self.entries.get(index).map(Entry::selection_key)
+    }
+
+    /// `index`번째 항목이 열쇠 `key`의 것인가.
+    pub(crate) fn has_key(&self, index: usize, key: &OsStr) -> bool {
+        self.entries.get(index).is_some_and(|e| e.has_key(key))
+    }
+
+    /// 검색 결과 항목에 facet이 한 작업을 반영한다: `keep`이 `false`인 항목은 빼고, `rename`이 새 폴더·새 이름을
+    /// 주는 항목은 바꾼다(폴더 경로, 항목 이름). 바뀐 것이 있으면 다시 정렬하고 `true`다.
+    pub(crate) fn apply_path_changes(
+        &mut self,
+        mut keep: impl FnMut(&Path, &Item) -> bool,
+        mut rename: impl FnMut(&Path, &Item) -> Option<(Arc<Path>, OsString)>,
+    ) -> bool {
+        let before = self.entries.len();
+        self.entries.retain(|entry| match &entry.folder {
+            Some(folder) => keep(&folder.path, &entry.item),
+            None => true,
+        });
+        let mut changed = self.entries.len() != before;
+        let mut keys: HashMap<Arc<Path>, Arc<[u8]>> = HashMap::new();
+        for entry in &mut self.entries {
+            let Some(folder) = &entry.folder else {
+                continue;
+            };
+            let Some((path, name)) = rename(&folder.path, &entry.item) else {
+                continue;
+            };
+            let key = keys
+                .entry(Arc::clone(&path))
+                .or_insert_with(|| natural_key(&path.to_string_lossy()).into())
+                .clone();
+            let mut item = entry.item.clone();
+            item.name = name;
+            *entry = Entry::in_folder(item, Some(Folder { path, key }));
+            changed = true;
+        }
+        if changed {
+            self.resort();
+        }
+        changed
     }
 
     /// 항목 수.

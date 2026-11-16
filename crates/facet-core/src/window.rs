@@ -49,6 +49,11 @@
 //!
 //! 주소창: 친 글자로 가기([`App::go_to_text`])는 해석한 뒤 다른 이동처럼 일꾼 스레드에서 읽는다. 자동 완성 후보
 //! ([`App::complete_address`])는 폴더를 읽느라 막히므로 일꾼 스레드에서 읽고 같은 통로로 받는다.
+//!
+//! 검색 결과 위치([`crate::search_results`]): [`App::start_search`]가 활성 탭을 검색 결과 위치로 옮긴다(기록에 남음).
+//! 그 이동이 확정되면 실시간 탐색을 띄워 탭에 붙이고, 사건은 같은 깨우기로 알려 [`App::poll`]이 탭에 넣는다
+//! ([`Update::Search`]). 탭이 다른 곳으로 가거나 닫히면(창 닫기 포함) 탭이 피드를 버려 탐색이 멈춘다. facet이 한
+//! 작업(이름바꾸기, 삭제·휴지통 삭제·이동, 그 실행취소·다시 실행)은 끝날 때 모든 검색 결과 탭에 반영한다.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -73,8 +78,10 @@ use crate::job::{
     JobKind, JobQueue, JournalSink, NotRecyclableAnswer, RevertJob,
 };
 use crate::launch::LaunchTarget;
+use crate::live_search::LiveSearch;
 use crate::menu::{self, Menu, MenuContext, MenuKind};
 use crate::placement::Placement;
+use crate::search_results::PathChange;
 use crate::selection::Pick;
 use crate::session::{PanelSession, Session, TabSession, WindowSession};
 use crate::tab::{
@@ -421,6 +428,9 @@ pub enum Update {
     /// 복사·경로 복사·붙여넣기의 결과([`App::execute`]의 [`CommandId::Copy`]·[`CommandId::CopyPath`]·
     /// [`CommandId::Paste`]). 화면은 실패하면 까닭을 상태 줄에 보인다.
     Clipboard(Result<ClipboardDone, ClipboardFailure>),
+    /// 검색 결과 위치의 결과·진행이 바뀌었다(찾은 항목이 들어왔거나 검색이 끝났다, [`Tab::search`]). facet이 한 작업이
+    /// 결과 목록을 바꿨을 때도 온다.
+    Search,
 }
 
 /// 클립보드 명령이 해낸 일.
@@ -596,6 +606,8 @@ pub struct App {
     /// 잘라내기 표시가 있던 클립보드를 이동으로 붙여넣은 작업과 그때 읽은 클립보드 차례 번호. 끝나면 셸 규약을
     /// 알리고 클립보드를 비운다.
     cut_pastes: HashMap<JobId, u32>,
+    /// facet이 한 작업이 결과 목록을 바꾼 검색 결과 탭. 다음 [`App::poll`]이 [`Update::Search`]로 알린다.
+    changed_results: Vec<TabId>,
     outbox: Outbox,
     receiver: Receiver<Message>,
 }
@@ -732,7 +744,8 @@ impl App {
                             .tabs
                             .iter()
                             .map(|(_, tab)| TabSession {
-                                location: tab.location().clone(),
+                                // 검색 결과 위치는 검색한 폴더로 남는다.
+                                location: tab.location().for_session(),
                                 sort: tab.sort(),
                             })
                             .collect(),
@@ -799,6 +812,7 @@ impl App {
             clipboard_files: Arc::default(),
             cut_marks: Arc::default(),
             cut_pastes: HashMap::new(),
+            changed_results: Vec::new(),
             outbox: Outbox {
                 sender,
                 waker: Arc::default(),
@@ -1051,7 +1065,11 @@ impl App {
     pub fn open_in_new_tab(&mut self, index: usize) -> Option<TabId> {
         let tab = self.active_tab();
         let item = tab.get(index).filter(|item| item.is_folder)?;
-        let location = provider_for(tab.location()).child(tab.location(), &item.name);
+        // 검색 결과 항목은 제 폴더 안에 있다.
+        let location = match tab.item_path(index) {
+            Some(path) => Location::file_system(path),
+            None => provider_for(tab.location()).child(tab.location(), &item.name),
+        };
         Some(self.open_tab(location, false))
     }
 
@@ -1378,7 +1396,73 @@ impl App {
         while let Ok(message) = self.receiver.try_recv() {
             updates.push(self.deliver(message));
         }
+        updates.extend(self.pump_searches());
+        for id in std::mem::take(&mut self.changed_results) {
+            if !updates.contains(&(id, Update::Search)) {
+                updates.push((id, Update::Search));
+            }
+        }
         updates
+    }
+
+    /// 검색 결과 탭마다 피드에서 온 사건을 결과에 넣는다. 바뀐 탭마다 [`Update::Search`].
+    fn pump_searches(&mut self) -> Vec<(TabId, Update)> {
+        self.tabs_mut()
+            .filter(|(_, tab)| tab.search().is_some())
+            .filter_map(|(id, tab)| tab.pump_search().then_some((id, Update::Search)))
+            .collect()
+    }
+
+    /// 탭 `id`가 방금 검색 결과 위치로 확정됐으면 실시간 탐색을 띄워 붙인다. 사건은 같은 깨우기로 알린다.
+    fn start_tab_search(&mut self, id: TabId) {
+        let outbox = self.outbox.clone();
+        let Some(tab) = self.tab_mut(id) else {
+            return;
+        };
+        let Some(request) = tab.search_request() else {
+            return;
+        };
+        match LiveSearch::start_with_waker(request, move || outbox.wake()) {
+            Ok(search) => {
+                tab.attach_search(Box::new(search));
+            }
+            Err(error) => tab.search_failed(error),
+        }
+    }
+
+    /// 활성 탭에서 검색을 시작한다: 탭이 검색 결과 위치(지금 폴더 아래, 이름 조건 `query`)로 가고(뒤로·앞으로 기록에
+    /// 남아 뒤로 가면 원래 폴더), 그 이동이 확정되면 실시간 탐색이 결과를 흘려 넣는다([`Update::Search`], 진행은
+    /// [`Tab::search`]). 숨김 항목 보이기는 시작할 때의 상태를 따른다. 검색 결과 위치에서 부르면 같은 폴더를 다시 찾는다.
+    /// 검색어가 비었거나 찾을 폴더가 없으면(실제 폴더가 아님) 아무것도 하지 않고 `false`다. 막지 않는다.
+    pub fn start_search(&mut self, query: &str) -> bool {
+        if !self.has_windows() || query.trim().is_empty() {
+            return false;
+        }
+        let location = self.active_tab().location();
+        let folder = match (location.file_system_path(), location.search_scope()) {
+            (Some(path), _) => path.to_path_buf(),
+            (None, Some(scope)) => scope.folder.clone(),
+            (None, None) => return false,
+        };
+        self.navigate(Navigation::Go(Location::search_results(folder, query)))
+    }
+
+    /// facet이 한 작업의 변화를 모든 검색 결과 탭의 결과 목록에 반영한다. 바뀐 탭은 다음 [`App::poll`]이
+    /// [`Update::Search`]로 알린다.
+    fn apply_path_changes(&mut self, changes: &[PathChange]) {
+        if changes.is_empty() {
+            return;
+        }
+        let mut changed = Vec::new();
+        for (id, tab) in self.tabs_mut() {
+            if tab.apply_path_changes(changes) {
+                changed.push(id);
+            }
+        }
+        if !changed.is_empty() {
+            self.changed_results.extend(changed);
+            self.outbox.wake();
+        }
     }
 
     /// 읽기 결과 하나가 올 때까지 `timeout`까지 기다려 탭에 넘긴다. 시간 안에 오지 않으면 `None`이다.
@@ -1409,6 +1493,9 @@ impl App {
                     // 탭이 이미 닫혔다.
                     None => ReadOutcome::Stale,
                 };
+                if outcome == ReadOutcome::Committed {
+                    self.start_tab_search(id);
+                }
                 (id, Update::Read(outcome))
             }
             Message::Changes { tab: id, batch } => {
@@ -1439,6 +1526,12 @@ impl App {
                     self.record_edit(edited, merge);
                     if let Some(tab) = self.tab_mut(id) {
                         tab.apply_edit(edited);
+                    }
+                    if let Some(from) = &edited.original {
+                        self.apply_path_changes(&[PathChange::Renamed {
+                            from: from.clone(),
+                            to: edited.path.clone(),
+                        }]);
                     }
                 }
                 (id, Update::Edited(result))
@@ -1593,6 +1686,7 @@ impl App {
                     .next()
                     .is_some_and(|item| item.is_folder),
             location_is_folder: tab.location().file_system_path().is_some(),
+            location_is_results: tab.location().is_search_results(),
             panel_count: window.panels().len(),
             opposite_is_folder: window
                 .opposite_panel()
@@ -1677,7 +1771,8 @@ impl App {
             CommandId::SortByName
             | CommandId::SortByModified
             | CommandId::SortByType
-            | CommandId::SortBySize => {
+            | CommandId::SortBySize
+            | CommandId::SortByLocation => {
                 if let Some(column) = command.sort_column() {
                     let sort = command::sort_toggled(self.active_tab().sort(), column);
                     self.set_sort(sort);
@@ -1749,6 +1844,25 @@ impl App {
             }
             CommandId::ShowHistory => return Execution::ShowHistory,
             CommandId::Filter => return Execution::Filter,
+            CommandId::ShowInFolder => {
+                let id = self.active_tab_id();
+                return match self.active_tab_mut().show_in_folder() {
+                    Some(request) => {
+                        self.spawn_read(id, request);
+                        Execution::Done
+                    }
+                    None => Execution::Disabled,
+                };
+            }
+            CommandId::StopSearch => {
+                let id = self.active_tab_id();
+                return if self.active_tab_mut().stop_search() {
+                    self.changed_results.push(id);
+                    Execution::Done
+                } else {
+                    Execution::Disabled
+                };
+            }
             CommandId::Delete | CommandId::DeletePermanently => {
                 let Some(plan) = self.delete_plan(command) else {
                     return Execution::Disabled;
@@ -1844,15 +1958,16 @@ impl App {
         let Some(item) = tab.cursor_item() else {
             return Execution::Disabled;
         };
+        let path = tab.cursor_path();
         if item.is_folder {
-            let name = item.name.clone();
-            self.navigate(Navigation::Open(name));
+            // 검색 결과 항목은 제 폴더 안에 있으므로 전체 경로로 간다.
+            let navigation = match (&path, tab.location().is_search_results()) {
+                (Some(path), true) => Navigation::Go(Location::file_system(path)),
+                _ => Navigation::Open(item.name.clone()),
+            };
+            self.navigate(navigation);
             return Execution::Done;
         }
-        let path = tab
-            .location()
-            .file_system_path()
-            .map(|folder| folder.join(&item.name));
         let id = self.active_tab_id();
         self.active_tab_mut().set_open_error(None);
         let Some(path) = path else {
@@ -1928,19 +2043,38 @@ impl App {
             return Err(EditError::Unavailable);
         }
         let tab = self.active_tab();
-        let folder = tab
-            .location()
-            .file_system_path()
-            .ok_or(EditError::Unavailable)?
-            .to_path_buf();
-        if !tab.all_names().any(|name| name == original) {
-            return Err(EditError::Unavailable);
-        }
+        let folder = if tab.location().is_search_results() {
+            // 결과 항목은 이름이 겹칠 수 있다: 이름 입력란은 커서 항목에 열리므로 커서 항목이 그 이름이면 그것, 아니면
+            // 그 이름의 첫 항목의 폴더다.
+            let index = tab
+                .cursor()
+                .filter(|&i| tab.get(i).is_some_and(|item| item.name == original))
+                .or_else(|| {
+                    (0..tab.len()).find(|&i| tab.get(i).is_some_and(|item| item.name == original))
+                })
+                .ok_or(EditError::Unavailable)?;
+            tab.folder_of(index)
+                .ok_or(EditError::Unavailable)?
+                .to_path_buf()
+        } else {
+            let folder = tab
+                .location()
+                .file_system_path()
+                .ok_or(EditError::Unavailable)?
+                .to_path_buf();
+            if !tab.all_names().any(|name| name == original) {
+                return Err(EditError::Unavailable);
+            }
+            folder
+        };
         if original == std::ffi::OsStr::new(new_name) {
             return Err(EditError::Unchanged);
         }
         crate::name_input::validate_name(new_name).map_err(EditError::InvalidName)?;
-        if edit::name_taken(tab.all_names(), original, new_name) {
+        // 검색 결과에는 그 폴더의 항목이 다 있지 않으므로 같은 이름은 파일 연산이 막는다(실행 중 실패 NameTaken).
+        if !tab.location().is_search_results()
+            && edit::name_taken(tab.all_names(), original, new_name)
+        {
             return Err(EditError::NameTaken);
         }
         let original = original.to_os_string();
@@ -2044,11 +2178,12 @@ impl App {
     /// 감싸 줄마다 하나), 선택이 없으면 현재 폴더 경로 하나. 위치가 실제 폴더가 아니면 `None`.
     pub fn copy_path_text(&self) -> Option<String> {
         let tab = self.active_tab();
-        let folder = tab.location().file_system_path()?;
-        let mut paths: Vec<PathBuf> = tab
-            .selected_items()
-            .map(|item| folder.join(&item.name))
-            .collect();
+        // 검색 결과 위치의 「현재 폴더」는 검색한 폴더다.
+        let folder = match tab.location().search_scope() {
+            Some(scope) => scope.folder.as_path(),
+            None => tab.location().file_system_path()?,
+        };
+        let mut paths = tab.selected_paths();
         if paths.is_empty() {
             paths.push(folder.to_path_buf());
         }
@@ -2189,13 +2324,13 @@ impl App {
     /// 활성 탭의 선택(목록 순서), 없으면 커서 항목 하나의 경로. 위치가 실제 폴더가 아니거나 둘 다 없으면 `None`.
     fn selected_sources(&self) -> Option<Vec<PathBuf>> {
         let tab = self.active_window().active_panel().active_tab();
-        let folder = tab.location().file_system_path()?;
-        let mut sources: Vec<PathBuf> = tab
-            .selected_items()
-            .map(|item| folder.join(&item.name))
-            .collect();
+        // 실제 폴더이거나 검색 결과 위치여야 한다. 결과 항목은 항목마다 제 폴더 경로다.
+        if tab.location().file_system_path().is_none() && !tab.location().is_search_results() {
+            return None;
+        }
+        let mut sources = tab.selected_paths();
         if sources.is_empty() {
-            sources.push(folder.join(&tab.cursor_item()?.name));
+            sources.push(tab.cursor_path()?);
         }
         Some(sources)
     }
@@ -2384,7 +2519,9 @@ impl App {
         let mut changed = false;
         for event in self.jobs.poll() {
             if let JobEvent::Finished { job, summary } = &event {
-                self.history.finish(*job);
+                if let Some(changes) = self.history.finish_reverted(*job) {
+                    self.apply_path_changes(&changes);
+                }
                 self.record_transfer(*job, summary);
                 self.finish_cut_paste(*job, summary);
             }
@@ -2401,6 +2538,13 @@ impl App {
             return;
         };
         let journal = std::mem::take(&mut *journal.lock().unwrap_or_else(|e| e.into_inner()));
+        // 지우거나 옮긴 항목은 검색 결과에서도 빠진다.
+        let changes: Vec<PathChange> = journal
+            .steps
+            .iter()
+            .filter_map(PathChange::of_step)
+            .collect();
+        self.apply_path_changes(&changes);
         if journal.steps.is_empty() && !journal.overwrote {
             return;
         }

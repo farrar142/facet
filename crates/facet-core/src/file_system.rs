@@ -277,9 +277,12 @@ pub(crate) fn make_item(
     })
 }
 
+/// 공급자가 받은 위치의 경로. 파일 시스템 공급자는 실제 폴더만 받지만, 잘못 넘어온 검색 결과 위치는 검색한 폴더로 본다.
 fn path_of(location: &Location) -> &Path {
-    let Location::FileSystem(path) = location;
-    path
+    match location {
+        Location::FileSystem(path) => path,
+        Location::SearchResults(scope) => &scope.folder,
+    }
 }
 
 /// 드라이브·공유 접두어의 보이는 이름. 긴 경로 접두어(`\\?\`, `\\?\UNC\`)를 뺀다.

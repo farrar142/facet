@@ -21,6 +21,7 @@ pub mod name_input;
 pub mod name_match;
 pub mod placement;
 mod provider;
+pub mod search_results;
 pub mod selection;
 pub mod session;
 pub mod tab;
@@ -30,7 +31,7 @@ pub mod work_area;
 
 pub use facet_win::OpenError;
 pub use file_system::FileSystemProvider;
-pub use location::{Attributes, Item, ListError, Location};
+pub use location::{Attributes, Item, ListError, Location, SearchScope};
 pub use provider::{Candidate, PathSegment, Provider, ResolveError, Resolved, provider_for};
 
 /// 코어 크레이트의 버전.

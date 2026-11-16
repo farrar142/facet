@@ -131,5 +131,6 @@ pub struct PathSegment {
 pub fn provider_for(location: &Location) -> &'static dyn Provider {
     match location {
         Location::FileSystem(_) => &FileSystemProvider,
+        Location::SearchResults(_) => &crate::search_results::SearchResultsProvider,
     }
 }

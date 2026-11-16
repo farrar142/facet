@@ -18,6 +18,18 @@ use std::time::SystemTime;
 pub enum Location {
     /// 파일 시스템 공급자가 읽는 실제 폴더. 로컬, 네트워크(UNC), 긴 경로(`\\?\`) 모두 여기다.
     FileSystem(PathBuf),
+    /// **검색 결과 위치**: 검색한 폴더 아래에서 이름 조건에 맞는 항목들을 탭 안의 위치처럼 보이는 것. 실제 폴더가
+    /// 아니다([`Location::file_system_path`]가 `None`). 목록은 읽지 않고 검색이 채운다([`crate::search_results`]).
+    SearchResults(SearchScope),
+}
+
+/// 검색 결과 위치가 무엇을 찾았는가: 검색한 폴더와 검색어(이름 조건).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SearchScope {
+    /// 검색한 폴더(실제 폴더). 결과 항목은 이 아래에 있다.
+    pub folder: PathBuf,
+    /// 검색어: 이름 조건([`crate::name_match`]의 규칙, 필터와 같음).
+    pub query: String,
 }
 
 impl Location {
@@ -26,10 +38,40 @@ impl Location {
         Self::FileSystem(path.into())
     }
 
-    /// 실제 폴더 위치면 그 경로. 다른 공급자의 위치면 `None`이다.
+    /// 폴더 `folder` 아래에서 이름 조건 `query`로 찾은 검색 결과 위치.
+    pub fn search_results(folder: impl Into<PathBuf>, query: impl Into<String>) -> Self {
+        Self::SearchResults(SearchScope {
+            folder: folder.into(),
+            query: query.into(),
+        })
+    }
+
+    /// 실제 폴더 위치면 그 경로. 다른 공급자의 위치(검색 결과 위치 포함)면 `None`이다.
     pub fn file_system_path(&self) -> Option<&Path> {
         match self {
             Self::FileSystem(path) => Some(path),
+            Self::SearchResults(_) => None,
+        }
+    }
+
+    /// 검색 결과 위치면 검색한 폴더와 검색어.
+    pub fn search_scope(&self) -> Option<&SearchScope> {
+        match self {
+            Self::SearchResults(scope) => Some(scope),
+            Self::FileSystem(_) => None,
+        }
+    }
+
+    /// 검색 결과 위치인가.
+    pub fn is_search_results(&self) -> bool {
+        matches!(self, Self::SearchResults(_))
+    }
+
+    /// 세션에 남길 위치: 검색 결과 위치는 검색한 폴더로 되돌린다(결과는 탐색 시점의 것이라 남기지 않는다).
+    pub fn for_session(&self) -> Location {
+        match self {
+            Self::SearchResults(scope) => Self::FileSystem(scope.folder.clone()),
+            other => other.clone(),
         }
     }
 }
@@ -38,6 +80,9 @@ impl fmt::Display for Location {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::FileSystem(path) => write!(f, "{}", path.display()),
+            Self::SearchResults(scope) => {
+                write!(f, "{} ? {}", scope.folder.display(), scope.query)
+            }
         }
     }
 }
