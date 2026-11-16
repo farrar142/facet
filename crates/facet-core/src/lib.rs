@@ -6,6 +6,7 @@
 pub mod clipboard;
 pub mod command;
 pub mod details;
+pub mod dragdrop;
 pub mod edit;
 pub mod file_list;
 mod file_system;
