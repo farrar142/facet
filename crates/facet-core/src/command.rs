@@ -105,6 +105,9 @@ pub enum CommandId {
     /// 필터: 활성 패널에 필터 입력란을 열고 포커스를 준다([`crate::window::Execution::Filter`]). 치는 즉시 현재 폴더의
     /// 목록이 이름으로 좁혀진다([`crate::window::App::set_filter`]). 늘 켜져 있다.
     Filter,
+    /// 검색: 활성 패널의 검색창에 포커스를 준다([`crate::window::Execution::Search`]). 검색창에서 Enter를 누르면
+    /// [`crate::window::App::start_search`]가 현재 폴더 아래 실시간 탐색을 시작한다. 늘 켜져 있다.
+    Search,
     /// 삭제: 활성 탭의 선택(없으면 커서 항목)을 휴지통으로 보낸다. 묻지 않고 곧바로 휴지통 삭제 작업을 넣는다. 원본이
     /// 모두 휴지통이 없는 위치에 있으면 영구 삭제가 되므로 화면이 먼저 확인받는다
     /// ([`crate::window::Execution::ConfirmDelete`]). 원본이 없거나 위치가 실제 폴더가 아니면 꺼진다.
@@ -135,7 +138,7 @@ pub enum CommandId {
 
 impl CommandId {
     /// 모든 명령. 명령 팔레트는 검색어가 없으면 이 순서로 보인다.
-    pub const ALL: [CommandId; 51] = [
+    pub const ALL: [CommandId; 52] = [
         CommandId::Open,
         CommandId::Back,
         CommandId::Forward,
@@ -178,6 +181,7 @@ impl CommandId {
         CommandId::Redo,
         CommandId::ShowHistory,
         CommandId::Filter,
+        CommandId::Search,
         CommandId::Delete,
         CommandId::DeletePermanently,
         CommandId::Copy,
@@ -236,6 +240,7 @@ impl CommandId {
             CommandId::Redo => "redo",
             CommandId::ShowHistory => "show-history",
             CommandId::Filter => "filter",
+            CommandId::Search => "search",
             CommandId::Delete => "delete",
             CommandId::DeletePermanently => "delete-permanently",
             CommandId::Copy => "copy",
@@ -347,6 +352,7 @@ impl CommandId {
             CommandId::Redo => const { &[key(letter('Y')).ctrl()] },
             CommandId::ShowHistory => &[],
             CommandId::Filter => const { &[key(letter('F')).ctrl().shift()] },
+            CommandId::Search => const { &[key(letter('F')).ctrl(), key(letter('E')).ctrl()] },
             CommandId::Delete => const { &[key(Key::Delete)] },
             CommandId::DeletePermanently => const { &[key(Key::Delete).shift()] },
             CommandId::Copy => const { &[key(letter('C')).ctrl()] },
@@ -422,7 +428,8 @@ impl CommandId {
             | CommandId::Undo
             | CommandId::Redo
             | CommandId::ShowHistory
-            | CommandId::Filter => true,
+            | CommandId::Filter
+            | CommandId::Search => true,
         }
     }
 

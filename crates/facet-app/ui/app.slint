@@ -11,6 +11,8 @@ export struct Row {
     modified: string,
     kind: string,
     size: string,
+    // 검색 결과 항목이 든 폴더 경로(폴더 목록에서는 비어 있다).
+    location: string,
     // 선택한 항목인가.
     selected: bool,
     // 커서 항목인가(키보드가 가리키는 항목. 선택과 다르다).
@@ -100,6 +102,10 @@ export struct PanelData {
     item-count: int,
     // 필터 중이면 필터 없이 보일 전체 항목 수, 아니면 -1.
     total-count: int,
+    // 검색 결과 위치인가(위치 열을 보인다), 탐색 상태 띠 글자(비면 띠 없음), 탐색 중인가(중지 단추).
+    results: bool,
+    search-status: string,
+    search-running: bool,
     selected-count: int,
     selected-size: string,
 }
@@ -1051,6 +1057,66 @@ component FilterBar inherits Rectangle {
     }
 }
 
+// 검색창: 이름을 쳐 Enter로 현재 폴더 아래 실시간 탐색을 시작한다. 「이름」「내용」 전환이 있고 「내용」은 내용 검색이
+// 생길 때까지 꺼 둔다. 한글 IME의 조합 글자는 TextInput이 처리하고 Enter가 확정한다. 열릴 때와 `focus-count`가
+// 바뀔 때(명령을 또 눌렀다) 포커스를 받고 전체를 선택한다.
+component SearchBar inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    in property <int> focus-count;
+    callback submit(string);
+    callback escape();
+
+    height: 28px;
+    background: Palette.background;
+    border-width: 1px;
+    border-radius: 3px;
+    border-color: Palette.accent-background;
+    clip: true;
+
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 6px;
+        spacing: 8px;
+        input := TextInput {
+            horizontal-stretch: 1;
+            single-line: true;
+            vertical-alignment: center;
+            color: Palette.foreground;
+            init => {
+                self.focus();
+                self.select-all();
+            }
+            accepted => {
+                root.submit(self.text);
+            }
+            key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    root.escape();
+                    return accept;
+                }
+                reject
+            }
+        }
+        Text {
+            text: @tr("이름");
+            vertical-alignment: center;
+            font-weight: 700;
+            color: Palette.accent-background;
+        }
+        // 내용 검색은 아직 없다: 꺼 둔다.
+        Text {
+            text: @tr("내용");
+            vertical-alignment: center;
+            color: Palette.foreground.transparentize(60%);
+        }
+    }
+
+    changed focus-count => {
+        input.focus();
+        input.select-all();
+    }
+}
+
 // 패널 하나: 탭 줄, 주소창, 알림, 자세히 보기, 상태 표시줄. 창에 둘(좌우)까지 놓인다.
 // 패널을 누르면(어느 곳이든) `activate`가 먼저 불려 활성 패널이 되고, 그 뒤 동작은 활성 패널에 듣는다.
 // 이름 입력란과 주소창 고쳐 쓰기는 활성 패널에서만 열린다(창이 `editing`·`address-editing`을 활성 패널에만 준다).
@@ -1073,6 +1139,10 @@ component PanelView inherits Rectangle {
     in property <bool> filter-open;
     in-out property <string> filter-text;
     in property <int> filter-focus;
+    // 검색창(활성 패널에만 열린다): 열렸는가, 글자, 포커스를 다시 달라는 신호.
+    in property <bool> search-open;
+    in-out property <string> search-text;
+    in property <int> search-focus;
     in property <int> editing: -1;
     in-out property <string> edit-text;
     // 이름 입력란을 열 때 고를 범위(UTF-8 바이트), 곁에 보일 까닭(Rust의 문장 모듈이 만든다), 확장자 바꿈을 묻는 중인가.
@@ -1087,6 +1157,7 @@ component PanelView inherits Rectangle {
     in-out property <length> modified-width;
     in-out property <length> type-width;
     in-out property <length> size-width;
+    in-out property <length> location-width;
     in-out property <length> content-y <=> list.content-y;
     out property <length> view-height: list.visible-height;
     out property <length> tab-width: clamp(tab-strip.width / max(1, root.tabs.length), 90px, 200px);
@@ -1160,6 +1231,10 @@ component PanelView inherits Rectangle {
     // 필터: 글자가 바뀌었다(곧바로 목록을 좁힌다), Esc(필터를 지우고 닫는다).
     callback filter-edited(string);
     callback cancel-filter();
+    // 검색창: Enter(탐색 시작), Esc(닫기), 탐색 중지 단추.
+    callback search-submit(string);
+    callback cancel-search();
+    callback stop-search();
 
     // 활성 패널의 테두리. 패널이 하나면 그리지 않는다.
     border-width: root.split ? 2px : 0px;
@@ -1385,6 +1460,20 @@ component PanelView inherits Rectangle {
             }
         }
 
+        // 검색창: 현재 폴더 아래 이름을 실시간으로 찾는다.
+        if root.search-open: SearchBar {
+            text <=> root.search-text;
+            focus-count: root.search-focus;
+            submit(text) => {
+                root.search-submit(text);
+                root.focus-keys();
+            }
+            escape => {
+                root.cancel-search();
+                root.focus-keys();
+            }
+        }
+
         if root.data.address-problem != Problem.none: Text {
             text: root.data.address-problem == Problem.address-empty ? @tr("주소를 입력하세요")
                 : root.data.address-problem == Problem.address-invalid-character ? @tr("주소에 쓸 수 없는 글자가 있습니다: {}", root.data.address-problem-value)
@@ -1426,6 +1515,40 @@ component PanelView inherits Rectangle {
             text: @tr("자동 새로 고침 안 됨 (F5로 새로 고침)");
             wrap: word-wrap;
             color: #8a6d00;
+        }
+
+        // 탐색 상태 띠: 탐색 중이면 찾은 수·훑은 폴더 수와 중지 단추, 끝나면 요약.
+        if root.data.search-status != "": Rectangle {
+            height: 24px;
+            background: Palette.accent-background.transparentize(85%);
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                spacing: 8px;
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.data.search-status;
+                    overflow: elide;
+                    vertical-alignment: center;
+                    color: Palette.foreground;
+                }
+                if root.data.search-running: Rectangle {
+                    width: 52px;
+                    border-width: 1px;
+                    border-radius: 3px;
+                    border-color: Palette.border;
+                    Text {
+                        text: @tr("중지");
+                        color: Palette.foreground;
+                    }
+                    TouchArea {
+                        clicked => {
+                            root.activate();
+                            root.stop-search();
+                        }
+                    }
+                }
+            }
         }
 
         // 열 머리글
@@ -1473,6 +1596,17 @@ component PanelView inherits Rectangle {
                 sort => {
                     root.activate();
                     root.sort-by(3);
+                    root.focus-list();
+                }
+            }
+            if root.data.results: Header {
+                text: @tr("위치");
+                column-width <=> root.location-width;
+                sorted: root.data.sort-column == 4;
+                descending: root.data.sort-descending;
+                sort => {
+                    root.activate();
+                    root.sort-by(4);
                     root.focus-list();
                 }
             }
@@ -1656,6 +1790,16 @@ component PanelView inherits Rectangle {
                                 text: row.size;
                                 overflow: elide;
                                 horizontal-alignment: right;
+                                vertical-alignment: center;
+                                color: row.selected ? Palette.selection-foreground : Palette.foreground;
+                            }
+                        }
+                        if root.data.results: HorizontalLayout {
+                            width: root.location-width;
+                            padding-right: 8px;
+                            Text {
+                                text: row.location;
+                                overflow: elide;
                                 vertical-alignment: center;
                                 color: row.selected ? Palette.selection-foreground : Palette.foreground;
                             }
@@ -1968,6 +2112,10 @@ export component AppWindow inherits Window {
     in property <bool> filter-open;
     in-out property <string> filter-text;
     in property <int> filter-focus;
+    // 검색창(활성 패널): 열렸는가, 글자, 포커스를 다시 달라는 신호.
+    in property <bool> search-open;
+    in-out property <string> search-text;
+    in property <int> search-focus;
     // 자동 완성 후보(하위 폴더 이름)와 Tab·화살표로 고른 후보의 번호(없으면 -1).
     in property <[string]> candidates;
     in property <int> candidate-highlight: -1;
@@ -2044,6 +2192,7 @@ export component AppWindow inherits Window {
     in-out property <length> modified-width: 140px;
     in-out property <length> type-width: 120px;
     in-out property <length> size-width: 90px;
+    in-out property <length> location-width: 240px;
 
     // 키 입력 하나: 키의 글자와 수식 키. Rust가 명령이나 커서 이동으로 처리했으면 참을 돌려준다.
     // 거짓이면 글자 입력으로 보고 `typed`로 넘어온다(한글은 IME가 조합을 끝낸 뒤).
@@ -2132,6 +2281,10 @@ export component AppWindow inherits Window {
     // 필터 입력란: 글자가 바뀌었다(곧바로 거른다), Esc(필터를 지우고 닫는다).
     callback filter-edited(string);
     callback cancel-filter();
+    // 검색창: Enter(탐색 시작), Esc(닫기), 탐색 중지.
+    callback search-submit(string);
+    callback cancel-search();
+    callback stop-search();
 
     // 명령 팔레트: 글자가 바뀌었다(검색), 화살표(1·-1)로 골랐다, 줄을 실행한다(참이면 실행했다. 꺼진 명령이면 거짓),
     // 닫는다.
@@ -2326,6 +2479,9 @@ export component AppWindow inherits Window {
             filter-open: root.filter-open && self.active;
             filter-text <=> root.filter-text;
             filter-focus: root.filter-focus;
+            search-open: root.search-open && self.active;
+            search-text <=> root.search-text;
+            search-focus: root.search-focus;
             editing: self.active ? root.editing : -1;
             edit-text <=> root.edit-text;
             edit-selection-start: root.edit-selection-start;
@@ -2338,6 +2494,7 @@ export component AppWindow inherits Window {
             modified-width <=> root.modified-width;
             type-width <=> root.type-width;
             size-width <=> root.size-width;
+            location-width <=> root.location-width;
             activate => {
                 root.panel-pressed(0);
             }
@@ -2434,6 +2591,15 @@ export component AppWindow inherits Window {
             cancel-filter => {
                 root.cancel-filter();
             }
+            search-submit(text) => {
+                root.search-submit(text);
+            }
+            cancel-search => {
+                root.cancel-search();
+            }
+            stop-search => {
+                root.stop-search();
+            }
         }
         // 패널 사이 경계: 끌어 분할 비율을 바꾸고, 두 번 누르면 반반으로 맞춘다.
         if root.split: Rectangle {
@@ -2473,6 +2639,9 @@ export component AppWindow inherits Window {
             filter-open: root.filter-open && self.active;
             filter-text <=> root.filter-text;
             filter-focus: root.filter-focus;
+            search-open: root.search-open && self.active;
+            search-text <=> root.search-text;
+            search-focus: root.search-focus;
             editing: self.active ? root.editing : -1;
             edit-text <=> root.edit-text;
             edit-selection-start: root.edit-selection-start;
@@ -2485,6 +2654,7 @@ export component AppWindow inherits Window {
             modified-width <=> root.modified-width;
             type-width <=> root.type-width;
             size-width <=> root.size-width;
+            location-width <=> root.location-width;
             activate => {
                 root.panel-pressed(1);
             }
@@ -2581,6 +2751,15 @@ export component AppWindow inherits Window {
             cancel-filter => {
                 root.cancel-filter();
             }
+            search-submit(text) => {
+                root.search-submit(text);
+            }
+            cancel-search => {
+                root.cancel-search();
+            }
+            stop-search => {
+                root.stop-search();
+            }
         }
     }
 
@@ -2662,7 +2841,7 @@ export component AppWindow inherits Window {
                     height: parent.height - 4px;
                     job: job;
                     // 다른 입력(이름 입력란, 주소창, 팔레트, 확인 줄, 정보 화면)이 열려 있으면 키보드를 뺏지 않는다.
-                    autofocus: root.editing < 0 && !root.address-editing && !root.filter-open && !root.palette-open && !root.target-open && !root.confirm-open && !root.show-about && !root.history-open && !root.menu-open;
+                    autofocus: root.editing < 0 && !root.address-editing && !root.filter-open && !root.search-open && !root.palette-open && !root.target-open && !root.confirm-open && !root.show-about && !root.history-open && !root.menu-open;
                     answer-conflict(choice, rest) => {
                         root.job-answer-conflict(job.id, choice, rest);
                         keys.focus();

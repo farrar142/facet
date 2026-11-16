@@ -490,6 +490,8 @@ pub enum Execution {
     /// 화면이 할 일: 활성 패널에 필터 입력란을 열고 포커스를 준다. 친 글자는 [`App::set_filter`]에, Esc는
     /// [`App::clear_filter`]에 넘긴다.
     Filter,
+    /// 화면이 할 일: 활성 패널의 검색창에 포커스를 준다. 친 글자로 Enter를 누르면 [`App::start_search`]를 부른다.
+    Search,
     /// 화면이 할 일: 삭제를 실행하기 전에 되돌릴 수 없다는 경고와 항목을 보이고 확인받는다. 보일 원본은
     /// [`App::delete_plan`]이 주고, 확인하면 [`App::start_delete`]로 작업을 넣는다. 아직 아무것도 지우지 않았다.
     ConfirmDelete(DeleteWarning),
@@ -1844,6 +1846,7 @@ impl App {
             }
             CommandId::ShowHistory => return Execution::ShowHistory,
             CommandId::Filter => return Execution::Filter,
+            CommandId::Search => return Execution::Search,
             CommandId::ShowInFolder => {
                 let id = self.active_tab_id();
                 return match self.active_tab_mut().show_in_folder() {
