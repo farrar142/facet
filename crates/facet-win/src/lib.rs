@@ -35,6 +35,7 @@ use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 
 pub mod clipboard;
+pub mod drag_source;
 pub mod drop_target;
 pub mod file_ops;
 pub mod recycle;
@@ -43,6 +44,8 @@ pub mod single_instance;
 mod watch;
 #[cfg(windows)]
 mod windows_clipboard;
+#[cfg(windows)]
+mod windows_drag_source;
 #[cfg(windows)]
 mod windows_drop_target;
 #[cfg(windows)]
