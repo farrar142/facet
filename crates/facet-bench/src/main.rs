@@ -58,6 +58,9 @@ const USAGE: &str = "\
       항목 N개(기본 100000, 가지 폴더 1110개 포함)의 시험 나무(경로를 빼면 임시 폴더의 facet-test-folders/tree-N)를
       만들거나 확인한 뒤, 「보고서」로 실시간 탐색을 시작해 끝날 때까지의 시간을 N회(기본 5) 재어 중앙값이
       상한(기본 10000ms)을 넘으면 실패한다.
+  facet-bench content [경로] [--runs N]
+      임시 폴더의 본문 128MB 시험 나무(경로를 빼면 facet-test-folders/content-search)를 내용 검색으로 끝까지
+      읽는 처리량을 N회(기본 5) 재어(한 번 데운 뒤) 중앙값이 하한(40MB/s)보다 낮으면 실패한다.
   facet-bench copy [--size-mb N] [--count N] [--runs N]
       임시 폴더에 큰 파일 하나(기본 256MiB)와 4KiB 파일 N개(기본 2000)가 든 폴더를 만들고, 작업 대기열의
       복사 작업으로 각각 N회(기본 3) 복사해(한 번 데운 뒤, 대상은 매번 지움) 큰 파일 처리량 중앙값이 하한
@@ -204,6 +207,7 @@ fn main() -> ExitCode {
         "menu" => menu(&args),
         "filter" => filter(&args),
         "search" => live_search(&args),
+        "content" => content_search(&args),
         "copy" => copy_bench(&args),
         "delete" => delete_bench(&args),
         "compare-recycle" => compare_recycle(&args),
@@ -666,6 +670,33 @@ fn live_search(args: &Args) -> Result<(), String> {
     );
     check_median("실시간 탐색", &m, limit)?;
     println!("  상한 안: 통과");
+    Ok(())
+}
+
+fn content_search(args: &Args) -> Result<(), String> {
+    use facet_bench::content;
+    warn_debug();
+    let path = args.path.clone().unwrap_or_else(content::test_content_path);
+    println!("내용 검색 시험 나무: {}", path.display());
+    let m = content::measure_content_search(&path, args.runs())?;
+    println!(
+        "내용 검색: 「{}」 (파일 {}개 {:.0}MB, 일꾼 스레드 {}개, {}회):",
+        content::CONTENT_NEEDLE,
+        m.item_count,
+        content::CONTENT_TOTAL_BYTES as f64 / 1e6,
+        facet_core::content_search::thread_count(),
+        m.times.len()
+    );
+    print_times(&m);
+    println!(
+        "  중앙값 {:.1}MB/s, 최악 {:.1}MB/s / 로컬 기준 {}MB/s, CI 하한 {}MB/s",
+        content::content_throughput(m.median()) / 1e6,
+        content::content_throughput(m.max()) / 1e6,
+        content::CONTENT_THROUGHPUT_TARGET / 1_000_000,
+        content::CONTENT_THROUGHPUT_LIMIT / 1_000_000
+    );
+    content::check_content_throughput(&m, content::CONTENT_THROUGHPUT_LIMIT)?;
+    println!("  하한 위: 통과");
     Ok(())
 }
 

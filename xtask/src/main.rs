@@ -267,6 +267,7 @@ fn bench_steps() -> Vec<Step> {
         menu_bench_step(),
         filter_bench_step(),
         search_bench_step(),
+        content_bench_step(),
         copy_bench_step(),
         delete_bench_step(),
     ]
@@ -370,6 +371,16 @@ fn search_bench_step() -> Step {
     Step {
         name: "실시간 탐색 벤치마크",
         args: facet_bench("search"),
+        env: Vec::new(),
+    }
+}
+
+/// 임시 폴더의 본문 128MB 시험 나무(`facet-test-folders/content-search`)를 만들거나 확인하고 내용 검색 처리량을
+/// 잰다. 하한은 `facet-bench`의 기본값이다.
+fn content_bench_step() -> Step {
+    Step {
+        name: "내용 검색 벤치마크",
+        args: facet_bench("content"),
         env: Vec::new(),
     }
 }
