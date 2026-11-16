@@ -73,7 +73,9 @@ use crate::job::{
     JobKind, JobQueue, JournalSink, NotRecyclableAnswer, RevertJob,
 };
 use crate::launch::LaunchTarget;
+use crate::menu::{self, Menu, MenuContext, MenuKind};
 use crate::placement::Placement;
+use crate::selection::Pick;
 use crate::session::{PanelSession, Session, TabSession, WindowSession};
 use crate::tab::{
     ChangeOutcome, ClosedTab, CompletionId, CompletionResult, Navigation, ReadOutcome, ReadRequest,
@@ -1534,6 +1536,66 @@ impl App {
             }
             command => command.is_enabled_in_window(self.active_window()),
         }
+    }
+
+    /// 오른쪽 메뉴의 맥락: 활성 탭·창·앱 상태에서 이미 가진 값만 모은다(목록을 훑지 않는다. 선택이 폴더 하나인지는
+    /// 선택이 하나일 때만 그 항목을 찾는다).
+    pub fn menu_context(&self, kind: MenuKind) -> MenuContext {
+        let window = self.active_window();
+        let tab = window.active_panel().active_tab();
+        let selected_count = tab.selected_count();
+        MenuContext {
+            kind,
+            selected_count,
+            has_cursor: tab.cursor_item().is_some(),
+            cursor_is_folder: tab.cursor_item().is_some_and(|item| item.is_folder),
+            single_folder_selected: selected_count == 1
+                && tab
+                    .selected_items()
+                    .next()
+                    .is_some_and(|item| item.is_folder),
+            location_is_folder: tab.location().file_system_path().is_some(),
+            panel_count: window.panels().len(),
+            opposite_is_folder: window
+                .opposite_panel()
+                .is_some_and(|other| other.active_tab().location().file_system_path().is_some()),
+            clipboard_has_files: self.clipboard_has_files(),
+            sort: tab.sort(),
+            show_hidden: self.show_hidden,
+        }
+    }
+
+    /// 오른쪽 메뉴를 만든다([`menu::build`]). 순수 구성이라 선택이 많아도 시간이 같다.
+    pub fn context_menu(&self, kind: MenuKind) -> Menu {
+        menu::build(&self.menu_context(kind))
+    }
+
+    /// 활성 창의 `panel`번 패널에서 오른쪽 클릭했다: 그 패널이 활성 패널이 되고, 항목 `index`를 눌렀으면 선택을
+    /// 정한다(선택에 없으면 그 항목 하나로 바꾸고 커서도 거기 둔다. 선택에 있으면 선택은 그대로고 커서만 거기
+    /// 둔다). `index`가 `None`이거나 목록 밖이면 빈 곳이라 선택을 푼다. 열 메뉴의 종류를 돌려준다. 패널이 없으면
+    /// `None`이다.
+    pub fn context_click(&mut self, panel: usize, index: Option<usize>) -> Option<MenuKind> {
+        if panel >= self.active_window().panels().len() {
+            return None;
+        }
+        if panel != self.active_window().active_panel_index() {
+            self.activate_panel(panel);
+        }
+        let tab = self.active_tab_mut();
+        Some(match index.filter(|i| *i < tab.len()) {
+            Some(index) => {
+                if tab.is_selected(index) {
+                    tab.pick(index, Pick::CursorOnly);
+                } else {
+                    tab.select_only(index);
+                }
+                MenuKind::Item
+            }
+            None => {
+                tab.clear_selection();
+                MenuKind::Background
+            }
+        })
     }
 
     /// 명령 팔레트 검색: 앱이 주는 명령 이름에서 찾고, 실행 가능 여부는 [`App::can_execute`]를 따른다

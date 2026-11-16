@@ -17,7 +17,7 @@
 //! - `indexer <install|uninstall>`: 인덱서 서비스를 release로 빌드해 개발 기계에 설치하거나 지운다(관리자).
 //!
 //! 벤치마크 상한과 그 근거는 `crates/facet-bench/src/lib.rs`의 `LIST_LIMIT`·`QUERY_LIMIT`·
-//! `INDEX_MEMORY_LIMIT`·`MFT_PARSE_LIMIT`·`SESSION_PARSE_LIMIT`·`CLIPBOARD_LIMIT`, `crates/facet-bench/src/copy.rs`의
+//! `INDEX_MEMORY_LIMIT`·`MFT_PARSE_LIMIT`·`SESSION_PARSE_LIMIT`·`CLIPBOARD_LIMIT`·`MENU_LIMIT`, `crates/facet-bench/src/copy.rs`의
 //! `COPY_THROUGHPUT_LIMIT`·`COPY_SMALL_LIMIT`, `crates/facet-bench/src/delete.rs`의 `DELETE_LIMIT`·
 //! `UNDO_TARGET_LIMIT`에 있다.
 
@@ -263,6 +263,7 @@ fn bench_steps() -> Vec<Step> {
         mft_bench_step(),
         session_bench_step(),
         clipboard_bench_step(),
+        menu_bench_step(),
         copy_bench_step(),
         delete_bench_step(),
     ]
@@ -338,6 +339,15 @@ fn clipboard_bench_step() -> Step {
     Step {
         name: "클립보드 형식 벤치마크",
         args: facet_bench("clipboard"),
+        env: Vec::new(),
+    }
+}
+
+/// 선택 1만 개에서 오른쪽 메뉴(항목 메뉴·빈 곳 메뉴)를 만드는 시간을 잰다. 상한은 `facet-bench`의 기본값이다.
+fn menu_bench_step() -> Step {
+    Step {
+        name: "오른쪽 메뉴 구성 벤치마크",
+        args: facet_bench("menu"),
         env: Vec::new(),
     }
 }
