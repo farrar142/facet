@@ -53,12 +53,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::cell::{Cell, RefCell};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use facet_core::command::{self, CommandId, Key};
 use facet_core::details::{self, Column, Direction};
+use facet_core::dragdrop::{
+    self, AllowedEffects, DropData, DropEffect, DropRequest, DropTarget, Modifiers,
+};
 use facet_core::edit::{EditError, EditKind, Edited};
 use facet_core::file_list;
 use facet_core::history::UndoError;
@@ -92,6 +96,7 @@ use crate::tab_drag::{Frame, Hover, Point, ScreenPoint, Strip, TabDrag, Target};
 use crate::target::{Section, TargetChooser};
 
 mod address;
+mod file_drop;
 mod history_view;
 mod ime;
 mod instance;
@@ -147,6 +152,9 @@ fn main() -> Result<(), slint::PlatformError> {
         SAVER.with(|slot| *slot.borrow_mut() = Some(saver));
     }
 
+    // winit의 파일 드롭(창마다 자기 `IDropTarget`을 등록하고 `DroppedFile` 이벤트를 냄)을 끄고 facet이 창마다 OLE
+    // 드롭 대상을 직접 등록한다(`facet_win::drop_target`, docs/adr/0008). 창을 만들기 전에 골라야 한다.
+    select_backend()?;
     let first = app.borrow().active_window_id();
     let view = open_view(&app, first)?;
     restore_placement(&view);
@@ -353,9 +361,19 @@ fn open_view(app: &Rc<RefCell<App>>, window: WindowId) -> Result<Rc<View>, slint
     // 창을 옮기거나 크기를 바꾸면(최대화·최소화 포함) 이벤트를 다 처리한 뒤 그 자리를 코어에 알린다. 끄는 동안 이벤트가
     // 잇달아 와도 한 번만 맡긴다.
     let placement_pending = Rc::new(Cell::new(false));
+    // OLE 드롭 대상은 winit 창이 생긴 뒤에 등록한다. Slint는 `show` 때가 아니라 이벤트 루프가 돌기 시작한 뒤 winit 창을
+    // 만들므로, 그 창의 첫 winit 이벤트가 오면 이벤트 루프로 돌아간 뒤 등록한다.
+    let drop_pending = Cell::new(true);
     ui.window()
         .on_winit_window_event(move |slint_window, event| {
             keys::note_window_event(event);
+            if drop_pending.replace(false) {
+                Timer::single_shot(Duration::ZERO, move || {
+                    if let Some(view) = view_of(window) {
+                        register_drop_target(&view);
+                    }
+                });
+            }
             // 사각형 선택은 누른 뒤 창의 마우스 이벤트로 따라간다. 끄는 동안 목록이 넘어가며 누른 행의 화면 요소가 사라져도
             // 놓치지 않고, 창 밖으로 끌어도 창이 마우스를 붙잡고 있어 온다.
             match event {
@@ -1130,6 +1148,8 @@ struct View {
     delete: RefCell<Option<DeletePlan>>,
     /// 작업 영역의 진행 표시들.
     jobs: Rc<VecModel<JobRow>>,
+    /// 이 창의 OLE 드롭 대상 등록(다른 앱에서 끌어 온 파일). 창을 띄운 뒤 등록하고 화면 상태를 버리면 해제한다.
+    drop_target: RefCell<Option<facet_win::drop_target::Registration>>,
 }
 
 /// 사각형 선택 하나: 끌기 상태와 마지막으로 코어에 넘긴 걸친 행.
@@ -1200,6 +1220,7 @@ impl View {
             transfer: RefCell::default(),
             delete: RefCell::default(),
             jobs,
+            drop_target: RefCell::default(),
         })
     }
 
@@ -3097,6 +3118,24 @@ impl<'a> PanelUi<'a> {
         }
     }
 
+    /// 패널 위 끝(탭 줄 위, 창 기준).
+    fn tab_strip_top(&self) -> f32 {
+        if self.right {
+            self.ui.get_right_tab_strip_top()
+        } else {
+            self.ui.get_left_tab_strip_top()
+        }
+    }
+
+    /// 다른 앱에서 끌어 온 파일이 놓일 폴더 행(없으면 -1).
+    fn set_drop_row(&self, row: i32) {
+        if self.right {
+            self.ui.set_right_drop_row(row);
+        } else {
+            self.ui.set_left_drop_row(row);
+        }
+    }
+
     fn list_left(&self) -> f32 {
         if self.right {
             self.ui.get_right_list_left()
@@ -3253,5 +3292,240 @@ impl Model for TabRows {
 
     fn model_tracker(&self) -> &dyn ModelTracker {
         &self.notify
+    }
+}
+
+impl View {
+    /// 다른 앱에서 끄는 파일을 화면 점(`state`)에 놓으면 할 일: 효과와 대상 폴더. 놓을 수 없으면 `None`이다. 놓일 폴더
+    /// 행을 드러내고(없으면 지운다), 코어를 다른 일로 빌려 쓰는 중이면 놓을 수 없음으로 답한다. 오른쪽 버튼 끌기는 고르기
+    /// 메뉴(다음 티켓)가 아직 없어 놓을 수 없음이다(docs/adr/0008).
+    fn drop_place(
+        &self,
+        state: &facet_win::drop_target::DragState,
+        sources: Option<&[PathBuf]>,
+    ) -> Option<(DropEffect, PathBuf)> {
+        let mut highlight = None;
+        let placed = self.drop_decision(state, sources, &mut highlight);
+        self.show_drop_row(placed.as_ref().and(highlight));
+        placed
+    }
+
+    fn drop_decision(
+        &self,
+        state: &facet_win::drop_target::DragState,
+        sources: Option<&[PathBuf]>,
+        highlight: &mut Option<(usize, usize)>,
+    ) -> Option<(DropEffect, PathBuf)> {
+        use file_drop::{PanelArea, Place};
+        let at = self.frame()?.to_window(ScreenPoint {
+            x: f64::from(state.x),
+            y: f64::from(state.y),
+        });
+        let app = self.app.try_borrow().ok()?;
+        let window = app.window(self.window)?;
+        let tab_of = |panel: usize| window.panels().get(panel).map(Panel::active_tab);
+        let row_height = self.ui.get_row_height();
+        let areas: Vec<Option<PanelArea>> = (0..MAX_PANELS)
+            .map(|panel| {
+                let tab = tab_of(panel)?;
+                let ui = PanelUi::of(&self.ui, panel);
+                Some(PanelArea {
+                    top: ui.tab_strip_top(),
+                    list: marquee::List {
+                        left: ui.list_left(),
+                        top: ui.list_top(),
+                        width: ui.list_width(),
+                        height: ui.view_height(),
+                        scroll: (-ui.content_y()).max(0.0),
+                        row_height,
+                        rows: tab.len(),
+                    },
+                })
+            })
+            .collect();
+        let place = file_drop::place_at(at, &areas, |panel, row| {
+            tab_of(panel)
+                .and_then(|tab| tab.get(row))
+                .is_some_and(|item| item.is_folder)
+        });
+        let folder = match place {
+            Place::FolderRow { panel, row } => tab_of(panel).and_then(|tab| {
+                let item = tab.get(row)?;
+                Some(tab.location().file_system_path()?.join(&item.name))
+            }),
+            Place::Panel { panel } => {
+                tab_of(panel).and_then(|tab| tab.location().file_system_path().map(PathBuf::from))
+            }
+            Place::FileRow | Place::Outside => None,
+        };
+        let target = folder.map_or(DropTarget::NotAFolder, DropTarget::Folder);
+        let (data, sources) = match sources {
+            Some(sources) => (DropData::Files, sources),
+            None => (DropData::Other, &[][..]),
+        };
+        let decision = dragdrop::decide(&DropRequest {
+            sources,
+            target: &target,
+            modifiers: Modifiers {
+                ctrl: state.keys.ctrl,
+                shift: state.keys.shift,
+            },
+            right_button: state.keys.right_button,
+            allowed: AllowedEffects {
+                copy: state.allowed.copy,
+                mov: state.allowed.mov,
+            },
+            data,
+        });
+        let effect = match decision {
+            dragdrop::Decision::Copy => DropEffect::Copy,
+            dragdrop::Decision::Move => DropEffect::Move,
+            dragdrop::Decision::Menu { .. } | dragdrop::Decision::Refuse(_) => return None,
+        };
+        let DropTarget::Folder(folder) = target else {
+            return None;
+        };
+        if let Place::FolderRow { panel, row } = place {
+            *highlight = Some((panel, row));
+        }
+        Some((effect, folder))
+    }
+
+    /// 끌어 온 파일이 놓일 폴더 행(패널, 항목 번호)을 드러낸다. `None`이면 지운다.
+    fn show_drop_row(&self, at: Option<(usize, usize)>) {
+        for panel in 0..MAX_PANELS {
+            let row = at
+                .filter(|(shown, _)| *shown == panel)
+                .and_then(|(_, row)| i32::try_from(row).ok())
+                .unwrap_or(-1);
+            PanelUi::of(&self.ui, panel).set_drop_row(row);
+        }
+    }
+}
+
+/// 창 하나의 OLE 드롭 대상 처리기: 다른 앱(탐색기 등)에서 끌어 온 파일을 받는다. OLE가 UI 스레드에서 부른다.
+struct FileDrop {
+    window: WindowId,
+    /// 끌기가 들어올 때 읽은 파일들. 파일 목록이 아니면 `None`.
+    sources: RefCell<Option<Vec<PathBuf>>>,
+}
+
+fn drop_effect(effect: Option<DropEffect>) -> facet_win::drop_target::Effect {
+    use facet_win::drop_target::Effect;
+    match effect {
+        Some(DropEffect::Copy) => Effect::Copy,
+        Some(DropEffect::Move) => Effect::Move,
+        None => Effect::None,
+    }
+}
+
+impl facet_win::drop_target::DropHandler for FileDrop {
+    fn enter(
+        &self,
+        data: &facet_win::drop_target::DragData,
+        state: &facet_win::drop_target::DragState,
+    ) -> facet_win::drop_target::Effect {
+        *self.sources.borrow_mut() = data.files.clone();
+        self.over(state)
+    }
+
+    fn over(&self, state: &facet_win::drop_target::DragState) -> facet_win::drop_target::Effect {
+        let Some(view) = view_of(self.window) else {
+            return facet_win::drop_target::Effect::None;
+        };
+        let sources = self.sources.borrow();
+        drop_effect(
+            view.drop_place(state, sources.as_deref())
+                .map(|(effect, _)| effect),
+        )
+    }
+
+    fn leave(&self) {
+        self.sources.borrow_mut().take();
+        if let Some(view) = view_of(self.window) {
+            view.show_drop_row(None);
+        }
+    }
+
+    fn drop(
+        &self,
+        data: &facet_win::drop_target::DragData,
+        state: &facet_win::drop_target::DragState,
+    ) -> facet_win::drop_target::Effect {
+        self.sources.borrow_mut().take();
+        let Some(view) = view_of(self.window) else {
+            return facet_win::drop_target::Effect::None;
+        };
+        let placed = view.drop_place(state, data.files.as_deref());
+        view.show_drop_row(None);
+        let (Some((effect, target)), Some(sources)) = (placed, data.files.clone()) else {
+            return facet_win::drop_target::Effect::None;
+        };
+        // 원본 앱이 기다리므로 작업은 넣기만 한다(시작 전 확인만 하고 복사·이동은 작업 대기열이 한다). 막히면 원본
+        // 앱에 아무 일도 없었다고 답한다.
+        let started = {
+            let Ok(mut app) = view.app.try_borrow_mut() else {
+                return facet_win::drop_target::Effect::None;
+            };
+            if app.has_windows() && app.active_window_id() != self.window {
+                app.activate_window(self.window);
+            }
+            app.start_drop(effect, sources, target)
+        };
+        match started {
+            Ok(_) => {
+                // 작업 영역과 최근 대상(세션)은 이벤트 루프로 돌아간 뒤 고친다.
+                Timer::single_shot(Duration::ZERO, || {
+                    refresh_jobs();
+                    save_session();
+                });
+                drop_effect(Some(effect))
+            }
+            Err(rejection) => {
+                view.ui
+                    .set_notice(text::drop_rejected_text(&rejection).into());
+                facet_win::drop_target::Effect::None
+            }
+        }
+    }
+}
+
+/// 창을 띄운 뒤 그 창을 OLE 드롭 대상으로 등록한다(다른 앱에서 끌어 온 파일). 실패해도 창은 그대로 돈다.
+fn register_drop_target(view: &View) {
+    #[cfg(windows)]
+    {
+        if view.drop_target.borrow().is_some() {
+            return;
+        }
+        let Some(handle) = view.handle() else {
+            eprintln!("드롭 대상을 등록하지 못함: 창 핸들 없음");
+            return;
+        };
+        let handler = FileDrop {
+            window: view.window,
+            sources: RefCell::default(),
+        };
+        match facet_win::drop_target::register(handle, Box::new(handler)) {
+            Ok(registration) => *view.drop_target.borrow_mut() = Some(registration),
+            Err(error) => eprintln!("드롭 대상을 등록하지 못함: {error}"),
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = view;
+}
+
+/// Slint 백엔드를 고른다: winit의 파일 드롭을 끈다(facet이 창마다 OLE 드롭 대상을 직접 등록하므로,
+/// docs/adr/0008). `SLINT_BACKEND`로 고른 렌더러는 그대로 따른다. 창을 만들기 전에 불러야 한다.
+fn select_backend() -> Result<(), slint::PlatformError> {
+    #[cfg(windows)]
+    {
+        use slint::winit_030::winit::platform::windows::WindowAttributesExtWindows;
+        slint::BackendSelector::new()
+            .with_winit_window_attributes_hook(|attributes| attributes.with_drag_and_drop(false))
+            .select()
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(())
     }
 }

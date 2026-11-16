@@ -154,6 +154,18 @@ pub fn clipboard_failure_text(failure: &ClipboardFailure) -> String {
     }
 }
 
+/// 다른 앱에서 끌어 온 파일을 놓았는데 작업을 시작하기 전에 막힌 까닭(상태 줄).
+pub fn drop_rejected_text(rejection: &CopyRejection) -> String {
+    match rejection {
+        CopyRejection::NoSources => "놓은 항목을 찾을 수 없습니다".to_owned(),
+        CopyRejection::TargetMissing => "놓을 폴더를 찾을 수 없습니다".to_owned(),
+        CopyRejection::TargetNotFolder => "놓을 위치가 폴더가 아닙니다".to_owned(),
+        CopyRejection::IntoItself(source) | CopyRejection::TargetInsideSource(source) => {
+            format!("폴더를 그 안으로 놓을 수 없습니다: {}", source.display())
+        }
+    }
+}
+
 /// 클립보드를 쓰지 못한 까닭(상태 줄).
 pub fn clipboard_error_text(error: &ClipboardError) -> String {
     match error {
