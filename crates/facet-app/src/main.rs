@@ -54,6 +54,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use facet_core::command::{self, CommandId, Key};
@@ -233,6 +234,8 @@ fn save_session() {
 }
 
 thread_local! {
+    /// 마지막으로 그린 잘라내기 표시. 포인터가 달라지면 행을 다시 그린다.
+    static CUT_MARKS: RefCell<Arc<facet_core::clipboard::CutMarks>> = RefCell::default();
     /// UI 스레드의 코어 앱. 모든 창이 함께 쓴다.
     static APP: RefCell<Option<Rc<RefCell<App>>>> = const { RefCell::new(None) };
     /// 세션 저장(일꾼 스레드). 세션 파일 자리가 없으면(측정 모드 등) `None`이다.
@@ -573,6 +576,21 @@ fn poll_all() {
         return;
     };
     let views = views();
+    // 클립보드가 바뀌어 잘라내기 표시가 달라졌으면 모든 창의 행을 다시 그린다.
+    let marks = app.borrow().cut_marks();
+    let marks_changed = CUT_MARKS.with(|last| {
+        let mut last = last.borrow_mut();
+        let changed = !Arc::ptr_eq(&last, &marks);
+        *last = marks;
+        changed
+    });
+    if marks_changed {
+        for view in &views {
+            for panel in &view.panels {
+                panel.rows.notify.reset();
+            }
+        }
+    }
     // 지금 스크롤 위치를 탭에 알린다: 이동이 확정되면 떠나는 위치의 기록에 남는다.
     for view in &views {
         view.remember_scroll();
@@ -3216,6 +3234,7 @@ impl Model for TabRows {
         let app = self.app.try_borrow().ok()?;
         let tab = self.tab(&app)?;
         let item = tab.get(row)?;
+        let marks = app.cut_marks();
         Some(Row {
             name: item.name.to_string_lossy().as_ref().into(),
             folder: item.is_folder,
@@ -3224,6 +3243,11 @@ impl Model for TabRows {
             size: details::size_text(item).into(),
             selected: tab.is_selected(row),
             cursor: tab.cursor() == Some(row),
+            cut: !marks.is_empty()
+                && tab
+                    .location()
+                    .file_system_path()
+                    .is_some_and(|folder| marks.contains(folder, &item.name)),
         })
     }
 

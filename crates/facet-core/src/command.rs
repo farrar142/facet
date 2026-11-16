@@ -108,8 +108,11 @@ pub enum CommandId {
     /// ([`crate::window::Execution::ConfirmDelete`]). 켜지는 조건은 삭제와 같다.
     DeletePermanently,
     /// 복사: 활성 탭의 선택(없으면 커서 항목)을 클립보드에 복사 형식으로 올린다([`crate::window::App::execute`]가 클립보드
-    /// 스레드에 맡긴다). 원본이 없으면 꺼진다. 잘라내기는 아직 없다.
+    /// 스레드에 맡긴다). 원본이 없으면 꺼진다.
     Copy,
+    /// 잘라내기: 활성 탭의 선택(없으면 커서 항목)을 잘라내기 표시와 함께 클립보드에 올린다. 클립보드 변경 알림이 그 경로를
+    /// 잘라내기 표시([`crate::clipboard::CutMarks`])로 앱 상태에 올려 모든 탭·창이 흐리게 그린다. 켜지는 조건은 복사와 같다.
+    Cut,
     /// 붙여넣기: 클립보드의 파일을 활성 탭에 붙여넣는다(대상은 선택이 폴더 하나면 그 안, 아니면 현재 폴더,
     /// [`crate::window::App::paste_target`]). 복사면 복사 작업, 잘라내기 표시가 있으면 이동 작업을 넣는다. 클립보드에
     /// 파일이 있다는 것은 앱 상태라 [`crate::window::App::can_execute`]가 본다(클립보드를 부르지 않는다).
@@ -121,7 +124,7 @@ pub enum CommandId {
 
 impl CommandId {
     /// 모든 명령. 명령 팔레트는 검색어가 없으면 이 순서로 보인다.
-    pub const ALL: [CommandId; 46] = [
+    pub const ALL: [CommandId; 47] = [
         CommandId::Open,
         CommandId::Back,
         CommandId::Forward,
@@ -166,6 +169,7 @@ impl CommandId {
         CommandId::Delete,
         CommandId::DeletePermanently,
         CommandId::Copy,
+        CommandId::Cut,
         CommandId::Paste,
         CommandId::CopyPath,
     ];
@@ -219,6 +223,7 @@ impl CommandId {
             CommandId::Delete => "delete",
             CommandId::DeletePermanently => "delete-permanently",
             CommandId::Copy => "copy",
+            CommandId::Cut => "cut",
             CommandId::Paste => "paste",
             CommandId::CopyPath => "copy-path",
         }
@@ -320,6 +325,7 @@ impl CommandId {
             CommandId::Delete => const { &[key(Key::Delete)] },
             CommandId::DeletePermanently => const { &[key(Key::Delete).shift()] },
             CommandId::Copy => const { &[key(letter('C')).ctrl()] },
+            CommandId::Cut => const { &[key(letter('X')).ctrl()] },
             CommandId::Paste => const { &[key(letter('V')).ctrl()] },
             CommandId::CopyPath => const { &[key(letter('C')).ctrl().shift()] },
         }
@@ -356,7 +362,8 @@ impl CommandId {
             | CommandId::MoveTo
             | CommandId::Delete
             | CommandId::DeletePermanently
-            | CommandId::Copy => has_sources(tab),
+            | CommandId::Copy
+            | CommandId::Cut => has_sources(tab),
             // 붙여넣을 곳(현재 폴더)이 실제 폴더여야 한다. 클립보드에 파일이 있는지는 앱 상태다.
             CommandId::Paste | CommandId::CopyPath => tab.location().file_system_path().is_some(),
             CommandId::Rename => {

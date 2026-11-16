@@ -57,6 +57,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::clipboard::CutMarks;
 use facet_win::clipboard::format::ClipboardOperation;
 use facet_win::clipboard::{Clipboard, ClipboardError, ClipboardFiles};
 use facet_win::{OpenError, OpenResult, ShellWorker};
@@ -419,6 +420,8 @@ pub enum Update {
 pub enum ClipboardDone {
     /// 항목 `items`개를 복사 형식으로 올렸다(복사).
     Copied { items: usize },
+    /// 항목 `items`개를 잘라내기 표시와 함께 올렸다(잘라내기).
+    Cut { items: usize },
     /// 항목 `items`개의 경로를 글자로 올렸다(경로 복사. 선택이 없으면 현재 폴더 하나).
     PathsCopied { items: usize },
     /// 붙여넣기 작업을 작업 대기열에 넣었다.
@@ -577,6 +580,8 @@ pub struct App {
     /// 클립보드 변경 알림이 알려 준 「파일이 있음」 요약. 붙여넣기를 켜고 끄는 데 쓴다(명령 실행 여부를 볼 때
     /// 클립보드를 부르지 않는다).
     clipboard_files: Arc<Mutex<Option<ClipboardFiles>>>,
+    /// 잘라내기 표시: `clipboard_files`와 함께 바뀌는 「잘라낸 경로들」([`App::cut_marks`]).
+    cut_marks: Arc<Mutex<Arc<CutMarks>>>,
     /// 잘라내기 표시가 있던 클립보드를 이동으로 붙여넣은 작업과 그때 읽은 클립보드 차례 번호. 끝나면 셸 규약을
     /// 알리고 클립보드를 비운다.
     cut_pastes: HashMap<JobId, u32>,
@@ -781,6 +786,7 @@ impl App {
             journals: HashMap::new(),
             clipboard: None,
             clipboard_files: Arc::default(),
+            cut_marks: Arc::default(),
             cut_pastes: HashMap::new(),
             outbox: Outbox {
                 sender,
@@ -1665,6 +1671,16 @@ impl App {
                 }
                 return Execution::Done;
             }
+            CommandId::Cut => {
+                if let Some(paths) = self.selected_sources() {
+                    let items = paths.len();
+                    self.clipboard_task(move |clipboard| {
+                        clipboard.set_files(&paths, ClipboardOperation::Move)?;
+                        Ok(ClipboardDone::Cut { items })
+                    });
+                }
+                return Execution::Done;
+            }
             CommandId::CopyPath => {
                 if let Some(text) = self.copy_path_text() {
                     let items = text.lines().count();
@@ -1883,9 +1899,10 @@ impl App {
             return Ok(());
         }
         let files = Arc::clone(&self.clipboard_files);
+        let marks = Arc::clone(&self.cut_marks);
         let outbox = self.outbox.clone();
         let clipboard = Clipboard::start(move |summary| {
-            *files.lock().unwrap_or_else(|e| e.into_inner()) = summary;
+            store_clipboard(&files, &marks, summary);
             outbox.wake();
         })?;
         self.clipboard = Some(Arc::new(clipboard));
@@ -1902,10 +1919,13 @@ impl App {
 
     /// 클립보드 변경 알림이 하는 일을 직접 한다: 「파일이 있음」 요약을 바꾼다. 시험이 클립보드를 흉내 낼 때 쓴다.
     pub fn set_clipboard_files(&mut self, files: Option<ClipboardFiles>) {
-        *self
-            .clipboard_files
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = files;
+        store_clipboard(&self.clipboard_files, &self.cut_marks, files);
+    }
+
+    /// 지금 잘라내기 표시(클립보드가 알려 준 잘라낸 경로들). 바뀔 때만 다른 값(`Arc`)이 되므로 화면은 포인터가 같은지로
+    /// 다시 그릴지 안다. facet이 잘라냈든 탐색기가 잘라냈든 같고, 클립보드가 바뀌면 풀린다.
+    pub fn cut_marks(&self) -> Arc<CutMarks> {
+        Arc::clone(&self.cut_marks.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// 붙여넣을 폴더: 활성 탭의 선택이 폴더 하나면 그 안, 아니면 현재 폴더. 위치가 실제 폴더가 아니면 `None`.
@@ -2483,4 +2503,20 @@ pub fn home_location() -> Location {
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
     Location::file_system(path)
+}
+
+/// 클립보드 요약과 그에서 만든 잘라내기 표시를 함께 바꾼다(요약이 같으면 표시 `Arc`는 그대로).
+fn store_clipboard(
+    files: &Mutex<Option<ClipboardFiles>>,
+    marks: &Mutex<Arc<CutMarks>>,
+    summary: Option<ClipboardFiles>,
+) {
+    let new = CutMarks::from_clipboard(summary.as_ref());
+    {
+        let mut marks = marks.lock().unwrap_or_else(|e| e.into_inner());
+        if **marks != new {
+            *marks = Arc::new(new);
+        }
+    }
+    *files.lock().unwrap_or_else(|e| e.into_inner()) = summary;
 }
