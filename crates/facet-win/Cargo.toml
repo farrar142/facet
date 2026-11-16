@@ -34,11 +34,13 @@ windows = { version = "0.62", features = [
     "Win32_System_IO",
     "Win32_System_Pipes",
     "Win32_System_Registry",
+    "Win32_System_SystemServices",
     "Win32_System_Threading",
     "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
 ] }
-# COM 객체 구현(`#[implement]`: 휴지통 작업의 진행 알림)이 만드는 코드가 이 크레이트를 직접 가리킨다.
+# COM 객체 구현(`#[implement]`: 휴지통 작업의 진행 알림, OLE 드롭 대상)이 만드는 코드가 이 크레이트를 직접 가리킨다.
 windows-core = "0.62"
 
 

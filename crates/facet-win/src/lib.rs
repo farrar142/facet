@@ -22,6 +22,9 @@
 //! - [`clipboard`]: 클립보드를 소유하는 전용 STA 스레드([`clipboard::Clipboard`]: 파일 목록·글자 올리기와 읽기, 잘라내기
 //!   붙여넣기 뒤 알림과 비우기, 변경 알림 콜백)와 탐색기와 같은 형식([`clipboard::format`]). 메서드는 그 스레드를
 //!   기다리므로 UI 스레드에서 부르지 않는다. Windows가 아니면 「지원하지 않음」이다.
+//! - [`drop_target`]: 창 하나를 OLE 드롭 대상으로 등록해(`RegisterDragDrop`) 다른 앱에서 끌어 온 파일 목록(`CF_HDROP`,
+//!   [`clipboard::format`]으로 읽음)·원본이 허용한 효과·키를 처리기에 넘기고 처리기가 고른 효과를 돌려준다. 이동은 셸의
+//!   최적화된 이동 규약을 따른다. 창을 만든 UI 스레드(STA)에서만 등록한다. Windows가 아니면 「지원하지 않음」이다.
 //! - [`shell_copy`]: **측정 전용** 셸 복사(`IFileOperation`, 전용 스레드의 COM, 대화 없음). 탐색기 비교 측정만 부르고
 //!   앱은 부르지 않는다. Windows가 아니면 「지원하지 않음」이다.
 
@@ -32,6 +35,7 @@ use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 
 pub mod clipboard;
+pub mod drop_target;
 pub mod file_ops;
 pub mod recycle;
 pub mod shell_copy;
@@ -39,6 +43,8 @@ pub mod single_instance;
 mod watch;
 #[cfg(windows)]
 mod windows_clipboard;
+#[cfg(windows)]
+mod windows_drop_target;
 #[cfg(windows)]
 mod windows_file_ops;
 #[cfg(windows)]
