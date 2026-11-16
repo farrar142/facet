@@ -45,6 +45,9 @@ const USAGE: &str = "\
   facet-bench session [--runs N] [--limit-ms N]
       탭 100개 세션 파일(창 다섯 개, 패널 둘, 긴 경로와 한글 경로 섞임)을 읽고 해석하는 시간을
       N회(기본 5) 재어 중앙값이 상한(기본 50ms)을 넘으면 실패한다.
+  facet-bench clipboard [--runs N] [--limit-ms N]
+      파일 1만 개 목록을 클립보드 파일 목록 형식(CF_HDROP) 바이트로 만들고 읽는 시간을 각각 N회(기본 5) 재어
+      중앙값이 상한(기본 50ms)을 넘으면 실패한다.
   facet-bench copy [--size-mb N] [--count N] [--runs N]
       임시 폴더에 큰 파일 하나(기본 256MiB)와 4KiB 파일 N개(기본 2000)가 든 폴더를 만들고, 작업 대기열의
       복사 작업으로 각각 N회(기본 3) 복사해(한 번 데운 뒤, 대상은 매번 지움) 큰 파일 처리량 중앙값이 하한
@@ -187,6 +190,7 @@ fn main() -> ExitCode {
         "index" => index(&args),
         "mft" => mft(&args),
         "session" => session(&args),
+        "clipboard" => clipboard(&args),
         "copy" => copy_bench(&args),
         "delete" => delete_bench(&args),
         "compare-recycle" => compare_recycle(&args),
@@ -516,6 +520,37 @@ fn session(args: &Args) -> Result<(), String> {
         limit.as_millis()
     );
     check_session_limit(&m, limit)?;
+    println!("  상한 안: 통과");
+    Ok(())
+}
+
+fn clipboard(args: &Args) -> Result<(), String> {
+    if args.path.is_some() {
+        return Err(format!(
+            "clipboard 명령은 경로를 받지 않습니다
+
+{USAGE}"
+        ));
+    }
+    warn_debug();
+    let limit = args.limit.unwrap_or(facet_bench::CLIPBOARD_LIMIT);
+    let m = facet_bench::measure_clipboard(args.runs())?;
+    for (name, t) in [("만들기", &m.build), ("읽기", &m.parse)] {
+        println!(
+            "클립보드 형식 {name} (경로 {}개, {}회):",
+            t.item_count,
+            t.times.len()
+        );
+        print_times(t);
+        println!(
+            "  중앙값 {:.3}ms, 최악 {:.3}ms / 로컬 기준 {}ms, CI 상한 {}ms",
+            ms(t.median()),
+            ms(t.max()),
+            facet_bench::CLIPBOARD_TARGET.as_millis(),
+            limit.as_millis()
+        );
+    }
+    facet_bench::check_clipboard_limit(&m, limit)?;
     println!("  상한 안: 통과");
     Ok(())
 }
