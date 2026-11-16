@@ -715,6 +715,8 @@ fn 전체_개수가_상한이면_구분하고_이어_받기가_무효면_다시_
 fn 결과_항목에서_기존_검색_결과_위치의_명령_켜짐과_폴더에서_보기가_그대로다() {
     let mut f = Fixture::new();
     let dir = f.path().to_path_buf();
+    // 「폴더에서 보기」는 디스크에 없는 결과를 열지 않으므로(결과에서 뺌) 그 파일을 실제로 만든다.
+    std::fs::write(dir.join("보고서 001.txt"), b"1").unwrap();
     type_first(&mut f.app, "\"보고서 001\"");
     assert_eq!(names(f.app.active_tab()), ["보고서 001.txt"]);
     f.app.active_tab_mut().select_only(0);

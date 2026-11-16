@@ -56,7 +56,7 @@
 //! 작업(이름바꾸기, 삭제·휴지통 삭제·이동, 그 실행취소·다시 실행)은 끝날 때 모든 검색 결과 탭에 반영한다.
 
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -75,7 +75,7 @@ use crate::history::{
     History, NotUndoable, OperationKind, Outcomes, Record, RecordId, Reversal, UndoError,
 };
 use crate::indexer_client::{ClientOptions, Connection, IndexerClient, IndexerEvent};
-use crate::instant_search::DemotionReason;
+use crate::instant_search::{DemotionReason, Follow};
 use crate::job::{
     AnswerError, ConflictAnswer, CopyRejection, DeleteRejection, ErrorAnswer, JobEvent, JobId,
     JobKind, JobQueue, JournalSink, NotRecyclableAnswer, RevertJob,
@@ -524,6 +524,17 @@ pub enum Execution {
     /// 화면이 할 일: 삭제를 실행하기 전에 되돌릴 수 없다는 경고와 항목을 보이고 확인받는다. 보일 원본은
     /// [`App::delete_plan`]이 주고, 확인하면 [`App::start_delete`]로 작업을 넣는다. 아직 아무것도 지우지 않았다.
     ConfirmDelete(DeleteWarning),
+    /// 검색 결과에서 열려던 항목(열기·새 탭에서 열기·「폴더에서 보기」)이 디스크에 없다: 열지 않고 결과에서 뺐다(폴더면 그
+    /// 아래 결과까지). 화면은 그 까닭([`Tab::missing_item`]의 경로)을 상태 줄에 보인다.
+    ItemMissing,
+}
+
+/// 경로의 항목이 디스크에 없는가(없음·경로 없음만. 권한 등 다른 오류는 있는 것으로 보아 여는 쪽에 맡긴다).
+fn is_missing(path: &Path) -> bool {
+    matches!(
+        std::fs::symlink_metadata(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    )
 }
 
 /// 삭제를 실행하기 전에 확인받는 까닭. 어느 쪽이든 휴지통을 거치지 않는 영구 삭제라 실행취소할 수 없다.
@@ -641,6 +652,8 @@ pub struct App {
     changed_results: Vec<TabId>,
     /// 인덱서 서비스 연결([`App::enable_indexer`]). 즉시 검색이 쓴다. 아직이면 `None`이고 즉시 검색은 「서비스 없음」이다.
     indexer: Option<IndexerClient>,
+    /// 즉시 검색 결과의 인덱스 변경 확인([`App::poll`])을 깨우도록 잡아 둔 시각. 잡지 않았으면 `None`이다.
+    follow_wake: Option<Instant>,
     outbox: Outbox,
     receiver: Receiver<Message>,
 }
@@ -847,6 +860,7 @@ impl App {
             cut_pastes: HashMap::new(),
             changed_results: Vec::new(),
             indexer: None,
+            follow_wake: None,
             outbox: Outbox {
                 sender,
                 waker: Arc::default(),
@@ -1096,7 +1110,13 @@ impl App {
 
     /// 활성 탭의 `index`번째 보이는 항목이 폴더면 그 폴더를 새 탭으로 연다(휠 클릭). 지금 탭이 그대로 활성이고
     /// 새 탭은 그 바로 뒤에 숨은 채로 붙는다([`App::open_tab`]). 폴더가 아니거나 항목이 없으면 `None`이다.
+    ///
+    /// 검색 결과의 폴더가 디스크에 없으면 열지 않고 결과에서 빼며 `None`이다(까닭은 [`Tab::missing_item`]).
     pub fn open_in_new_tab(&mut self, index: usize) -> Option<TabId> {
+        self.active_tab().get(index).filter(|item| item.is_folder)?;
+        if self.vanished_result(index).is_some() {
+            return None;
+        }
         let tab = self.active_tab();
         let item = tab.get(index).filter(|item| item.is_folder)?;
         // 검색 결과 항목은 제 폴더 안에 있다.
@@ -1436,6 +1456,7 @@ impl App {
         updates.extend(self.pump_searches());
         updates.extend(self.pump_indexer());
         updates.extend(self.pump_demoted());
+        self.pump_follow();
         for id in std::mem::take(&mut self.changed_results) {
             if !updates.contains(&(id, Update::Search)) {
                 updates.push((id, Update::Search));
@@ -1715,7 +1736,7 @@ impl App {
                         continue;
                     };
                     match tab.instant_reply(id, result) {
-                        InstantReply::Ignored => {}
+                        InstantReply::Ignored | InstantReply::Unchanged => {}
                         InstantReply::Applied => updates.push((tab_id, Update::Search)),
                         InstantReply::Requery => requery.push(tab_id),
                         InstantReply::Demoted => {
@@ -1733,6 +1754,99 @@ impl App {
             self.start_demoted(id);
         }
         updates
+    }
+
+    /// 보이는 즉시 검색 결과 탭이 인덱스 변경을 따라가게 한다([`crate::instant_search::FOLLOW_INTERVAL`]마다 확인). 확인할
+    /// 때가 된 탭 하나에 확인 요청(결과 0개짜리 이어 받기, 표지가 없으면 조용한 다시 받기)을 보내고, 다음 확인 때 깨우도록
+    /// 잡는다. 어느 탭이든 서비스의 응답을 기다리는 중이면 보내지 않는다: 연결 하나에 질의 하나만 이어 받으므로 다시 받기가
+    /// 다른 탭이 기다리는 질의를 취소하지 않게 하고, 한 번에 하나씩 보내 두 탭의 다시 받기가 서로 취소하지 않게 한다(응답이
+    /// 오면 다시 깨어 다음 탭을 본다). 숨은 탭은 확인하지 않는다.
+    fn pump_follow(&mut self) {
+        if self.indexer.is_none() {
+            return;
+        }
+        let now = Instant::now();
+        if self.follow_wake.is_some_and(|at| at <= now) {
+            self.follow_wake = None;
+        }
+        let mut due: Vec<(Instant, TabId)> = self
+            .tabs_mut()
+            .filter_map(|(id, tab)| tab.instant_follow_due().map(|at| (at, id)))
+            .collect();
+        if due.is_empty() {
+            return;
+        }
+        due.sort();
+        let busy = self
+            .tabs_mut()
+            .any(|(_, tab)| tab.instant_in_flight().is_some());
+        if !busy && due[0].0 <= now {
+            let (_, id) = due.remove(0);
+            self.follow_instant(id);
+        }
+        // 응답을 기다리는 동안 때가 된 탭은 응답이 깨운다. 아직 때가 아닌 탭은 그때 깨운다.
+        let Some(&(next, _)) = due.iter().find(|(at, _)| *at > now) else {
+            return;
+        };
+        if self.follow_wake.is_some_and(|at| at <= next) {
+            return;
+        }
+        self.follow_wake = Some(next);
+        let outbox = self.outbox.clone();
+        let wait = next - now;
+        thread::Builder::new()
+            .name("facet-follow-wake".into())
+            .spawn(move || {
+                thread::sleep(wait);
+                outbox.wake();
+            })
+            .expect("인덱스 변경 확인 깨우기 스레드를 만들지 못했다");
+    }
+
+    /// 탭 `id`의 인덱스 변경 확인 요청을 보낸다.
+    fn follow_instant(&mut self, id: TabId) {
+        let Some(follow) = self.tab_mut(id).and_then(|tab| tab.instant_follow()) else {
+            return;
+        };
+        match follow {
+            Follow::Probe(resume) => {
+                let Some(client) = &self.indexer else {
+                    return;
+                };
+                let request = client.resume(resume);
+                if let Some(tab) = self.tab_mut(id) {
+                    tab.instant_probe_sent(request);
+                }
+            }
+            Follow::Refresh => {
+                if self
+                    .tab_mut(id)
+                    .is_some_and(|tab| tab.request_instant_refresh())
+                {
+                    self.start_instant(id);
+                }
+            }
+        }
+    }
+
+    /// 활성 탭이 검색 결과 위치이고 보이는 항목 `index`가 디스크에 없으면 그 항목(폴더면 그 아래 결과까지)을 결과에서 빼고
+    /// [`Tab::missing_item`]에 경로를 두고 돌려준다. 있거나(있는지 알 수 없는 오류 포함) 검색 결과 위치가 아니면 `None`이고
+    /// 지난 까닭을 지운다. 사용자가 결과에서 항목 하나를 열 때만 부르므로 UI 스레드에서 메타데이터를 한 번 읽는다.
+    fn vanished_result(&mut self, index: usize) -> Option<PathBuf> {
+        let id = self.active_tab_id();
+        let tab = self.active_tab_mut();
+        tab.set_missing_item(None);
+        if !tab.location().is_search_results() {
+            return None;
+        }
+        let path = tab.item_path(index)?;
+        if !is_missing(&path) {
+            return None;
+        }
+        tab.apply_path_changes(&[PathChange::Removed(path.clone())]);
+        tab.set_missing_item(Some(path.clone()));
+        self.changed_results.push(id);
+        Some(path)
     }
 
     /// 활성 탭에서 내용 검색을 시작한다: [`App::start_search`]와 같이 탭이 검색 결과 위치(지금 폴더 아래, 찾을 글자 `text`,
@@ -2149,9 +2263,10 @@ impl App {
                     .active_tab()
                     .cursor()
                     .and_then(|index| self.open_in_new_tab(index));
-                return match opened {
-                    Some(_) => Execution::Done,
-                    None => Execution::Disabled,
+                return match (opened, self.active_tab().missing_item()) {
+                    (Some(_), _) => Execution::Done,
+                    (None, Some(_)) => Execution::ItemMissing,
+                    (None, None) => Execution::Disabled,
                 };
             }
             CommandId::CloseTab => {
@@ -2218,6 +2333,14 @@ impl App {
             }
             CommandId::ShowInFolder => {
                 let id = self.active_tab_id();
+                if self
+                    .active_tab()
+                    .cursor()
+                    .and_then(|index| self.vanished_result(index))
+                    .is_some()
+                {
+                    return Execution::ItemMissing;
+                }
                 return match self.active_tab_mut().show_in_folder() {
                     Some(request) => {
                         self.spawn_read(id, request);
@@ -2326,6 +2449,14 @@ impl App {
     }
 
     fn open_cursor_item(&mut self) -> Execution {
+        if self
+            .active_tab()
+            .cursor()
+            .and_then(|index| self.vanished_result(index))
+            .is_some()
+        {
+            return Execution::ItemMissing;
+        }
         let tab = self.active_tab();
         let Some(item) = tab.cursor_item() else {
             return Execution::Disabled;

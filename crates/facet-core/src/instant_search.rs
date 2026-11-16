@@ -21,6 +21,11 @@
 //!   실시간 탐색([`crate::live_search`])을 띄워 같은 검색 결과 위치에 결과를 넣는다([`Demotion`], [`InstantStatus::demotion`]).
 //!   범위가 모든 볼륨이면 탐색 범위는 검색 전 폴더 아래로 좁아진다(`narrowed_to_folder`). 강등 중 입력이 바뀌면 앞선 탐색은
 //!   곧바로 멈추고 새 탐색은 [`DEMOTED_SEARCH_DELAY`] 뒤에 시작한다. 서비스가 다시 닿으면 다음 입력부터 즉시 검색이다.
+//! - **인덱스 변경 따라가기**: 결과가 보이는 탭은 [`FOLLOW_INTERVAL`]마다 인덱스가 바뀌었는지 확인한다. 이어 받기 표지가
+//!   있으면 결과 0개짜리 이어 받기(probe)를 보내 서비스가 표지를 무효(`StaleCursor`, 인덱스가 바뀜)로 답하는지 보고, 표지가
+//!   없으면(결과를 다 받았거나 다른 탭의 질의가 표지를 지움) 같은 질의를 곧바로 다시 보낸다. 바뀌었으면 같은 질의를 조용히
+//!   다시 보내(받은 만큼, [`refresh_limit`]) 결과를 바꾼다. 선택·커서·범위 기준은 전체 경로로 남고 사라진 항목은 빠진다.
+//!   숨은 탭은 확인하지 않는다.
 //! - 화면 문장은 없다(ADR-0007).
 
 use std::path::Path;
@@ -48,6 +53,42 @@ pub const PAGE_SIZE: u32 = 100;
 /// 않고, 멈추면 한 번 기다린 정도(체감 지연이 한 박자)로 시작한다. 처음 강등되는 입력(결과 위치로 막 간 첫 글자)과 검색 중
 /// 서비스가 멈춰 강등된 질의는 이어 치는 중이 아니므로 기다리지 않는다.
 pub const DEMOTED_SEARCH_DELAY: Duration = Duration::from_millis(250);
+
+/// 결과가 보이는 즉시 검색 탭이 인덱스가 바뀌었는지 확인하는 간격.
+///
+/// 확인 방법: 이어 받기 표지가 있으면 결과 0개짜리 이어 받기를 보낸다. 서비스는 인덱스가 바뀐 뒤(USN 변경 적용·인덱스
+/// 바꿔 끼우기)의 표지를 무효(`StaleCursor`)로 답하므로, 결과를 옮기지 않고 서비스 쪽 질의도 돌리지 않은 채 바뀌었는지
+/// 안다. 표지가 없으면(결과를 다 받음·다른 탭의 질의가 이 연결의 표지를 지움) 같은 질의를 다시 보내 결과를 견준다.
+///
+/// 간격: 인덱서 서비스가 USN 저널을 100ms마다 읽어 새 파일이 1초 안에 질의 결과에 나오므로 1초면 밖의 변경이 늦어도 2초
+/// 안에 화면에 닿는다. 더 짧게 하면 바쁜 볼륨(시스템 드라이브는 늘 바뀜)에서 1초에도 여러 번 같은 질의(100만 항목 인덱스에
+/// 수십 ms)를 다시 돌리게 되고, 더 길면 「밖에서 지운 파일이 결과에 남아 있다」가 눈에 띈다.
+pub const FOLLOW_INTERVAL: Duration = Duration::from_secs(1);
+
+/// 인덱스가 바뀌어 다시 받는 결과 수의 상한. 스크롤로 이어 받은 만큼([`PAGE_SIZE`]의 배수로 올림)을 한 번에 다시 받되 이
+/// 수를 넘지 않는다.
+///
+/// 결과 하나는 경로·이름·크기·날짜·속성으로 대략 200바이트라 5천 개면 응답이 1MB쯤으로 프레임 상한(8MB) 안이고, 목록을 다시
+/// 만드는 데도 한 프레임 안팎이다. 그보다 많이 스크롤한 결과는 앞 5천 개만 다시 받고 나머지는 다시 스크롤하면 이어 받는다.
+pub const REFRESH_LIMIT_MAX: u32 = 5_000;
+
+/// 받은 결과 `loaded`개를 다시 받을 때의 결과 수: [`PAGE_SIZE`]의 배수로 올리고 [`PAGE_SIZE`]..=[`REFRESH_LIMIT_MAX`]로 자른다.
+pub fn refresh_limit(loaded: usize) -> u32 {
+    let loaded = u32::try_from(loaded).unwrap_or(u32::MAX);
+    loaded
+        .div_ceil(PAGE_SIZE)
+        .saturating_mul(PAGE_SIZE)
+        .clamp(PAGE_SIZE, REFRESH_LIMIT_MAX)
+}
+
+/// 인덱스가 바뀌었는지 확인하는 요청([`crate::tab::Tab::instant_follow`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Follow {
+    /// 결과 0개짜리 이어 받기: 서비스가 표지를 무효로 답하면 인덱스가 바뀌었다.
+    Probe(facet_protocol::ResumeMessage),
+    /// 같은 질의를 조용히 다시 보낸다(이어 받기 표지가 없음).
+    Refresh,
+}
 
 /// 즉시 검색을 서비스에 보내는 정렬. 서비스가 모르는 열이면 `None`이다(받아 둔 결과만 정렬).
 pub fn server_sort(sort: Sort) -> Option<(SortKey, Order)> {
@@ -128,6 +169,10 @@ pub(crate) enum Flight {
     Resume,
     /// 범위 볼륨의 인덱스 여부를 묻는 상태 질의.
     Status,
+    /// 인덱스가 바뀌었는지 보는 결과 0개짜리 이어 받기.
+    Probe,
+    /// 인덱스가 바뀌어 같은 질의를 받은 만큼 조용히 다시 보냄.
+    Refresh,
 }
 
 /// 탭의 즉시 검색 내부 상태(검색 결과 위치가 즉시 검색일 때).
@@ -148,6 +193,10 @@ pub(crate) struct InstantState {
     pub(crate) was_demoted: bool,
     /// 강등한 실시간 탐색을 시작할 시각. 시작했으면 `None`.
     pub(crate) live_due: Option<Instant>,
+    /// 다음에 보낼 질의가 인덱스 변경을 따라가는 조용한 다시 받기인가(받은 만큼, 앞 결과를 그대로 보이며).
+    pub(crate) refresh: bool,
+    /// 결과를 마지막으로 받았거나 인덱스 변경을 확인한 시각. 아직 결과가 없으면 `None`이다.
+    pub(crate) checked_at: Option<Instant>,
 }
 
 /// 경로가 든 볼륨 이름(`C:`). 드라이브 문자가 없으면(UNC 등) `None`이다.
@@ -233,6 +282,15 @@ mod tests {
         assert_eq!(volume_of(Path::new(&unc)), None);
         assert_eq!(volume_of(Path::new("c:/a/b")), Some("C:".into()));
         assert_eq!(volume_of(Path::new(r"\server\share\a")), None);
+    }
+
+    #[test]
+    fn 다시_받는_수는_받은_만큼을_한_화면_분량의_배수로_올리고_상한에서_자른다() {
+        assert_eq!(refresh_limit(0), PAGE_SIZE);
+        assert_eq!(refresh_limit(1), PAGE_SIZE);
+        assert_eq!(refresh_limit(100), 100);
+        assert_eq!(refresh_limit(101), 200);
+        assert_eq!(refresh_limit(1_000_000), REFRESH_LIMIT_MAX);
     }
 
     #[test]
