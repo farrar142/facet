@@ -12,8 +12,11 @@ use windows::Win32::Foundation::{E_ABORT, E_FAIL};
 use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetVolumePathNameW};
 use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance, CoTaskMemFree};
 use windows::Win32::UI::Shell::{
-    FOF_ALLOWUNDO, FOF_NO_UI, FOF_RENAMEONCOLLISION, FOFX_RECYCLEONDELETE, FileOperation,
-    IFileOperation, IFileOperationProgressSink, IFileOperationProgressSink_Impl, IShellItem,
+    COPYENGINE_E_ACCESS_DENIED_DEST, COPYENGINE_E_ACCESS_DENIED_SRC,
+    COPYENGINE_E_ACCESSDENIED_READONLY, COPYENGINE_E_DISK_FULL, COPYENGINE_E_PATH_NOT_FOUND_SRC,
+    COPYENGINE_E_SHARING_VIOLATION_DEST, COPYENGINE_E_SHARING_VIOLATION_SRC, FOF_ALLOWUNDO,
+    FOF_NO_UI, FOF_RENAMEONCOLLISION, FOFX_RECYCLEONDELETE, FileOperation, IFileOperation,
+    IFileOperationProgressSink, IFileOperationProgressSink_Impl, IShellItem,
     SHCreateItemFromParsingName, SHCreateItemFromRelativeName, SICHINT_CANONICAL,
     SIGDN_FILESYSPATH, TSF_DELETE_RECYCLE_IF_POSSIBLE,
 };
@@ -32,8 +35,24 @@ fn com_error(error: std::io::Error) -> FileOpError {
     FileOpError::new(FileOpErrorKind::Other, None)
 }
 
+/// 셸이 항목마다 알린 결과 코드를 오류로. 셸의 복사 엔진은 Win32 코드 대신 제 코드(`COPYENGINE_E_*`)를 주므로
+/// 같은 뜻의 종류로 바꾼다(잠긴 파일은 공유 위반 `COPYENGINE_E_SHARING_VIOLATION_SRC`로 온다).
 fn from_hresult(hresult: HRESULT) -> FileOpError {
-    from_windows(&windows::core::Error::from_hresult(hresult))
+    let kind = match hresult {
+        COPYENGINE_E_SHARING_VIOLATION_SRC | COPYENGINE_E_SHARING_VIOLATION_DEST => {
+            Some(FileOpErrorKind::Locked)
+        }
+        COPYENGINE_E_ACCESS_DENIED_SRC
+        | COPYENGINE_E_ACCESS_DENIED_DEST
+        | COPYENGINE_E_ACCESSDENIED_READONLY => Some(FileOpErrorKind::AccessDenied),
+        COPYENGINE_E_PATH_NOT_FOUND_SRC => Some(FileOpErrorKind::SourceMissing),
+        COPYENGINE_E_DISK_FULL => Some(FileOpErrorKind::DiskFull),
+        _ => None,
+    };
+    match kind {
+        Some(kind) => FileOpError::new(kind, Some(hresult.0)),
+        None => from_windows(&windows::core::Error::from_hresult(hresult)),
+    }
 }
 
 /// 셸이 경로 하나로 받는 최대 길이(UTF-16 단위, 끝의 NUL 제외). `MAX_PATH`(260)에서 NUL 하나를 뺀 값.

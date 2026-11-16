@@ -102,7 +102,12 @@ impl Recycler<'_, '_> {
             let mut again = Vec::new();
             let mut settled = false;
             for (position, (path, stamp)) in chunk.into_iter().zip(stamps).enumerate() {
-                match results.get(position) {
+                let outcome = results.get(position);
+                // 앞 항목의 질문에서 취소했어도 셸이 이미 휴지통에 보낸 뒤 항목은 적는다(실행취소로 되살리게).
+                if self.engine.cancelled && !matches!(outcome, Some(RecycleOutcome::Recycled(_))) {
+                    continue;
+                }
+                match outcome {
                     Some(RecycleOutcome::Recycled(item)) => {
                         settled = true;
                         let stamp =
@@ -143,9 +148,9 @@ impl Recycler<'_, '_> {
                     // 앞 항목에서 셸이 멈춰 손대지 않았다: 다음 호출로 다시 보낸다.
                     Some(RecycleOutcome::NotAttempted) | None => again.push(path),
                 }
-                if self.engine.cancelled {
-                    return;
-                }
+            }
+            if self.engine.cancelled {
+                return;
             }
             if !settled && let Some(first) = again.first().cloned() {
                 // 셸이 아무 항목도 다루지 않았다: 같은 호출을 되풀이하지 않게 첫 항목을 오류로 묻는다.
