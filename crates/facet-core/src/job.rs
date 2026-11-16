@@ -1370,14 +1370,14 @@ pub fn deletes_permanently(sources: &[PathBuf]) -> bool {
 }
 
 /// 두 경로가 같은지(Windows는 대소문자를 가리지 않는다). 둘 다 정규화한 경로라야 한다.
-fn same_path(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
     let a: Vec<_> = a.components().collect();
     let b: Vec<_> = b.components().collect();
     a.len() == b.len() && a.iter().zip(&b).all(|(x, y)| same_component(x, y))
 }
 
 /// `path`가 `base`이거나 그 아래인지. 둘 다 정규화한 경로라야 한다.
-fn is_within(path: &Path, base: &Path) -> bool {
+pub(crate) fn is_within(path: &Path, base: &Path) -> bool {
     let path: Vec<_> = path.components().collect();
     let base: Vec<_> = base.components().collect();
     path.len() >= base.len() && base.iter().zip(&path).all(|(x, y)| same_component(x, y))

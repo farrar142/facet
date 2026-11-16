@@ -1887,6 +1887,30 @@ impl App {
         Ok(id)
     }
 
+    /// 끌어 놓기로 정한 복사·이동([`crate::dragdrop::decide`]의 결과)을 반대편 패널 복사·이동과 같은 길로 작업
+    /// 대기열에 넣는다([`App::start_transfer`]와 같다: 작업 영역에 더하고, 이름 충돌·항목별 오류 질문·작업 기록과
+    /// 실행취소가 그대로다). 놓은 폴더도 **최근 대상에 더한다**: 사용자가 고른 대상 폴더이고 「복사 위치…」의 최근
+    /// 목록에서 다시 고를 만하기 때문이다. 고르기 메뉴에서 고른 효과도 이것으로 넣는다.
+    ///
+    /// 놓을 수 있는지는 부르는 쪽이 먼저 [`crate::dragdrop::decide`]로 확인한다. 이것은 자기 하위로 복사·이동
+    /// 같은 시작 전 거부([`CopyRejection`])만 다시 막는다.
+    pub fn start_drop(
+        &mut self,
+        effect: crate::dragdrop::DropEffect,
+        sources: Vec<PathBuf>,
+        target: PathBuf,
+    ) -> Result<JobId, CopyRejection> {
+        let kind = match effect {
+            crate::dragdrop::DropEffect::Copy => JobKind::Copy,
+            crate::dragdrop::DropEffect::Move => JobKind::Move,
+        };
+        self.start_transfer(&TransferPlan {
+            kind,
+            sources,
+            target,
+        })
+    }
+
     /// 고른 항목들(`sources`)을 **영구 삭제**하는 작업을 작업 대기열에 넣어 곧바로 시작하고(차례를 기다리지 않는다,
     /// [`JobQueue::delete_permanently`]) 작업 영역에 더한다([`JobKind::Delete`], 대상 자리에는 지우는 위치: 첫 원본이
     /// 든 폴더). 원본이 없으면 작업을 만들지 않고 까닭([`DeleteRejection`])을 돌려준다.
