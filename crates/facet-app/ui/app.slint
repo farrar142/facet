@@ -56,6 +56,15 @@ export enum Problem {
 }
 
 // 탭 줄의 탭 하나: 제목(폴더 이름), 툴팁(전체 경로), 활성 탭인가. 이름과 경로라 번역하지 않는다.
+// 사각형 선택 중 그릴 사각형: 보이는가, 목록 내용 기준 자리(목록 왼쪽과 첫 행 위가 0)와 크기.
+export struct MarqueeBox {
+    shown: bool,
+    x: length,
+    y: length,
+    width: length,
+    height: length,
+}
+
 export struct TabItem {
     title: string,
     path: string,
@@ -1011,6 +1020,12 @@ component PanelView inherits Rectangle {
     // 탭 끌기: 끄는 탭(이 패널의 것이면 그 번호, 아니면 -1)과 놓일 자리(이 패널 탭 줄 위면 탭 사이 틈 번호, 아니면 -1).
     in property <int> dragged-tab: -1;
     in property <int> drop-slot: -1;
+    // 목록의 보이는 영역 자리(창 기준)와 너비(스크롤 막대 제외). 사각형 선택에서 Rust가 끄는 점을 행으로 바꾼다.
+    out property <length> list-left: list.absolute-position.x;
+    out property <length> list-top: list.absolute-position.y;
+    out property <length> list-width: list.visible-width;
+    // 사각형 선택 중 그릴 사각형(목록 내용 기준, Rust가 넣는다).
+    in property <MarqueeBox> marquee;
     // 주소창의 자리(창 기준). 창이 자동 완성 후보를 그 아래에 놓는다.
     out property <length> address-x: address-bar.absolute-position.x;
     out property <length> address-y: address-bar.absolute-position.y + address-bar.height;
@@ -1037,6 +1052,9 @@ component PanelView inherits Rectangle {
     callback tab-drag-move(length, length);
     callback tab-drag-end(length, length) -> bool;
     callback tab-drag-cancel();
+    // 빈 곳(목록 아래 -1, 행의 이름 글자 오른쪽 여백이면 그 행)을 왼쪽 버튼으로 눌렀다: 행, Ctrl, Shift, 창 기준 점.
+    // 끌기 시작 문턱을 넘으면 사각형 선택, 아니면 누르기다(Rust가 정한다).
+    callback marquee-press(int, bool, bool, length, length);
     callback sort-by(int);
     // 이름 입력란: 확정(참이면 입력란을 닫았다), Esc(참이면 닫았다), 글자가 바뀜, 확장자 바꿈 확인의 답(참이면 닫았다).
     callback confirm-rename(string) -> bool;
@@ -1366,6 +1384,11 @@ component PanelView inherits Rectangle {
                         border-width: row.cursor ? 1px : 0px;
                         border-color: Palette.accent-background;
                     }
+                    // 이름 글자의 너비를 재는 보이지 않는 글자: 이름 글자 오른쪽 여백(빈 곳)이 어디부터인지 정한다.
+                    name-measure := Text {
+                        text: row.name;
+                        visible: false;
+                    }
                     // 입력란보다 아래에 둔다. 그래야 입력란 안을 누르면 입력란이 받는다.
                     TouchArea {
                         pointer-event(event) => {
@@ -1387,7 +1410,14 @@ component PanelView inherits Rectangle {
                                 if (root.editing >= 0 && !root.confirm-rename(root.edit-text)) {
                                     return;
                                 }
-                                root.row-pressed(i, event.modifiers.control, event.modifiers.shift);
+                                // 아이콘과 이름 글자 위는 항목 위, 그 오른쪽(이름 칸 여백과 다른 칸)은 빈 곳이다. 빈 곳은
+                                // 끌면 사각형 선택이고 끌지 않고 놓으면 이 행을 누른 것이다(Rust가 놓을 때 고른다).
+                                if (self.mouse-x > min(28px + name-measure.preferred-width, root.name-width - 8px)) {
+                                    root.marquee-press(i, event.modifiers.control, event.modifiers.shift,
+                                        self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                                } else {
+                                    root.row-pressed(i, event.modifiers.control, event.modifiers.shift);
+                                }
                                 root.focus-list();
                             }
                         }
@@ -1499,6 +1529,42 @@ component PanelView inherits Rectangle {
                         }
                         Rectangle { }
                     }
+                }
+            }
+
+            // 목록 아래 빈 곳: 눌러 끌면 사각형 선택이다. 누르기만 하면 전처럼 아무것도 고르지 않는다.
+            TouchArea {
+                y: clamp(root.rows.length * root.row-height + root.content-y, 0px, list.height);
+                width: list.visible-width;
+                height: list.height - self.y;
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down) {
+                        if (root.editing >= 0 && event.button == PointerEventButton.left) {
+                            root.confirm-rename(root.edit-text);
+                        }
+                        root.activate();
+                    }
+                    root.pointer(event);
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                        root.marquee-press(-1, event.modifiers.control, event.modifiers.shift,
+                            self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                    }
+                }
+            }
+
+            // 사각형 선택의 반투명 사각형. 목록과 함께 넘어가고 보이는 영역 밖은 자른다.
+            Rectangle {
+                width: list.visible-width;
+                height: list.height;
+                clip: true;
+                if root.marquee.shown: Rectangle {
+                    x: root.marquee.x;
+                    y: root.marquee.y + root.content-y;
+                    width: root.marquee.width;
+                    height: root.marquee.height;
+                    background: Palette.accent-background.transparentize(80%);
+                    border-width: 1px;
+                    border-color: Palette.accent-background;
                 }
             }
 
@@ -1660,6 +1726,15 @@ export component AppWindow inherits Window {
     in property <int> left-drop-slot: -1;
     in property <int> right-dragged-tab: -1;
     in property <int> right-drop-slot: -1;
+    // 사각형 선택: 패널마다 목록의 보이는 영역 자리(창 기준)와 너비, 그릴 사각형(Rust가 정한다).
+    out property <length> left-list-left: left.list-left;
+    out property <length> left-list-top: left.list-top;
+    out property <length> left-list-width: left.list-width;
+    out property <length> right-list-left: right.list-left;
+    out property <length> right-list-top: right.list-top;
+    out property <length> right-list-width: right.list-width;
+    in property <MarqueeBox> left-marquee;
+    in property <MarqueeBox> right-marquee;
     // 주소창(활성 패널): 글자로 고쳐 쓰는 모드인가. 아니면 경로 조각 모드다.
     in property <bool> address-editing;
     // 고쳐 쓰는 글자. 모드를 열 때 Rust가 지금 위치를 채운다.
@@ -1766,6 +1841,9 @@ export component AppWindow inherits Window {
     callback tab-drag-move(length, length);
     callback tab-drag-end(length, length) -> bool;
     callback tab-drag-cancel();
+    // 빈 곳을 왼쪽 버튼으로 눌렀다: 패널(0 왼쪽, 1 오른쪽), 행(목록 아래면 -1), Ctrl, Shift, 창 기준 점. 끄는 동안과 놓을
+    // 때는 Rust가 창의 마우스 이벤트로 따라간다.
+    callback marquee-press(int, int, bool, bool, length, length);
     // 열 머리글을 눌렀다: 열 번호.
     callback sort-by(int);
     // 마우스 뒤로(거짓)·앞로(참) 버튼.
@@ -2022,6 +2100,10 @@ export component AppWindow inherits Window {
             }
             dragged-tab: root.left-dragged-tab;
             drop-slot: root.left-drop-slot;
+            marquee: root.left-marquee;
+            marquee-press(row, ctrl, shift, x, y) => {
+                root.marquee-press(0, row, ctrl, shift, x, y);
+            }
             tab-drag-start(index, x, y) => {
                 root.tab-drag-start(0, index, x, y);
             }
@@ -2144,6 +2226,10 @@ export component AppWindow inherits Window {
             }
             dragged-tab: root.right-dragged-tab;
             drop-slot: root.right-drop-slot;
+            marquee: root.right-marquee;
+            marquee-press(row, ctrl, shift, x, y) => {
+                root.marquee-press(1, row, ctrl, shift, x, y);
+            }
             tab-drag-start(index, x, y) => {
                 root.tab-drag-start(1, index, x, y);
             }

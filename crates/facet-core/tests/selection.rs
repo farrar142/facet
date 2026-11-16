@@ -538,3 +538,137 @@ fn 글자로_이동하면_그_항목을_고른다() {
     assert_eq!(selected(&tab), ["나비.txt"]);
     assert_eq!(tab.cursor(), Some(1));
 }
+
+// 사각형 선택(빈 곳에서 시작한 끌기). 화면은 사각형이 걸친 행 범위만 넘긴다. 정렬하면 d, a, b, c, e.
+
+#[test]
+fn 사각형_선택은_걸친_행으로_선택을_바꾼다() {
+    let dir = basic();
+    let mut tab = tab_at(dir.path());
+    tab.select_only(4);
+    tab.begin_marquee(false);
+    assert!(tab.is_marquee_active());
+    tab.marquee_select(Some((1, 2)));
+    assert_eq!(selected(&tab), ["a.txt", "b.txt"]);
+    // 끄는 동안 사각형이 줄면 빠진 행은 선택에서 빠진다.
+    tab.marquee_select(Some((1, 1)));
+    assert_eq!(selected(&tab), ["a.txt"]);
+    // 위로 끌어도(끄는 점 쪽이 앞) 같은 범위다.
+    tab.marquee_select(Some((3, 1)));
+    assert_eq!(selected(&tab), ["a.txt", "b.txt", "c.txt"]);
+    tab.end_marquee();
+    assert!(!tab.is_marquee_active());
+    assert_eq!(selected(&tab), ["a.txt", "b.txt", "c.txt"]);
+}
+
+#[test]
+fn 사각형_선택의_커서와_기준은_끄는_점_쪽_끝_행이다() {
+    let dir = basic();
+    let mut tab = tab_at(dir.path());
+    tab.begin_marquee(false);
+    tab.marquee_select(Some((1, 3)));
+    tab.end_marquee();
+    assert_eq!(tab.cursor(), Some(3));
+    // 기준이 거기 있어 Shift 클릭은 그 행부터다.
+    tab.select_range(4);
+    assert_eq!(selected(&tab), ["c.txt", "e.txt"]);
+
+    tab.begin_marquee(false);
+    tab.marquee_select(Some((4, 2)));
+    assert_eq!(tab.cursor(), Some(2));
+}
+
+#[test]
+fn 걸친_행이_없으면_선택이_비고_커서는_그대로다() {
+    let dir = basic();
+    let mut tab = tab_at(dir.path());
+    tab.select_only(2);
+    tab.begin_marquee(false);
+    tab.marquee_select(None);
+    assert!(selected(&tab).is_empty());
+    assert_eq!(tab.cursor(), Some(2));
+}
+
+#[test]
+fn 목록_밖_번호는_끝_행으로_자른다() {
+    let dir = basic();
+    let mut tab = tab_at(dir.path());
+    tab.begin_marquee(false);
+    tab.marquee_select(Some((3, 99)));
+    assert_eq!(selected(&tab), ["c.txt", "e.txt"]);
+    assert_eq!(tab.cursor(), Some(4));
+}
+
+#[test]
+fn ctrl_사각형_선택은_끌기_전_선택에_더한다() {
+    let dir = basic();
+    let mut tab = tab_at(dir.path());
+    tab.select_only(0);
+    tab.toggle_select(4);
+    tab.begin_marquee(true);
+    tab.marquee_select(Some((1, 2)));
+    assert_eq!(selected(&tab), ["d", "a.txt", "b.txt", "e.txt"]);
+    // 사각형이 줄어도 끌기 전 선택은 남는다.
+    tab.marquee_select(Some((2, 2)));
+    assert_eq!(selected(&tab), ["d", "b.txt", "e.txt"]);
+    // 끌기 전에 고른 행을 사각형이 지나가도 그대로 선택이다(뒤집지 않는다).
+    tab.marquee_select(Some((3, 4)));
+    assert_eq!(selected(&tab), ["d", "c.txt", "e.txt"]);
+    tab.marquee_select(None);
+    assert_eq!(selected(&tab), ["d", "e.txt"]);
+}
+
+#[test]
+fn 사각형_선택은_정렬을_바꿔도_이름으로_유지된다() {
+    let dir = basic();
+    let mut tab = tab_at(dir.path());
+    tab.select_only(4);
+    tab.begin_marquee(true);
+    tab.marquee_select(Some((1, 2)));
+    // 끄는 중에 정렬이 바뀌어도 이미 고른 이름과 끌기 전 선택은 그대로다.
+    tab.set_sort(Sort {
+        column: Column::Name,
+        direction: Direction::Descending,
+    });
+    // 내림차순: d, e, c, b, a.
+    assert_eq!(selected(&tab), ["e.txt", "b.txt", "a.txt"]);
+    tab.marquee_select(Some((2, 2)));
+    assert_eq!(selected(&tab), ["e.txt", "c.txt"]);
+    tab.end_marquee();
+    tab.set_sort(Sort::default());
+    assert_eq!(selected(&tab), ["c.txt", "e.txt"]);
+    assert_eq!(tab.cursor_item().unwrap().name, "c.txt");
+}
+
+#[test]
+fn 사각형_선택은_새로_고쳐도_이름으로_유지되고_사라진_항목은_빠진다() {
+    let dir = basic();
+    let mut tab = tab_at(dir.path());
+    tab.select_only(4);
+    tab.begin_marquee(true);
+    tab.marquee_select(Some((1, 2)));
+    fs::remove_file(dir.path().join("e.txt")).unwrap();
+    fs::write(dir.path().join("0.txt"), b"0").unwrap();
+    go(&mut tab, Navigation::Refresh);
+    // d, 0, a, b, c: 행 번호가 밀려도 이름으로 남고, 사라진 e는 끌기 전 선택에서도 빠진다.
+    assert_eq!(selected(&tab), ["a.txt", "b.txt"]);
+    tab.marquee_select(Some((4, 4)));
+    assert_eq!(selected(&tab), ["c.txt"]);
+    assert_eq!(tab.selected_count(), 1);
+    tab.end_marquee();
+    go(&mut tab, Navigation::Refresh);
+    assert_eq!(selected(&tab), ["c.txt"]);
+}
+
+#[test]
+fn 다른_위치로_가면_사각형_선택이_끝난다() {
+    let dir = folder_with(&[("a.txt", 1)], &["sub"]);
+    let mut tab = tab_at(dir.path());
+    tab.begin_marquee(true);
+    tab.marquee_select(Some((0, 1)));
+    go(
+        &mut tab,
+        Navigation::Go(Location::file_system(dir.path().join("sub"))),
+    );
+    assert!(!tab.is_marquee_active());
+}
