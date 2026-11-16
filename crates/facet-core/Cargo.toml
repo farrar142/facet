@@ -12,6 +12,9 @@ workspace = true
 
 [dev-dependencies]
 tempfile = "3.27.0"
+# 인덱서 서비스 연결 테스트(`tests/indexer_client.rs`)만 같은 프로세스에 합성 인덱스의 파이프 서버를 띄우려고 쓴다.
+facet-index.workspace = true
+facet-indexer = { path = "../facet-indexer" }
 
 [dependencies]
 # 폴더 변경 감시의 Windows 호출(`unsafe`)은 안전 래퍼 크레이트에 둔다(ADR-0002).
