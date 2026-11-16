@@ -77,6 +77,10 @@ impl Condition {
             Self::NameRegex { pattern, case } => {
                 index::Filter::name_regex(pattern, (*case).into())?
             }
+            Self::PathContains { part, case } => index::Filter::path_contains(part, (*case).into()),
+            Self::PathWildcard { pattern, case } => {
+                index::Filter::path_wildcard(pattern, (*case).into())?
+            }
             Self::Under { folder } => index::Filter::under(folder),
             Self::Size { min, max } => index::Filter::size(*min, *max),
             Self::Modified { min, max } => index::Filter::modified(*min, *max),

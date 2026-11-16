@@ -153,6 +153,24 @@ impl fmt::Display for FilterError {
 
 impl std::error::Error for FilterError {}
 
+/// 와일드카드(`*`, `?`)를 처음부터 끝까지 맞는 정규식 글자로 바꾼다.
+fn wildcard_regex(pattern: &str) -> String {
+    let mut re = String::from("^");
+    let mut literal = String::new();
+    for c in pattern.chars() {
+        if matches!(c, '*' | '?') {
+            re.push_str(&regex::escape(&literal));
+            literal.clear();
+            re.push_str(if c == '*' { ".*" } else { "." });
+        } else {
+            literal.push(c);
+        }
+    }
+    re.push_str(&regex::escape(&literal));
+    re.push('$');
+    re
+}
+
 /// 항목에 거는 조건 트리. 조건 하나를 만들거나 [`Filter::and`]·[`Filter::or`]·[`Filter::not`]으로 묶는다.
 ///
 /// 사람이 치는 질의 문법은 이 위에 따로 얹는다. 여기에는 글자 문법이 없다.
@@ -168,6 +186,13 @@ enum Node {
     },
     /// 이름이 정규식(와일드카드는 정규식으로 바꾼 것)과 맞는다.
     Pattern(regex::Regex),
+    /// 전체 경로에 조각이 들어 있다. 대소문자 무시면 `part`는 접은 조각이다.
+    PathContains {
+        part: String,
+        case: Case,
+    },
+    /// 전체 경로가 정규식(와일드카드를 바꾼 것)과 맞는다.
+    PathPattern(regex::Regex),
     /// 폴더 아래(하위 폴더 포함)에 있다. 접은 폴더 경로를 `\`로 끝나게 담는다.
     Under(String),
     Size(Option<u64>, Option<u64>),
@@ -193,20 +218,25 @@ impl Filter {
 
     /// 이름 전체가 와일드카드(`*` 0개 이상의 글자, `?` 글자 하나)와 맞는 항목.
     pub fn name_wildcard(pattern: &str, case: Case) -> Result<Self, FilterError> {
-        let mut re = String::from("^");
-        let mut literal = String::new();
-        for c in pattern.chars() {
-            if matches!(c, '*' | '?') {
-                re.push_str(&regex::escape(&literal));
-                literal.clear();
-                re.push_str(if c == '*' { ".*" } else { "." });
-            } else {
-                literal.push(c);
-            }
+        Self::compile(&wildcard_regex(pattern), case)
+    }
+
+    /// 전체 경로(볼륨 루트부터, `\` 구분)에 `part`가 들어 있는 항목. 빈 조각은 경로를 만들 수
+    /// 있는 모든 항목과 맞는다. 볼륨 루트까지 닿지 않는 항목은 맞지 않는다.
+    pub fn path_contains(part: &str, case: Case) -> Self {
+        let part = match case {
+            Case::Insensitive => fold(part),
+            Case::Sensitive => part.to_owned(),
+        };
+        Self(Node::PathContains { part, case })
+    }
+
+    /// 전체 경로 전체가 와일드카드(`*` 0개 이상의 글자(`\` 포함), `?` 글자 하나)와 맞는 항목.
+    pub fn path_wildcard(pattern: &str, case: Case) -> Result<Self, FilterError> {
+        match Self::compile(&wildcard_regex(pattern), case)?.0 {
+            Node::Pattern(re) => Ok(Self(Node::PathPattern(re))),
+            _ => unreachable!(),
         }
-        re.push_str(&regex::escape(&literal));
-        re.push('$');
-        Self::compile(&re, case)
     }
 
     /// 이름의 어딘가가 정규식과 맞는 항목. 잘못된 정규식은 오류 값이다.
@@ -749,6 +779,19 @@ impl Index {
                 Case::Sensitive => self.name(item.index).contains(part.as_str()),
             },
             Node::Pattern(re) => re.is_match(self.name(item.index)),
+            Node::PathContains { part, case } => match case {
+                Case::Insensitive => item
+                    .folded_path()
+                    .is_some_and(|p| p.contains(part.as_str())),
+                Case::Sensitive => item
+                    .built_path()
+                    .as_ref()
+                    .is_some_and(|(p, _)| p.contains(part.as_str())),
+            },
+            Node::PathPattern(re) => item
+                .built_path()
+                .as_ref()
+                .is_some_and(|(p, _)| re.is_match(p)),
             Node::Under(prefix) => item
                 .folded_path()
                 .is_some_and(|p| p.len() > prefix.len() && p.starts_with(prefix.as_str())),

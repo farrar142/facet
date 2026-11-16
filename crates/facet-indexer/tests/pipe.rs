@@ -399,3 +399,55 @@ fn pipe_security_opens_only_to_interactive_users_and_the_server_account() {
         );
     }
 }
+
+#[test]
+fn path_condition_query_returns_results() {
+    let name = unique_name();
+    let _server = sample_server(&name);
+    let mut pipe = greeted(&name);
+    let query = |condition| {
+        Request::Query(QueryMessage {
+            condition,
+            sort: Some((SortKey::Path, Order::Ascending)),
+            limit: Some(100),
+        })
+    };
+
+    // 폴더 이름 조각: `사진` 폴더 아래 두 파일.
+    let Response::Page(page) = ask(
+        &mut pipe,
+        &query(Condition::PathContains {
+            part: r"사진\".into(),
+            case: Case::Insensitive,
+        }),
+    ) else {
+        panic!("결과 조각이 아님")
+    };
+    let paths: Vec<_> = page.hits.iter().map(|h| h.path.clone()).collect();
+    assert_eq!(
+        paths,
+        [
+            format!(r"{SAMPLE_VOLUME}\사진\README.md"),
+            format!(r"{SAMPLE_VOLUME}\사진\여름 바다.jpg"),
+        ]
+    );
+
+    // 경로 와일드카드와 이름 조건 섞기.
+    let Response::Page(page) = ask(
+        &mut pipe,
+        &query(Condition::And(vec![
+            Condition::PathWildcard {
+                pattern: format!(r"{SAMPLE_VOLUME}\문서\*.txt"),
+                case: Case::Insensitive,
+            },
+            Condition::NameContains {
+                part: "보고서 1".into(),
+                case: Case::Insensitive,
+            },
+        ])),
+    ) else {
+        panic!("결과 조각이 아님")
+    };
+    assert!(page.total >= 1);
+    assert!(page.hits.iter().all(|h| h.name.starts_with("보고서 1")));
+}

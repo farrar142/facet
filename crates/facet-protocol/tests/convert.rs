@@ -100,6 +100,20 @@ fn every_condition_becomes_the_same_index_filter() {
             Filter::name_regex(r"^\d{4}-", index::Case::Insensitive).unwrap(),
         ),
         (
+            Condition::PathContains {
+                part: r"문서\보".into(),
+                case: Case::Insensitive,
+            },
+            Filter::path_contains(r"문서\보", index::Case::Insensitive),
+        ),
+        (
+            Condition::PathWildcard {
+                pattern: r"C:\*.txt".into(),
+                case: Case::Sensitive,
+            },
+            Filter::path_wildcard(r"C:\*.txt", index::Case::Sensitive).unwrap(),
+        ),
+        (
             Condition::Under {
                 folder: r"C:\문서".into(),
             },
