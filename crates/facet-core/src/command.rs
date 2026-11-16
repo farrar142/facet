@@ -140,11 +140,15 @@ pub enum CommandId {
     /// 검색 중지: 활성 탭의 검색을 멈추고 지금까지의 결과는 남긴다. 검색이 도는 중일 때만 켜진다. 기본 단축키는 없다
     /// (Esc 등은 앱이 붙인다).
     StopSearch,
+    /// 현재 폴더 아래만: 즉시 검색의 범위를 「모든 볼륨」과 「현재 폴더 아래만」 사이에서 바꾸는 전환(켜짐 표시는
+    /// [`CommandId::is_checked`]). 범위는 탭에 남고, 즉시 검색 결과 위치에서 바꾸면 같은 질의를 새 범위로 다시 보낸다. 검색을
+    /// 시작한 위치가 실제 폴더가 아니면(이름·내용 검색 결과 위치) 꺼지고 모든 볼륨으로 찾는다. 기본 단축키는 없다.
+    InstantUnderFolder,
 }
 
 impl CommandId {
     /// 모든 명령. 명령 팔레트는 검색어가 없으면 이 순서로 보인다.
-    pub const ALL: [CommandId; 54] = [
+    pub const ALL: [CommandId; 55] = [
         CommandId::Open,
         CommandId::Back,
         CommandId::Forward,
@@ -199,6 +203,7 @@ impl CommandId {
         CommandId::SortByMatches,
         CommandId::ShowInFolder,
         CommandId::StopSearch,
+        CommandId::InstantUnderFolder,
     ];
 
     /// 바뀌지 않는 ID 글자. 화면 문장이 아니다.
@@ -260,6 +265,7 @@ impl CommandId {
             CommandId::SortByMatches => "sort-by-matches",
             CommandId::ShowInFolder => "show-in-folder",
             CommandId::StopSearch => "stop-search",
+            CommandId::InstantUnderFolder => "instant-under-folder",
         }
     }
 
@@ -338,6 +344,7 @@ impl CommandId {
             | CommandId::ContentSearch
             | CommandId::ShowInFolder
             | CommandId::StopSearch
+            | CommandId::InstantUnderFolder
             | CommandId::OpenInNewTab => &[],
             CommandId::NewTab => const { &[key(letter('T')).ctrl()] },
             CommandId::CloseTab => const { &[key(letter('W')).ctrl()] },
@@ -424,6 +431,7 @@ impl CommandId {
                 tab.location().is_search_results() && tab.cursor_item().is_some()
             }
             CommandId::StopSearch => tab.search().is_some_and(|status| status.running),
+            CommandId::InstantUnderFolder => tab.instant_base().is_some(),
             CommandId::Refresh
             | CommandId::EditAddress
             | CommandId::ToggleHidden
@@ -448,6 +456,15 @@ impl CommandId {
             | CommandId::Filter
             | CommandId::Search
             | CommandId::ContentSearch => true,
+        }
+    }
+
+    /// 켜짐 표시가 있는 전환 명령이 지금 켜져 있는가(활성 탭 기준). 전환이 아닌 명령은 `false`다. 「숨김 항목 보이기」의 켜짐은
+    /// 앱 상태라 오른쪽 메뉴가 따로 본다([`crate::menu`]).
+    pub fn is_checked(self, tab: &Tab) -> bool {
+        match self {
+            CommandId::InstantUnderFolder => tab.instant_under(),
+            _ => false,
         }
     }
 

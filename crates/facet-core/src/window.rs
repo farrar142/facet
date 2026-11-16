@@ -74,6 +74,8 @@ use crate::edit::{self, EditError, Edited};
 use crate::history::{
     History, NotUndoable, OperationKind, Outcomes, Record, RecordId, Reversal, UndoError,
 };
+use crate::indexer_client::{ClientOptions, Connection, IndexerClient, IndexerEvent};
+use crate::instant_search::Unavailable;
 use crate::job::{
     AnswerError, ConflictAnswer, CopyRejection, DeleteRejection, ErrorAnswer, JobEvent, JobId,
     JobKind, JobQueue, JournalSink, NotRecyclableAnswer, RevertJob,
@@ -87,8 +89,8 @@ use crate::search_results::PathChange;
 use crate::selection::Pick;
 use crate::session::{PanelSession, Session, TabSession, WindowSession};
 use crate::tab::{
-    ChangeOutcome, ClosedTab, CompletionId, CompletionResult, FilterResult, Navigation,
-    ReadOutcome, ReadRequest, ReadResult, Tab,
+    ChangeOutcome, ClosedTab, CompletionId, CompletionResult, FilterResult, InstantReply,
+    Navigation, ReadOutcome, ReadRequest, ReadResult, Retarget, Tab,
 };
 use crate::watch::ChangeBatch;
 use crate::work_area::WorkArea;
@@ -637,6 +639,8 @@ pub struct App {
     cut_pastes: HashMap<JobId, u32>,
     /// facet이 한 작업이 결과 목록을 바꾼 검색 결과 탭. 다음 [`App::poll`]이 [`Update::Search`]로 알린다.
     changed_results: Vec<TabId>,
+    /// 인덱서 서비스 연결([`App::enable_indexer`]). 즉시 검색이 쓴다. 아직이면 `None`이고 즉시 검색은 「서비스 없음」이다.
+    indexer: Option<IndexerClient>,
     outbox: Outbox,
     receiver: Receiver<Message>,
 }
@@ -842,6 +846,7 @@ impl App {
             cut_marks: Arc::default(),
             cut_pastes: HashMap::new(),
             changed_results: Vec::new(),
+            indexer: None,
             outbox: Outbox {
                 sender,
                 waker: Arc::default(),
@@ -1429,6 +1434,7 @@ impl App {
             updates.push(self.deliver(message));
         }
         updates.extend(self.pump_searches());
+        updates.extend(self.pump_indexer());
         for id in std::mem::take(&mut self.changed_results) {
             if !updates.contains(&(id, Update::Search)) {
                 updates.push((id, Update::Search));
@@ -1473,6 +1479,174 @@ impl App {
             // 정규식은 해석 때 이미 확인했다. 그래도 여기 오면 검색 없이 끝난다.
             Err(StartError::Regex(_)) => tab.stop_search_unstarted(),
         }
+    }
+
+    /// 인덱서 서비스 연결을 띄운다([`IndexerClient::start`], 곧바로 돌아오고 파이프는 뒤에서 연다). 앱(화면)이 시작한 뒤 한 번
+    /// 부른다: 코어는 시험이 진짜 서비스에 붙지 않게 스스로 띄우지 않는다. 연결이 없으면 즉시 검색은 「서비스 없음」이다
+    /// ([`crate::instant_search::InstantStatus::unavailable`]). 이미 띄웠으면 아무것도 하지 않는다. 연결 사건은 같은 깨우기로
+    /// 알리고 [`App::poll`]이 받는다.
+    pub fn enable_indexer(&mut self, options: ClientOptions) {
+        if self.indexer.is_some() {
+            return;
+        }
+        let client = IndexerClient::start(options);
+        let outbox = self.outbox.clone();
+        client.set_waker(move || outbox.wake());
+        self.indexer = Some(client);
+    }
+
+    /// 인덱서 서비스 연결의 지금 상태. [`App::enable_indexer`]를 부르기 전이면 `None`이다.
+    pub fn indexer_connection(&self) -> Option<Connection> {
+        self.indexer.as_ref().map(IndexerClient::connection)
+    }
+
+    /// 활성 탭의 즉시 검색 글자를 바꾼다(입력이 바뀔 때마다 부른다): 글자를 질의 문법으로 해석해 질의를 서비스에 보낸다.
+    ///
+    /// - 첫 글자면 활성 탭이 즉시 검색 결과 위치(지금 폴더, 이미 검색 결과 위치면 그 검색 전 폴더)로 가 기록에 하나 남고,
+    ///   뒤 글자는 그 위치를 제자리에서 고친다(기록은 늘지 않는다). 앞 결과는 새 응답이 올 때까지 그대로 보인다.
+    /// - 문법이 틀리면 위치·결과를 그대로 두고 까닭과 틀린 위치를 [`Tab::instant_error`]에 둔다.
+    /// - 글자가 비면(공백뿐 포함) [`App::end_instant_search`]와 같다: 검색 전 위치로 돌아간다.
+    ///
+    /// 범위는 탭의 「현재 폴더 아래만」([`CommandId::InstantUnderFolder`])을 따른다(검색을 시작한 위치가 실제 폴더가 아니면
+    /// 모든 볼륨이다). 결과·전체 개수·상태는 [`Tab::search`]·[`Tab::instant`]로 읽고 바뀌면 [`Update::Search`]가 온다.
+    pub fn set_instant_query(&mut self, text: &str) {
+        match query_syntax::parse(text, Today::now()) {
+            Err(error) => self.active_tab_mut().set_instant_error(Some(error)),
+            Ok(Parsed::Empty) => self.end_instant_search(),
+            Ok(Parsed::Query(_)) => {
+                let id = self.active_tab_id();
+                let tab = self.active_tab_mut();
+                tab.set_instant_error(None);
+                let base = tab.instant_base();
+                let under = base.is_some() && tab.instant_under();
+                let Some(folder) = base.or_else(|| {
+                    tab.location()
+                        .search_scope()
+                        .map(|scope| scope.folder.clone())
+                }) else {
+                    return;
+                };
+                let location = Location::instant_search_results(folder, text, under);
+                match tab.retarget_instant(location.clone()) {
+                    Retarget::Replaced => {
+                        self.start_instant(id);
+                        self.changed_results.push(id);
+                    }
+                    Retarget::Pending | Retarget::Unchanged => {}
+                    Retarget::NotSearching => {
+                        self.navigate(Navigation::Go(location));
+                    }
+                }
+            }
+        }
+    }
+
+    /// 활성 탭의 즉시 검색을 끝낸다(「검색 끝내기」, Esc가 부른다): 검색 전 위치로 돌아간다(뒤로 가는 것이라 앞으로 가면 같은
+    /// 결과로 돌아온다). 즉시 검색 중이 아니면 틀린 글자의 까닭만 지운다.
+    pub fn end_instant_search(&mut self) {
+        let tab = self.active_tab_mut();
+        tab.set_instant_error(None);
+        if tab.is_instant_search() {
+            if tab.can_go_back() {
+                self.navigate(Navigation::Back);
+            } else if let Some(folder) = tab.instant_base() {
+                self.navigate(Navigation::Go(Location::file_system(folder)));
+            }
+        } else if tab.is_instant_search_pending() {
+            // 아직 결과 위치로 가는 중이면 그 이동을 버려 제자리에 남는다.
+            tab.cancel_pending();
+        }
+    }
+
+    /// 탭 `id`의 즉시 검색 결과를 더 받는다(목록 끝 가까이 스크롤했을 때 화면이 부른다). 이어 받을 결과가 없거나 응답을
+    /// 기다리는 중이면 `false`다. 응답은 [`App::poll`]이 붙인다([`Update::Search`]).
+    pub fn load_more_results(&mut self, id: TabId) -> bool {
+        let Some(resume) = self.tab_mut(id).and_then(|tab| tab.instant_resume()) else {
+            return false;
+        };
+        let Some(client) = &self.indexer else {
+            return false;
+        };
+        let request = client.resume(resume);
+        if let Some(tab) = self.tab_mut(id) {
+            tab.instant_resume_sent(request);
+        }
+        true
+    }
+
+    /// 탭 `id`가 아직 보내지 않은 즉시 검색 질의가 있으면 서비스에 보낸다(연결이 없으면 「서비스 없음」). 서비스는 질의
+    /// 하나만 이어 받으므로 다른 탭의 이어 받기는 끊긴다([`crate::instant_search`]).
+    fn start_instant(&mut self, id: TabId) {
+        let Some(tab) = self.tab_mut(id) else {
+            return;
+        };
+        if !tab.instant_needs_query() {
+            return;
+        }
+        let Some(query) = tab.instant_query() else {
+            return;
+        };
+        let request = self.indexer.as_ref().map(|client| client.query(query));
+        if request.is_some() {
+            for (other, tab) in self.tabs_mut() {
+                if other != id {
+                    tab.instant_superseded();
+                }
+            }
+        }
+        if let Some(tab) = self.tab_mut(id) {
+            match request {
+                Some(request) => tab.instant_sent(request),
+                None => tab.instant_unavailable(Unavailable::Connection(Connection::NoService)),
+            }
+        }
+    }
+
+    /// 인덱서 서비스 연결의 사건을 받아 탭에 넘긴다. 응답은 기다리는 탭의 결과에 들어가고(바뀐 탭마다
+    /// [`Update::Search`]), 연결이 맺어지면 서비스에 닿지 못해 멈춰 있던 탭이 질의를 다시 보낸다.
+    fn pump_indexer(&mut self) -> Vec<(TabId, Update)> {
+        let Some(client) = &self.indexer else {
+            return Vec::new();
+        };
+        let events = client.poll();
+        let mut updates = Vec::new();
+        let mut requery = Vec::new();
+        for event in events {
+            match event {
+                IndexerEvent::Connection(Connection::Connected { .. }) => {
+                    let retry: Vec<TabId> = self
+                        .tabs_mut()
+                        .filter_map(|(id, tab)| tab.instant_retry().then_some(id))
+                        .collect();
+                    for id in retry {
+                        requery.push(id);
+                        updates.push((id, Update::Search));
+                    }
+                }
+                IndexerEvent::Connection(_) => {}
+                IndexerEvent::Reply { id, result } => {
+                    let owner = self
+                        .tabs_mut()
+                        .find(|(_, tab)| tab.instant_in_flight() == Some(id))
+                        .map(|(tab_id, _)| tab_id);
+                    let Some(tab_id) = owner else {
+                        continue;
+                    };
+                    let Some(tab) = self.tab_mut(tab_id) else {
+                        continue;
+                    };
+                    match tab.instant_reply(id, result) {
+                        InstantReply::Ignored => {}
+                        InstantReply::Applied => updates.push((tab_id, Update::Search)),
+                        InstantReply::Requery => requery.push(tab_id),
+                    }
+                }
+            }
+        }
+        for id in requery {
+            self.start_instant(id);
+        }
+        updates
     }
 
     /// 활성 탭에서 내용 검색을 시작한다: [`App::start_search`]와 같이 탭이 검색 결과 위치(지금 폴더 아래, 찾을 글자 `text`,
@@ -1590,6 +1764,7 @@ impl App {
                 };
                 if outcome == ReadOutcome::Committed {
                     self.start_tab_search(id);
+                    self.start_instant(id);
                 }
                 (id, Update::Read(outcome))
             }
@@ -1741,6 +1916,9 @@ impl App {
     /// 활성 탭의 정렬을 바꾼다. 다시 읽지 않는다.
     pub fn set_sort(&mut self, sort: Sort) {
         self.active_tab_mut().set_sort(sort);
+        // 즉시 검색 결과면 서비스가 아는 열로 바꿨을 때 같은 질의를 그 정렬로 다시 보낸다.
+        let id = self.active_tab_id();
+        self.start_instant(id);
     }
 
     /// 명령을 활성 창·패널·탭에서 지금 실행할 수 있는가([`CommandId::is_enabled_in_window`]). 앱이 끝났으면 아무 명령도
@@ -1942,6 +2120,16 @@ impl App {
             CommandId::Filter => return Execution::Filter,
             CommandId::Search => return Execution::Search,
             CommandId::ContentSearch => return Execution::ContentSearch,
+            CommandId::InstantUnderFolder => {
+                let id = self.active_tab_id();
+                let tab = self.active_tab_mut();
+                let under = !tab.instant_under();
+                if tab.set_instant_under(under) == Retarget::Replaced {
+                    self.start_instant(id);
+                    self.changed_results.push(id);
+                }
+                return Execution::Done;
+            }
             CommandId::ShowInFolder => {
                 let id = self.active_tab_id();
                 return match self.active_tab_mut().show_in_folder() {

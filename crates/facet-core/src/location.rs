@@ -47,6 +47,12 @@ pub enum SearchKind {
         /// 파일 이름 조건([`crate::name_match`]의 규칙). 비우면 모든 파일.
         name_pattern: String,
     },
+    /// 즉시 검색: 검색어를 질의 문법으로 해석해 인덱서 서비스에 묻는다([`crate::instant_search`]). `folder`는 검색 전
+    /// 폴더이고, `under`이면 그 폴더 아래만, 아니면 인덱스가 있는 모든 볼륨에서 찾는다.
+    Instant {
+        /// 검색한 폴더 아래만 찾는가(「현재 폴더 아래만」).
+        under: bool,
+    },
 }
 
 impl Location {
@@ -78,6 +84,19 @@ impl Location {
                 mode,
                 name_pattern: name_pattern.into(),
             },
+        })
+    }
+
+    /// 즉시 검색 결과 위치: 검색 전 폴더 `folder`, 검색어 `query`, 범위 `under`(폴더 아래만인가, 아니면 모든 볼륨).
+    pub fn instant_search_results(
+        folder: impl Into<PathBuf>,
+        query: impl Into<String>,
+        under: bool,
+    ) -> Self {
+        Self::SearchResults(SearchScope {
+            folder: folder.into(),
+            query: query.into(),
+            kind: SearchKind::Instant { under },
         })
     }
 
