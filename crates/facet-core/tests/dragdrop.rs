@@ -358,3 +358,194 @@ fn 드롭으로_이동한_뒤_실행취소하면_원래대로_돌아온다() {
     assert_eq!(names(&src), ["a.txt"]);
     assert!(names(&dst).is_empty());
 }
+
+/// facet 항목을 끄는 길: 앱의 끄는 항목(선택)으로 끌기 원본의 데이터 개체를 만들고, 드롭 대상(다른 앱에서 온 끌기와
+/// 같은 OLE 길)이 그 데이터 개체에서 읽은 파일로 결정해 작업을 넣는다.
+struct AppDrop {
+    app: std::rc::Rc<std::cell::RefCell<App>>,
+    target: PathBuf,
+    started: std::rc::Rc<std::cell::RefCell<Option<JobId>>>,
+}
+
+impl AppDrop {
+    fn decision(
+        &self,
+        data: &facet_win::drop_target::DragData,
+        state: &facet_win::drop_target::DragState,
+    ) -> (Decision, Vec<PathBuf>) {
+        let sources = data.files.clone().unwrap_or_default();
+        let decision = decide(&DropRequest {
+            sources: &sources,
+            target: &DropTarget::Folder(self.target.clone()),
+            modifiers: Modifiers {
+                ctrl: state.keys.ctrl,
+                shift: state.keys.shift,
+            },
+            right_button: state.keys.right_button,
+            allowed: AllowedEffects {
+                copy: state.allowed.copy,
+                mov: state.allowed.mov,
+            },
+            data: if data.files.is_some() {
+                DropData::Files
+            } else {
+                DropData::Other
+            },
+        });
+        (decision, sources)
+    }
+}
+
+fn win_effect(decision: Decision) -> facet_win::drop_target::Effect {
+    match decision {
+        Decision::Copy => facet_win::drop_target::Effect::Copy,
+        Decision::Move => facet_win::drop_target::Effect::Move,
+        _ => facet_win::drop_target::Effect::None,
+    }
+}
+
+impl facet_win::drop_target::DropHandler for AppDrop {
+    fn enter(
+        &self,
+        data: &facet_win::drop_target::DragData,
+        state: &facet_win::drop_target::DragState,
+    ) -> facet_win::drop_target::Effect {
+        win_effect(self.decision(data, state).0)
+    }
+    fn over(&self, _: &facet_win::drop_target::DragState) -> facet_win::drop_target::Effect {
+        facet_win::drop_target::Effect::None
+    }
+    fn leave(&self) {}
+    fn drop(
+        &self,
+        data: &facet_win::drop_target::DragData,
+        state: &facet_win::drop_target::DragState,
+    ) -> facet_win::drop_target::Effect {
+        let (decision, sources) = self.decision(data, state);
+        let effect = match decision {
+            Decision::Copy => DropEffect::Copy,
+            Decision::Move => DropEffect::Move,
+            _ => return facet_win::drop_target::Effect::None,
+        };
+        let job = self
+            .app
+            .borrow_mut()
+            .start_drop(effect, sources, self.target.clone())
+            .expect("작업을 넣는다");
+        *self.started.borrow_mut() = Some(job);
+        win_effect(decision)
+    }
+}
+
+#[test]
+fn facet_항목을_끌어_폴더에_놓으면_같은_볼륨은_이동이고_실행취소된다() {
+    use facet_win::drag_source::DragObject;
+    use facet_win::drop_target::testing::TestTarget;
+    use facet_win::drop_target::{Allowed, DragKeys, Effect};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("src");
+    let dst = dir.path().join("dst");
+    fs::create_dir_all(&src).unwrap();
+    fs::create_dir_all(&dst).unwrap();
+    fs::write(src.join("a.txt"), "a").unwrap();
+    fs::write(src.join("b.txt"), "b").unwrap();
+    let mut app = app_at(&src);
+    app.active_tab_mut().select_all();
+    let sources = app.drag_sources().expect("끄는 항목");
+    assert_eq!(sources, [src.join("a.txt"), src.join("b.txt")]);
+
+    let app = Rc::new(RefCell::new(app));
+    let started = Rc::new(RefCell::new(None));
+    let target = TestTarget::new(Box::new(AppDrop {
+        app: Rc::clone(&app),
+        target: dst.clone(),
+        started: Rc::clone(&started),
+    }))
+    .unwrap();
+    let object = DragObject::new(
+        &sources,
+        Allowed {
+            copy: true,
+            mov: true,
+        },
+    )
+    .unwrap();
+    let data = object.as_test_data().unwrap();
+    let keys = DragKeys::default();
+    assert_eq!(
+        target.enter(&data, keys, (0, 0), object.allowed()),
+        Effect::Move
+    );
+    // Ctrl은 복사로 바꾼다(놓지 않고 커서만 본다).
+    let ctrl = DragKeys { ctrl: true, ..keys };
+    target.leave();
+    assert_eq!(
+        target.enter(&data, ctrl, (0, 0), object.allowed()),
+        Effect::Copy
+    );
+    // 놓으면 facet이 이동을 직접 하므로 원본 앱(여기서는 facet의 끌기 원본)에는 「없음」이 돌아간다.
+    assert_eq!(
+        target.drop(&data, keys, (0, 0), object.allowed()),
+        Effect::None
+    );
+    assert_eq!(data.performed_effect(), Some(0));
+
+    let job = started.borrow().expect("작업이 들어갔다");
+    let mut app = app.borrow_mut();
+    assert_eq!(app.work_area().entry(job).unwrap().kind, JobKind::Move);
+    let (state, _) = wait_job(&mut app, job);
+    assert_eq!(state, JobState::Finished);
+    assert_eq!(names(&dst), ["a.txt", "b.txt"]);
+    assert!(names(&src).is_empty());
+
+    let undo = app.undo().expect("실행취소");
+    let (state, summary) = wait_job(&mut app, undo);
+    assert_eq!(state, JobState::Finished, "{summary:?}");
+    assert_eq!(names(&src), ["a.txt", "b.txt"]);
+    assert!(names(&dst).is_empty());
+}
+
+#[test]
+fn facet_폴더를_자기_자신에_끌면_놓을_수_없다() {
+    use facet_win::drag_source::DragObject;
+    use facet_win::drop_target::testing::TestTarget;
+    use facet_win::drop_target::{Allowed, DragKeys, Effect};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let dir = TempDir::new().unwrap();
+    let folder = dir.path().join("폴더");
+    fs::create_dir_all(folder.join("하위")).unwrap();
+    let app = Rc::new(RefCell::new(app_at(dir.path())));
+    let started = Rc::new(RefCell::new(None));
+    for target_folder in [folder.clone(), folder.join("하위")] {
+        let target = TestTarget::new(Box::new(AppDrop {
+            app: Rc::clone(&app),
+            target: target_folder,
+            started: Rc::clone(&started),
+        }))
+        .unwrap();
+        let object = DragObject::new(
+            std::slice::from_ref(&folder),
+            Allowed {
+                copy: true,
+                mov: true,
+            },
+        )
+        .unwrap();
+        let data = object.as_test_data().unwrap();
+        let keys = DragKeys::default();
+        assert_eq!(
+            target.enter(&data, keys, (0, 0), object.allowed()),
+            Effect::None
+        );
+        assert_eq!(
+            target.drop(&data, keys, (0, 0), object.allowed()),
+            Effect::None
+        );
+    }
+    assert!(started.borrow().is_none(), "아무 작업도 넣지 않는다");
+}

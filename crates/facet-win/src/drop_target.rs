@@ -28,6 +28,9 @@
 //!
 //! 셸의 끌기 그림 도우미(`IDropTargetHelper`)가 있으면 끄는 동안 탐색기가 만든 끌기 그림을 이 창 위에도 그린다.
 //!
+//! 처리기가 [`DropHandler::label`]로 설명을 주면 데이터 개체에 셸의 드롭 설명(`DropDescription`)을 적어 끌기 그림
+//! 옆에 「〈폴더〉로 이동」 같은 글자가 보이게 한다. 떠나거나 놓으면 지운다(`DROPIMAGE_INVALID`).
+//!
 //! Windows가 아니면 [`register`]는 [`DropError::Unsupported`]다.
 
 use std::fmt;
@@ -109,8 +112,26 @@ impl Effect {
     }
 }
 
+/// 커서 옆에 보일 설명(셸의 드롭 설명 `DROPDESCRIPTION`). 글자는 앱이 준다(ADR-0007).
+///
+/// 셸은 `message`의 `%1`을 `insert`로 바꿔 보이고 `insert`를 강조한다. 원본 앱이 끌기 그림을 셸 끌기 그림
+/// 도우미로 만들고 설명 글자를 허용했을 때만 보인다(facet과 탐색기는 그렇게 한다). 효과(복사·이동·놓을 수 없음)의
+/// 아이콘은 처리기가 돌려준 [`Effect`]를 따른다.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DropLabel {
+    /// 설명 글자(`%1` 자리에 `insert`가 들어간다). 259글자(UTF-16)를 넘으면 자른다.
+    pub message: String,
+    /// 강조할 글자(보통 폴더 이름). 259글자를 넘으면 자른다.
+    pub insert: String,
+}
+
 /// 드롭 대상의 처리기. 창을 등록한 스레드에서만 불린다.
 pub trait DropHandler {
+    /// 바로 앞 [`DropHandler::enter`]·[`DropHandler::over`]에 맞는 커서 옆 설명. 없으면 셸의 기본 설명이다.
+    /// 처리기가 효과를 돌려준 직후 불린다.
+    fn label(&self) -> Option<DropLabel> {
+        None
+    }
     /// 끌기가 창에 들어왔다. 데이터는 이때 한 번 읽어 준다.
     fn enter(&self, data: &DragData, state: &DragState) -> Effect;
     /// 창 위에서 움직이거나 키가 바뀌었다.

@@ -189,6 +189,21 @@ pub fn decide(request: &DropRequest<'_>) -> Decision {
     }
 }
 
+/// 끄는 동안 커서에 보일 효과. 고르기 메뉴(오른쪽 버튼)면 메뉴에 든 효과 가운데 기본 효과(없으면 다른 하나)를
+/// 보인다. 놓을 수 없으면 `None`.
+pub fn cursor_effect(decision: Decision, sources: &[PathBuf], target: &Path) -> Option<DropEffect> {
+    match decision {
+        Decision::Copy => Some(DropEffect::Copy),
+        Decision::Move => Some(DropEffect::Move),
+        Decision::Menu { copy, mov } => match (default_effect(sources, target), copy, mov) {
+            (DropEffect::Move, _, true) | (DropEffect::Copy, false, true) => Some(DropEffect::Move),
+            (_, true, _) => Some(DropEffect::Copy),
+            _ => None,
+        },
+        Decision::Refuse(_) => None,
+    }
+}
+
 /// 수식 키가 없을 때의 효과: 모두 같은 볼륨이면 이동, 아니면 복사.
 pub fn default_effect(sources: &[PathBuf], target: &Path) -> DropEffect {
     match volume_key(target) {
@@ -253,6 +268,38 @@ mod tests {
             Path::new(r"\\srv\other\a")
         ));
         assert!(!same_volume(Path::new("rel"), Path::new("rel")));
+    }
+
+    #[test]
+    fn 커서_효과는_메뉴면_기본_효과를_따른다() {
+        let same = paths(&[r"C:\a\x"]);
+        let other = paths(&[r"D:\a\x"]);
+        let t = Path::new(r"C:\t");
+        let menu = |copy, mov| Decision::Menu { copy, mov };
+        assert_eq!(
+            cursor_effect(menu(true, true), &same, t),
+            Some(DropEffect::Move)
+        );
+        assert_eq!(
+            cursor_effect(menu(true, true), &other, t),
+            Some(DropEffect::Copy)
+        );
+        assert_eq!(
+            cursor_effect(menu(true, false), &same, t),
+            Some(DropEffect::Copy)
+        );
+        assert_eq!(
+            cursor_effect(menu(false, true), &other, t),
+            Some(DropEffect::Move)
+        );
+        assert_eq!(
+            cursor_effect(Decision::Copy, &same, t),
+            Some(DropEffect::Copy)
+        );
+        assert_eq!(
+            cursor_effect(Decision::Refuse(Refusal::IntoItself), &same, t),
+            None
+        );
     }
 
     #[test]

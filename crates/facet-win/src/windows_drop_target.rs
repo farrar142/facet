@@ -1,6 +1,6 @@
 //! OLE 드롭 대상의 Windows 구현. `unsafe`는 이 파일 안에 가둔다(규약은 [`crate::drop_target`] 문서).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 use std::num::NonZeroIsize;
@@ -27,20 +27,23 @@ use windows::Win32::System::SystemServices::{
     MK_CONTROL, MK_RBUTTON, MK_SHIFT, MODIFIERKEYS_FLAGS,
 };
 use windows::Win32::UI::Shell::{
-    CFSTR_LOGICALPERFORMEDDROPEFFECT, CFSTR_PERFORMEDDROPEFFECT, CLSID_DragDropHelper,
+    CFSTR_DROPDESCRIPTION, CFSTR_LOGICALPERFORMEDDROPEFFECT, CFSTR_PERFORMEDDROPEFFECT,
+    CLSID_DragDropHelper, DROPIMAGE_COPY, DROPIMAGE_INVALID, DROPIMAGE_MOVE, DROPIMAGE_NONE,
     IDropTargetHelper,
 };
 use windows::core::{PCWSTR, Ref, implement};
 
-use crate::drop_target::{Allowed, DragData, DragKeys, DragState, DropError, DropHandler, Effect};
+use crate::drop_target::{
+    Allowed, DragData, DragKeys, DragState, DropError, DropHandler, DropLabel, Effect,
+};
 
 /// 이 스레드의 OLE 초기화 하나. 버리면 짝을 맞춰 `OleUninitialize`한다. `Send`가 아니다.
-struct OleThread {
+pub(crate) struct OleThread {
     _not_send: PhantomData<*const ()>,
 }
 
 impl OleThread {
-    fn initialize() -> Result<OleThread, DropError> {
+    pub(crate) fn initialize() -> Result<OleThread, DropError> {
         // SAFETY: 예약 인수는 비워 둔다. 성공(S_FALSE 포함)하면 같은 스레드의 Drop이 짝을 맞춘다.
         match unsafe { OleInitialize(None) } {
             Ok(()) => Ok(OleThread {
@@ -114,6 +117,10 @@ struct Target {
     helper: Option<IDropTargetHelper>,
     /// 이 끌기에서 오른쪽 버튼이 눌린 적이 있는가(놓을 때는 버튼이 이미 떨어져 있다).
     right_button: Cell<bool>,
+    /// 들어온 끌기의 데이터 개체(드롭 설명을 적을 곳). 떠나거나 놓으면 버린다.
+    object: RefCell<Option<IDataObject>>,
+    /// 마지막으로 적은 드롭 설명(같으면 다시 적지 않는다).
+    described: RefCell<Option<(Effect, Option<DropLabel>)>>,
 }
 
 impl Target {
@@ -127,6 +134,44 @@ impl Target {
             hwnd,
             helper,
             right_button: Cell::new(false),
+            object: RefCell::new(None),
+            described: RefCell::new(None),
+        }
+    }
+
+    /// 처리기가 준 설명을 들어온 데이터 개체에 드롭 설명으로 적는다(바뀌었을 때만).
+    fn describe(&self, effect: Effect) {
+        let label = catch_unwind(AssertUnwindSafe(|| self.handler.label())).unwrap_or(None);
+        let next = (effect, label);
+        if self.described.borrow().as_ref() == Some(&next) {
+            return;
+        }
+        if let Some(object) = self.object.borrow().as_ref() {
+            let kind = match (&next.1, effect) {
+                (None, _) => DROPIMAGE_INVALID,
+                (Some(_), Effect::Copy) => DROPIMAGE_COPY,
+                (Some(_), Effect::Move) => DROPIMAGE_MOVE,
+                (Some(_), Effect::None) => DROPIMAGE_NONE,
+            };
+            set_hglobal_named(
+                object,
+                CFSTR_DROPDESCRIPTION,
+                &description_bytes(kind.0, next.1.as_ref()),
+            );
+        }
+        *self.described.borrow_mut() = Some(next);
+    }
+
+    /// 끌기가 끝났다: 적은 설명을 지우고 데이터 개체를 버린다.
+    fn finish(&self) {
+        let object = self.object.borrow_mut().take();
+        let described = self.described.borrow_mut().take();
+        if let (Some(object), Some(_)) = (object, described) {
+            set_hglobal_named(
+                &object,
+                CFSTR_DROPDESCRIPTION,
+                &description_bytes(DROPIMAGE_INVALID.0, None),
+            );
         }
     }
 
@@ -204,7 +249,10 @@ impl IDropTarget_Impl for Target_Impl {
         let allowed = unsafe { read_effect(pdweffect) };
         let state = self.state(grfkeystate, pt, allowed);
         let data = read_data(pdataobj.as_ref());
+        *self.described.borrow_mut() = None;
+        *self.object.borrow_mut() = pdataobj.as_ref().cloned();
         let effect = self.ask(state.allowed, |h| h.enter(&data, &state));
+        self.describe(effect);
         let value = effect_value(effect);
         if let (Some(helper), Some(hwnd), Some(object)) =
             (&self.helper, self.hwnd, pdataobj.as_ref())
@@ -227,6 +275,7 @@ impl IDropTarget_Impl for Target_Impl {
         let allowed = unsafe { read_effect(pdweffect) };
         let state = self.state(grfkeystate, pt, allowed);
         let effect = self.ask(state.allowed, |h| h.over(&state));
+        self.describe(effect);
         let value = effect_value(effect);
         if let Some(helper) = &self.helper {
             // SAFETY: 지역 점을 넘긴다.
@@ -239,6 +288,7 @@ impl IDropTarget_Impl for Target_Impl {
 
     fn DragLeave(&self) -> windows::core::Result<()> {
         let _ = catch_unwind(AssertUnwindSafe(|| self.handler.leave()));
+        self.finish();
         self.right_button.set(false);
         if let Some(helper) = &self.helper {
             // SAFETY: 인수 없음.
@@ -259,6 +309,7 @@ impl IDropTarget_Impl for Target_Impl {
         let state = self.state(grfkeystate, pt, allowed);
         let data = read_data(pdataobj.as_ref());
         let effect = self.ask(state.allowed, |h| h.drop(&data, &state));
+        self.finish();
         self.right_button.set(false);
         // 이동은 facet이 직접 한다(최적화된 이동): 원본 앱이 원본을 지우지 않게 결과를 적고 「없음」을 돌려준다.
         let returned = match effect {
@@ -292,7 +343,7 @@ fn hglobal_format(format: u16) -> FORMATETC {
 }
 
 /// 데이터 개체에서 파일 목록(`CF_HDROP`) 바이트를 꺼낸다. 없으면 「파일 아님」.
-fn read_data(object: Option<&IDataObject>) -> DragData {
+pub(crate) fn read_data(object: Option<&IDataObject>) -> DragData {
     let bytes = object.and_then(|object| read_hglobal(object, CF_HDROP.0));
     DragData::from_hdrop(bytes.as_deref())
 }
@@ -344,8 +395,8 @@ fn new_hglobal(bytes: &[u8]) -> Option<HGLOBAL> {
     }
 }
 
-/// 데이터 개체에 이름 있는 형식 `name`을 전역 메모리 `bytes`로 넣는다. 데이터 개체가 메모리를 넘겨받는다.
-fn set_hglobal(object: &IDataObject, format: u16, bytes: &[u8]) -> bool {
+/// 데이터 개체에 형식 `format`을 전역 메모리 `bytes`로 넣는다. 데이터 개체가 메모리를 넘겨받는다.
+pub(crate) fn set_hglobal(object: &IDataObject, format: u16, bytes: &[u8]) -> bool {
     let Some(global) = new_hglobal(bytes) else {
         return false;
     };
@@ -373,9 +424,57 @@ fn named_format(name: PCWSTR) -> Option<u16> {
 }
 
 fn set_dword(object: &IDataObject, name: PCWSTR, value: u32) {
+    set_hglobal_named(object, name, &value.to_le_bytes());
+}
+
+fn set_hglobal_named(object: &IDataObject, name: PCWSTR, bytes: &[u8]) {
     if let Some(format) = named_format(name) {
-        set_hglobal(object, format, &value.to_le_bytes());
+        set_hglobal(object, format, bytes);
     }
+}
+
+/// `DROPDESCRIPTION`의 글자 칸 하나(UTF-16 260단위, 널로 끝남).
+const DESCRIPTION_CHARS: usize = 260;
+
+/// `DROPDESCRIPTION` 구조체 바이트: 종류(`i32`), 설명 글자, 강조 글자. 글자는 259단위에서 자른다(대리 쌍을 가르지
+/// 않는다).
+fn description_bytes(kind: i32, label: Option<&DropLabel>) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(4 + 4 * DESCRIPTION_CHARS);
+    bytes.extend_from_slice(&kind.to_le_bytes());
+    for text in [
+        label.map_or("", |l| l.message.as_str()),
+        label.map_or("", |l| l.insert.as_str()),
+    ] {
+        let mut units: Vec<u16> = Vec::with_capacity(DESCRIPTION_CHARS);
+        for c in text.chars() {
+            let mut buf = [0u16; 2];
+            let encoded = c.encode_utf16(&mut buf);
+            if units.len() + encoded.len() > DESCRIPTION_CHARS - 1 {
+                break;
+            }
+            units.extend_from_slice(encoded);
+        }
+        units.resize(DESCRIPTION_CHARS, 0);
+        bytes.extend(units.iter().flat_map(|u| u.to_le_bytes()));
+    }
+    bytes
+}
+
+/// `DROPDESCRIPTION` 바이트를 읽는다(종류, 설명, 강조). 시험이 쓴다.
+fn parse_description(bytes: &[u8]) -> Option<(i32, String, String)> {
+    let kind = i32::from_le_bytes(bytes.get(..4)?.try_into().ok()?);
+    let text = |start: usize| -> Option<String> {
+        let units: Vec<u16> = bytes
+            .get(start..start + 2 * DESCRIPTION_CHARS)?
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
+            .take_while(|u| *u != 0)
+            .collect();
+        Some(String::from_utf16_lossy(&units))
+    };
+    Some((kind, text(4)?, text(4 + 2 * DESCRIPTION_CHARS)?))
 }
 
 /// 시험 도우미. 앱은 부르지 않는다.
@@ -391,8 +490,8 @@ pub mod testing {
         MK_CONTROL, MK_LBUTTON, MK_RBUTTON, MK_SHIFT, MODIFIERKEYS_FLAGS,
     };
     use windows::Win32::UI::Shell::{
-        CFSTR_FILEDESCRIPTORW, CFSTR_LOGICALPERFORMEDDROPEFFECT, CFSTR_PERFORMEDDROPEFFECT,
-        SHCreateDataObject,
+        CFSTR_DROPDESCRIPTION, CFSTR_FILEDESCRIPTORW, CFSTR_LOGICALPERFORMEDDROPEFFECT,
+        CFSTR_PERFORMEDDROPEFFECT, SHCreateDataObject,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WINDOW_STYLE,
@@ -446,6 +545,20 @@ pub mod testing {
             let format = named_format(CFSTR_FILEDESCRIPTORW).ok_or(DropError::Other(0))?;
             // 항목 수 0인 FILEGROUPDESCRIPTORW 머리.
             FakeData::with(format, &0u32.to_le_bytes())
+        }
+
+        /// 드롭 대상이 적은 드롭 설명(종류 값, 설명, 강조). 없으면 `None`. 종류 -1은 지운 것(`DROPIMAGE_INVALID`).
+        pub fn drop_description(&self) -> Option<(i32, String, String)> {
+            let bytes = read_hglobal(&self.object, named_format(CFSTR_DROPDESCRIPTION)?)?;
+            super::parse_description(&bytes)
+        }
+
+        /// 이미 있는 데이터 개체(끌기 원본이 만든 것)를 감싼다.
+        pub(crate) fn wrap(object: IDataObject) -> Result<FakeData, DropError> {
+            Ok(FakeData {
+                object,
+                _ole: OleThread::initialize()?,
+            })
         }
 
         /// 놓은 뒤 드롭 대상이 적은 `Performed DropEffect`.
