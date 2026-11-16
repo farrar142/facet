@@ -100,11 +100,18 @@ pub enum CommandId {
     /// 작업 기록 보기: 작업 기록을 읽기 전용 목록으로 연다([`crate::window::Execution::ShowHistory`]). 기록이 없으면
     /// 꺼진다.
     ShowHistory,
+    /// 삭제: 활성 탭의 선택(없으면 커서 항목)을 휴지통으로 보낸다. 묻지 않고 곧바로 휴지통 삭제 작업을 넣는다. 원본이
+    /// 모두 휴지통이 없는 위치에 있으면 영구 삭제가 되므로 화면이 먼저 확인받는다
+    /// ([`crate::window::Execution::ConfirmDelete`]). 원본이 없거나 위치가 실제 폴더가 아니면 꺼진다.
+    Delete,
+    /// 영구 삭제: 활성 탭의 선택(없으면 커서 항목)을 휴지통을 거치지 않고 지운다. 늘 화면이 먼저 확인받는다
+    /// ([`crate::window::Execution::ConfirmDelete`]). 켜지는 조건은 삭제와 같다.
+    DeletePermanently,
 }
 
 impl CommandId {
     /// 모든 명령. 명령 팔레트는 검색어가 없으면 이 순서로 보인다.
-    pub const ALL: [CommandId; 41] = [
+    pub const ALL: [CommandId; 43] = [
         CommandId::Open,
         CommandId::Back,
         CommandId::Forward,
@@ -146,6 +153,8 @@ impl CommandId {
         CommandId::Undo,
         CommandId::Redo,
         CommandId::ShowHistory,
+        CommandId::Delete,
+        CommandId::DeletePermanently,
     ];
 
     /// 바뀌지 않는 ID 글자. 화면 문장이 아니다.
@@ -194,6 +203,8 @@ impl CommandId {
             CommandId::Undo => "undo",
             CommandId::Redo => "redo",
             CommandId::ShowHistory => "show-history",
+            CommandId::Delete => "delete",
+            CommandId::DeletePermanently => "delete-permanently",
         }
     }
 
@@ -290,6 +301,8 @@ impl CommandId {
             CommandId::Undo => const { &[key(letter('Z')).ctrl()] },
             CommandId::Redo => const { &[key(letter('Y')).ctrl()] },
             CommandId::ShowHistory => &[],
+            CommandId::Delete => const { &[key(Key::Delete)] },
+            CommandId::DeletePermanently => const { &[key(Key::Delete).shift()] },
         }
     }
 
@@ -302,6 +315,7 @@ impl CommandId {
     /// - 이름 바꾸기: 커서 항목이 있고 탭 위치가 실제 폴더일 때. 새 폴더: 탭 위치가 실제 폴더일 때.
     /// - 반대편 패널로 복사·이동: 원본(선택, 없으면 커서 항목)이 있고 탭 위치가 실제 폴더일 때. 반대편 패널은
     ///   [`CommandId::is_enabled_in_window`]가 본다.
+    /// - 삭제·영구 삭제: 원본(선택, 없으면 커서 항목)이 있고 탭 위치가 실제 폴더일 때.
     /// - 나머지는 늘 켜져 있다. 다음·이전·n번째 탭은 탭 하나만 보아서는 모르므로 켜져 있다고 하고, 패널의 탭
     ///   수는 [`CommandId::is_enabled_in`]이 본다. 닫은 탭 되살리기도 켜져 있다고 하고, 닫은 탭 목록은
     ///   [`crate::window::App::can_execute`]가 본다. 패널 나누기/합치기와 활성 패널 바꾸기도 켜져 있다고 하고, 창의
@@ -318,7 +332,9 @@ impl CommandId {
             CommandId::CopyToOtherPanel
             | CommandId::MoveToOtherPanel
             | CommandId::CopyTo
-            | CommandId::MoveTo => has_sources(tab),
+            | CommandId::MoveTo
+            | CommandId::Delete
+            | CommandId::DeletePermanently => has_sources(tab),
             CommandId::Rename => {
                 tab.location().file_system_path().is_some() && tab.cursor_item().is_some()
             }
@@ -408,7 +424,7 @@ impl CommandState for Window {
     }
 }
 
-/// 복사·이동할 원본이 있는가: 선택이나 커서 항목이 있고 탭 위치가 실제 폴더다.
+/// 복사·이동·삭제할 원본이 있는가: 선택이나 커서 항목이 있고 탭 위치가 실제 폴더다.
 fn has_sources(tab: &Tab) -> bool {
     tab.location().file_system_path().is_some()
         && (tab.selected_items().next().is_some() || tab.cursor_item().is_some())

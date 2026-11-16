@@ -36,6 +36,10 @@
 //! - 반대편 패널로 복사·이동(F7·F8): 코어가 확인 줄을 띄우라고 하면([`Execution::ConfirmTransfer`]) 창 아래에 대상과
 //!   항목 수([`App::transfer_plan`])를 보이고, Enter면 작업 대기열에 넣는다([`App::start_transfer`], 막히면 까닭을
 //!   보인다). Esc면 아무것도 하지 않는다.
+//! - 삭제(Delete)·영구 삭제(Shift+Delete): Delete는 묻지 않고 휴지통 삭제 작업을 넣는다(코어가 곧바로 넣는다). 영구
+//!   삭제와, 원본이 모두 휴지통이 없는 위치에 있는 Delete는 코어가 [`Execution::ConfirmDelete`]를 주고, 같은 확인
+//!   줄에 「영구 삭제, 실행취소할 수 없음」 경고와 항목(하나면 이름, 여럿이면 수, [`App::delete_plan`])을 보인다.
+//!   Enter면 [`App::start_delete`], Esc면 아무것도 지우지 않는다.
 //! - 복사·이동 대상 선택 창(「복사 위치…」「이동 위치…」, 패널이 하나일 때의 F7·F8): 코어가
 //!   [`Execution::ChooseTransferTarget`]을 주면 창 위에 경로 입력란·반대편 패널 위치·최근 대상을 보인다
 //!   ([`App::transfer_choice`], 상태는 `src/target.rs`). 글자는 [`App::transfer_plan_to`]가 주소창과 같은 규칙으로
@@ -58,7 +62,8 @@ use facet_core::edit::{EditError, EditKind, Edited};
 use facet_core::file_list;
 use facet_core::history::UndoError;
 use facet_core::job::{
-    ConflictAnswer, CopyRejection, ErrorAnswer, JobId, JobKind, JobState, Remaining,
+    ConflictAnswer, CopyRejection, DeleteRejection, ErrorAnswer, JobId, JobKind, JobState,
+    NotRecyclableAnswer, Remaining,
 };
 use facet_core::launch::{LaunchTarget, resolve_launch};
 use facet_core::placement::{self, Monitor, Rect, WindowState};
@@ -66,8 +71,8 @@ use facet_core::selection::{CursorMove, Pick};
 use facet_core::session::{self, Loaded, SAVE_DELAY, Saver};
 use facet_core::tab::{AutoRefresh, Navigation, ReadOutcome, Relocation, Tab};
 use facet_core::window::{
-    App, Execution, MAX_PANELS, Panel, TabDestination, TabId, TargetError, TransferPlan, Update,
-    WindowId,
+    App, DeletePlan, DeleteWarning, Execution, MAX_PANELS, Panel, TabDestination, TabId,
+    TargetError, TransferPlan, Update, WindowId,
 };
 use facet_core::work_area::JobEntry;
 use facet_core::{ListError, Location, OpenError, ResolveError, provider_for};
@@ -679,6 +684,12 @@ fn connect(ui: &AppWindow, w: WindowId) {
     ui.on_job_answer_error(move |id, choice| {
         job_action(id, JobAction::AnswerError(question::error_answer(choice)));
     });
+    ui.on_job_answer_not_recyclable(move |id, choice| {
+        job_action(
+            id,
+            JobAction::AnswerNotRecyclable(question::not_recyclable_answer(choice)),
+        );
+    });
 }
 
 /// 진행 표시의 단추.
@@ -692,6 +703,7 @@ enum JobAction {
     /// 질문 대화의 답. 다른 창에서 먼저 답했으면 코어가 받지 않는다(한 번만 적용).
     AnswerConflict(ConflictAnswer),
     AnswerError(ErrorAnswer),
+    AnswerNotRecyclable(NotRecyclableAnswer),
 }
 
 /// 진행 표시의 단추를 눌렀다: 화면에 넘긴 작업 번호로 작업을 찾아 코어의 작업 대기열을 부르고, 모든 창의 작업 영역을
@@ -733,6 +745,9 @@ fn job_action(id: i32, action: JobAction) {
             }
             JobAction::AnswerError(answer) => {
                 let _ = app.answer_error(job, answer);
+            }
+            JobAction::AnswerNotRecyclable(answer) => {
+                let _ = app.answer_not_recyclable(job, answer);
             }
         }
     }
@@ -823,6 +838,12 @@ impl ProgressView {
         ui.on_job_answer_error(move |id, choice| {
             job_action(id, JobAction::AnswerError(question::error_answer(choice)));
         });
+        ui.on_job_answer_not_recyclable(move |id, choice| {
+            job_action(
+                id,
+                JobAction::AnswerNotRecyclable(question::not_recyclable_answer(choice)),
+            );
+        });
         Ok(ProgressView { ui, jobs })
     }
 
@@ -901,12 +922,13 @@ fn job_row(entry: &JobEntry) -> JobRow {
     };
     JobRow {
         id: job_number(entry.id),
-        moving: entry.kind == JobKind::Move,
-        reverting: match entry.kind {
-            // 삭제 작업의 진행 표시는 뒤 티켓(앱)이 따로 그린다. 그때까지는 종류 표시 없이 보인다.
-            JobKind::Copy | JobKind::Move | JobKind::Delete | JobKind::Recycle => 0,
-            JobKind::Undo => 1,
-            JobKind::Redo => 2,
+        kind: match entry.kind {
+            JobKind::Copy => JobType::Copy,
+            JobKind::Move => JobType::Move,
+            JobKind::Undo => JobType::Undo,
+            JobKind::Redo => JobType::Redo,
+            JobKind::Recycle => JobType::Recycle,
+            JobKind::Delete => JobType::Delete,
         },
         target: entry.target.display().to_string().into(),
         status: match entry.state {
@@ -947,9 +969,20 @@ fn job_row(entry: &JobEntry) -> JobRow {
         newer: asked.newer,
         larger: asked.larger,
         can_overwrite: asked.can_overwrite,
-        overwrite_permanent: asked.overwrite_permanent,
+        overwrite_note: asked.overwrite_note,
         error_path: asked.error_path.into(),
         error_reason: asked.error_reason,
+    }
+}
+
+/// 삭제 확인 줄에 보일 항목 이름: 항목이 하나면 그 이름, 여럿이면 비어 있다(화면이 항목 수를 보인다).
+fn delete_name(plan: &DeletePlan) -> String {
+    match plan.sources.as_slice() {
+        [one] => one
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| one.display().to_string()),
+        _ => String::new(),
     }
 }
 
@@ -1007,6 +1040,8 @@ struct View {
     target_rows: Rc<VecModel<TargetRow>>,
     /// 확인 줄이 열려 있으면 확인하면 넣을 복사·이동. 화면의 `confirm-open`과 함께 바뀐다.
     transfer: RefCell<Option<TransferPlan>>,
+    /// 확인 줄이 삭제 확인으로 열려 있으면 확인하면 넣을 영구 삭제. 화면의 `confirm-delete`와 함께 바뀐다.
+    delete: RefCell<Option<DeletePlan>>,
     /// 작업 영역의 진행 표시들.
     jobs: Rc<VecModel<JobRow>>,
 }
@@ -1063,6 +1098,7 @@ impl View {
             target: RefCell::default(),
             target_rows,
             transfer: RefCell::default(),
+            delete: RefCell::default(),
             jobs,
         })
     }
@@ -1082,6 +1118,7 @@ impl View {
         };
         self.close_rename();
         self.close_address_edit();
+        self.close_transfer();
         let ui = &self.ui;
         ui.set_confirm_moving(kind == JobKind::Move);
         ui.set_confirm_target(plan.target.display().to_string().into());
@@ -1092,9 +1129,58 @@ impl View {
         *self.transfer.borrow_mut() = Some(plan);
     }
 
+    /// 삭제 전 확인 줄을 연다: 되돌릴 수 없다는 경고와 항목(하나면 이름, 여럿이면 수)을 보인다. 아직 아무것도
+    /// 지우지 않는다. 지금 할 수 없으면 열지 않는다.
+    fn open_delete(&self, warning: DeleteWarning) {
+        let command = match warning {
+            DeleteWarning::Permanent => CommandId::DeletePermanently,
+            DeleteWarning::NoRecycleBin => CommandId::Delete,
+        };
+        let Some(plan) = self.app.borrow().delete_plan(command) else {
+            return;
+        };
+        let Some(warning) = plan.warning else {
+            // 그 사이 휴지통이 있는 위치가 되었으면 확인할 것이 없다(다시 누르면 휴지통으로 보낸다).
+            return;
+        };
+        self.close_rename();
+        self.close_address_edit();
+        self.close_transfer();
+        let ui = &self.ui;
+        ui.set_confirm_delete(match warning {
+            DeleteWarning::Permanent => DeleteConfirm::Permanent,
+            DeleteWarning::NoRecycleBin => DeleteConfirm::NoRecycleBin,
+        });
+        ui.set_confirm_name(delete_name(&plan).into());
+        ui.set_confirm_items(count(plan.sources.len()));
+        ui.set_confirm_problem(TransferProblem::None);
+        ui.set_confirm_problem_path(SharedString::new());
+        ui.set_confirm_open(true);
+        *self.delete.borrow_mut() = Some(plan);
+    }
+
     /// 확인 줄의 Enter: 작업을 대기열에 넣고 확인 줄을 닫는다. 시작 전에 막히면 작업을 만들지 않고 까닭을 보인다(다음
     /// Enter·Esc로 닫는다).
     fn accept_transfer(&self) {
+        let delete = self.delete.borrow().clone();
+        if let Some(plan) = delete {
+            if self.ui.get_confirm_problem() != TransferProblem::None {
+                self.close_transfer();
+                return;
+            }
+            let started = self.app.borrow_mut().start_delete(&plan);
+            match started {
+                Ok(_) => {
+                    self.close_transfer();
+                    refresh_jobs();
+                }
+                Err(DeleteRejection::NoSources) => {
+                    self.ui
+                        .set_confirm_problem(TransferProblem::NothingToDelete);
+                }
+            }
+            return;
+        }
         let plan = self.transfer.borrow().clone();
         let Some(plan) = plan else {
             self.close_transfer();
@@ -1315,7 +1401,10 @@ impl View {
     /// 확인 줄을 닫는다(Esc): 아무것도 하지 않는다.
     fn close_transfer(&self) {
         self.transfer.borrow_mut().take();
+        self.delete.borrow_mut().take();
         self.ui.set_confirm_open(false);
+        self.ui.set_confirm_delete(DeleteConfirm::None);
+        self.ui.set_confirm_name(SharedString::new());
     }
 
     /// 탭에 넘긴 결과 가운데 이 창의 패널에 보이는 탭의 것을 그린다. 결과는 탭 번호로 찾아가므로 다른 창의 탭
@@ -1665,6 +1754,10 @@ impl View {
                 }
             }
             Execution::UndoRefused(UndoError::NotUndoable(_)) | Execution::Done => {
+                if command == CommandId::Delete {
+                    // 휴지통 삭제 작업을 곧바로 넣었다. 작업 영역을 그린다.
+                    refresh_jobs();
+                }
                 if let Some(notice) = reversal.and_then(|(started, refused)| match execution {
                     Execution::Done => Some(started),
                     _ => refused,
@@ -1673,6 +1766,7 @@ impl View {
                 }
             }
             Execution::ShowHistory => self.open_history(),
+            Execution::ConfirmDelete(warning) => self.open_delete(warning),
             Execution::UndoRefused(_) | Execution::Disabled | Execution::WindowClosed => {}
         }
     }

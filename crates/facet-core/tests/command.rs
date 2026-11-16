@@ -9,7 +9,7 @@ use facet_core::Location;
 use facet_core::command::{self, CommandId, Key, Shortcut, find_by_shortcut};
 use facet_core::details::{Column, Direction, Sort};
 use facet_core::tab::{Navigation, ReadOutcome, Tab};
-use facet_core::window::{App, Execution};
+use facet_core::window::{App, DeleteWarning, Execution};
 use tempfile::TempDir;
 
 const WAIT: Duration = Duration::from_secs(10);
@@ -69,6 +69,8 @@ fn name(command: CommandId) -> &'static str {
         CommandId::Undo => "실행취소",
         CommandId::Redo => "다시 실행",
         CommandId::ShowHistory => "작업 기록 보기",
+        CommandId::Delete => "삭제",
+        CommandId::DeletePermanently => "영구 삭제",
     }
 }
 
@@ -167,8 +169,8 @@ fn s2_탭_명령과_기본_단축키() {
     assert!(CopyTo.shortcuts().is_empty());
     assert!(MoveTo.shortcuts().is_empty());
     // S1의 14개와 탭·패널·창 명령, 반대편 패널로 복사·이동, 위치를 골라 복사·이동, 이름 바꾸기·새 폴더(자세한 확인은
-    // tests/edit.rs), 실행취소·다시 실행·작업 기록 보기(자세한 확인은 tests/history.rs)가 전부다.
-    assert_eq!(CommandId::ALL.len(), 14 + expected.len() + 2 + 2 + 3);
+    // tests/edit.rs), 실행취소·다시 실행·작업 기록 보기(자세한 확인은 tests/history.rs), 삭제·영구 삭제가 전부다.
+    assert_eq!(CommandId::ALL.len(), 14 + expected.len() + 2 + 2 + 3 + 2);
     assert_eq!(GoToTab(3).as_str(), "go-to-tab-3");
     assert_eq!(CommandId::from_id("go-to-tab-8"), Some(GoToTab(8)));
     assert_eq!(CommandId::from_id("go-to-tab-9"), None);
@@ -532,4 +534,92 @@ fn 연결된_프로그램이_없는_파일을_열면_탭이_까닭을_갖는다(
     // 다음 이동을 시작하면 지운다.
     app.execute(CommandId::Refresh);
     assert_eq!(app.active_tab().open_error(), None);
+}
+
+#[test]
+fn 삭제와_영구_삭제의_단축키() {
+    assert_eq!(CommandId::Delete.shortcuts(), &[key(Key::Delete)]);
+    assert_eq!(
+        CommandId::DeletePermanently.shortcuts(),
+        &[key(Key::Delete).shift()]
+    );
+    assert_eq!(find_by_shortcut(key(Key::Delete)), Some(CommandId::Delete));
+    assert_eq!(
+        find_by_shortcut(key(Key::Delete).shift()),
+        Some(CommandId::DeletePermanently)
+    );
+    // 다른 수식 키와는 묶이지 않는다.
+    assert_eq!(find_by_shortcut(key(Key::Delete).ctrl()), None);
+    assert_eq!(find_by_shortcut(key(Key::Delete).alt()), None);
+    assert_eq!(CommandId::Delete.as_str(), "delete");
+    assert_eq!(
+        CommandId::from_id("delete-permanently"),
+        Some(CommandId::DeletePermanently)
+    );
+}
+
+#[test]
+fn 삭제와_영구_삭제는_원본이_있어야_켜진다() {
+    let dir = tree();
+    let mut tab = tab_at(dir.path());
+    // 커서도 선택도 없다.
+    assert!(tab.cursor().is_none());
+    for command in [CommandId::Delete, CommandId::DeletePermanently] {
+        assert!(!command.is_enabled(&tab), "{command:?}");
+    }
+    // 커서 항목만 있어도 켜진다.
+    tab.select_only(0);
+    for command in [CommandId::Delete, CommandId::DeletePermanently] {
+        assert!(command.is_enabled(&tab), "{command:?}");
+    }
+    // 빈 폴더에서는 원본이 없다.
+    let empty = TempDir::new().unwrap();
+    let tab = tab_at(empty.path());
+    for command in [CommandId::Delete, CommandId::DeletePermanently] {
+        assert!(!command.is_enabled(&tab), "{command:?}");
+    }
+}
+
+#[test]
+fn 삭제할_내용은_선택이고_없으면_커서_항목이며_영구_삭제는_늘_확인받는다() {
+    let dir = tree();
+    let mut app = app_at(dir.path());
+    assert_eq!(app.delete_plan(CommandId::Delete), None);
+    assert_eq!(
+        app.execute(CommandId::DeletePermanently),
+        Execution::Disabled
+    );
+    // 삭제 명령이 아니면 내용이 없다.
+    app.active_tab_mut().select_only(0);
+    assert_eq!(app.delete_plan(CommandId::Rename), None);
+
+    // 선택이 없으면 커서 항목 하나.
+    app.active_tab_mut().toggle_cursor_selection();
+    assert_eq!(app.active_tab().selected_items().count(), 0);
+    let cursor = app.active_tab().cursor_item().unwrap().name.clone();
+    let plan = app.delete_plan(CommandId::DeletePermanently).unwrap();
+    assert_eq!(plan.sources, vec![dir.path().join(&cursor)]);
+    assert_eq!(plan.warning, Some(DeleteWarning::Permanent));
+    assert!(plan.is_permanent());
+
+    // 선택이 있으면 선택(목록 순서).
+    app.active_tab_mut().select_all();
+    let plan = app.delete_plan(CommandId::DeletePermanently).unwrap();
+    let expected: Vec<_> = app
+        .active_tab()
+        .selected_items()
+        .map(|item| dir.path().join(&item.name))
+        .collect();
+    assert_eq!(plan.sources, expected);
+    assert_eq!(plan.sources.len(), 3);
+
+    // 영구 삭제는 실행해도 지우지 않고 확인을 맡긴다.
+    assert_eq!(
+        app.execute(CommandId::DeletePermanently),
+        Execution::ConfirmDelete(DeleteWarning::Permanent)
+    );
+    assert!(app.work_area().entries().is_empty());
+    for path in &plan.sources {
+        assert!(path.exists(), "{path:?}");
+    }
 }
