@@ -17,6 +17,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # 시험 바이너리 약 60개를 링크하므로 dev·test 빌드는 줄 정보만 남긴다(공장 Implementer와 같음).
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   ci:

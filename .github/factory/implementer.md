@@ -14,8 +14,14 @@ The workflow around you has already created your branch. After you finish, it ru
 
 - Do exactly what the ticket's "What to build" and acceptance criteria ask. No scope beyond them.
 - Test-first where the ticket has testable behaviour: write a failing test through the public interface, then make it pass.
-- Run `cargo xtask ci` yourself and keep going until it passes. The workflow runs it again after you, and a failure there fails the run.
-- Commit on the current branch in small, meaningful commits. Commit messages in Korean, imperative mood.
+- Check only what you touched, and leave the full `cargo xtask ci` to the workflow (it takes 8 minutes cold and the workflow runs it right after you anyway, so running it yourself only doubles the time):
+  - `cargo fmt --all`
+  - `cargo clippy --all-targets -p <each crate you changed> -- -D warnings`
+  - the tests you wrote or that cover what you changed: `cargo test -p <crate> --test <file>` (or a name filter). A change to a crate others depend on (`facet-core`, `facet-win`, `facet-protocol`, `facet-index`) also needs `cargo build --workspace --all-targets` so dependents still compile.
+  - a benchmark only if the ticket adds or changes one, by its own subcommand: `cargo run --release -p facet-bench -- <name>`.
+- If the workflow's `cargo xtask ci` fails after you finish, you get the failing log in the same run and one chance to fix it.
+- Run every command in the foreground and wait for it. Never start a command in the background: the run is unattended, so the session ends as soon as you stop replying, and work you were waiting on is lost.
+- Commit on the current branch in small, meaningful commits. Commit messages in Korean, imperative mood. Commit before you finish: uncommitted work is not merged.
 
 ## 3. PR body
 
