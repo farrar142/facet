@@ -300,6 +300,7 @@ mod screen {
             opens: vec![ms(100)],
             renames: vec![ms(10)],
             menus: vec![ms(20)],
+            searches: vec![ms(50)],
             frames: frames.iter().map(|n| ms(*n)).collect(),
             scroll_runs: 1,
             spec: SystemSpec {
@@ -383,6 +384,54 @@ mod screen {
         assert!(r.to_table().contains("오른쪽 메뉴 중앙값"));
         assert!(r.to_json().contains("\"context_menu\""));
         assert_eq!(MENU_LIMIT, ms(50));
+    }
+
+    fn with_searches(mut r: ScreenResult, searches: &[u64]) -> ScreenResult {
+        r.searches = searches.iter().map(|n| ms(*n)).collect();
+        r
+    }
+
+    #[test]
+    fn 실시간_탐색_첫_결과는_중앙값이_100ms_미만일_때만_통과한다() {
+        use facet_bench::screen::SEARCH_FIRST_LIMIT;
+        let base = || result(&[100], &[16], Some(60.0));
+        assert!(with_searches(base(), &[40, 90, 900]).verdict().search_pass);
+        assert!(!with_searches(base(), &[40, 110, 120]).verdict().search_pass);
+        assert!(!with_searches(base(), &[100]).verdict().search_pass);
+        assert!(!with_searches(base(), &[]).verdict().search_pass);
+        assert!(!with_searches(base(), &[150]).verdict().pass());
+        let r = with_searches(base(), &[30, 20, 70]);
+        let v = r.verdict();
+        assert_eq!((v.search_median, v.search_worst), (ms(30), ms(70)));
+        assert!(r.to_table().contains("실시간 탐색 첫 결과 중앙값"));
+        let json = r.to_json();
+        assert!(json.contains("\"live_search_first_result\""), "{json}");
+        assert!(json.contains("\"limit_ms\": 100,"), "{json}");
+        assert_eq!(SEARCH_FIRST_LIMIT, ms(100));
+    }
+
+    #[test]
+    fn 측정이_넘기는_탐색_조각은_시험_폴더_항목에_맞는다() {
+        use facet_bench::screen::SEARCH_QUERY;
+        use facet_core::name_match::name_matches;
+        assert!(name_matches(
+            SEARCH_QUERY,
+            std::ffi::OsStr::new(&facet_bench::test_folder_entry(0).name)
+        ));
+    }
+
+    #[test]
+    fn 실시간_탐색_첫_결과_보고는_결과가_있어야_한다() {
+        use facet_bench::screen::search_frame;
+        use facet_core::measure::ScreenReport;
+        let report = |rows, frame| ScreenReport {
+            rows,
+            search_frame: frame,
+            ..ScreenReport::default()
+        };
+        assert_eq!(search_frame(&report(12, Some(ms(40)))), Ok(ms(40)));
+        assert!(search_frame(&report(0, Some(ms(40)))).is_err());
+        assert!(search_frame(&report(12, None)).is_err());
     }
 
     fn with_sessions(mut r: ScreenResult, sessions: &[u64]) -> ScreenResult {

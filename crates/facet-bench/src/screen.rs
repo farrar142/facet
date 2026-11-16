@@ -12,8 +12,8 @@ use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use facet_core::measure::{
-    ENV_MENU, ENV_OPEN, ENV_OUT, ENV_RENAME, ENV_SCROLL_ROWS, ENV_START_US, ENV_WINDOWS,
-    ScreenReport,
+    ENV_MENU, ENV_OPEN, ENV_OUT, ENV_RENAME, ENV_SCROLL_ROWS, ENV_SEARCH, ENV_START_US,
+    ENV_WINDOWS, ScreenReport,
 };
 
 /// 콜드 스타트 통과 기준: 중앙값이 이보다 짧아야 한다.
@@ -38,6 +38,15 @@ pub const RENAME_LIMIT: Duration = Duration::from_millis(16);
 /// 열 때(오른쪽 클릭과 같은 길)부터 메뉴가 그려진 첫 프레임이 화면에 나갈 때까지다. 근거: 사람은 입력 뒤 약 100ms
 /// 안의 반응을 즉각으로 느끼고, 메뉴 구성(1ms 기준)과 한두 프레임 그리기에 쓰고도 절반이 남는 값이다.
 pub const MENU_LIMIT: Duration = Duration::from_millis(50);
+
+/// 「실시간 탐색 시작부터 첫 결과 화면까지」 통과 기준: 중앙값이 100ms보다 짧아야 한다(spec #21의 속도 기준).
+/// 시험 폴더를 연 창에서 검색창 Enter와 같은 길로 실시간 탐색을 시작한 때부터 결과가 하나 이상 든 첫 프레임이 화면에
+/// 나갈 때까지다.
+pub const SEARCH_FIRST_LIMIT: Duration = Duration::from_millis(100);
+
+/// 실시간 탐색 첫 결과를 잴 때 넘기는 이름 조각. 시험 폴더의 0번 항목(「보고서 000000.txt」)을 비롯해 열 개 중
+/// 하나가 맞으므로 시험 폴더에 항목이 하나라도 있으면 반드시 결과가 있다(실시간 탐색 벤치마크와 같은 조각).
+pub const SEARCH_QUERY: &str = "보고서";
 
 /// 프레임 시간 통과 기준: 최악값이 한 프레임 시간의 이 배수 이하여야 한다.
 pub const FRAME_WORST_FACTOR: f64 = 2.0;
@@ -177,6 +186,8 @@ pub struct ScreenResult {
     pub renames: Vec<Duration>,
     /// 시험 폴더 전체를 선택하고 항목 메뉴를 열어 그 프레임까지(회차마다 하나).
     pub menus: Vec<Duration>,
+    /// 실시간 탐색을 시작해 첫 결과가 든 프레임까지(회차마다 하나).
+    pub searches: Vec<Duration>,
     /// 스크롤하는 동안의 프레임 시간들(스크롤 회차 전체).
     pub frames: Vec<Duration>,
     pub scroll_runs: usize,
@@ -202,6 +213,9 @@ pub struct Verdict {
     pub menu_median: Duration,
     pub menu_worst: Duration,
     pub menu_pass: bool,
+    pub search_median: Duration,
+    pub search_worst: Duration,
+    pub search_pass: bool,
     pub frame_median: Duration,
     pub frame_worst: Duration,
     /// 프레임 최악값의 상한(한 프레임의 두 배).
@@ -220,6 +234,7 @@ impl Verdict {
             && self.open_pass
             && self.rename_pass
             && self.menu_pass
+            && self.search_pass
             && self.frame_pass
     }
 }
@@ -232,6 +247,7 @@ impl ScreenResult {
         let session_median = median(&self.session_starts);
         let rename_median = median(&self.renames);
         let menu_median = median(&self.menus);
+        let search_median = median(&self.searches);
         let frame_worst = worst(&self.frames);
         let frame_worst_limit = frame_budget(self.spec.refresh_hz).mul_f64(FRAME_WORST_FACTOR);
         Verdict {
@@ -250,6 +266,9 @@ impl ScreenResult {
             menu_median,
             menu_worst: worst(&self.menus),
             menu_pass: !self.menus.is_empty() && menu_median < MENU_LIMIT,
+            search_median,
+            search_worst: worst(&self.searches),
+            search_pass: !self.searches.is_empty() && search_median < SEARCH_FIRST_LIMIT,
             frame_median: median(&self.frames),
             frame_worst,
             frame_worst_limit,
@@ -379,6 +398,19 @@ impl ScreenResult {
         );
         let _ = writeln!(
             t,
+            "실시간 탐색 첫 결과 중앙값 ({}회)  {:<10}  < {}ms                   {}",
+            self.searches.len(),
+            ms(v.search_median),
+            SEARCH_FIRST_LIMIT.as_millis(),
+            mark(v.search_pass)
+        );
+        let _ = writeln!(
+            t,
+            "실시간 탐색 첫 결과 최악값  {:<10}  (참고)",
+            ms(v.search_worst)
+        );
+        let _ = writeln!(
+            t,
             "프레임 시간 중앙값        {:<10}  (참고: 한 프레임 {})",
             ms(v.frame_median),
             ms(frame_budget(self.spec.refresh_hz))
@@ -481,6 +513,14 @@ impl ScreenResult {
         let _ = writeln!(j, "    \"limit_ms\": {},", MENU_LIMIT.as_millis());
         let _ = writeln!(j, "    \"pass\": {}", v.menu_pass);
         let _ = writeln!(j, "  }},");
+        let _ = writeln!(j, "  \"live_search_first_result\": {{");
+        let _ = writeln!(j, "    \"query\": {},", json_string(SEARCH_QUERY));
+        let _ = writeln!(j, "    \"runs_ms\": [{}],", list(&self.searches));
+        let _ = writeln!(j, "    \"median_ms\": {},", ms(v.search_median));
+        let _ = writeln!(j, "    \"worst_ms\": {},", ms(v.search_worst));
+        let _ = writeln!(j, "    \"limit_ms\": {},", SEARCH_FIRST_LIMIT.as_millis());
+        let _ = writeln!(j, "    \"pass\": {}", v.search_pass);
+        let _ = writeln!(j, "  }},");
         let _ = writeln!(j, "  \"scroll\": {{");
         let _ = writeln!(j, "    \"rows_per_frame\": {},", self.scroll_rows);
         let _ = writeln!(j, "    \"runs\": {},", self.scroll_runs);
@@ -545,6 +585,7 @@ pub fn run_app(
         .env_remove(ENV_OPEN)
         .env_remove(ENV_RENAME)
         .env_remove(ENV_MENU)
+        .env_remove(ENV_SEARCH)
         .stdin(Stdio::null());
     if let Some(open) = open {
         command.env(ENV_OPEN, open);
@@ -576,6 +617,7 @@ pub fn run_app_rename(
         .env_remove(ENV_OPEN)
         .env(ENV_RENAME, format!("{from}|{to}"))
         .env_remove(ENV_MENU)
+        .env_remove(ENV_SEARCH)
         .stdin(Stdio::null());
     run_to_report(command, &out, timeout)
 }
@@ -598,8 +640,49 @@ pub fn run_app_menu(app: &Path, folder: &Path, timeout: Duration) -> io::Result<
         .env_remove(ENV_OPEN)
         .env_remove(ENV_RENAME)
         .env(ENV_MENU, "1")
+        .env_remove(ENV_SEARCH)
         .stdin(Stdio::null());
     run_to_report(command, &out, timeout)
+}
+
+/// 실시간 탐색 첫 결과를 잰다: `folder`를 열어 첫 화면이 나오면 그 폴더 아래로 `query`의 실시간 탐색을 검색창과 같은
+/// 길로 시작하고, 시작한 때부터 첫 결과가 든 프레임까지를 앱이 알린다.
+pub fn run_app_search(
+    app: &Path,
+    folder: &Path,
+    query: &str,
+    timeout: Duration,
+) -> io::Result<ScreenReport> {
+    let out = std::env::temp_dir().join(format!("facet-measure-{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&out);
+    let start_us = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_micros() as u64);
+    let mut command = Command::new(app);
+    command
+        .arg(folder)
+        .env_remove(ENV_WINDOWS)
+        .env(ENV_OUT, &out)
+        .env(ENV_START_US, start_us.to_string())
+        .env(ENV_SCROLL_ROWS, "0")
+        .env_remove(ENV_OPEN)
+        .env_remove(ENV_RENAME)
+        .env_remove(ENV_MENU)
+        .env(ENV_SEARCH, query)
+        .stdin(Stdio::null());
+    run_to_report(command, &out, timeout)
+}
+
+/// 실시간 탐색 첫 결과 측정의 보고에서 잰 시간을 꺼낸다. 시간이 없거나 그 프레임에 결과가 없으면(앱이 결과 없는
+/// 프레임을 잘못 셌다) 오류다.
+pub fn search_frame(report: &ScreenReport) -> Result<Duration, String> {
+    let frame = report
+        .search_frame
+        .ok_or("앱이 실시간 탐색 첫 결과 프레임 시각을 알리지 않았습니다")?;
+    if report.rows == 0 {
+        return Err("실시간 탐색 첫 결과 프레임에 결과가 없습니다".to_owned());
+    }
+    Ok(frame)
 }
 
 /// 세션 복원 콜드 스타트를 잰다: 인자 없이 `session` 파일(`FACET_SESSION_PATH`)로 앱을 띄워 창 `windows`개의
@@ -625,6 +708,7 @@ pub fn run_app_session(
         .env_remove(ENV_OPEN)
         .env_remove(ENV_RENAME)
         .env_remove(ENV_MENU)
+        .env_remove(ENV_SEARCH)
         .stdin(Stdio::null());
     run_to_report(command, &out, timeout)
 }
@@ -724,6 +808,13 @@ pub fn measure(plan: &Plan<'_>) -> Result<ScreenResult, String> {
                 .ok_or("앱이 오른쪽 메뉴 프레임 시각을 알리지 않았습니다")?,
         );
     }
+    let mut searches = Vec::new();
+    for n in 1..=plan.runs {
+        eprintln!("실시간 탐색 첫 결과 {n}/{}…", plan.runs);
+        let r = run_app_search(plan.app, plan.folder, SEARCH_QUERY, RUN_TIMEOUT)
+            .map_err(|e| e.to_string())?;
+        searches.push(search_frame(&r)?);
+    }
     let mut frames = Vec::new();
     for n in 1..=plan.scroll_runs {
         eprintln!("스크롤 {n}/{}…", plan.scroll_runs);
@@ -745,6 +836,7 @@ pub fn measure(plan: &Plan<'_>) -> Result<ScreenResult, String> {
         opens,
         renames,
         menus,
+        searches,
         frames,
         scroll_runs: plan.scroll_runs,
         spec,

@@ -790,7 +790,11 @@ fn connect(ui: &AppWindow, w: WindowId) {
     ui.on_cancel_address_edit(move || with_view(w, View::close_address_edit));
     ui.on_filter_edited(move |text| with_view(w, |view| view.filter_edited(&text)));
     ui.on_cancel_filter(move || with_view(w, View::close_filter));
-    ui.on_search_submit(move |text| with_view(w, |view| view.search_submit(&text)));
+    ui.on_search_submit(move |text| {
+        with_view(w, |view| {
+            view.search_submit(&text);
+        })
+    });
     ui.on_cancel_search(move || with_view(w, View::hide_search_bar));
     ui.on_stop_search(move || with_view(w, |view| view.execute(CommandId::StopSearch)));
     ui.on_search_mode_changed(move || {
@@ -1657,6 +1661,7 @@ impl View {
         let mut committed = [false; MAX_PANELS];
         let mut touched = false;
         let mut edits = Vec::new();
+        let mut searched = false;
         for (tab, update) in updates {
             let Some(panel) = visible.iter().position(|id| id == tab) else {
                 continue;
@@ -1670,6 +1675,7 @@ impl View {
                     self.receive_target_candidates(*id, candidates.clone());
                 }
                 Update::Edited(result) if panel == active => edits.push((*tab, result)),
+                Update::Search if panel == active => searched = true,
                 _ => {}
             }
         }
@@ -1681,7 +1687,8 @@ impl View {
             self.close_rename();
         }
         self.render();
-        if committed[active] {
+        if committed[active] || searched {
+            // 검색 결과가 들어온 것도 알린다(실시간 탐색 첫 결과 측정).
             self.mark_loaded();
         }
         for (panel, committed) in committed.into_iter().enumerate() {
@@ -1705,6 +1712,12 @@ impl View {
             .borrow_mut()
             .rename(std::ffi::OsStr::new(from), to)
             .is_ok()
+    }
+
+    /// 측정 모드: 활성 탭 폴더 아래로 `query`의 실시간 탐색을 검색창 Enter와 같은 길로 시작한다. 시작했으면 `true`.
+    fn measure_search(&self, query: &str) -> bool {
+        self.ui.set_search_content(false);
+        self.search_submit(query)
     }
 
     /// 측정 모드: 활성 탭의 항목을 모두 선택하고 그 모습을 그린다. 그릴 것이 있으면 `true`.
@@ -2754,10 +2767,12 @@ impl View {
     /// 검색창에서 Enter: 현재 폴더 아래 실시간 탐색을 시작한다. 검색어가 비었거나 시작할 수 없는 위치면 아무 일도 없다.
     ///
     /// 「내용」이면 같은 자리에서 내용 검색을 시작하고, 시작 전에 막히면(틀린 정규식 등) 위치를 바꾸지 않고 까닭을 검색창 곁에 보인다.
-    fn search_submit(&self, text: &str) {
+    ///
+    /// 탐색을 시작했으면 `true`(측정 모드가 쓴다).
+    fn search_submit(&self, text: &str) -> bool {
         let mode = search_bar::Mode::from_content(self.ui.get_search_content());
         let Some(query) = search_bar::query_to_start(mode, text) else {
-            return;
+            return false;
         };
         self.remember_scroll();
         let started = match mode {
@@ -2793,6 +2808,7 @@ impl View {
             self.render();
             self.restore_scroll(self.active_panel());
         }
+        started
     }
 
     /// 활성 패널에 필터 입력란을 열고 포커스를 준다(이미 열려 있으면 포커스만 다시 준다).

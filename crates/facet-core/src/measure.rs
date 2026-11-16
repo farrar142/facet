@@ -12,6 +12,7 @@
 //! windows 2          # [`ENV_WINDOWS`]를 줬을 때, 첫 프레임이 나온 창 수
 //! rename_frame_us 9 # [`ENV_RENAME`]의 이름바꾸기를 확정한 때부터 목록에 새 이름이 든 첫 프레임이 나올 때까지
 //! menu_frame_us 20000 # [`ENV_MENU`]의 오른쪽 메뉴를 열 때부터 메뉴가 그려진 첫 프레임이 나올 때까지
+//! search_frame_us 40000 # [`ENV_SEARCH`]의 실시간 탐색을 시작한 때부터 첫 결과가 든 프레임이 나올 때까지
 //! frame_us 16700     # 스크롤 중 프레임 하나의 시간(마이크로초). 프레임마다 한 줄
 //! ```
 
@@ -32,6 +33,10 @@ pub const ENV_RENAME: &str = "FACET_MEASURE_RENAME";
 /// 그 상태에서 첫 행의 항목 메뉴를 열어(오른쪽 클릭과 같은 길) 열 때부터 메뉴가 그려진 첫 프레임이 화면에 나갈
 /// 때까지를 잰다(`menu_frame`). 스크롤은 하지 않는다.
 pub const ENV_MENU: &str = "FACET_MEASURE_MENU";
+/// 이름 조각을 주면 첫 화면 뒤에 활성 탭 폴더 아래로 그 조각의 실시간 탐색을 검색창 Enter와 같은 길로 시작하고,
+/// 시작한 때부터 결과가 하나 이상 든 첫 프레임이 화면에 나갈 때까지를 잰다(`search_frame`). 이때 `rows`는 그
+/// 프레임의 결과 수이고 스크롤은 하지 않는다.
+pub const ENV_SEARCH: &str = "FACET_MEASURE_SEARCH";
 /// 2 이상이면 창이 이만큼 뜰 때까지를 첫 화면으로 잰다(세션 복원 콜드 스타트). 창마다 목록이 든 첫 프레임이
 /// 나온 뒤, 마지막 창의 첫 프레임까지의 시간이 `first_frame`이다. `rows`는 마지막 창이 읽은 항목 수이고 스크롤과
 /// 폴더 열기는 하지 않는다.
@@ -54,6 +59,8 @@ pub struct ScreenReport {
     pub rename_frame: Option<Duration>,
     /// 오른쪽 메뉴를 열 때부터 메뉴가 그려진 첫 프레임이 창에 나올 때까지.
     pub menu_frame: Option<Duration>,
+    /// 실시간 탐색을 시작한 때부터 첫 결과가 든 프레임이 창에 나올 때까지.
+    pub search_frame: Option<Duration>,
     /// 스크롤하는 동안의 프레임 시간들.
     pub frames: Vec<Duration>,
 }
@@ -93,6 +100,13 @@ impl ScreenReport {
                 d.as_micros()
             ));
         }
+        if let Some(d) = self.search_frame {
+            out.push_str(&format!(
+                "search_frame_us {}
+",
+                d.as_micros()
+            ));
+        }
         for f in &self.frames {
             out.push_str(&format!("frame_us {}\n", f.as_micros()));
         }
@@ -117,6 +131,7 @@ impl ScreenReport {
                 "open_frame_us" => report.open_frame = Some(Duration::from_micros(number)),
                 "rename_frame_us" => report.rename_frame = Some(Duration::from_micros(number)),
                 "menu_frame_us" => report.menu_frame = Some(Duration::from_micros(number)),
+                "search_frame_us" => report.search_frame = Some(Duration::from_micros(number)),
                 "frame_us" => report.frames.push(Duration::from_micros(number)),
                 _ => return Err(format!("모르는 항목: {line}")),
             }
@@ -138,6 +153,7 @@ mod tests {
             open_frame: Some(Duration::from_micros(45_678)),
             rename_frame: Some(Duration::from_micros(9_000)),
             menu_frame: Some(Duration::from_micros(20_000)),
+            search_frame: Some(Duration::from_micros(40_000)),
             frames: vec![Duration::from_micros(16_700), Duration::from_micros(33_000)],
         };
         assert_eq!(ScreenReport::parse(&report.to_text()), Ok(report));
