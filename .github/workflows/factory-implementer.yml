@@ -439,7 +439,15 @@ jobs:
           CONFLICT_PR: ${{ steps.guard.outputs.pr }}
         run: |
           sha=$(git rev-parse HEAD)
-          git push --force origin "$BRANCH"
+          if [ "$MODE" = conflict ]; then
+            # Conflict mode merges main on top of the PR branch, so history is not rewritten: a plain
+            # push. If someone pushed to the branch meanwhile it is refused instead of dropping their
+            # commits (#504).
+            git push origin "$BRANCH"
+          else
+            # A fresh implementation starts from main and replaces an earlier attempt's branch.
+            git push --force origin "$BRANCH"
+          fi
           body=.factory/pr-body.md
           run="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           if [ "$MODE" = conflict ]; then
