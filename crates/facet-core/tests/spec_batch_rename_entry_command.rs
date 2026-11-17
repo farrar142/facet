@@ -46,13 +46,11 @@ fn names_on_disk(dir: &Path) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "#290"]
 fn batch_rename_has_ctrl_m_as_its_only_default_shortcut() {
     assert_eq!(CommandId::BatchRename.shortcuts(), &[CTRL_M]);
 }
 
 #[test]
-#[ignore = "#290"]
 fn ctrl_m_finds_batch_rename_by_key_and_no_other_command_uses_it() {
     assert_eq!(find_by_shortcut(CTRL_M), Some(CommandId::BatchRename));
 
@@ -86,7 +84,6 @@ fn ctrl_m_finds_batch_rename_by_key_and_no_other_command_uses_it() {
 }
 
 #[test]
-#[ignore = "#290"]
 fn ctrl_m_opens_the_window_only_with_two_or_more_selected() {
     let dir = folder();
     let mut app = app_at(dir.path());
@@ -105,7 +102,6 @@ fn ctrl_m_opens_the_window_only_with_two_or_more_selected() {
 }
 
 #[test]
-#[ignore = "#290"]
 fn palette_row_shows_ctrl_m() {
     let dir = folder();
     let app = app_at(dir.path());

@@ -374,7 +374,7 @@ impl CommandId {
             CommandId::MoveToOtherPanel => const { &[key(Key::Function(8))] },
             CommandId::CopyTo | CommandId::MoveTo => &[],
             CommandId::Rename => const { &[key(Key::Function(2))] },
-            CommandId::BatchRename => &[],
+            CommandId::BatchRename => const { &[key(letter('M')).ctrl()] },
             CommandId::NewFolder => const { &[key(letter('N')).ctrl().shift()] },
             CommandId::Undo => const { &[key(letter('Z')).ctrl()] },
             CommandId::Redo => const { &[key(letter('Y')).ctrl()] },
