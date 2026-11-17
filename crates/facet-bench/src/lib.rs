@@ -1342,3 +1342,26 @@ pub fn measure_live_search(path: &Path, count: usize, runs: usize) -> Result<Mea
         times,
     })
 }
+
+/// #293: 일괄 이름 바꾸기 실행 벤치마크의 기본 파일 수(1만).
+pub const BATCH_RENAME_JOB_COUNT: usize = 10_000; // #293
+
+/// #293: 일괄 이름 바꾸기 실행 벤치마크의 로컬 기준.
+pub const BATCH_RENAME_JOB_TARGET: Duration = Duration::ZERO; // #293
+
+/// #293: 일괄 이름 바꾸기 실행 벤치마크의 CI 상한(기준의 10배).
+pub const BATCH_RENAME_JOB_LIMIT: Duration = Duration::ZERO; // #293
+
+/// #293: `root` 안에 파일 `count`개 폴더를 만들어 일괄 이름 바꾸기 작업으로 바꾸는 시간을 잰다.
+pub fn measure_batch_rename_job(
+    _root: &Path,
+    _count: usize,
+    _runs: usize,
+) -> Result<Measurement, String> {
+    todo!("#293")
+}
+
+/// #293: 중앙값이 `limit`을 넘으면 중앙값·상한(ms)을 담은 메시지.
+pub fn check_batch_rename_job_limit(_m: &Measurement, _limit: Duration) -> Result<(), String> {
+    todo!("#293")
+}
