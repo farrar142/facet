@@ -27,11 +27,16 @@
 #                                     the ticket's last `ready-for-agent` label), impl-end (handed to
 #                                     Verify; track=T), verify-start (pr=#P; wait since the last impl-end
 #                                     of the ticket), verify-end (pr=#P outcome=merged|mech|conflict|
-#                                     rebase-ci|push|review|merge-failed|cancelled|stopped). Not a cost: the sums
+#                                     rebase-ci|push|review|merge-failed|cancelled|stopped, and on a
+#                                     conflict files=a,b: the files that conflicted with main, #307).
+#                                     impl-start also has mode=conflict when the run only resolves
+#                                     conflicts on the open PR (#307). Not a cost: the sums
 #                                     read only `<!-- ledger -->` comments.
 #   ledger.sh stats                   verify runs and the share sent back for a conflict (outcome
-#                                     conflict, rebase-ci or push), the Implementer wait per track and
-#                                     the Verify wait (count, mean, max) from the event comments
+#                                     conflict, rebase-ci or push), the Implementer wait per track,
+#                                     the Verify wait (count, mean, max) and the conflicts with main
+#                                     per file, most first (verify-end files=, #307), from the event
+#                                     comments
 #
 # Environment:
 #   REPO (or GITHUB_REPOSITORY)   owner/name; gh needs GH_TOKEN
@@ -257,6 +262,7 @@ $line"; then
 #   verify runs, of them sent back for a conflict (outcome conflict, rebase-ci or push), and the ratio
 #   the wait from `ready-for-agent` to the Implementer's start, per track: count, mean, max (seconds)
 #   the wait from the hand-over to Verify's start: count, mean, max (seconds)
+#   the files of the verify-end events (files=a,b: conflicts with main) per file, most first (#307)
 stats() {
   local n; n=$(ledger_issue)
   [ -n "$n" ] || { echo "no open factory-ledger issue" >&2; return 1; }
@@ -272,7 +278,11 @@ stats() {
       + (if ($v | length) > 0 then " (ratio \(($c * 100 / ($v | length)) | floor)%)" else "" end),
       ([$e[] | select(.event == "impl-start")] | group_by(.track // "1")[]
         | "implementer wait, track \(.[0].track // "1"): \(waits | summary)"),
-      "verify wait: \([$e[] | select(.event == "verify-start")] | waits | summary)"'
+      "verify wait: \([$e[] | select(.event == "verify-start")] | waits | summary)",
+      ([$v[] | .files // empty | split(",")[] | select(. != "")] | group_by(.)
+        | map({file: .[0], n: length}) | sort_by(-.n, .file)
+        | if length == 0 then "conflicts per file: none"
+          else "conflicts per file:", (.[] | "  \(.n) \(.file)") end)'
 }
 
 usage() {

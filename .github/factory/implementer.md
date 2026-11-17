@@ -9,7 +9,7 @@ The workflow around you has already created your branch. After you finish, it ru
 - The ticket, body and comments: `gh issue view <n> --json number,title,body,comments`. Its "Parent" section names the spec issue; read that too. Its "계약" section names the public interface the acceptance tests use.
 - `AGENTS.md`, every file under `docs/agents/`, `GLOSSARY.md`, and the ADRs in `docs/adr/` that touch the ticket's area. Use the glossary's terms and respect the ADRs. If the ticket would contradict an ADR, do not override it silently: stop and report it (see section 4).
 - Comments from earlier failed Implementer runs on this ticket, if any. Do not repeat what failed.
-- **Send-backs.** If the ticket has a `<!-- factory-sendback -->` comment, Verify closed your earlier PR. Read every such comment: it lists each acceptance criterion as met or not and what must change. Your branch starts again from today's main, so redo the work and fix exactly what Verify named.
+- **Send-backs.** If the ticket has a `<!-- factory-sendback kind=acceptance …` comment (or an old `<!-- factory-sendback -->` one), Verify closed your earlier PR. Read every such comment: it lists each acceptance criterion as met or not and what must change. Your branch starts again from today's main, so redo the work and fix exactly what Verify named. A `kind=conflict` send-back only said the PR conflicted with main; the workflow resolves those on the open PR without running you (conflict mode, ADR-0001), so you see one only after a later acceptance failure.
 
 ## 2. Build
 

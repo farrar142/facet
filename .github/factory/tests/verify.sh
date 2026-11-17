@@ -217,7 +217,7 @@ setup first-sendback
 jq -n '[{id: 1, event: "pull_request", head_branch: "agent/issue-7", triggering_actor: {login: "github-actions[bot]"}, jobs: 0}]' | tr -d '' > "$FAKE_GH/runs.json"
 bash "$verify" sendback 7 40 "$tmp/reason.md" > /dev/null
 eq "exit" 0 "$?"
-eq "sendback comments" 1 "$(count_marker 7 '<!-- factory-sendback -->')"
+eq "sendback comments" 1 "$(count_marker 7 '<!-- factory-sendback')"
 has "the reason is in the comment" "AC-1: 미충족" "$(jq -r '.[0].body' "$FAKE_GH/comments-7.json")"
 eq "PR state" closed "$(state_of pull-40)"
 has "branch deleted" "git/refs/heads/agent/issue-7" "$(calls)"
@@ -232,7 +232,7 @@ jq -n '[{id: 1, created_at: "2026-11-17T01:00:00Z", body: "<!-- factory-sendback
   | tr -d '\r' > "$FAKE_GH/comments-7.json"
 bash "$verify" sendback 7 40 "$tmp/reason.md" > /dev/null
 eq "exit" 0 "$?"
-eq "sendback comments" 2 "$(count_marker 7 '<!-- factory-sendback -->')"
+eq "sendback comments" 2 "$(count_marker 7 '<!-- factory-sendback')"
 eq "human marker" 1 "$(count_marker 7 '<!-- factory-human -->')"
 eq "labels" ready-for-human "$(labels_of 7)"
 lacks "implementer not dispatched" "factory-implementer.yml" "$(calls)"
@@ -246,6 +246,79 @@ jq -n '[{id: 1, created_at: "2026-11-17T01:00:00Z", body: "<!-- factory-implemen
 bash "$verify" sendback 7 40 "$tmp/reason.md" > /dev/null
 eq "labels" ready-for-agent "$(labels_of 7)"
 eq "the ticket goes first" "--first 7" "$(cat "$tmp/next-args")"
+
+# --- send-back kinds and limits (#307) ---------------------------------------------------------
+
+# prior <kind>...: earlier send-back comments on #7, one per kind (`old` = unmarked, before #307)
+prior() {
+  local i=0 k
+  for k in "$@"; do
+    i=$((i + 1))
+    if [ "$k" = old ]; then
+      printf '<!-- factory-sendback -->\nVerify가 PR #3%s을 되돌렸다.\n' "$i"
+    else
+      printf '<!-- factory-sendback kind=%s pr=3%s -->\nVerify가 PR #3%s을 되돌렸다.\n' "$k" "$i" "$i"
+    fi | jq -Rs --argjson i "$i" '{id: $i, created_at: "2026-11-17T01:00:00Z", body: .}'
+  done | jq -s . | tr -d '\r' > "$FAKE_GH/comments-7.json"
+}
+last_body() { jq -r '.[-1].body' "$FAKE_GH/comments-7.json" | tr -d '\r'; }
+checked_pr() { # the PR body as Verify left it
+  jq -n '{number: 40, state: "open", merged: false, head: {ref: "agent/issue-7"},
+    body: "본문\n\nCloses #7\n\n<!-- factory-checked abc123 -->"}' | tr -d '\r' > "$FAKE_GH/pull-40.json"
+}
+
+setup conflict-sendback-keeps-the-pr
+checked_pr
+bash "$verify" sendback 7 40 "$tmp/reason.md" conflict > /dev/null
+eq "exit" 0 "$?"
+has "kind in the marker" "<!-- factory-sendback kind=conflict pr=40 -->" "$(jq -r '.[0].body' "$FAKE_GH/comments-7.json")"
+eq "PR stays open" open "$(state_of pull-40)"
+lacks "branch kept" "git/refs/heads/agent/issue-7" "$(calls)"
+lacks "checked marker gone" "<!-- factory-checked " "$(jq -r .body "$FAKE_GH/pull-40.json")"
+has "body kept" "Closes #7" "$(jq -r .body "$FAKE_GH/pull-40.json")"
+eq "labels" ready-for-agent "$(labels_of 7)"
+eq "the ticket goes first" "--first 7" "$(cat "$tmp/next-args")"
+eq "conflict-pr reuses the PR" 40 "$(bash "$verify" conflict-pr 7 | tr -d '\r')"
+
+setup conflict-pr-only-after-a-conflict
+bash "$verify" sendback 7 40 "$tmp/reason.md" > /dev/null
+has "acceptance by default" "<!-- factory-sendback kind=acceptance pr=40 -->" "$(jq -r '.[0].body' "$FAKE_GH/comments-7.json")"
+eq "no conflict-pr after an acceptance failure" "" "$(bash "$verify" conflict-pr 7 | tr -d '\r')"
+
+setup conflict-pr-closed
+prior conflict
+jq -n '{number: 31, state: "closed", merged: false, head: {ref: "agent/issue-7"}}' | tr -d '\r' > "$FAKE_GH/pull-31.json"
+eq "no conflict-pr when its PR is closed" "" "$(bash "$verify" conflict-pr 7 | tr -d '\r')"
+bash "$verify" conflict-pr 7 > /dev/null; eq "conflict-pr exits 0 (the guard runs under bash -e)" 0 "$?"
+
+setup two-conflicts-stay-with-the-factory
+prior conflict
+bash "$verify" sendback 7 40 "$tmp/reason.md" conflict > /dev/null
+eq "labels" ready-for-agent "$(labels_of 7)"
+eq "no human marker" 0 "$(count_marker 7 '<!-- factory-human -->')"
+
+setup three-conflicts-go-to-a-human
+prior conflict acceptance conflict
+bash "$verify" sendback 7 40 "$tmp/reason.md" conflict > /dev/null
+eq "labels" ready-for-human "$(labels_of 7)"
+eq "human marker" 1 "$(count_marker 7 '<!-- factory-human -->')"
+has "names the conflict limit" "사람 넘김 한도: main과의 충돌 3번" "$(last_body)"
+eq "PR stays open" open "$(state_of pull-40)"
+
+setup two-acceptance-failures-go-to-a-human
+prior conflict conflict acceptance
+bash "$verify" sendback 7 40 "$tmp/reason.md" acceptance > /dev/null
+eq "labels" ready-for-human "$(labels_of 7)"
+has "names the acceptance limit" "사람 넘김 한도: 인수 실패 2번" "$(last_body)"
+
+setup old-unmarked-count-as-acceptance
+prior old
+bash "$verify" sendback 7 40 "$tmp/reason.md" conflict > /dev/null
+eq "an old one and a conflict" ready-for-agent "$(labels_of 7)"
+setup old-unmarked-count-as-acceptance-2
+prior old
+bash "$verify" sendback 7 40 "$tmp/reason.md" acceptance > /dev/null
+eq "an old one and an acceptance failure" ready-for-human "$(labels_of 7)"
 
 setup pass
 jq -n '[{id: 1, event: "pull_request", head_branch: "agent/issue-7", triggering_actor: {login: "github-actions[bot]"}, jobs: 0}]' | tr -d '' > "$FAKE_GH/runs.json"

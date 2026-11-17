@@ -9,8 +9,10 @@
 #   3. an acceptance review on Sonnet (.github/factory/verify.md): every acceptance criterion met,
 #      nothing out of scope.
 # Pass: squash-merge, close the ticket, build main, dispatch the next ticket (verify.sh pass).
-# Otherwise: send the ticket back to the Implementer with the reason, or to a human on the second
-# send-back (verify.sh sendback).
+# Otherwise: send the ticket back to the Implementer with the reason (verify.sh sendback): a branch
+# that conflicts with main (or fails or cannot be pushed once main is merged in) as kind=conflict,
+# keeping the PR for the Implementer to resolve; anything else as kind=acceptance, closing it. A
+# human gets the ticket on the second acceptance or the third conflict send-back (#307).
 name: factory-verify
 run-name: 'verify #${{ inputs.issue }} (PR #${{ inputs.pr }})'
 
@@ -109,8 +111,11 @@ jobs:
           echo "mech=$r" >> "$GITHUB_OUTPUT"
 
       # `cargo xtask ci` already passed on the checked commit; run it again only when the head
-      # moved or main moved on. A rebase conflict sends the ticket back.
-      - name: Rebase onto main
+      # moved or main moved on. Main is merged in, not rebased onto (#307): a branch whose
+      # conflicts the Implementer resolved carries a merge commit, and a rebase would replay its
+      # commits one by one into the same conflicts again (the PR is squashed anyway). A conflict
+      # sends the ticket back as kind=conflict; the Implementer then resolves it on this branch.
+      - name: Merge main in
         id: base
         if: steps.mech.outputs.mech == 'pass'
         env:
@@ -120,14 +125,16 @@ jobs:
           if git merge-base --is-ancestor origin/main HEAD && [ -n "$CHECKED" ] && [ "$head" = "$CHECKED" ]; then
             echo "::notice::the head is the checked commit on today's main; not running cargo xtask ci again"
             echo "ci=skip" >> "$GITHUB_OUTPUT"
-          elif git rebase origin/main; then
+          elif git merge --no-edit origin/main; then
             echo "ci=run" >> "$GITHUB_OUTPUT"
           else
-            files=$(git diff --name-only --diff-filter=U | sed 's/^/- /')
-            git rebase --abort
-            printf '### main 위로 rebase하면 충돌한다\n\n%s\n' "$files" > .factory/conflict.md
+            files=$(git diff --name-only --diff-filter=U)
+            git merge --abort
+            printf '### main을 merge하면 충돌한다\n\n%s\n' "$(printf '%s\n' "$files" | sed 's/^/- /')" > .factory/conflict.md
             cat .factory/conflict.md
             echo "ci=conflict" >> "$GITHUB_OUTPUT"
+            # for the ledger's per-file conflict counts (ledger.sh stats, #307)
+            echo "files=$(printf '%s\n' "$files" | sed '/^$/d' | paste -sd, -)" >> "$GITHUB_OUTPUT"
           fi
 
       - uses: Swatinem/rust-cache@v2
@@ -141,7 +148,7 @@ jobs:
           cargo xtask ci 2>&1 | tee .factory/ci.log
 
       # The merge must land exactly what was checked.
-      - name: Push the rebased branch
+      - name: Push the merged branch
         id: push
         if: steps.ci.outcome == 'success'
         env:
@@ -191,35 +198,40 @@ jobs:
           BASE: ${{ steps.base.outputs.ci }}
           CI_OUTCOME: ${{ steps.ci.outcome }}
           PUSH_OUTCOME: ${{ steps.push.outcome }}
+          CONFLICT_FILES: ${{ steps.base.outputs.files }}
         run: |
-          # the verdict, for the ledger's conflict send-back ratio (ledger.sh stats, #286)
+          # the verdict and the conflicting files, for the ledger's conflict send-back ratio and
+          # per-file conflict counts (ledger.sh stats, #286, #307)
           outcome=stopped
-          trap 'bash .github/factory/ledger.sh event verify-end "$N" "pr=#$PR" "outcome=$outcome"' EXIT
+          trap 'bash .github/factory/ledger.sh event verify-end "$N" "pr=#$PR" "outcome=$outcome" ${CONFLICT_FILES:+"files=$CONFLICT_FILES"}' EXIT
           if [ "$CANCELLED" = true ]; then
             echo "::warning::cancelled; PR #$PR stays open and #$N in progress"
             outcome=cancelled
             exit 0
           fi
           reason=.factory/sendback.md
+          # conflict, rebase-ci and push: the branch does not go onto today's main. The
+          # Implementer resolves that on this PR's branch instead of implementing again (#307).
+          kind=acceptance
           verdict=$(tr -d '[:space:]' < .factory/verify-verdict 2>/dev/null || true)
           if [ "$MECH" != pass ]; then
             outcome=mech
             { echo "### 기계 검사 실패"; echo; cat .factory/mech.md 2>/dev/null; } > "$reason"
           elif [ "$BASE" = conflict ]; then
-            outcome=conflict
+            outcome=conflict kind=conflict
             cp .factory/conflict.md "$reason"
           elif [ "$BASE" = run ] && [ "$CI_OUTCOME" != success ]; then
-            outcome=rebase-ci
+            outcome=rebase-ci kind=conflict
             {
-              echo "### main 위로 rebase한 뒤 \`cargo xtask ci\` 실패"
+              echo "### main을 merge한 뒤 \`cargo xtask ci\` 실패"
               echo
               echo '```'
               grep -E 'error|FAILED|panicked|xtask ci:' .factory/ci.log 2>/dev/null | tail -n 60
               echo '```'
             } > "$reason"
           elif [ "$BASE" = run ] && [ "$PUSH_OUTCOME" != success ]; then
-            outcome=push
-            echo "### main 위로 rebase한 브랜치를 push하지 못했다(그 사이 브랜치가 바뀌었을 수 있다)" > "$reason"
+            outcome=push kind=conflict
+            echo "### main을 merge한 브랜치를 push하지 못했다(그 사이 브랜치가 바뀌었을 수 있다)" > "$reason"
           elif [ "$verdict" != pass ]; then
             outcome=review
             {
@@ -235,7 +247,7 @@ jobs:
             { echo "### 판단은 통과였지만 PR을 병합하지 못했다"; echo; cat .factory/verify-report.md 2>/dev/null; } > "$reason"
           fi
           cat "$reason"
-          bash .github/factory/verify.sh sendback "$N" "$PR" "$reason"
+          bash .github/factory/verify.sh sendback "$N" "$PR" "$reason" "$kind"
 
       # Nothing to verify (the PR is no longer open) or the guard stopped the run: keep the chain
       # going unless the daily budget is spent (the Implementer's schedule resumes after KST

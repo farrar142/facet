@@ -12,13 +12,27 @@
 #                                           another ticket's ignore) is "the acceptance test changed";
 #                                        3. no `todo!("#N")` stub (Odin's placeholder for a name of
 #                                           ticket #N's contract) is left in any tracked *.rs file.
-#   verify.sh sendback <N> <PR> <file>   send ticket #N back: comment `<!-- factory-sendback -->` and the
-#                                        reason (<file>) on the ticket, close the PR, delete its
-#                                        branch and its job-less bot ci.yml runs (prune-runs.sh), drop `in-progress`. On the ticket's second send-back
-#                                        hand it to a human (`ready-for-human`, `<!-- factory-human -->`)
+#   verify.sh sendback <N> <PR> <file> [kind]
+#                                        send ticket #N back with the reason (<file>), drop
+#                                        `in-progress`. <kind> is `acceptance` (default: machine
+#                                        checks, acceptance review, merge) or `conflict` (the branch
+#                                        does not go onto today's main: conflict, rebase-ci, push;
+#                                        #307). The comment starts with the marker
+#                                        `<!-- factory-sendback kind=<kind> pr=<PR> -->`.
+#                                        acceptance: close the PR, delete its branch and its job-less
+#                                        bot ci.yml runs (prune-runs.sh); the Implementer starts over.
+#                                        conflict: keep the PR and its branch; the Implementer only
+#                                        merges main into it and resolves (verify.sh conflict-pr).
+#                                        Each kind has its own limit (ACCEPTANCE_LIMIT 2,
+#                                        CONFLICT_LIMIT 3; an old marker without kind= counts as
+#                                        acceptance): on reaching it hand the ticket to a human
+#                                        (`ready-for-human`, `<!-- factory-human -->` naming the limit)
 #                                        and move the chain on (dispatch-next.sh); otherwise label it
 #                                        `ready-for-agent` again and run dispatch-next.sh --first <N>
 #                                        (the ticket first, into an empty Implementer track, #286).
+#   verify.sh conflict-pr <N>            the PR the Implementer resolves instead of implementing
+#                                        again: printed when ticket #N's last send-back is kind=conflict
+#                                        and its PR is still open; nothing otherwise (#307).
 #   verify.sh next-verify [PR]           when no other Verify run is going, dispatch Verify for the
 #                                        oldest open PR still waiting for one (not [PR]); the guard
 #                                        against a lost pending run (#286).
@@ -36,14 +50,19 @@
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 REPO=${REPO:-${GITHUB_REPOSITORY:-}}
-SENDBACK='<!-- factory-sendback -->'
+# Every send-back comment starts with this; `kind=` follows since #307 (none: acceptance).
+SENDBACK='<!-- factory-sendback'
 HUMAN='<!-- factory-human -->'
-SENDBACK_LIMIT=2
+# Send-backs of one kind that hand the ticket to a human (decision 2026-11-18, #307): a failed
+# acceptance twice, a conflict with main three times. Conflicts are mostly the other track's luck,
+# not the ticket's fault, and resolving one does not implement the ticket again.
+ACCEPTANCE_LIMIT=2
+CONFLICT_LIMIT=3
 
 j() { jq "$@" | tr -d '\r'; }
 
 usage() {
-  echo "usage: verify.sh mech <N> <base> | sendback <N> <PR> <reason file> | pass <N> <PR> [report file] | next-verify [skip PR]" >&2
+  echo "usage: verify.sh mech <N> <base> | sendback <N> <PR> <reason file> [acceptance|conflict] | conflict-pr <N> | pass <N> <PR> [report file] | next-verify [skip PR]" >&2
   exit 2
 }
 
@@ -128,41 +147,93 @@ delete_branch() {
   [ -n "$1" ] || return 0
   gh api -X DELETE "repos/$REPO/git/refs/heads/$1" >/dev/null 2>&1 || echo "::warning::could not delete branch $1"
 }
-sendback_count() {
+# sendbacks <N>: the ticket's send-back comments, oldest first, as JSON lines {kind, pr}
+# (a marker without kind= is an acceptance send-back from before #307).
+sendbacks() {
   gh api "repos/$REPO/issues/$1/comments?per_page=100" --paginate \
-    | j -s --arg m "$SENDBACK" '[.[][] | select(.body | contains($m))] | length'
+    | j -c -s --arg m "$SENDBACK" '.[][] | .body | select(startswith($m)) | split("\n")[0]
+        | {kind: ((capture("kind=(?<k>[a-z]+)").k) // "acceptance"),
+           pr: ((capture("pr=(?<p>[0-9]+)").p) // null)}'
+}
+sendback_count() { # sendback_count <N> <kind>
+  sendbacks "$1" | j -s --arg k "$2" '[.[] | select(.kind == $k)] | length'
 }
 run_link() { [ -n "${RUN_URL:-}" ] && printf ' (%s)' "$RUN_URL"; }
 
 # --- sendback ------------------------------------------------------------------------------------
 
 sendback() {
-  local n=$1 pr=$2 file=$3 reason branch count
+  local n=$1 pr=$2 file=$3 kind=${4:-acceptance} reason branch count limit what next
+  case "$kind" in acceptance | conflict) ;; *) usage ;; esac
   reason=$(cat "$file" 2>/dev/null)
   [ -n "$reason" ] || reason="(사유가 남지 않았다)"
-  branch=$(pr_branch "$pr")
 
-  comment "$n" "$SENDBACK
-Verify가 PR #$pr을 되돌렸다$(run_link).
+  if [ "$kind" = conflict ]; then
+    limit=$CONFLICT_LIMIT what="main과의 충돌"
+    next="PR #$pr과 그 브랜치는 그대로 둔다. Implementer가 다시 구현하지 않고 그 브랜치에 main을 merge해 충돌만 푼다."
+  else
+    limit=$ACCEPTANCE_LIMIT what="인수 실패"
+    next="PR #$pr을 닫았다. Implementer가 오늘의 main에서 다시 구현한다."
+  fi
+  comment "$n" "$SENDBACK kind=$kind pr=$pr -->
+Verify가 PR #$pr을 되돌렸다($what)$(run_link). $next
 
 $reason"
-  gh api -X PATCH "repos/$REPO/pulls/$pr" -f state=closed >/dev/null || echo "::warning::could not close PR #$pr"
-  delete_branch "$branch"
-  prune_runs "$branch"
+  if [ "$kind" = acceptance ]; then
+    branch=$(pr_branch "$pr")
+    gh api -X PATCH "repos/$REPO/pulls/$pr" -f state=closed >/dev/null || echo "::warning::could not close PR #$pr"
+    delete_branch "$branch"
+    prune_runs "$branch"
+  else
+    unmark_checked "$pr"
+  fi
   remove_label "$n" in-progress
 
-  count=$(sendback_count "$n")
-  if [ "${count:-0}" -ge "$SENDBACK_LIMIT" ]; then
+  count=$(sendback_count "$n" "$kind")
+  if [ "${count:-0}" -ge "$limit" ]; then
     add_label "$n" ready-for-human
     comment "$n" "$HUMAN
-Verify가 이 티켓을 ${count}번 되돌렸다. 공장은 더 돌리지 않는다: 사람이 위 되돌림 사유를 보고 티켓이나 인수 시험을 고친 뒤 \`ready-for-human\`을 떼고 \`ready-for-agent\`를 붙인다."
-    echo "#$n: send-back $count, handed to a human"
+Verify가 이 티켓을 ${what}로 ${count}번 되돌렸다(사람 넘김 한도: ${what} ${limit}번). 공장은 더 돌리지 않는다: 사람이 위 되돌림 사유를 보고 티켓이나 인수 시험을 고치거나 충돌을 푼 뒤 \`ready-for-human\`을 떼고 \`ready-for-agent\`를 붙인다."
+    echo "#$n: $kind send-back $count of $limit, handed to a human"
     next_ticket
   else
     add_label "$n" ready-for-agent
     next_ticket --first "$n"
-    echo "#$n: send-back $count, back to ready-for-agent (dispatch-next.sh tries it first)"
+    echo "#$n: $kind send-back $count of $limit, back to ready-for-agent (dispatch-next.sh tries it first)"
   fi
+}
+
+# unmark_checked <PR>: the PR stays open on a conflict send-back, but no Verify may take it before
+# the Implementer resolved it (next-verify picks open PRs with `<!-- factory-checked `): turn its
+# checked markers into `<!-- factory-stale-checked `. The Implementer appends a new one (#307).
+unmark_checked() {
+  local f
+  f=$(mktemp)
+  if gh api "repos/$REPO/pulls/$1" | j -r '.body // ""' \
+      | sed 's/<!-- factory-checked /<!-- factory-stale-checked /g' > "$f"; then
+    gh api -X PATCH "repos/$REPO/pulls/$1" -F "body=@$f" >/dev/null \
+      || echo "::warning::could not unmark PR #$1 as checked"
+  else
+    echo "::warning::could not read PR #$1"
+  fi
+  rm -f "$f"
+}
+
+# --- conflict-pr ---------------------------------------------------------------------------------
+
+# The Implementer's guard asks this (#307): when the ticket's last send-back was a conflict and its
+# PR is still open, print that PR; the run then merges main into the PR's branch and resolves
+# instead of implementing the ticket again.
+conflict_pr() {
+  local n=$1 last pr state
+  last=$(sendbacks "$n" | tail -n 1)
+  [ -n "$last" ] || return 0
+  [ "$(printf '%s' "$last" | j -r .kind)" = conflict ] || return 0
+  pr=$(printf '%s' "$last" | j -r '.pr // empty')
+  [ -n "$pr" ] || return 0
+  state=$(gh api "repos/$REPO/pulls/$pr" 2>/dev/null | j -r '.state // empty')
+  if [ "$state" = open ]; then echo "$pr"; fi
+  return 0
 }
 
 # --- pass ----------------------------------------------------------------------------------------
@@ -237,7 +308,8 @@ next_verify() {
 
 case "${1:-}" in
   mech) [ $# -eq 3 ] || usage; mech "$2" "$3" ;;
-  sendback) [ $# -eq 4 ] || usage; : "${REPO:?REPO is not set}"; sendback "$2" "$3" "$4" ;;
+  sendback) [ $# -eq 4 ] || [ $# -eq 5 ] || usage; : "${REPO:?REPO is not set}"; sendback "$2" "$3" "$4" "${5:-acceptance}" ;;
+  conflict-pr) [ $# -eq 2 ] || usage; : "${REPO:?REPO is not set}"; conflict_pr "$2" ;;
   pass) [ $# -ge 3 ] || usage; : "${REPO:?REPO is not set}"; pass "$2" "$3" "${4:-}" ;;
   next-verify) [ $# -le 2 ] || usage; : "${REPO:?REPO is not set}"; next_verify "${2:-0}" ;;
   *) usage ;;

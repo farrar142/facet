@@ -8,6 +8,11 @@
 # workflow itself runs `cargo xtask ci`, pushes and opens the PR, and hands it to
 # factory-verify.yml (spec #249), which checks the PR and merges it or sends the ticket back.
 # This workflow never merges.
+#
+# Conflict mode (#307, `mode` input, auto by default): when Verify sent the ticket back because its
+# branch conflicts with today's main, the run checks out the open PR's branch, merges main in, lets
+# the agent resolve the conflicts (the "Resolve conflicts" step), passes `cargo xtask ci`, pushes
+# and hands the same PR to Verify again. It does not implement the ticket again.
 name: factory-implementer
 # Dispatched runs carry the ticket and the track in their title: dispatch-next.sh reads it to find
 # the busy tracks and tickets (#286).
@@ -30,6 +35,15 @@ on:
         required: false
         type: string
         default: '1'
+      mode:
+        description: >-
+          auto (default): resolve conflicts only when Verify's last send-back of the ticket was a
+          conflict and its PR is still open (verify.sh conflict-pr), else implement;
+          implement: implement from main; conflict: resolve conflicts on the open PR only (#307)
+        required: false
+        type: choice
+        options: [auto, implement, conflict]
+        default: auto
   # 00:05 KST: the daily budget (spec #249) starts over, so restart a chain that stopped on it.
   schedule:
     - cron: '5 15 * * *'
@@ -144,6 +158,8 @@ jobs:
       - name: Guard and claim
         id: guard
         if: steps.budget.outputs.go == 'true'
+        env:
+          MODE_INPUT: ${{ inputs.mode }}
         run: |
           read -r state labels < <(gh issue view "$N" --repo "$REPO" --json state,labels --jq '[.state, ([.labels[].name] | join(","))] | @tsv')
           go=true
@@ -156,30 +172,60 @@ jobs:
               go=false
             fi
           fi
+          # Conflict mode (#307): Verify sent the ticket back because its branch conflicts with
+          # main (or fails or cannot be pushed with main merged in) and kept the PR open. Then this
+          # run only merges main into that branch and resolves; it does not implement again.
+          mode=implement pr=
+          if $go && [ "${MODE_INPUT:-auto}" != implement ]; then
+            pr=$(bash .github/factory/verify.sh conflict-pr "$N")
+            if [ -n "$pr" ]; then
+              mode=conflict
+            elif [ "$MODE_INPUT" = conflict ]; then
+              echo "::error::#$N: mode=conflict, but its last send-back is no conflict or its PR is closed"
+              go=false
+            fi
+          fi
           if $go; then
             gh issue edit "$N" --repo "$REPO" --remove-label ready-for-agent --add-label in-progress
             # Measurement (#286): the wait from `ready-for-agent` to this start, per track.
-            bash .github/factory/ledger.sh event impl-start "$N" "track=$TRACK"
+            if [ "$mode" = conflict ]; then
+              echo "::notice::#$N: resolving conflicts with main on PR #$pr"
+              bash .github/factory/ledger.sh event impl-start "$N" "track=$TRACK" mode=conflict "pr=#$pr"
+            else
+              bash .github/factory/ledger.sh event impl-start "$N" "track=$TRACK"
+            fi
           fi
-          echo "go=$go" >> "$GITHUB_OUTPUT"
+          {
+            echo "go=$go"
+            echo "mode=$mode"
+            echo "pr=$pr"
+          } >> "$GITHUB_OUTPUT"
           # Model: the ticket's model label (set by Decompose), Sonnet when there is none,
           # and Opus for any retry after a code failure (the checks failed; an
           # infrastructure failure retries on the same model, see "Record failure") or after
-          # Verify sent the ticket back (`<!-- factory-sendback -->`, spec #249).
+          # Verify sent the ticket back (`<!-- factory-sendback` of any kind, spec #249, #307).
           # Opus only for hard tickets (Windows API, OLE, concurrency safety); never Fable.
           model=claude-sonnet-5-5
           case ",$labels," in *,model:opus,*) model=claude-opus-5-5;; esac
-          fails=$(gh issue view "$N" --repo "$REPO" --json comments --jq '[.comments[].body | select(contains("<!-- factory-implementer-failed -->") or contains("<!-- factory-sendback -->"))] | length')
+          fails=$(gh issue view "$N" --repo "$REPO" --json comments --jq '[.comments[].body | select(contains("<!-- factory-implementer-failed -->") or startswith("<!-- factory-sendback"))] | length')
           if [ "$fails" -gt 0 ]; then model=claude-opus-5-5; fi
           echo "::notice::#$N runs on $model (earlier code failures and send-backs: $fails)"
           echo "model=$model" >> "$GITHUB_OUTPUT"
 
+      # Conflict mode (#307) goes on from the open PR's branch; otherwise a new branch from main.
       - name: Prepare branch
         if: steps.guard.outputs.go == 'true'
+        env:
+          MODE: ${{ steps.guard.outputs.mode }}
         run: |
           git config user.name "facet-factory[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch -c "$BRANCH"
+          if [ "$MODE" = conflict ]; then
+            git fetch origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
+            git switch -C "$BRANCH" "origin/$BRANCH"
+          else
+            git switch -c "$BRANCH"
+          fi
           mkdir -p .factory
           echo ".factory/" >> .git/info/exclude
           # Logs the agent writes while checking (ci.log, run 43938463111) must not land in the PR.
@@ -201,8 +247,9 @@ jobs:
           & $exe --version
           "path=$exe" >> $env:GITHUB_OUTPUT
 
+      # Not in conflict mode (#307): the ticket is implemented on the PR's branch already.
       - name: Implement
-        if: steps.guard.outputs.go == 'true'
+        if: steps.guard.outputs.go == 'true' && steps.guard.outputs.mode != 'conflict'
         uses: anthropics/claude-code-action@v1
         with:
           path_to_claude_code_executable: ${{ steps.claude.outputs.path }}
@@ -223,7 +270,7 @@ jobs:
       # output, which may carry secrets in a public repo). Print only the shell commands it ran,
       # so slow or backgrounded commands show up in the run log.
       - name: Agent commands
-        if: always() && steps.guard.outputs.go == 'true'
+        if: always() && steps.guard.outputs.go == 'true' && steps.guard.outputs.mode != 'conflict'
         continue-on-error: true
         run: |
           f="$RUNNER_TEMP/claude-execution-output.json"
@@ -236,17 +283,32 @@ jobs:
       # Cost ledger (spec #249). After "Agent commands", which reads the same execution file:
       # recording moves it away so a later stage does not count it again.
       - name: Record cost (implement)
-        if: always() && steps.guard.outputs.go == 'true'
+        if: always() && steps.guard.outputs.go == 'true' && steps.guard.outputs.mode != 'conflict'
         run: bash .github/factory/ledger.sh record implementer "$N"
 
       # Put the agent's commits on top of today's main: sibling tickets or factory changes
       # may have landed during the run. Pushing a branch based on an older main also
       # counts as editing workflow files, which GITHUB_TOKEN may not do.
       # On a conflict, fall back to a merge and let the agent resolve it (the PR is squashed anyway).
+      # Conflict mode (#307): no agent ran yet and the branch already carries the PR's work: merge
+      # main into it (as Verify does), and let the agent resolve what conflicts.
       - name: Rebase onto main
         id: rebase
         if: steps.guard.outputs.go == 'true'
+        env:
+          MODE: ${{ steps.guard.outputs.mode }}
         run: |
+          if [ "$MODE" = conflict ]; then
+            git fetch origin main
+            if git merge --no-edit origin/main; then
+              echo "::notice::main merges into the PR's branch cleanly now"
+              echo "conflict=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "::warning::conflicts with main: $(git diff --name-only --diff-filter=U | tr '\n' ' ')"
+              echo "conflict=true" >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
           # The agent sometimes ends with staged or unstaged edits it never committed
           # (run 43823742621), which stops the rebase. If it committed work, add the
           # leftovers on top (the automated checks below still judge the result). If it
@@ -372,13 +434,25 @@ jobs:
       - name: Push and open PR
         id: pr
         if: steps.guard.outputs.go == 'true'
+        env:
+          MODE: ${{ steps.guard.outputs.mode }}
+          CONFLICT_PR: ${{ steps.guard.outputs.pr }}
         run: |
           sha=$(git rev-parse HEAD)
           git push --force origin "$BRANCH"
           body=.factory/pr-body.md
-          [ -s "$body" ] || echo "(the agent wrote no PR body)" > "$body"
-          printf '\n\nCloses #%s\n\n_Opened by the factory Implementer run: %s_\n\n<!-- factory-checked %s -->\n' "$N" \
-            "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" "$sha" >> "$body"
+          run="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          if [ "$MODE" = conflict ]; then
+            # Keep the PR's body (its checked markers are stale since the send-back) and add the
+            # newly checked commit, which Verify reads as the last one (#307).
+            gh pr view "$CONFLICT_PR" --repo "$REPO" --json body --jq .body | tr -d '\r' > "$body"
+            printf '\n\n_Conflicts with main resolved by the factory Implementer run: %s_\n\n<!-- factory-checked %s -->\n' \
+              "$run" "$sha" >> "$body"
+          else
+            [ -s "$body" ] || echo "(the agent wrote no PR body)" > "$body"
+            printf '\n\nCloses #%s\n\n_Opened by the factory Implementer run: %s_\n\n<!-- factory-checked %s -->\n' "$N" \
+              "$run" "$sha" >> "$body"
+          fi
           title=$(gh issue view "$N" --repo "$REPO" --json title --jq .title)
           url=$(gh pr list --repo "$REPO" --head "$BRANCH" --state open --json url --jq '.[0].url')
           if [ -n "$url" ]; then
