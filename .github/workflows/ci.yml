@@ -22,8 +22,80 @@ env:
   # 시험 바이너리 약 60개를 링크하므로 dev·test 빌드는 줄 정보만 남긴다(공장 Implementer와 같음).
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
+# PR: lint·test·bench를 Windows job 셋으로 나란히 돌리고(`cargo xtask ci --only …`), 벤치마크는 PR이 바꾼
+# 파일에 닿는 것만 고른다. 공장 스크립트 시험은 공장 파일이 바뀐 PR에서만 ubuntu job으로 돈다.
+# main push·수동 실행: Windows job 하나가 `cargo xtask ci --full`(공장 스크립트 시험은 ubuntu job 몫)로 모두 돌고
+# rust-cache를 저장한다. PR job들은 같은 캐시(shared-key)를 읽기만 한다.
+# 공장(Verify·Implementer)은 인자 없는 `cargo xtask ci` 한 번으로 같은 판정을 받는다(xtask/src/ci_select.rs).
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      factory: ${{ steps.diff.outputs.factory }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - id: diff
+        run: |
+          if [ "${{ github.event_name }}" != pull_request ]; then
+            echo "factory=true" >> "$GITHUB_OUTPUT"
+          elif git diff --name-only HEAD^1 HEAD | grep -qE '^\.github/(factory/|workflows/factory-)'; then
+            echo "factory=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "factory=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # 공장 스크립트 시험(가짜 gh로 .github/factory/의 셸 스크립트를 시험). Windows의 bash로는 7분 넘게 걸린다.
+  factory:
+    needs: changes
+    if: needs.changes.outputs.factory == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash .github/factory/test.sh
+
+  lint:
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          save-if: false
+      - run: cargo xtask ci --only lint
+
+  test:
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          save-if: false
+      - run: cargo xtask ci --only test
+
+  bench:
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    steps:
+      # PR 사건의 HEAD는 기준 브랜치 위의 병합 커밋이라 첫 부모(HEAD^1)와 견주면 PR이 바꾼 파일이다.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          save-if: false
+      - run: cargo xtask ci --only bench --base HEAD^1
+
   ci:
+    if: github.event_name != 'pull_request'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,5 +104,7 @@ jobs:
       - run: rustup show
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
 
-      - run: cargo xtask ci
+      - run: cargo xtask ci --full --only lint,test,bench
