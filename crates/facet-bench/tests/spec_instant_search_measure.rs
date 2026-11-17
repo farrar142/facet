@@ -47,7 +47,6 @@ fn result(instant: &[u64]) -> ScreenResult {
 }
 
 #[test]
-#[ignore = "#227"]
 fn 즉시_검색_첫_결과는_중앙값이_50ms_미만일_때만_통과한다() {
     assert_eq!(INSTANT_FIRST_LIMIT, ms(50));
     assert!(result(&[20, 45, 900]).verdict().instant_pass);
@@ -62,7 +61,6 @@ fn 즉시_검색_첫_결과는_중앙값이_50ms_미만일_때만_통과한다()
 }
 
 #[test]
-#[ignore = "#227"]
 fn 즉시_검색_첫_결과가_표와_json에_통과_여부와_함께_나온다() {
     let r = result(&[30, 20, 70]);
     let table = r.to_table();
@@ -87,7 +85,6 @@ fn 즉시_검색_첫_결과가_표와_json에_통과_여부와_함께_나온다(
 }
 
 #[test]
-#[ignore = "#227"]
 fn 앱_보고의_즉시_검색_줄을_그대로_읽는다() {
     assert!(ENV_INSTANT.starts_with("FACET_MEASURE_"));
     assert_ne!(ENV_INSTANT, ENV_SEARCH);
@@ -106,7 +103,6 @@ fn 앱_보고의_즉시_검색_줄을_그대로_읽는다() {
 }
 
 #[test]
-#[ignore = "#227"]
 fn 즉시_검색_보고는_시간과_결과가_있고_강등되지_않아야_한다() {
     let report = |rows, frame, demoted| ScreenReport {
         rows,
@@ -130,7 +126,6 @@ fn 즉시_검색_보고는_시간과_결과가_있고_강등되지_않아야_한
 }
 
 #[test]
-#[ignore = "#227"]
 fn 측정이_넘기는_질의는_시험_폴더_항목에_맞는다() {
     assert!(!INSTANT_QUERY.trim().is_empty());
     assert!(name_matches(
@@ -177,7 +172,6 @@ mod server {
     }
 
     #[test]
-    #[ignore = "#227"]
     fn 측정_도구의_합성_인덱스_서버에_즉시_검색하면_강등_없이_시험_폴더_아래_결과가_온다() {
         let dir = TempDir::new().unwrap();
         let pipe = unique_pipe();

@@ -15,14 +15,14 @@
 //! 그리기 알림이 없는 software 렌더러에서도 femtovg와 같은 구간(내보내고 이벤트 루프로 돌아온 때)을 잰다.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use facet_core::Location;
 use facet_core::measure::{
-    ENV_MENU, ENV_OPEN, ENV_OUT, ENV_RENAME, ENV_SCROLL_ROWS, ENV_SEARCH, ENV_START_US,
-    ENV_WINDOWS, ScreenReport,
+    ENV_INSTANT, ENV_MENU, ENV_OPEN, ENV_OUT, ENV_RENAME, ENV_SCROLL_ROWS, ENV_SEARCH,
+    ENV_START_US, ENV_WINDOWS, ScreenReport,
 };
 use slint::winit_030::winit::event::WindowEvent;
 use slint::{ComponentHandle, Model};
@@ -48,6 +48,14 @@ fn window_loads(key: u64) -> usize {
     WINDOW_LOADS.lock().map_or(0, |loads| {
         loads.iter().find(|(k, _)| *k == key).map_or(0, |(_, n)| *n)
     })
+}
+
+/// 마지막으로 창에 들어간 즉시 검색 결과가 실시간 탐색으로 강등된 것인가.
+static DEMOTED: AtomicBool = AtomicBool::new(false);
+
+/// 활성 탭의 즉시 검색이 강등됐는지 알린다([`mark_loaded`]와 함께 부른다).
+pub fn mark_demoted(demoted: bool) {
+    DEMOTED.store(demoted, Ordering::Relaxed);
 }
 
 /// 마지막으로 창에 들어간 항목 수.
@@ -84,6 +92,8 @@ struct State {
     menu_selecting: bool,
     /// 첫 화면 뒤에 시작할 실시간 탐색의 이름 조각. 시작한 때는 `open_started`다.
     search: Option<String>,
+    /// 첫 화면 뒤에 즉시 검색에 넘길 질의 글자. 넘긴 때는 `open_started`다.
+    instant: Option<String>,
     /// 이 횟수보다 많이 목록이 들어온 뒤의 프레임만 센다. 이동한 폴더의 목록을 기다릴 때 쓴다.
     loads_seen: usize,
     report: ScreenReport,
@@ -120,6 +130,11 @@ pub fn is_enabled() -> bool {
     std::env::var_os(ENV_OUT).is_some_and(|v| !v.is_empty())
 }
 
+/// 즉시 검색 측정인가(측정 모드이고 [`ENV_INSTANT`]가 있다). 이때만 측정 모드에서도 인덱서 연결을 띄운다.
+pub fn instant_enabled() -> bool {
+    is_enabled() && std::env::var_os(ENV_INSTANT).is_some_and(|v| !v.is_empty())
+}
+
 /// 측정 모드이면 프레임 세기(창의 winit 이벤트마다 부를 것)를 돌려준다. 아니면 `None`이다.
 ///
 /// Slint는 창마다 winit 이벤트 훅을 하나만 두므로 훅은 `main`이 걸고, 키 위치 적기([`crate::keys`])와 이것을
@@ -148,6 +163,7 @@ pub fn frame_counter(ui: &AppWindow, key: u64) -> Option<impl FnMut(&WindowEvent
         menu: std::env::var_os(ENV_MENU).is_some_and(|v| !v.is_empty()),
         menu_selecting: false,
         search: std::env::var(ENV_SEARCH).ok().filter(|v| !v.is_empty()),
+        instant: std::env::var(ENV_INSTANT).ok().filter(|v| !v.is_empty()),
         loads_seen: 0,
         report: ScreenReport::default(),
         last_frame: None,
@@ -238,6 +254,20 @@ fn presented(weak: &slint::Weak<AppWindow>, state: &Mutex<State>) {
                 });
                 return;
             }
+            if let Some(query) = s.instant.clone() {
+                // 결과 위치로 옮긴 빈 목록의 프레임은 세지 않는다(결과가 든 프레임을 기다림, 아래).
+                s.loads_seen = window_loads(s.key);
+                s.open_started = Some(Instant::now());
+                drop(s);
+                crate::with_first_view(|view| {
+                    if !view.measure_instant(&query)
+                        && let Ok(mut s) = state.lock()
+                    {
+                        s.finish();
+                    }
+                });
+                return;
+            }
             if s.menu {
                 // 먼저 전체를 선택하고 그 프레임이 나가면 메뉴를 연다(선택을 그리는 비용이 메뉴 시간에 섞이지 않게).
                 s.loads_seen = window_loads(s.key);
@@ -278,6 +308,19 @@ fn presented(weak: &slint::Weak<AppWindow>, state: &Mutex<State>) {
                     return;
                 }
                 s.report.search_frame = Some(now - started);
+                s.report.rows = rows;
+                s.finish();
+                return;
+            }
+            if s.instant.is_some() {
+                let rows = ROWS.load(Ordering::Relaxed);
+                if rows == 0 {
+                    // 결과가 아직 없는 프레임(빈 결과 위치·응답 전): 다음 결과를 기다린다.
+                    s.loads_seen = window_loads(s.key);
+                    return;
+                }
+                s.report.instant_frame = Some(now - started);
+                s.report.instant_demoted = DEMOTED.load(Ordering::Relaxed);
                 s.report.rows = rows;
                 s.finish();
                 return;
