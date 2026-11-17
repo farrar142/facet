@@ -2393,7 +2393,10 @@ impl View {
         ui.set_batch_separator(SharedString::new());
         ui.set_batch_problem(SharedString::new());
         let inputs = batch_rename::Inputs::default();
-        let preview = self.app.borrow().batch_rename_preview(&inputs.rule());
+        let preview = self
+            .app
+            .borrow()
+            .batch_rename_preview_rules(&inputs.rule().to_rules(), local_utc_offset());
         if preview.is_none() {
             return;
         }
@@ -2431,7 +2434,10 @@ impl View {
             return;
         }
         let inputs = self.batch_inputs();
-        let preview = self.app.borrow().batch_rename_preview(&inputs.rule());
+        let preview = self
+            .app
+            .borrow()
+            .batch_rename_preview_rules(&inputs.rule().to_rules(), local_utc_offset());
         if let Some(window) = self.batch.borrow_mut().as_mut() {
             window.update(inputs, preview);
         }
@@ -2478,7 +2484,10 @@ impl View {
             return;
         }
         let rule = self.batch_inputs().rule();
-        let result = self.app.borrow_mut().start_batch_rename(&rule);
+        let result = self
+            .app
+            .borrow_mut()
+            .start_batch_rename_rules(&rule.to_rules(), local_utc_offset());
         match result {
             Ok(_) => {
                 self.close_batch();
@@ -4845,4 +4854,9 @@ fn select_backend() -> Result<(), slint::PlatformError> {
     {
         Ok(())
     }
+}
+
+/// 지금 시간대의 UTC와의 차이 초(일괄 이름 바꾸기의 수정 날짜 규칙에 넘김).
+fn local_utc_offset() -> i64 {
+    i64::from(facet_core::query_syntax::Today::now().utc_offset_seconds)
 }

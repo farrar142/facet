@@ -124,7 +124,7 @@ pub struct BatchWindow {
 }
 
 impl BatchWindow {
-    /// 입력값과 그 미리 보기를 새로 둔다(부른 쪽이 `App::batch_rename_preview`로 계산해 넘김).
+    /// 입력값과 그 미리 보기를 새로 둔다(부른 쪽이 `Inputs::rule`을 `RenameRule::to_rules`로 바꿔 `App::batch_rename_preview_rules`로 계산해 넘김).
     pub fn update(&mut self, inputs: Inputs, preview: Option<Preview>) {
         self.inputs = inputs;
         self.preview = preview;
@@ -266,5 +266,102 @@ mod tests {
     fn 겹침과_남는_이름의_까닭_글자() {
         assert!(text::batch_problem_text(BatchProblem::Duplicate).contains("겹침"));
         assert!(text::batch_problem_text(BatchProblem::NameTaken).contains("같은 이름이 있음"));
+    }
+
+    /// 창이 부르는 규칙 목록 입구(`Inputs::rule().to_rules()`)의 미리 보기가 S14a 입구(`Inputs::rule()`)의 미리
+    /// 보기와 같다: 항목·바뀔 이름·상태·수치 모두.
+    #[test]
+    fn 규칙_목록_입구의_미리_보기는_s14a_입구와_같다() {
+        use std::time::Duration;
+
+        use facet_core::Location;
+        use facet_core::tab::ReadOutcome;
+        use facet_core::window::App;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        for name in [
+            "사진 a.jpg",
+            "사진 b.jpg",
+            "메모.txt",
+            "목록.txt",
+            "남는 이름.txt",
+        ] {
+            std::fs::write(dir.path().join(name), name).unwrap();
+        }
+        std::fs::create_dir(dir.path().join("폴더")).unwrap();
+        let mut app = App::new(Some(Location::file_system(dir.path())));
+        let (_, outcome) = app.wait(Duration::from_secs(30)).expect("첫 읽기");
+        assert_eq!(outcome, ReadOutcome::Committed);
+        let tab = app.active_tab_mut();
+        let picked: Vec<usize> = (0..tab.len())
+            .filter(|&i| tab.get(i).is_some_and(|item| item.name != "남는 이름.txt"))
+            .collect();
+        tab.select_only(picked[0]);
+        for &i in &picked[1..] {
+            tab.toggle_select(i);
+        }
+
+        let mut cases = Vec::new();
+        cases.push(Inputs::default());
+        cases.push(Inputs {
+            find: "사진".to_owned(),
+            replace: "photo".to_owned(),
+            ..Inputs::default()
+        });
+        cases.push(Inputs {
+            prefix: "앞_".to_owned(),
+            suffix: "_뒤".to_owned(),
+            ..Inputs::default()
+        });
+        cases.push(Inputs {
+            numbering: true,
+            start: "7".to_owned(),
+            digits: "3".to_owned(),
+            at_end: false,
+            separator: "-".to_owned(),
+            ..Inputs::default()
+        });
+        cases.push(Inputs {
+            find: "목록".to_owned(),
+            replace: "남는 이름".to_owned(),
+            prefix: "x".to_owned(),
+            numbering: true,
+            separator: " ".to_owned(),
+            ..Inputs::default()
+        });
+        cases.push(Inputs {
+            find: "메모".to_owned(),
+            replace: "남는 이름".to_owned(),
+            ..Inputs::default()
+        });
+        cases.push(Inputs {
+            find: ".".to_owned(),
+            replace: "*".to_owned(),
+            ..Inputs::default()
+        });
+        for inputs in cases {
+            let rule = inputs.rule();
+            let s14a = app.batch_rename_preview(&rule).expect("S14a 미리 보기");
+            for offset in [0, 9 * 3600, -10 * 3600] {
+                let rules = app
+                    .batch_rename_preview_rules(&rule.to_rules(), offset)
+                    .expect("규칙 목록 미리 보기");
+                assert_eq!(rules.entries(), s14a.entries(), "{inputs:?}");
+                assert_eq!(rules.rename_count(), s14a.rename_count(), "{inputs:?}");
+                assert_eq!(
+                    rules.unchanged_count(),
+                    s14a.unchanged_count(),
+                    "{inputs:?}"
+                );
+                assert_eq!(rules.problem_count(), s14a.problem_count(), "{inputs:?}");
+                let mut window = BatchWindow::default();
+                window.update(inputs.clone(), Some(rules.clone()));
+                let mut old = BatchWindow::default();
+                old.update(inputs.clone(), Some(s14a.clone()));
+                assert_eq!(window.can_execute(), old.can_execute());
+                assert_eq!(window.counts_text(), old.counts_text());
+                assert_eq!(lines(&rules), lines(&s14a));
+            }
+        }
     }
 }
