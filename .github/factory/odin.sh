@@ -18,7 +18,8 @@
 #                                       `<!-- factory-human -->` with the reason on it. Nothing is merged.
 #   odin.sh pass <S> <PR> [report]      the checks passed and the workflow pushed Odin's fixes: comment the
 #                                       report on the spec PR, squash-merge it (retrying while GitHub
-#                                       computes mergeability), delete its branch, build main, label the
+#                                       computes mergeability), delete its branch and its job-less
+#                                       bot ci.yml runs (prune-runs.sh), build main, label the
 #                                       spec's open tickets `ready-for-agent` and dispatch the first one
 #                                       (dispatch-next.sh --tickets-only --candidates <them>: the
 #                                       label search may lag, so the approved tickets are named: the
@@ -28,7 +29,8 @@
 #                                       label the tickets and dispatch the first one as `pass` does.
 #
 # Environment: REPO (or GITHUB_REPOSITORY), GH_TOKEN, BASE (default main); RUN_URL (link in comments,
-# optional); FACTORY_DISPATCH_NEXT (command run instead of dispatch-next.sh, tests);
+# optional); FACTORY_DISPATCH_NEXT (command run instead of dispatch-next.sh, tests); FACTORY_PRUNE_RUNS
+# (command run with the branch instead of prune-runs.sh, tests);
 # FACTORY_MERGE_WAIT (seconds between merge attempts, default 15). Needs bash, gh and jq.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
@@ -57,6 +59,10 @@ has_label() { # has_label <issue> <label>
 delete_branch() {
   gh api -X DELETE "repos/$REPO/git/refs/heads/$1" > /dev/null 2>&1 \
     || echo "::warning::could not delete branch $1"
+}
+# Delete the job-less ci.yml pull_request runs GitHub left on the spec PR branch (prune-runs.sh, #270).
+prune_runs() {
+  if [ -n "${FACTORY_PRUNE_RUNS:-}" ]; then $FACTORY_PRUNE_RUNS "$1"; else bash "$here/prune-runs.sh" "$1"; fi
 }
 dispatch() { # dispatch <workflow file>
   gh api -X POST "repos/$REPO/actions/workflows/$1/dispatches" -f "ref=$BASE" > /dev/null
@@ -180,6 +186,7 @@ $(cat "$report")" || echo "::warning::could not comment on PR #$pr"
     return 1
   fi
   delete_branch "$(branch_of "$s")"
+  prune_runs "$(branch_of "$s")"
   # A GITHUB_TOKEN merge fires no push event: build main here, as verify.sh does.
   dispatch ci.yml || echo "::warning::could not dispatch ci.yml"
   start_chain "$s"
@@ -193,6 +200,7 @@ empty() {
     || echo "::warning::could not comment on PR #$pr"
   gh api -X PATCH "repos/$REPO/pulls/$pr" -f state=closed > /dev/null || echo "::warning::could not close PR #$pr"
   delete_branch "$(branch_of "$s")"
+  prune_runs "$(branch_of "$s")"
   start_chain "$s"
 }
 
