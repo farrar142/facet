@@ -83,7 +83,6 @@ fn receive_until(app: &mut App, until: &[BatchPreviewId]) -> (Received, Vec<TabI
 }
 
 #[test]
-#[ignore = "#292"]
 fn the_result_arrives_as_an_update_equal_to_the_synchronous_preview() {
     let dir = folder();
     let mut app = app_at(dir.path());
@@ -103,7 +102,6 @@ fn the_result_arrives_as_an_update_equal_to_the_synchronous_preview() {
 }
 
 #[test]
-#[ignore = "#292"]
 fn an_earlier_request_is_discarded_once_and_only_the_last_one_is_drawn() {
     let dir = folder();
     let mut app = app_at(dir.path());
@@ -139,7 +137,6 @@ fn an_earlier_request_is_discarded_once_and_only_the_last_one_is_drawn() {
 }
 
 #[test]
-#[ignore = "#292"]
 fn a_disabled_command_gives_no_request_and_no_update() {
     let dir = folder();
     let mut app = app_at(dir.path());
@@ -159,7 +156,6 @@ fn a_disabled_command_gives_no_request_and_no_update() {
 }
 
 #[test]
-#[ignore = "#292"]
 fn the_result_uses_the_items_selected_when_requesting() {
     let dir = folder();
     let mut app = app_at(dir.path());
