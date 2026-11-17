@@ -18,6 +18,9 @@ on:
         description: Ticket number to implement
         required: true
         type: number
+  # 00:05 KST: the daily budget (spec #249) starts over, so restart a chain that stopped on it.
+  schedule:
+    - cron: '5 15 * * *'
 
 permissions:
   contents: write
@@ -25,6 +28,14 @@ permissions:
   issues: write
   actions: write
   id-token: write
+
+env:
+  # Spec issues in roadmap order (docs/roadmap.md, S2..S18 without S7 which ran with S1).
+  # Each spec's prerequisites come earlier in this list. S19 (#67) is a draft: add it after grilling.
+  SPEC_QUEUE: "17 18 19 20 21 23 24 25 26 27 28 29 30 31 32 33"
+  # Budgets of .github/factory/ledger.sh (spec #249 "비용 장부와 상한"); empty means its defaults.
+  FACTORY_SPEC_BUDGET_USD: ${{ vars.FACTORY_SPEC_BUDGET_USD }}
+  FACTORY_DAILY_BUDGET_USD: ${{ vars.FACTORY_DAILY_BUDGET_USD }}
 
 jobs:
   # A ticket closed (usually by a merged PR): dispatch every approved ticket
@@ -36,17 +47,30 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       REPO: ${{ github.repository }}
     steps:
-      # Runs are serial (see the implement job), so dispatch only the first one.
+      - uses: actions/checkout@v4
+      # Runs are serial (see the implement job), so dispatch only the first one
+      # (that its budget guard lets start).
       - name: Dispatch the next unblocked approved ticket
+        run: bash .github/factory/dispatch-next.sh --tickets-only
+
+  # Daily after KST midnight: only "dispatch next ticket", unless a run is already going.
+  resume:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dispatch next ticket
         run: |
-          for n in $(gh issue list --repo "$REPO" --state open --label ready-for-agent --limit 200 --json number --jq 'sort_by(.number) | .[].number'); do
-            open=$(gh api "repos/$REPO/issues/$n" --jq '.issue_dependencies_summary.blocked_by // 0')
-            if [ "$open" -eq 0 ]; then
-              echo "dispatch #$n"
-              gh workflow run factory-implementer.yml --repo "$REPO" -f issue="$n"
-              exit 0
-            fi
-          done
+          busy=$(gh run list --repo "$REPO" --workflow factory-implementer.yml --limit 50 --json databaseId,status \
+            --jq "[.[] | select(.status != \"completed\" and .databaseId != ${{ github.run_id }})] | length")
+          if [ "$busy" -gt 0 ]; then
+            echo "::notice::$busy factory-implementer run(s) going; the chain is alive"
+            exit 0
+          fi
+          bash .github/factory/dispatch-next.sh
 
   implement:
     if: >-
@@ -70,16 +94,24 @@ jobs:
       BRANCH: agent/issue-${{ github.event.issue.number || inputs.issue }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       REPO: ${{ github.repository }}
-      # Spec issues in roadmap order (docs/roadmap.md, S2..S18 without S7 which ran with S1).
-      # Each spec's prerequisites come earlier in this list. S19 (#67) is a draft: add it after grilling.
-      SPEC_QUEUE: "17 18 19 20 21 23 24 25 26 27 28 29 30 31 32 33"
       # Line tables only (no full debug info) in dev/test builds: the workspace links about 60
       # test binaries, and full PDBs make each link slower. Backtraces keep file and line.
       # The agent's builds and the checks share this, so the checks reuse the agent's artifacts.
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Spec #249 "비용 장부와 상한": before claiming, stop on needs-decision / factory-paused and
+      # on the spec and daily budgets. A stopped ticket keeps `ready-for-agent`.
+      - name: Budget guard
+        id: budget
+        run: bash .github/factory/ledger.sh guard "$N"
+
       - name: Guard and claim
         id: guard
+        if: steps.budget.outputs.go == 'true'
         run: |
           read -r state labels < <(gh issue view "$N" --repo "$REPO" --json state,labels --jq '[.state, ([.labels[].name] | join(","))] | @tsv')
           go=true
@@ -106,11 +138,6 @@ jobs:
           if [ "$fails" -gt 0 ]; then model=claude-opus-5-5; fi
           echo "::notice::#$N runs on $model (earlier failures: $fails)"
           echo "model=$model" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/checkout@v4
-        if: steps.guard.outputs.go == 'true'
-        with:
-          fetch-depth: 0
 
       - name: Prepare branch
         if: steps.guard.outputs.go == 'true'
@@ -171,6 +198,12 @@ jobs:
             | select(.type == "tool_use" and .name == "Bash")
             | (if .input.run_in_background then "[background] " else "" end) + (.input.command | gsub("\n"; " ") | .[0:200])' "$f" || true
 
+      # Cost ledger (spec #249). After "Agent commands", which reads the same execution file:
+      # recording moves it away so a later stage does not count it again.
+      - name: Record cost (implement)
+        if: always() && steps.guard.outputs.go == 'true'
+        run: bash .github/factory/ledger.sh record implementer "$N"
+
       # Put the agent's commits on top of today's main: sibling tickets or factory changes
       # may have landed during the run. Pushing a branch based on an older main also
       # counts as editing workflow files, which GITHUB_TOKEN may not do.
@@ -229,6 +262,10 @@ jobs:
             --max-turns 60
             --allowedTools "Bash,Read,Edit,Write,Glob,Grep"
 
+      - name: Record cost (conflicts)
+        if: always() && steps.guard.outputs.go == 'true' && steps.rebase.outputs.conflict == 'true'
+        run: bash .github/factory/ledger.sh record implementer-conflicts "$N"
+
       # No commits means nothing to check: fail here instead of after the 4-minute checks
       # (runs 43909075691, 43922416562). Counts as an infrastructure failure, as before.
       - name: Require commits
@@ -275,6 +312,10 @@ jobs:
             --model ${{ steps.guard.outputs.model }}
             --max-turns 80
             --allowedTools "Bash,Read,Edit,Write,Glob,Grep"
+
+      - name: Record cost (fix)
+        if: always() && steps.guard.outputs.go == 'true' && steps.checks_first.outcome == 'failure'
+        run: bash .github/factory/ledger.sh record implementer-fix "$N"
 
       - name: Automated checks
         id: checks
@@ -382,40 +423,6 @@ jobs:
         if: always()
         run: |
           sleep 10
-          for n in $(gh issue list --repo "$REPO" --state open --label ready-for-agent --limit 200 --json number --jq 'sort_by(.number) | .[].number'); do
-            open=$(gh api "repos/$REPO/issues/$n" --jq '.issue_dependencies_summary.blocked_by // 0')
-            if [ "$open" -eq 0 ]; then
-              echo "dispatch #$n"
-              gh workflow run factory-implementer.yml --repo "$REPO" -f issue="$n"
-              exit 0
-            fi
-          done
-          echo "::notice::no unblocked approved ticket left"
-
-          # Queue empty: move on to the next spec (decision 2026-11-15, roadmap order).
-          # Wait while anything is still running, queued or being decomposed.
-          busy=$(gh issue list --repo "$REPO" --state open --label in-progress --json number --jq length)
-          queued=$(gh issue list --repo "$REPO" --state open --label ready-for-agent --json number --jq length)
-          if [ "$busy" -gt 0 ] || [ "$queued" -gt 0 ]; then
-            echo "::notice::$busy in progress, $queued waiting on blockers; not moving to the next spec yet"
-            exit 0
-          fi
-          for s in $(gh issue list --repo "$REPO" --state open --label spec --json number --jq '.[].number'); do
-            read -r total done < <(gh api "repos/$REPO/issues/$s" --jq '"\(.sub_issues_summary.total // 0) \(.sub_issues_summary.completed // 0)"')
-            if [ "$total" -eq 0 ]; then
-              echo "::notice::spec #$s is still being decomposed"; exit 0
-            fi
-            if [ "$total" -eq "$done" ]; then
-              gh issue close "$s" --repo "$REPO" --reason completed --comment "All $total tickets merged."
-            fi
-          done
-          for s in $SPEC_QUEUE; do
-            read -r state labels < <(gh issue view "$s" --repo "$REPO" --json state,labels --jq '[.state, ([.labels[].name] | join(","))] | @tsv')
-            [ "$state" = OPEN ] || continue
-            case ",$labels," in *,spec,*) continue;; esac
-            echo "next spec: #$s"
-            gh issue edit "$s" --repo "$REPO" --add-label spec
-            gh workflow run factory-decompose.yml --repo "$REPO" -f issue="$s"
-            exit 0
-          done
-          echo "::notice::every spec in the queue is labelled; the factory is idle"
+          # A run stopped by the daily budget does not look for another ticket: none may start.
+          if [ "${{ steps.budget.outputs.reason }}" = daily ]; then exit 0; fi
+          bash .github/factory/dispatch-next.sh

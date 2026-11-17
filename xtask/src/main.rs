@@ -1,6 +1,6 @@
 //! 저장소 작업 명령. `cargo xtask <명령>`으로 부른다.
 //!
-//! - `ci`: 형식 검사 → lint(경고를 오류로) → 빌드 → 테스트 → 실제 볼륨 테스트 → 코어 벤치마크
+//! - `ci`: 형식 검사 → lint(경고를 오류로) → 빌드 → 테스트 → 공장 스크립트 시험 → 실제 볼륨 테스트 → 코어 벤치마크
 //!   → 인덱스 벤치마크 → MFT 파싱 벤치마크 → 세션 읽기·해석 벤치마크 → 클립보드 형식·오른쪽 메뉴·일괄 이름 바꾸기 미리 보기·필터·실시간 탐색 벤치마크 → 복사 벤치마크 → 삭제 벤치마크. CI와 로컬이 같은 명령을 쓴다. 실제 볼륨 테스트는 관리자일 때만 시험 VHD를
 //!   만들어 돌린다.
 //! - `test-folder`: 시험 폴더를 만든다(`facet-bench make-folder`).
@@ -27,13 +27,13 @@ mod vhd;
 
 use std::env;
 use std::path::PathBuf;
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
 
 const USAGE: &str = "\
 사용법: cargo xtask <명령>
 
 명령:
-  ci                             형식 검사, lint(경고를 오류로), 빌드, 테스트, 실제 볼륨 테스트,
+  ci                             형식 검사, lint(경고를 오류로), 빌드, 테스트, 공장 스크립트 시험(bash가 없으면 건너뜀), 실제 볼륨 테스트,
                                  코어 벤치마크, 인덱스 벤치마크, MFT 파싱 벤치마크, 세션 읽기·해석 벤치마크, 복사 벤치마크, 삭제 벤치마크를 차례로 돌린다. 실제 볼륨 테스트는
                                  관리자일 때만 시험 VHD를 만들어 돌리고, 아니면 건너뛴다고 출력한다
   test-folder [경로] [--count N]  N개(기본 100000) 항목이 든 시험 폴더를 만든다.
@@ -134,13 +134,65 @@ fn step(name: &'static str, args: &[&str]) -> Step {
     }
 }
 
-/// `ci`: 앞 단계들 → 실제 볼륨 테스트 → 코어 벤치마크 → 인덱스 벤치마크.
+/// `ci`: 앞 단계들 → 공장 스크립트 시험 → 실제 볼륨 테스트 → 코어 벤치마크 → 인덱스 벤치마크.
 fn run_ci() -> ExitCode {
-    if run_steps("ci", &ci_steps()) != ExitCode::SUCCESS || real_volume_tests() != ExitCode::SUCCESS
+    if run_steps("ci", &ci_steps()) != ExitCode::SUCCESS
+        || factory_script_tests() != ExitCode::SUCCESS
+        || real_volume_tests() != ExitCode::SUCCESS
     {
         return ExitCode::FAILURE;
     }
     run_steps("ci", &bench_steps())
+}
+
+/// 공장 스크립트 시험: `bash .github/factory/test.sh`(가짜 `gh`로 공장의 셸 스크립트를 시험한다,
+/// `.github/factory/tests/`). bash가 없으면 건너뛴다고 출력한다.
+fn factory_script_tests() -> ExitCode {
+    const NAME: &str = "공장 스크립트 시험";
+    let Some(bash) = find_bash() else {
+        println!("\n=== xtask ci: {NAME}: bash가 없으므로 건너뜀 ===");
+        return ExitCode::SUCCESS;
+    };
+    println!("\n=== xtask ci: {NAME} (bash .github/factory/test.sh) ===");
+    match Command::new(&bash)
+        .arg(".github/factory/test.sh")
+        .current_dir(workspace_root())
+        .status()
+    {
+        Ok(s) if s.success() => ExitCode::SUCCESS,
+        Ok(s) => {
+            eprintln!("\nxtask ci: {NAME} 단계 실패 ({s})");
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            eprintln!("\nxtask ci: {NAME} 단계를 실행하지 못함: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// bash 실행 파일. Windows에서는 Git for Windows의 bash를 먼저 찾는다(PATH의 `bash`가
+/// `System32\bash.exe`(WSL)일 수 있다). 없으면 PATH의 `bash`가 도는지 본다.
+fn find_bash() -> Option<PathBuf> {
+    if cfg!(windows) {
+        for var in ["ProgramW6432", "ProgramFiles"] {
+            if let Some(dir) = env::var_os(var) {
+                let path = PathBuf::from(dir).join("Git").join("bin").join("bash.exe");
+                if path.is_file() {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    match Command::new("bash")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(s) if s.success() => Some(PathBuf::from("bash")),
+        _ => None,
+    }
 }
 
 /// 실제 볼륨 테스트를 고르는 이름 앞부분. 이 테스트들은 `#[ignore]`로 기본 `cargo test`에서 빠진다.

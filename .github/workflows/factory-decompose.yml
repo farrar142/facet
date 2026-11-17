@@ -31,6 +31,9 @@ jobs:
     env:
       SPEC: ${{ github.event.issue.number || inputs.issue }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+      FACTORY_SPEC_BUDGET_USD: ${{ vars.FACTORY_SPEC_BUDGET_USD }}
+      FACTORY_DAILY_BUDGET_USD: ${{ vars.FACTORY_DAILY_BUDGET_USD }}
     steps:
       - uses: actions/checkout@v4
 
@@ -42,8 +45,15 @@ jobs:
           echo "sub_issues=$n" >> "$GITHUB_OUTPUT"
           if [ "$n" -gt 0 ]; then echo "::notice::#$SPEC already has $n sub-issues; skipping."; fi
 
-      - name: Decompose
+      # Spec #249 "비용 장부와 상한": stop on needs-decision / factory-paused and on the
+      # spec and daily budgets (.github/factory/ledger.sh).
+      - name: Budget guard
+        id: budget
         if: steps.guard.outputs.sub_issues == '0'
+        run: bash .github/factory/ledger.sh guard "$SPEC"
+
+      - name: Decompose
+        if: steps.guard.outputs.sub_issues == '0' && steps.budget.outputs.go == 'true'
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -59,11 +69,15 @@ jobs:
             --max-turns 80
             --allowedTools "Bash(gh:*),Read,Glob,Grep"
 
+      - name: Record cost
+        if: always() && steps.budget.outputs.go == 'true'
+        run: bash .github/factory/ledger.sh record decompose "$SPEC"
+
       # The owner approves tickets without review (decision 2026-11-15): label every new
       # ticket `ready-for-agent` and start the serial Implementer chain. GITHUB_TOKEN label
       # changes fire no events, so dispatch the first unblocked ticket explicitly.
       - name: Approve tickets and start the chain
-        if: steps.guard.outputs.sub_issues == '0'
+        if: steps.guard.outputs.sub_issues == '0' && steps.budget.outputs.go == 'true'
         env:
           REPO: ${{ github.repository }}
         run: |
