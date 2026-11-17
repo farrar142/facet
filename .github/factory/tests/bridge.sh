@@ -38,11 +38,11 @@ issue() {
     | tr -d '\r' > "$FAKE_GH/issue-$1.json"
 }
 
-# comment <id> <issue> <body>
+# comment <id> <issue> <body> [author login, default github-actions[bot]]
 comment() {
   local f="$FAKE_GH/repo-comments.json"
-  jq --argjson id "$1" --arg n "$2" --arg b "$3" \
-    '. + [{id: $id, body: $b, created_at: "2026-11-17T03:00:00Z",
+  jq --argjson id "$1" --arg n "$2" --arg b "$3" --arg u "${4:-github-actions[bot]}" \
+    '. + [{id: $id, body: $b, user: {login: $u}, created_at: "2026-11-17T03:00:00Z",
            issue_url: "https://api.github.com/repos/owner/repo/issues/\($n)",
            html_url: "https://github.com/owner/repo/issues/\($n)#issuecomment-\($id)"}]' "$f" \
     | tr -d '\r' > "$f.new" && mv "$f.new" "$f"
@@ -138,6 +138,92 @@ eq remembered "" "$(remembered)"
 issue 249 open spec,needs-decision "공장 개선"
 run
 eq "sent after the label is back" 1 "$(sent_count)"
+
+# --- who wrote the marker ------------------------------------------------------------------
+
+# perm <login> <permission> [role_name]
+perm() {
+  jq -n --arg p "$2" --arg r "${3:-$2}" '{permission: $p, role_name: $r}' | tr -d '\r' \
+    > "$FAKE_GH/permission-$1.json"
+}
+perm_calls() { grep -c 'collaborators/.*/permission' "$FAKE_GH/calls.log" || true; }
+
+setup "a marker by someone without write access is not sent and not looked at again"
+issue 249 open spec,needs-decision "공장 개선"
+issue 301 open ready-for-human "티켓 하나"
+comment 11 249 "<!-- factory-question -->
+가짜 질문" stranger
+comment 12 301 "<!-- factory-human -->
+가짜 넘김" stranger
+perm stranger read
+run
+eq code 0 "$(code)"
+eq sends 0 "$(sent_count)"
+eq remembered "11 12" "$(remembered)"
+has log "ignored question #249 by stranger" "$(cat "$tmp/log")"
+eq "asked once per run" 1 "$(perm_calls)"
+run
+eq sends 0 "$(sent_count)"
+eq "not asked again" 1 "$(perm_calls)"
+
+setup "a triage collaborator is not trusted either"
+issue 249 open spec,needs-decision "공장 개선"
+comment 11 249 "<!-- factory-question -->
+질문" helper
+perm helper read triage
+run
+eq sends 0 "$(sent_count)"
+eq remembered "11" "$(remembered)"
+
+setup "markers by github-actions[bot] are sent without asking"
+markers
+run
+eq sends 4 "$(sent_count)"
+eq "no permission lookups" 0 "$(perm_calls)"
+
+setup "markers by write, maintain and admin collaborators are sent"
+issue 249 open spec,needs-decision "공장 개선"
+issue 301 open ready-for-human "티켓 하나"
+issue 302 open ready-for-human "티켓 둘"
+comment 11 249 "<!-- factory-question -->
+질문" writer
+comment 12 301 "<!-- factory-human -->
+넘김" keeper
+comment 13 302 "<!-- factory-human -->
+넘김" boss
+comment 14 302 "<!-- factory-human -->
+또" writer
+perm writer write
+perm keeper write maintain
+perm boss admin
+run
+eq code 0 "$(code)"
+eq sends 4 "$(sent_count)"
+eq remembered "11 12 13 14" "$(remembered)"
+eq "one lookup per author" 3 "$(perm_calls)"
+
+setup "a permission that cannot be read is retried next run"
+issue 301 open ready-for-human "티켓 하나"
+comment 12 301 "<!-- factory-human -->
+넘김" writer
+perm writer write
+touch "$FAKE_GH/fail-permission"
+run
+eq code 1 "$(code)"
+eq sends 0 "$(sent_count)"
+eq remembered "" "$(remembered)"
+rm "$FAKE_GH/fail-permission"
+run
+eq code 0 "$(code)"
+eq sends 1 "$(sent_count)"
+
+setup "--seed also remembers markers by others"
+issue 301 open ready-for-human "티켓 하나"
+comment 12 301 "<!-- factory-human -->
+가짜" stranger
+run --seed
+eq sends 0 "$(sent_count)"
+eq remembered "12" "$(remembered)"
 
 # --- failures ------------------------------------------------------------------------------
 

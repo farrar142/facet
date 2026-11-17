@@ -13,7 +13,12 @@
 #   <!-- factory-budget-daily DATE -->   the whole factory stopped at the daily budget (ledger issue)
 #   <!-- factory-human -->               a ticket handed to a person
 #
-# and sends each comment it has not sent before:
+# Anyone can write those markers on a public repository, so only comments by `github-actions[bot]` or by
+# someone with write access (collaborator permission admin, maintain or write) are sent. A comment by
+# anyone else is never sent and its id is remembered so it is not looked at again. Each author's
+# permission is asked once per run.
+#
+# It sends each comment it has not sent before:
 #
 #   agent-mail send --to "$BRIDGE_TO" --task facet-factory --idempotency-key facet-factory-<comment id>
 #     --subject … --body …
@@ -65,7 +70,7 @@ remember() { echo "$1" >> "$SENT"; }
 comments=$(gh api "repos/$REPO/issues/comments?since=$(since)&sort=created&direction=asc&per_page=100" --paginate) \
   || { echo "bridge: could not read the comments of $REPO" >&2; exit 1; }
 
-# One line per marker comment: id <TAB> kind <TAB> issue number.
+# One line per marker comment: id <TAB> kind <TAB> issue number <TAB> author login.
 matches=$(printf '%s' "$comments" | j -s -r '
   add // [] | .[]
   | (.body // "") as $b
@@ -74,12 +79,42 @@ matches=$(printf '%s' "$comments" | j -s -r '
      elif ($b | contains("<!-- factory-budget-daily ")) then "budget-daily"
      elif ($b | contains("<!-- factory-human -->")) then "human"
      else empty end) as $k
-  | [(.id | tostring), $k, (.issue_url | sub(".*/"; ""))] | @tsv')
+  | [(.id | tostring), $k, (.issue_url | sub(".*/"; "")), (.user.login // "")] | @tsv')
+
+# trusted <login>: github-actions[bot] or a collaborator with write access. Each answer is kept in
+# $trust ("<login> yes|no" lines, plain bash 3) so an author is asked once per run.
+# Returns 0 trusted, 1 not trusted, 2 the permission could not be read (tried again next run).
+trust=
+trusted() {
+  local login=$1 p v
+  [ "$login" = "github-actions[bot]" ] && return 0
+  [ -n "$login" ] || return 1
+  v=$(printf '%s\n' "$trust" | sed -n "s/^$login //p" | head -n 1)
+  if [ -z "$v" ]; then
+    p=$(gh api "repos/$REPO/collaborators/$login/permission") || return 2
+    if [ "$(printf '%s' "$p" | j -r '[.permission, .role_name]
+        | any(. == "admin" or . == "maintain" or . == "write")')" = true ]; then
+      v=yes
+    else
+      v=no
+    fi
+    trust="$trust$login $v
+"
+  fi
+  [ "$v" = yes ]
+}
 
 failed=0
-while IFS=$'\t' read -r id kind n; do
+while IFS=$'\t' read -r id kind n author; do
   [ -n "$id" ] || continue
   sent "$id" && continue
+  trusted "$author"
+  case $? in
+    0) ;;
+    1) remember "$id"; echo "bridge: ignored $kind #$n by ${author:-?} (no write access, comment $id)"
+       continue ;;
+    *) echo "bridge: could not read the permission of $author; will retry" >&2; failed=1; continue ;;
+  esac
   issue=$(gh api "repos/$REPO/issues/$n") || { echo "bridge: could not read #$n" >&2; failed=1; continue; }
   [ "$(printf '%s' "$issue" | j -r '.state')" = open ] || continue
   if [ "$kind" = question ] \
