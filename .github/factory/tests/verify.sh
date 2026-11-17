@@ -187,7 +187,10 @@ setup() {
   export FAKE_GH="$tmp/gh" FACTORY_MERGE_WAIT=0 RUN_URL=https://example.invalid/run/1
   mkdir -p "$FAKE_GH"
   : > "$FAKE_GH/calls.log"
-  export FACTORY_DISPATCH_NEXT="touch $tmp/next-dispatched"
+  printf '#!/usr/bin/env bash
+touch "%s/next-dispatched"; printf "%%s\n" "$*" >> "%s/next-args"
+' "$tmp" "$tmp" > "$tmp/next.sh"
+  export FACTORY_DISPATCH_NEXT="bash $tmp/next.sh"
   issue 7 in-progress
   jq -n '{number: 40, state: "open", merged: false, head: {ref: "agent/issue-7"}}' | tr -d '\r' > "$FAKE_GH/pull-40.json"
   printf 'AC-1: 미충족 — 시험이 없다\n' > "$tmp/reason.md"
@@ -220,8 +223,8 @@ eq "PR state" closed "$(state_of pull-40)"
 has "branch deleted" "git/refs/heads/agent/issue-7" "$(calls)"
 eq "bot pull_request run deleted (#270)" "" "$(runs_left)"
 eq "labels" ready-for-agent "$(labels_of 7)"
-has "implementer dispatched" "actions/workflows/factory-implementer.yml/dispatches -f ref=main -f inputs[issue]=7" "$(calls)"
-eq "next ticket" no "$(next_dispatched)"
+eq "the ticket goes first into a track (#286)" "--first 7" "$(cat "$tmp/next-args")"
+lacks "no direct dispatch" "factory-implementer.yml" "$(calls)"
 eq "no human marker" 0 "$(count_marker 7 '<!-- factory-human -->')"
 
 setup second-sendback
@@ -242,7 +245,7 @@ jq -n '[{id: 1, created_at: "2026-11-17T01:00:00Z", body: "<!-- factory-implemen
   | tr -d '\r' > "$FAKE_GH/comments-7.json"
 bash "$verify" sendback 7 40 "$tmp/reason.md" > /dev/null
 eq "labels" ready-for-agent "$(labels_of 7)"
-has "implementer dispatched" "factory-implementer.yml/dispatches" "$(calls)"
+eq "the ticket goes first" "--first 7" "$(cat "$tmp/next-args")"
 
 setup pass
 jq -n '[{id: 1, event: "pull_request", head_branch: "agent/issue-7", triggering_actor: {login: "github-actions[bot]"}, jobs: 0}]' | tr -d '' > "$FAKE_GH/runs.json"
@@ -268,6 +271,54 @@ eq "exit" 1 "$?"
 eq "ticket open" open "$(state_of issue-7)"
 eq "next ticket" no "$(next_dispatched)"
 lacks "no build" "ci.yml" "$(calls)"
+
+# --- next-verify (#286) ------------------------------------------------------------------------
+
+# waiting <pr> <ticket> [checked]: an open PR of the Implementer for the ticket
+waiting() {
+  local f="$FAKE_GH/pulls.json" b="Closes #$2"
+  [ "${3:-yes}" = yes ] && b="$b
+
+<!-- factory-checked abc123 -->"
+  [ -f "$f" ] || echo '[]' > "$f"
+  jq --argjson p "$1" --arg b "$b" '. + [{number: $p, state: "open", body: $b}]' "$f" | tr -d '\r' > "$f.new" \
+    && mv "$f.new" "$f"
+}
+verifying() { # verifying <ticket> <pr> [status]: a Verify run, not completed
+  local f="$FAKE_GH/runs-list.json"
+  [ -f "$f" ] || echo '[]' > "$f"
+  jq --arg t "verify #$1 (PR #$2)" --arg s "${3:-in_progress}" \
+    '[{databaseId: (([.[].databaseId] | max // 1000) + 1), workflow: "factory-verify.yml", status: $s,
+       event: "workflow_dispatch", displayTitle: $t}] + .' "$f" | tr -d '\r' > "$f.new" && mv "$f.new" "$f"
+}
+verify_dispatched() { grep '^workflow run factory-verify.yml' "$FAKE_GH/calls.log" | sed 's/.*issue=//' | tr '\n' ' ' | sed 's/ $//'; }
+
+setup next-verify-oldest-waiting
+issue 8 in-progress; issue 9 in-progress
+waiting 45 9; waiting 41 8
+bash "$verify" next-verify 40 > /dev/null
+eq "exit" 0 "$?"
+eq "the oldest PR" "8 -f pr=41" "$(verify_dispatched)"
+
+setup next-verify-skips
+issue 8 in-progress; issue 9 ready-for-agent; issue 10 in-progress
+waiting 40 7; waiting 41 8 no; waiting 42 9; waiting 43 10
+jq '.state = "closed"' "$FAKE_GH/issue-10.json" | tr -d '\r' > "$FAKE_GH/x" && mv "$FAKE_GH/x" "$FAKE_GH/issue-10.json"
+bash "$verify" next-verify 40 > /dev/null
+eq "this run's PR, unchecked, not in progress, closed ticket: none" "" "$(verify_dispatched)"
+
+setup next-verify-another-run-going
+waiting 41 7
+verifying 9 45
+bash "$verify" next-verify 40 > "$tmp/out"
+eq "nothing while another Verify runs" "" "$(verify_dispatched)"
+has "says so" "other Verify run" "$(cat "$tmp/out")"
+
+setup next-verify-own-run-and-completed-runs-do-not-count
+waiting 41 7
+verifying 9 45 completed; verifying 7 40
+GITHUB_RUN_ID=$(jq '.[0].databaseId' "$FAKE_GH/runs-list.json" | tr -d '\r') bash "$verify" next-verify 40 > /dev/null
+eq "dispatched" "7 -f pr=41" "$(verify_dispatched)"
 
 setup usage
 bash "$verify" sendback 7 > /dev/null 2>&1

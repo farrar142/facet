@@ -37,7 +37,7 @@ issue() {
 setup() {
   current=$1
   tmp=$(mktemp -d "$root/t.XXXXXX")
-  export FAKE_GH="$tmp/gh" FACTORY_LIST_RETRY_WAIT=0
+  export FAKE_GH="$tmp/gh" FACTORY_LIST_RETRY_WAIT=0 FACTORY_TRACKS=1 FACTORY_DISPATCH_SEEN_WAIT=0
   unset FACTORY_SPEC_QUEUE
   mkdir -p "$FAKE_GH"
   : > "$FAKE_GH/calls.log"
@@ -201,6 +201,127 @@ spec 50 spec
 run
 eq code 0 "$(code)"
 has "warns" "no open factory-ledger issue" "$(log)"
+
+# --- Implementer tracks (#286) -------------------------------------------------------------
+
+# implementing <n> <track> [status]: an Implementer run for ticket <n> in <track>, not completed
+implementing() {
+  local f="$FAKE_GH/runs-list.json"
+  [ -f "$f" ] || echo '[]' > "$f"
+  jq --argjson n "$1" --arg t "$2" --arg s "${3:-in_progress}" \
+    '[{databaseId: (([.[].databaseId] | max // 1000) + 1), workflow: "factory-implementer.yml", status: $s,
+       event: "workflow_dispatch", displayTitle: "implement #\($n) (track \($t))"}] + .' "$f" | tr -d '\r' > "$f.new" \
+    && mv "$f.new" "$f"
+}
+tracks_of() { grep '^workflow run factory-implementer.yml' "$FAKE_GH/calls.log" | sed 's/.*track=\([0-9]*\).*/\1/' | tr '\n' ' ' | sed 's/ $//'; }
+
+setup "two empty tracks fill with the two lowest tickets"
+issue 61 ready-for-agent; issue 62 ready-for-agent; issue 63 ready-for-agent
+FACTORY_TRACKS=2 run --tickets-only
+eq code 0 "$(code)"
+eq "two tickets" "61 62" "$(dispatched)"
+eq "one per track" "1 2" "$(tracks_of)"
+has "says the tracks" "tracks: 2, empty: 1 2" "$(log)"
+
+setup "FACTORY_TRACKS unset means two tracks"
+issue 61 ready-for-agent; issue 62 ready-for-agent
+unset FACTORY_TRACKS
+run --tickets-only
+eq "two tickets" "61 62" "$(dispatched)"
+export FACTORY_TRACKS=1
+
+setup "a bad FACTORY_TRACKS warns and means two"
+issue 61 ready-for-agent; issue 62 ready-for-agent
+FACTORY_TRACKS=x run
+eq "two tickets" "61 62" "$(dispatched)"
+has "warns" "FACTORY_TRACKS" "$(log)"
+
+setup "the empty track only"
+issue 61 ready-for-agent; issue 62 ready-for-agent
+implementing 70 1
+FACTORY_TRACKS=2 run
+eq "one ticket" 61 "$(dispatched)"
+eq "into track 2" 2 "$(tracks_of)"
+
+setup "full tracks dispatch nothing"
+issue 61 ready-for-agent
+implementing 70 1; implementing 71 2 queued
+FACTORY_TRACKS=2 run --candidates "61"
+eq code 0 "$(code)"
+eq "nothing" "" "$(dispatched)"
+has "says so" "every track is busy" "$(log)"
+lacks "no spec opened" "factory-decompose" "$(cat "$FAKE_GH/calls.log")"
+
+setup "completed runs and this run do not hold a track"
+issue 61 ready-for-agent; issue 62 ready-for-agent
+implementing 70 1 completed; implementing 71 2
+GITHUB_RUN_ID=$(jq '.[0].databaseId' "$FAKE_GH/runs-list.json" | tr -d '\r') FACTORY_TRACKS=2 run
+eq "both tracks" "61 62" "$(dispatched)"
+
+setup "a ticket with an Implementer run going is not dispatched again"
+issue 61 ready-for-agent; issue 62 ready-for-agent
+implementing 61 1
+FACTORY_TRACKS=2 run --candidates "61"
+eq "the other ticket" 62 "$(dispatched)"
+has "says so" "#61 already has an implement run" "$(log)"
+
+setup "calls one after another never dispatch a ticket twice"
+issue 61 ready-for-agent; issue 62 ready-for-agent
+FACTORY_TRACKS=3 run --candidates "61"
+FACTORY_TRACKS=3 run --candidates "61"
+FACTORY_TRACKS=3 run --first 61
+eq "each once, a track left empty" "61 62" "$(dispatched)"
+eq "dispatches" 2 "$(grep -c '^workflow run factory-implementer.yml' "$FAKE_GH/calls.log")"
+
+setup "--first goes before lower numbers"
+issue 61 ready-for-agent; issue 64 ready-for-agent
+run --first 64
+eq "first" 64 "$(dispatched)"
+
+setup "a run not listed yet only warns"
+issue 61 ready-for-agent
+touch "$FAKE_GH/runs-hidden"
+FACTORY_TRACKS=2 run --tickets-only
+eq code 0 "$(code)"
+eq "dispatched" 61 "$(dispatched)"
+has "warns" "::warning::" "$(log)"
+
+# open <n> <tickets…>: spec <n> labelled `spec` with those tickets as its open sub-issues
+open_spec() {
+  local n=$1; shift
+  jq -n --argjson n "$n" --argjson t "$#" \
+    '{number: $n, state: "open", body: "", labels: [{name: "spec"}],
+      sub_issues_summary: {total: ($t + 1), completed: 1}}' | tr -d '\r' > "$FAKE_GH/issue-$n.json"
+  printf '%s\n' "$@" | jq -R '{number: tonumber}' | jq -s . | tr -d '\r' > "$FAKE_GH/sub-issues-$n.json"
+}
+
+setup "a free track opens the next spec of the queue"
+open_spec 50 61; issue 61 in-progress; ledger; spec 60 ""; spec 61 ""
+implementing 61 1
+FACTORY_TRACKS=2 FACTORY_SPEC_QUEUE="60 61" run
+eq code 0 "$(code)"
+eq "no ticket" "" "$(dispatched)"
+eq "decompose" 60 "$(decomposed)"
+
+setup "as many specs as tracks: no next spec"
+open_spec 50 61; issue 61 in-progress; open_spec 55 66; issue 66 ready-for-agent 1; ledger; spec 60 ""
+implementing 61 1
+FACTORY_TRACKS=2 FACTORY_SPEC_QUEUE="60" run
+eq "no decompose" "" "$(decomposed)"
+has "says so" "2 spec(s) running" "$(log)"
+
+setup "FACTORY_TRACKS=1: a spec in progress blocks the next spec, as before"
+open_spec 50 61; issue 61 in-progress; ledger; spec 60 ""
+implementing 61 1
+FACTORY_TRACKS=1 FACTORY_SPEC_QUEUE="60" run
+eq "no ticket" "" "$(dispatched)"
+eq "no decompose" "" "$(decomposed)"
+
+setup "FACTORY_TRACKS=1: one ticket per call, track 1"
+issue 61 ready-for-agent; issue 62 ready-for-agent
+FACTORY_TRACKS=1 run --tickets-only
+eq "one" 61 "$(dispatched)"
+eq "track 1" 1 "$(tracks_of)"
 
 echo "dispatch-next.sh: $passes passed, $fails failed"
 [ "$fails" -eq 0 ]

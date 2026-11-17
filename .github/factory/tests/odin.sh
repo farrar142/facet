@@ -47,7 +47,7 @@ x"
 setup() {
   current=$1
   tmp=$(mktemp -d "$root/t.XXXXXX")
-  export FACTORY_LIST_RETRY_WAIT=0 FAKE_GH="$tmp/gh" GITHUB_OUTPUT="$tmp/output" FACTORY_MERGE_WAIT=0 RUN_URL=https://example.invalid/run/1
+  export FACTORY_TRACKS=1 FACTORY_DISPATCH_SEEN_WAIT=0 FACTORY_LIST_RETRY_WAIT=0 FAKE_GH="$tmp/gh" GITHUB_OUTPUT="$tmp/output" FACTORY_MERGE_WAIT=0 RUN_URL=https://example.invalid/run/1
   unset FACTORY_DISPATCH_NEXT
   mkdir -p "$FAKE_GH"
   : > "$FAKE_GH/calls.log"

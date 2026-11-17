@@ -9,6 +9,12 @@
 # factory-verify.yml (spec #249), which checks the PR and merges it or sends the ticket back.
 # This workflow never merges.
 name: factory-implementer
+# Dispatched runs carry the ticket and the track in their title: dispatch-next.sh reads it to find
+# the busy tracks and tickets (#286).
+run-name: >-
+  ${{ github.event_name == 'workflow_dispatch'
+  && format('implement #{0} (track {1})', inputs.issue, inputs.track || '1')
+  || format('factory-implementer {0}', github.event_name) }}
 
 on:
   issues:
@@ -19,6 +25,11 @@ on:
         description: Ticket number to implement
         required: true
         type: number
+      track:
+        description: Implementer track (1..FACTORY_TRACKS); dispatch-next.sh picks an empty one
+        required: false
+        type: string
+        default: '1'
   # 00:05 KST: the daily budget (spec #249) starts over, so restart a chain that stopped on it.
   schedule:
     - cron: '5 15 * * *'
@@ -34,13 +45,25 @@ env:
   # Spec issues in roadmap order, from the repository variable (spec #249). Empty: the factory
   # never moves on to another spec by itself (the trial runs only the spec labelled `spec`).
   FACTORY_SPEC_QUEUE: ${{ vars.FACTORY_SPEC_QUEUE }}
+  # Implementer tracks (#286): tickets implemented at once. Empty means 2; 1 is the serial chain.
+  FACTORY_TRACKS: ${{ vars.FACTORY_TRACKS }}
   # Budgets of .github/factory/ledger.sh (spec #249 "비용 장부와 상한"); empty means its defaults.
   FACTORY_SPEC_BUDGET_USD: ${{ vars.FACTORY_SPEC_BUDGET_USD }}
   FACTORY_DAILY_BUDGET_USD: ${{ vars.FACTORY_DAILY_BUDGET_USD }}
 
+# One run per ticket (#286): two dispatch-next.sh calls at the same moment can dispatch the same
+# ticket on two tracks. The second run then waits here until the first claimed the ticket, and its
+# guard finds the ticket no longer `ready-for-agent`. Other events get a group of their own.
+concurrency:
+  group: >-
+    ${{ github.event_name == 'workflow_dispatch'
+    && format('factory-ticket-{0}', inputs.issue)
+    || format('factory-implementer-{0}', github.run_id) }}
+  cancel-in-progress: false
+
 jobs:
-  # A ticket closed (usually by a merged PR): dispatch every approved ticket
-  # whose blockers are now all closed.
+  # A ticket closed (usually by a merged PR): fill the empty tracks with approved tickets whose
+  # blockers are now all closed.
   frontier:
     if: github.event_name == 'issues' && github.event.action == 'closed'
     runs-on: ubuntu-latest
@@ -49,12 +72,24 @@ jobs:
       REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@v4
-      # Runs are serial (see the implement job), so dispatch only the first one
-      # (that its budget guard lets start).
-      - name: Dispatch the next unblocked approved ticket
+      - name: Fill the empty tracks
         run: bash .github/factory/dispatch-next.sh --tickets-only
 
-  # Daily after KST midnight: only "dispatch next ticket", unless a run is already going.
+  # A ticket labelled `ready-for-agent`: start it on an empty track, if one is empty and nothing
+  # with a lower number goes first. A run does not implement on this event any more: a track's
+  # concurrency group would cancel a pending run silently (#286).
+  approved:
+    if: github.event.action == 'labeled' && github.event.label.name == 'ready-for-agent'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fill the empty tracks
+        run: bash .github/factory/dispatch-next.sh --tickets-only --candidates "${{ github.event.issue.number }}"
+
+  # Daily after KST midnight: fill the empty tracks (dispatch-next.sh skips busy ones).
   resume:
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
@@ -64,36 +99,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Dispatch next ticket
-        run: |
-          busy=$(gh run list --repo "$REPO" --workflow factory-implementer.yml --limit 50 --json databaseId,status \
-            --jq "[.[] | select(.status != \"completed\" and .databaseId != ${{ github.run_id }})] | length")
-          if [ "$busy" -gt 0 ]; then
-            echo "::notice::$busy factory-implementer run(s) going; the chain is alive"
-            exit 0
-          fi
-          bash .github/factory/dispatch-next.sh
+        run: bash .github/factory/dispatch-next.sh
 
   implement:
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.action == 'labeled' && github.event.label.name == 'ready-for-agent')
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 180
-    # One ticket at a time across the repo (decision 2026-11-15): parallel runs kept
-    # editing the same files. A group keeps at most one pending run and cancels older
-    # pending ones, so runs are chained instead: a run that opened a PR dispatches Verify
-    # (same group, factory-verify.yml), which dispatches the next unblocked ticket; any other
-    # run does that itself (the "Dispatch next ticket" step). A cancelled run leaves its
-    # ticket labelled `ready-for-agent`, so the chain picks it up later.
+    # One ticket per track (#286, decision 2026-11-15 for one track): parallel runs on one track
+    # kept editing the same files. A group keeps at most one pending run and cancels older pending
+    # ones, so dispatch-next.sh dispatches only into a track with no run. A run hands its PR to
+    # Verify (factory-verify.yml, a serial group of its own) and then refills the tracks (the
+    # "Dispatch next ticket" step). A cancelled run leaves its ticket labelled `ready-for-agent`,
+    # so a later call picks it up. With FACTORY_TRACKS=1 the run shares the group with Verify as
+    # before the tracks.
     concurrency:
-      group: factory-implementer
+      group: >-
+        ${{ vars.FACTORY_TRACKS == '1' && 'factory-implementer'
+        || format('factory-impl-{0}', inputs.track || '1') }}
       cancel-in-progress: false
     defaults:
       run:
         shell: bash
     env:
-      N: ${{ github.event.issue.number || inputs.issue }}
-      BRANCH: agent/issue-${{ github.event.issue.number || inputs.issue }}
+      N: ${{ inputs.issue }}
+      TRACK: ${{ inputs.track || '1' }}
+      BRANCH: agent/issue-${{ inputs.issue }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       REPO: ${{ github.repository }}
       # Line tables only (no full debug info) in dev/test builds: the workspace links about 60
@@ -128,6 +158,8 @@ jobs:
           fi
           if $go; then
             gh issue edit "$N" --repo "$REPO" --remove-label ready-for-agent --add-label in-progress
+            # Measurement (#286): the wait from `ready-for-agent` to this start, per track.
+            bash .github/factory/ledger.sh event impl-start "$N" "track=$TRACK"
           fi
           echo "go=$go" >> "$GITHUB_OUTPUT"
           # Model: the ticket's model label (set by Decompose), Sonnet when there is none,
@@ -359,12 +391,15 @@ jobs:
           echo "number=$number" >> "$GITHUB_OUTPUT"
 
       # The Implementer does not merge (spec #249): Verify checks the PR (machine checks, acceptance
-      # review), then merges it and moves the chain on, or sends the ticket back. It shares the
-      # concurrency group, so it runs right after this run and before any next ticket.
+      # review), then merges it and moves the chain on, or sends the ticket back. Verify is serial
+      # (one group, factory-verify.yml); with FACTORY_TRACKS=1 it shares this run's group, so it runs
+      # right after this run and before any next ticket.
       - name: Hand over to Verify
         id: handover
         if: steps.guard.outputs.go == 'true'
-        run: gh workflow run factory-verify.yml --repo "$REPO" -f issue="$N" -f pr="${{ steps.pr.outputs.number }}"
+        run: |
+          gh workflow run factory-verify.yml --repo "$REPO" -f issue="$N" -f pr="${{ steps.pr.outputs.number }}"
+          bash .github/factory/ledger.sh event impl-end "$N" "track=$TRACK"
 
       # A code failure (the automated checks failed) counts toward the model rule: one puts the
       # ticket back in the queue and the retry runs on Opus, two leave it to the managing session
@@ -391,11 +426,12 @@ jobs:
             gh issue edit "$N" --repo "$REPO" --add-label ready-for-agent
           fi
 
-      # Keep the chain going when this run did not hand a PR to Verify (failed, or skipped because
-      # the ticket was blocked, not approved or stopped by its budget guard). After a hand-over,
-      # Verify dispatches the next ticket. Lowest-numbered unblocked approved ticket first.
+      # Refill the tracks (#286): this run's track is free once it ends (dispatch-next.sh does not
+      # count the run calling it), so the next ticket waits in the track's group for this run only.
+      # With FACTORY_TRACKS=1 a run that handed its PR over leaves this to Verify, as before the
+      # tracks: Verify shares the group, and a second pending run would cancel it.
       - name: Dispatch next ticket
-        if: always() && steps.handover.outcome != 'success'
+        if: always() && (steps.handover.outcome != 'success' || vars.FACTORY_TRACKS != '1')
         run: |
           sleep 10
           # A run stopped by the daily budget does not look for another ticket: none may start.

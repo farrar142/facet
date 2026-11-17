@@ -282,5 +282,64 @@ bash "$ledger" guard 300 > /dev/null
 eq "go" false "$(out go)"
 eq "reason" error "$(out reason)"
 
+# --- event and stats (#286) ----------------------------------------------------------------
+
+events() { # the event lines on the ledger
+  jq -r '.[] | select(.body | startswith("<!-- factory-event -->")) | .body | split("\n")[1]' \
+    "$FAKE_GH/comments-900.json" | tr -d '\r'
+}
+
+setup "event: impl-start waits since the last ready-for-agent label"
+with_ledger; issue 7 ready-for-agent ""
+jq -n '[{event: "labeled", created_at: "2026-11-17T01:00:00Z", label: {name: "ready-for-agent"}},
+        {event: "labeled", created_at: "2026-11-17T02:50:00Z", label: {name: "ready-for-agent"}},
+        {event: "labeled", created_at: "2026-11-17T02:55:00Z", label: {name: "model:sonnet"}}]' \
+  | tr -d '\r' > "$FAKE_GH/events-7.json"
+bash "$ledger" event impl-start 7 track=2 > /dev/null
+eq "exit" 0 "$?"
+eq "line" "event=impl-start issue=#7 track=2 wait=600 run=777" "$(events)"
+eq "not a cost" 0 "$(comment_count 900 '<!-- ledger -->')"
+
+setup "event: verify-start waits since the ticket's last impl-end"
+with_ledger
+FAKE_GH_NOW=2026-11-17T02:40:00Z bash "$ledger" event impl-end 7 track=1 > /dev/null
+FAKE_GH_NOW=2026-11-17T02:45:00Z bash "$ledger" event impl-end 17 track=2 > /dev/null
+bash "$ledger" event verify-start 7 pr=#40 > /dev/null
+eq "wait from #7's hand-over, not #17's" "event=verify-start issue=#7 pr=#40 wait=1200 run=777" "$(events | tail -n 1)"
+
+setup "event: no ledger, no wait, failures do not fail"
+bash "$ledger" event impl-end 7 track=1 > /dev/null 2>&1
+eq "no ledger: exit 0" 0 "$?"
+with_ledger
+bash "$ledger" event impl-start 7 > /dev/null 2>&1
+eq "no label event: no wait" "event=impl-start issue=#7 run=777" "$(events)"
+touch "$FAKE_GH/fail-comments"
+bash "$ledger" event impl-end 7 > /dev/null 2>&1
+eq "a failed comment: exit 0" 0 "$?"
+REPO= GITHUB_REPOSITORY= bash "$ledger" event impl-end 7 > /dev/null 2>&1
+eq "no REPO: exit 0" 0 "$?"
+
+setup "stats: conflict send-back ratio and waits"
+with_ledger
+for l in "impl-start issue=#1 track=1 wait=100" "impl-start issue=#2 track=2 wait=300" \
+         "impl-start issue=#3 track=1 wait=200" "verify-start issue=#1 pr=#40 wait=10" \
+         "verify-start issue=#2 pr=#41 wait=50" "verify-end issue=#1 pr=#40 outcome=merged" \
+         "verify-end issue=#2 pr=#41 outcome=conflict" "verify-end issue=#3 pr=#42 outcome=rebase-ci" \
+         "verify-end issue=#4 pr=#43 outcome=review"; do
+  jq --arg b "<!-- factory-event -->
+event=$l run=1" '. + [{id: (length + 1), created_at: "2026-11-17T01:00:00Z", body: $b}]' \
+    "$FAKE_GH/comments-900.json" 2>/dev/null | tr -d '\r' > "$FAKE_GH/c.new" || true
+  [ -s "$FAKE_GH/c.new" ] || jq -n --arg b "<!-- factory-event -->
+event=$l run=1" '[{id: 1, created_at: "2026-11-17T01:00:00Z", body: $b}]' | tr -d '\r' > "$FAKE_GH/c.new"
+  mv "$FAKE_GH/c.new" "$FAKE_GH/comments-900.json"
+done
+ledger_comment 2026-11-17T01:00:00Z 1 5
+stats=$(bash "$ledger" stats | tr -d '\r')
+eq "stats" "verify: 4 runs, conflict send-backs 2 (ratio 50%)
+implementer wait, track 1: n=2 mean=150s max=200s
+implementer wait, track 2: n=1 mean=300s max=300s
+verify wait: n=2 mean=30s max=50s" "$stats"
+eq "sums untouched" 5.0000 "$(bash "$ledger" spec-total 1 | tr -d '\r')"
+
 echo "ledger: $passes passed, $fails failed"
 [ "$fails" -eq 0 ]

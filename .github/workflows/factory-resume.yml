@@ -39,6 +39,7 @@ jobs:
       BASE: ${{ github.event.repository.default_branch }}
       FACTORY_SPEC_BUDGET_USD: ${{ vars.FACTORY_SPEC_BUDGET_USD }}
       FACTORY_DAILY_BUDGET_USD: ${{ vars.FACTORY_DAILY_BUDGET_USD }}
+      FACTORY_TRACKS: ${{ vars.FACTORY_TRACKS }}
       FACTORY_SPEC_QUEUE: ${{ vars.FACTORY_SPEC_QUEUE }}
     steps:
       # decompose.sh state looks for the acceptance tests (#[ignore = "#N"]) in the checkout of main.
