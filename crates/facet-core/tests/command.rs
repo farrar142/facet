@@ -86,6 +86,9 @@ fn name(command: CommandId) -> &'static str {
         CommandId::SortByMatches => "일치로 정렬",
         // 즉시 검색의 범위 전환(자세한 확인은 tests/instant_search.rs).
         CommandId::InstantUnderFolder => "현재 폴더 아래만",
+        // 오른쪽 메뉴의 자체 항목(자세한 확인은 tests/spec_shell_helper_menu_layout.rs).
+        CommandId::OpenWith => "연결 프로그램",
+        CommandId::Properties => "속성",
     }
 }
 

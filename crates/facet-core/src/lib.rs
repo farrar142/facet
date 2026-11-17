@@ -31,6 +31,7 @@ pub mod rename_presets;
 pub mod search_results;
 pub mod selection;
 pub mod session;
+pub mod shell_helper;
 pub mod tab;
 pub mod watch;
 pub mod window;

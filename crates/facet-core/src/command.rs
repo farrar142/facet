@@ -148,6 +148,10 @@ pub enum CommandId {
     /// [`CommandId::is_checked`]). 범위는 탭에 남고, 즉시 검색 결과 위치에서 바꾸면 같은 질의를 새 범위로 다시 보낸다. 검색을
     /// 시작한 위치가 실제 폴더가 아니면(이름·내용 검색 결과 위치) 꺼지고 모든 볼륨으로 찾는다. 기본 단축키는 없다.
     InstantUnderFolder,
+    /// #321: 연결 프로그램(`open-with`).
+    OpenWith,
+    /// #321: 속성(`properties`, Alt+Enter).
+    Properties,
 }
 
 impl CommandId {
@@ -272,6 +276,8 @@ impl CommandId {
             CommandId::ShowInFolder => "show-in-folder",
             CommandId::StopSearch => "stop-search",
             CommandId::InstantUnderFolder => "instant-under-folder",
+            CommandId::OpenWith => "open-with",
+            CommandId::Properties => "properties",
         }
     }
 
@@ -387,6 +393,7 @@ impl CommandId {
             CommandId::Cut => const { &[key(letter('X')).ctrl()] },
             CommandId::Paste => const { &[key(letter('V')).ctrl()] },
             CommandId::CopyPath => const { &[key(letter('C')).ctrl().shift()] },
+            CommandId::OpenWith | CommandId::Properties => &[], // #321
         }
     }
 
@@ -440,6 +447,7 @@ impl CommandId {
             }
             CommandId::StopSearch => tab.search().is_some_and(|status| status.running),
             CommandId::InstantUnderFolder => tab.instant_base().is_some(),
+            CommandId::OpenWith | CommandId::Properties => todo!("#321"),
             CommandId::Refresh
             | CommandId::EditAddress
             | CommandId::ToggleHidden
