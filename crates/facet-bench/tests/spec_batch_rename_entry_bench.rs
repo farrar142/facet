@@ -11,7 +11,6 @@ use facet_bench::{
 };
 
 #[test]
-#[ignore = "#293"]
 fn the_limit_is_ten_times_the_target_for_ten_thousand_items() {
     assert_eq!(BATCH_RENAME_JOB_COUNT, 10_000);
     assert_eq!(BATCH_RENAME_JOB_LIMIT, BATCH_RENAME_JOB_TARGET * 10);
@@ -19,7 +18,6 @@ fn the_limit_is_ten_times_the_target_for_ten_thousand_items() {
 }
 
 #[test]
-#[ignore = "#293"]
 fn a_median_over_the_limit_fails_with_the_numbers() {
     let ms = Duration::from_millis;
     let m = Measurement {
@@ -37,7 +35,6 @@ fn a_median_over_the_limit_fails_with_the_numbers() {
 
 #[cfg(windows)]
 #[test]
-#[ignore = "#293"]
 fn a_small_run_measures_each_round_and_leaves_nothing_behind() {
     let root = tempfile::TempDir::new().unwrap();
     let m = facet_bench::measure_batch_rename_job(root.path(), 20, 2).expect("측정한다");

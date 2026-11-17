@@ -72,6 +72,7 @@ const USAGE: &str = "\
       복사 작업으로 각각 N회(기본 3) 복사해(한 번 데운 뒤, 대상은 매번 지움) 큰 파일 처리량 중앙값이 하한
       (10MB/s)보다 낮거나 작은 파일 복사 시간 중앙값이 상한(20000ms)을 넘으면 실패한다. Windows가 아니면 건너뛴다.
   facet-bench delete [--count N] [--runs N]
+  facet-bench batch-rename-run [--count N] [--runs N]
       임시 폴더에 4KiB 파일 N개(기본 10000)가 든 폴더를 만들고 작업 대기열의 영구 삭제 작업으로 지우는 시간을
       N회(기본 5) 재어(한 번 데운 뒤, 회차마다 폴더를 새로 만듦) 중앙값이 상한(10000ms)을 넘으면 실패한다.
       이어 작업 기록 100개(되돌릴 수 없는 것과 섞음)에서 실행취소 대상을 찾는 시간도 재어 중앙값이
@@ -218,6 +219,7 @@ fn main() -> ExitCode {
         "content" => content_search(&args),
         "copy" => copy_bench(&args),
         "delete" => delete_bench(&args),
+        "batch-rename-run" => batch_rename_run(&args),
         "compare-recycle" => compare_recycle(&args),
         "compare-copy" => compare_copy(&args),
         "screen" => make_folder(&args).and_then(|()| screen(&args)),
@@ -901,6 +903,49 @@ fn compare_copy(args: &Args) -> Result<(), String> {
 }
 
 /// 영구 삭제 벤치마크와 실행취소 대상 찾기: CI가 상한을 지킨다.
+fn batch_rename_run(args: &Args) -> Result<(), String> {
+    use facet_bench::{
+        BATCH_RENAME_JOB_COUNT, BATCH_RENAME_JOB_LIMIT, BATCH_RENAME_JOB_TARGET,
+        check_batch_rename_job_limit, measure_batch_rename_job,
+    };
+    if args.path.is_some() {
+        return Err(format!(
+            "batch-rename-run 명령은 경로를 받지 않습니다
+
+{USAGE}"
+        ));
+    }
+    warn_debug();
+    if !cfg!(windows) {
+        println!("일괄 이름 바꾸기 실행 벤치마크: Windows가 아니므로 건너뜀");
+        return Ok(());
+    }
+    let runs = args.runs.unwrap_or(5);
+    let count = args.count.unwrap_or(BATCH_RENAME_JOB_COUNT);
+    let root = std::env::temp_dir().join(format!("facet-bench-rename-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).map_err(|e| format!("{}: {e}", root.display()))?;
+    let result = measure_batch_rename_job(&root, count, runs);
+    let _ = std::fs::remove_dir_all(&root);
+    let m = result?;
+    println!(
+        "일괄 이름 바꾸기 실행 (파일 {count}개, 항목 {}개, 작업 대기열, {}회):",
+        m.item_count,
+        m.times.len()
+    );
+    print_times(&m);
+    println!(
+        "  중앙값 {:.1}ms, 최악 {:.1}ms / 로컬 기준 {}ms, CI 상한 {}ms",
+        ms(m.median()),
+        ms(m.max()),
+        BATCH_RENAME_JOB_TARGET.as_millis(),
+        BATCH_RENAME_JOB_LIMIT.as_millis()
+    );
+    check_batch_rename_job_limit(&m, BATCH_RENAME_JOB_LIMIT)?;
+    println!("  상한 안: 통과");
+    Ok(())
+}
+
 fn delete_bench(args: &Args) -> Result<(), String> {
     if args.path.is_some() {
         return Err(format!(

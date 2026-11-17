@@ -19,7 +19,7 @@
 //! 벤치마크 상한과 그 근거는 `crates/facet-bench/src/lib.rs`의 `LIST_LIMIT`·`QUERY_LIMIT`·
 //! `INDEX_MEMORY_LIMIT`·`MFT_PARSE_LIMIT`·`SESSION_PARSE_LIMIT`·`CLIPBOARD_LIMIT`·`MENU_LIMIT`·`BATCH_RENAME_LIMIT`·`FILTER_LIMIT`·`SEARCH_LIMIT`, `crates/facet-bench/src/copy.rs`의
 //! `COPY_THROUGHPUT_LIMIT`·`COPY_SMALL_LIMIT`, `crates/facet-bench/src/delete.rs`의 `DELETE_LIMIT`·
-//! `UNDO_TARGET_LIMIT`에 있다.
+//! `UNDO_TARGET_LIMIT`, `crates/facet-bench/src/lib.rs`의 `BATCH_RENAME_JOB_LIMIT`에 있다.
 
 mod dist;
 mod mft_fixture;
@@ -324,6 +324,7 @@ fn bench_steps() -> Vec<Step> {
         content_bench_step(),
         copy_bench_step(),
         delete_bench_step(),
+        batch_rename_run_bench_step(),
     ]
 }
 
@@ -473,6 +474,15 @@ fn delete_bench_step() -> Step {
     Step {
         name: "삭제 벤치마크",
         args: facet_bench("delete"),
+        env: Vec::new(),
+    }
+}
+
+/// 임시 폴더에서 작은 파일 1만 개를 작업 대기열의 일괄 이름 바꾸기 작업으로 모두 바꾸는 시간을 잰다.
+fn batch_rename_run_bench_step() -> Step {
+    Step {
+        name: "일괄 이름 바꾸기 실행 벤치마크",
+        args: facet_bench("batch-rename-run"),
         env: Vec::new(),
     }
 }
