@@ -3744,6 +3744,25 @@ impl View {
                 else {
                     return true;
                 };
+                let many_selected =
+                    !after_new_folder && self.app.borrow().active_tab().selected_count() >= 2;
+                if many_selected {
+                    let result = self.app.borrow_mut().rename_numbered(&name);
+                    return match result {
+                        Ok(_) => {
+                            self.close_rename();
+                            refresh_jobs();
+                            true
+                        }
+                        Err(error) => {
+                            if let Some(rename) = self.rename.borrow_mut().as_mut() {
+                                rename.failed_batch(error);
+                            }
+                            self.render_rename();
+                            false
+                        }
+                    };
+                }
                 let result = {
                     let mut app = self.app.borrow_mut();
                     if after_new_folder {

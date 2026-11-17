@@ -18,6 +18,8 @@ pub enum Problem {
     Name(NameError),
     /// 확정했으나 코어가 막았거나 실행 중에 실패했다.
     Edit(EditError),
+    /// 여러 항목에 번호를 붙이는 일괄 이름 바꾸기가 막혔다.
+    Batch(facet_core::window::BatchRenameError),
 }
 
 /// 확정(Enter·입력란 밖 클릭)을 어떻게 할지.
@@ -150,6 +152,12 @@ impl Rename {
     pub fn submitted(&mut self, name: &str) {
         self.problem = None;
         self.pending = Some(name.to_owned());
+    }
+
+    /// 번호 붙이기(여러 항목)가 막혔다: 까닭을 두고 입력란을 남긴다.
+    pub fn failed_batch(&mut self, error: facet_core::window::BatchRenameError) {
+        self.problem = Some(Problem::Batch(error));
+        self.asking_extension = false;
     }
 
     /// 코어가 곧바로 막았거나 실행이 실패했다: 까닭을 두고 입력란을 다시 연다. 다시 열 글자(친 이름)를 돌려준다.

@@ -105,7 +105,6 @@ fn rename_numbered(app: &mut App, typed: &str) {
 }
 
 #[test]
-#[ignore = "#291"]
 fn f2_with_many_selected_still_opens_the_name_input_and_keeps_the_selection() {
     let dir = folder_with(&["a.txt", "b.jpg", "c.txt"]);
     let mut app = app_at(dir.path());
@@ -122,7 +121,6 @@ fn f2_with_many_selected_still_opens_the_name_input_and_keeps_the_selection() {
 }
 
 #[test]
-#[ignore = "#291"]
 fn numbers_every_selected_item_in_list_order_keeping_each_extension() {
     let dir = folder_with(&["a.txt", "b.jpg", "c.txt", "d/"]);
     let mut app = app_at(dir.path());
@@ -165,7 +163,6 @@ fn numbers_every_selected_item_in_list_order_keeping_each_extension() {
 }
 
 #[test]
-#[ignore = "#291"]
 fn typed_name_keeping_the_cursor_extension_gives_the_same_names() {
     let names = ["a.txt", "b.jpg", "c.txt"];
     let mut results = Vec::new();
@@ -183,7 +180,6 @@ fn typed_name_keeping_the_cursor_extension_gives_the_same_names() {
 }
 
 #[test]
-#[ignore = "#291"]
 fn skips_numbers_taken_by_unselected_items() {
     let dir = folder_with(&["a.txt", "b.txt", "c.txt", "사진 (2).txt"]);
     let mut app = app_at(dir.path());
@@ -215,7 +211,6 @@ fn skips_numbers_taken_by_unselected_items() {
 }
 
 #[test]
-#[ignore = "#291"]
 fn one_record_undoes_and_redoes_all_names_at_once() {
     let names = ["a.txt", "b.jpg", "c.txt"];
     let dir = folder_with(&names);
@@ -245,7 +240,6 @@ fn one_record_undoes_and_redoes_all_names_at_once() {
 }
 
 #[test]
-#[ignore = "#291"]
 fn rejected_input_creates_no_job_and_changes_nothing() {
     let names = ["a.txt", "b.txt", "사진 (1).md", "사진 (2).md"];
     let dir = folder_with(&names);
