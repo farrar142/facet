@@ -68,7 +68,9 @@ case "$method $path" in
     fi
     cat "$f"; exit 0 ;;
   "DELETE repos/"*/*/git/refs/heads/*) echo '{}'; exit 0 ;;
-  "POST repos/"*/*/actions/workflows/*/dispatches) exit 0 ;;
+  "POST repos/"*/*/actions/workflows/*/dispatches)
+    [ -e "$d/fail-dispatch" ] && fail "dispatch is broken"
+    exit 0 ;;
   "DELETE repos/"*/*/issues/*/labels/*)
     l=${path##*/}; n=${path%/labels/*}; n=${n##*/}
     f="$d/issue-$n.json"
@@ -85,6 +87,11 @@ case "$method $path" in
 esac
 
 case "$path" in
+  # bridge.sh: the repository's issue comments, repo-comments.json
+  # ([{id, html_url, issue_url, created_at, body}], default []); the query (since=…) is ignored.
+  repos/*/*/issues/comments)
+    if [ -f "$d/repo-comments.json" ]; then cat "$d/repo-comments.json"; else echo '[]'; fi
+    ;;
   repos/*/*/issues)
     label=$(printf '%s' "$query" | tr '&' '\n' | sed -n 's/^labels=//p')
     shopt -s nullglob
