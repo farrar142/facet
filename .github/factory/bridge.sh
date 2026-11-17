@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# Mail bridge of the software factory (spec #249 "다리"). Not a workflow: a person's PC or server runs it
+# from cron (every 2 minutes). The factory itself never calls Agent Mail; this reads its marker comments
+# with gh and mails each new one once.
+#
+#   bridge.sh [--seed]
+#
+# Looks at the repository's issue and PR comments updated in the last BRIDGE_LOOKBACK_DAYS days (or since
+# BRIDGE_SINCE) on open issues and PRs, for:
+#
+#   <!-- factory-question -->            a question (only while the issue has `needs-decision`)
+#   <!-- factory-budget-spec -->         a spec stopped at its budget (`factory-paused`)
+#   <!-- factory-budget-daily DATE -->   the whole factory stopped at the daily budget (ledger issue)
+#   <!-- factory-human -->               a ticket handed to a person
+#
+# and sends each comment it has not sent before:
+#
+#   agent-mail send --to "$BRIDGE_TO" --task facet-factory --idempotency-key facet-factory-<comment id>
+#     --subject … --body …
+#
+# The body has the kind, the issue link, its title, the comment as written and what to do. The comment
+# id is remembered in the state file only after a successful send, so a failed send is tried again on the
+# next run (the idempotency key keeps a retry from arriving twice). --seed remembers every marker found
+# now without sending anything (run once when installing, so old markers do not all arrive at once).
+#
+# Environment:
+#   FACTORY_REPO          owner/name (default farrar142/facet); gh must be logged in
+#   BRIDGE_TO             recipient role (default sandcorp/boss)
+#   AGENT_MAIL_PROFILE    agent-mail credential profile (default automation); the profile knows the server
+#   BRIDGE_LOOKBACK_DAYS  how far back to read comments (default 14)
+#   BRIDGE_SINCE          ISO 8601 time to read from instead (tests)
+#   XDG_STATE_HOME        the state file is $XDG_STATE_HOME/facet-factory-bridge/sent (default under
+#                         ~/.local/state), one comment id per line
+#
+# Exits 1 when a send failed (the others are still sent). Needs bash, gh, jq and agent-mail.
+set -u
+REPO=${FACTORY_REPO:-farrar142/facet}
+TO=${BRIDGE_TO:-sandcorp/boss}
+export AGENT_MAIL_PROFILE=${AGENT_MAIL_PROFILE:-automation}
+STATE_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/facet-factory-bridge
+SENT=$STATE_DIR/sent
+
+seed=false
+case "${1:-}" in
+  --seed) seed=true ;;
+  "") ;;
+  *) echo "usage: bridge.sh [--seed]" >&2; exit 2 ;;
+esac
+
+# jq on Windows prints CRLF; strip the CR everywhere.
+j() { jq "$@" | tr -d '\r'; }
+
+since() {
+  if [ -n "${BRIDGE_SINCE:-}" ]; then echo "$BRIDGE_SINCE"; return; fi
+  local t=$(( $(date +%s) - ${BRIDGE_LOOKBACK_DAYS:-14} * 86400 ))
+  date -u -d "@$t" +%Y-%m-%dT%H:%M:%SZ 2> /dev/null || date -u -r "$t" +%Y-%m-%dT%H:%M:%SZ
+}
+
+mkdir -p "$STATE_DIR" || { echo "bridge: cannot create $STATE_DIR" >&2; exit 1; }
+touch "$SENT"
+
+sent() { grep -qxF -- "$1" "$SENT"; }
+remember() { echo "$1" >> "$SENT"; }
+
+comments=$(gh api "repos/$REPO/issues/comments?since=$(since)&sort=created&direction=asc&per_page=100" --paginate) \
+  || { echo "bridge: could not read the comments of $REPO" >&2; exit 1; }
+
+# One line per marker comment: id <TAB> kind <TAB> issue number.
+matches=$(printf '%s' "$comments" | j -s -r '
+  add // [] | .[]
+  | (.body // "") as $b
+  | (if ($b | contains("<!-- factory-question -->")) then "question"
+     elif ($b | contains("<!-- factory-budget-spec -->")) then "budget-spec"
+     elif ($b | contains("<!-- factory-budget-daily ")) then "budget-daily"
+     elif ($b | contains("<!-- factory-human -->")) then "human"
+     else empty end) as $k
+  | [(.id | tostring), $k, (.issue_url | sub(".*/"; ""))] | @tsv')
+
+failed=0
+while IFS=$'\t' read -r id kind n; do
+  [ -n "$id" ] || continue
+  sent "$id" && continue
+  issue=$(gh api "repos/$REPO/issues/$n") || { echo "bridge: could not read #$n" >&2; failed=1; continue; }
+  [ "$(printf '%s' "$issue" | j -r '.state')" = open ] || continue
+  if [ "$kind" = question ] \
+    && [ "$(printf '%s' "$issue" | j -r 'any(.labels[]; .name == "needs-decision")')" != true ]; then
+    continue # answered already; not remembered, so a question asked again is still sent
+  fi
+  if $seed; then remember "$id"; continue; fi
+
+  title=$(printf '%s' "$issue" | j -r '.title')
+  url=$(printf '%s' "$issue" | j -r '.html_url')
+  comment=$(printf '%s' "$comments" | j -s -r --argjson id "$id" 'add // [] | map(select(.id == $id)) | .[0]')
+  body=$(printf '%s' "$comment" | j -r '.body // ""')
+  link=$(printf '%s' "$comment" | j -r '.html_url // empty')
+  case "$kind" in
+    question)
+      label="질문"
+      todo="이슈에 답 댓글을 달고 needs-decision 라벨을 떼면 공장이 이어 간다." ;;
+    budget-spec)
+      label="spec 상한 멈춤"
+      todo="spec 본문의 \`예산: \$N\` 줄을 올리고 factory-paused 라벨을 떼면 이어 간다." ;;
+    budget-daily)
+      label="하루 상한 멈춤"
+      todo="할 일 없음: KST 0시가 지나면 공장이 스스로 다시 돈다." ;;
+    human)
+      label="사람 넘김"
+      todo="공장이 이 이슈를 사람에게 넘겼다(ready-for-human). 위 댓글의 까닭을 보고 이어 받는다." ;;
+  esac
+  text="종류: $label
+이슈: $url
+제목: #$n $title
+댓글: ${link:-$url}
+
+$body
+
+할 일: $todo"
+  if agent-mail send --to "$TO" --task facet-factory --idempotency-key "facet-factory-$id" \
+    --subject "[facet 공장] $label: #$n $title" --body "$text" > /dev/null; then
+    remember "$id"
+    echo "bridge: sent $kind #$n (comment $id)"
+  else
+    echo "bridge: could not send $kind #$n (comment $id); will retry" >&2
+    failed=1
+  fi
+done <<< "$matches"
+
+if $seed; then echo "bridge: seeded $(wc -l < "$SENT" | tr -d ' ') comment ids"; fi
+exit "$failed"
