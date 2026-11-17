@@ -48,7 +48,6 @@ fn root_list(app: &mut App) -> Subfolders {
 }
 
 #[test]
-#[ignore = "#305"]
 fn 맨_앞_목록의_마지막_줄은_사용자_홈_폴더다() {
     let dir = TempDir::new().unwrap();
     let mut app = app_at(dir.path());
@@ -65,7 +64,6 @@ fn 맨_앞_목록의_마지막_줄은_사용자_홈_폴더다() {
 }
 
 #[test]
-#[ignore = "#305"]
 fn 맨_앞_목록_요청도_하위_폴더_요청과_같은_번호_차례를_쓴다() {
     let dir = TempDir::new().unwrap();
     std::fs::create_dir(dir.path().join("안")).unwrap();
@@ -137,7 +135,6 @@ fn system_drive() -> String {
 
 #[cfg(windows)]
 #[test]
-#[ignore = "#305"]
 fn 맨_앞_목록에_시스템_드라이브가_조각과_같은_이름과_위치로_있다() {
     let dir = TempDir::new().unwrap();
     let mut app = app_at(dir.path());
@@ -173,7 +170,6 @@ fn 맨_앞_목록에_시스템_드라이브가_조각과_같은_이름과_위치
 
 #[cfg(windows)]
 #[test]
-#[ignore = "#305"]
 fn 맨_앞_목록의_다음_조각은_활성_탭의_드라이브다() {
     let dir = TempDir::new().unwrap();
     let mut app = app_at(dir.path());
