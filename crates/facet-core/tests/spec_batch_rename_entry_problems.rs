@@ -59,7 +59,6 @@ fn problem_positions(statuses: &[EntryStatus]) -> Vec<usize> {
 }
 
 #[test]
-#[ignore = "#294"]
 fn problem_rows_are_the_problem_entries_in_order() {
     // a → x는 남는 x.txt와, c와 e → q는 서로 겹친다. b·d는 그대로다.
     let rules = [
@@ -78,7 +77,6 @@ fn problem_rows_are_the_problem_entries_in_order() {
 }
 
 #[test]
-#[ignore = "#294"]
 fn problem_rows_are_empty_without_problems() {
     let rule = RenameRule {
         prefix: "휴가-".to_string(),
@@ -91,7 +89,6 @@ fn problem_rows_are_empty_without_problems() {
 }
 
 #[test]
-#[ignore = "#294"]
 fn a_broken_rule_is_not_a_problem_row() {
     // 틀린 정규식 규칙은 건너뛰고(규칙 문제), 나머지 규칙은 쓴다: b → b:는 쓸 수 없는 이름이다.
     let rules = [replace("(", "z", true), replace("b", "b:", false)];

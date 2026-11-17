@@ -128,7 +128,12 @@ impl Preview {
 
     /// #294: 상태가 `EntryStatus::Problem`인 항목의 `entries()` 안 번호(오름차순).
     pub fn problem_rows(&self) -> Vec<usize> {
-        todo!("#294")
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| matches!(e.status, EntryStatus::Problem(_)))
+            .map(|(i, _)| i)
+            .collect()
     }
 }
 

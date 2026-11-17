@@ -2432,10 +2432,13 @@ export component AppWindow inherits Window {
     in-out property <bool> batch-at-end: true;
     in-out property <string> batch-separator;
     in property <[BatchRow]> batch-rows;
+    in-out property <bool> batch-problems-only;
+    in property <string> batch-empty;
     in property <string> batch-counts;
     in property <bool> batch-can-execute;
     in property <string> batch-problem;
     callback batch-edited();
+    callback batch-filter-changed();
     callback batch-accept();
     callback batch-cancel();
     // 확인 줄: 열려 있는가, 이동인가, 대상 폴더, 항목 수, 시작 전에 막힌 까닭과 그 경로. 삭제 확인이면 그 까닭
@@ -3584,6 +3587,20 @@ export component AppWindow inherits Window {
             drop-shadow-blur: 8px;
             drop-shadow-color: #00000060;
             TouchArea { }
+            // 키보드: 포커스가 어디 있든(입력란은 제 `accepted`·`escape`가 먼저) Enter는 「바꾸기」, Esc는 닫기.
+            FocusScope {
+            key-pressed(event) => {
+                if (event.text == Key.Return) {
+                    if (root.batch-can-execute) { root.batch-accept(); }
+                    return accept;
+                }
+                if (event.text == Key.Escape) {
+                    keys.focus();
+                    root.batch-cancel();
+                    return accept;
+                }
+                reject
+            }
             Text {
                 x: 14px;
                 y: 8px;
@@ -3633,11 +3650,20 @@ export component AppWindow inherits Window {
                         escape => { keys.focus(); root.batch-cancel(); }
                     }
                 }
-                CheckBox {
-                    height: 28px;
-                    text: @tr("번호 매기기");
-                    checked <=> root.batch-numbering;
-                    toggled => { root.batch-edited(); }
+                HorizontalLayout {
+                    spacing: 12px;
+                    CheckBox {
+                        height: 28px;
+                        text: @tr("번호 매기기");
+                        checked <=> root.batch-numbering;
+                        toggled => { root.batch-edited(); }
+                    }
+                    CheckBox {
+                        height: 28px;
+                        text: @tr("문제 행만 보기");
+                        checked <=> root.batch-problems-only;
+                        toggled => { root.batch-filter-changed(); }
+                    }
                 }
                 HorizontalLayout {
                     spacing: 12px;
@@ -3709,6 +3735,14 @@ export component AppWindow inherits Window {
             }
             Text {
                 x: 14px;
+                y: 296px;
+                width: parent.width - 28px;
+                height: 24px;
+                text: root.batch-empty;
+                color: Palette.foreground.transparentize(40%);
+            }
+            Text {
+                x: 14px;
                 y: parent.height - 70px;
                 width: parent.width - 28px;
                 height: 20px;
@@ -3746,6 +3780,7 @@ export component AppWindow inherits Window {
                         root.batch-cancel();
                     }
                 }
+            }
             }
         }
     }

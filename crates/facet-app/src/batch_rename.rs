@@ -117,6 +117,20 @@ pub fn lines(preview: &Preview) -> Vec<Line> {
         .collect()
 }
 
+/// 보일 줄: `problems_only`면 문제 행만(코어의 `Preview::problem_rows`), 아니면 모두(넘긴 차례).
+pub fn visible_lines(preview: &Preview, problems_only: bool) -> Vec<Line> {
+    let all = lines(preview);
+    if !problems_only {
+        return all;
+    }
+    let mut all: Vec<Option<Line>> = all.into_iter().map(Some).collect();
+    preview
+        .problem_rows()
+        .into_iter()
+        .filter_map(|row| all.get_mut(row).and_then(Option::take))
+        .collect()
+}
+
 /// 창의 상태: 지금 입력값과 마지막으로 받은 미리 보기, 결과를 기다리는 마지막 요청.
 #[derive(Debug, Default)]
 pub struct BatchWindow {
@@ -124,9 +138,34 @@ pub struct BatchWindow {
     preview: Option<Preview>,
     /// 일꾼 스레드에 맡긴 마지막 미리 보기 요청(`App::request_batch_rename_preview`). 결과가 오면 비운다.
     pending: Option<BatchPreviewId>,
+    /// 「문제 행만 보기」 전환. 새 미리 보기가 와도 그대로다.
+    problems_only: bool,
 }
 
 impl BatchWindow {
+    /// 「문제 행만 보기」를 바꾼다(수치 줄·「바꾸기」 켜짐은 전체 미리 보기로 정하므로 그대로).
+    pub fn set_problems_only(&mut self, on: bool) {
+        self.problems_only = on;
+    }
+
+    /// 보일 줄.
+    pub fn visible_lines(&self) -> Vec<Line> {
+        self.preview
+            .as_ref()
+            .map(|p| visible_lines(p, self.problems_only))
+            .unwrap_or_default()
+    }
+
+    /// 문제 행만 보는데 문제 행이 없으면 그 안내, 아니면 비어 있다.
+    pub fn empty_text(&self) -> String {
+        match &self.preview {
+            Some(p) if self.problems_only && p.problem_count() == 0 => {
+                text::batch_no_problems_text()
+            }
+            _ => String::new(),
+        }
+    }
+
     /// 입력값과 그 미리 보기를 곧바로 둔다(시험에서 동기 미리 보기를 넣을 때). 화면은 [`BatchWindow::request`]·
     /// [`BatchWindow::receive`]로 일꾼 스레드의 결과를 받는다.
     #[cfg(test)]
@@ -156,6 +195,7 @@ impl BatchWindow {
     }
 
     /// 마지막 미리 보기.
+    #[cfg(test)]
     pub fn preview(&self) -> Option<&Preview> {
         self.preview.as_ref()
     }
@@ -236,6 +276,27 @@ mod tests {
             ..Inputs::default()
         };
         assert_eq!(inputs.rule().numbering.unwrap().digits, MAX_DIGITS);
+    }
+
+    #[test]
+    fn 문제_행만_보기는_문제_줄만_거르고_수치는_그대로다() {
+        let items = items(&["a.txt", "b.txt"]);
+        let rule = RenameRule {
+            find: "a".into(),
+            replace: ":".into(),
+            ..RenameRule::default()
+        };
+        let preview = preview(&items, &rule, &ExistingNames::new());
+        let mut window = BatchWindow::default();
+        window.update(Inputs::default(), Some(preview));
+        assert_eq!(window.visible_lines().len(), 2);
+        let counts = window.counts_text();
+        window.set_problems_only(true);
+        let shown = window.visible_lines();
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].kind, LineKind::Problem);
+        assert_eq!(window.counts_text(), counts);
+        assert!(window.empty_text().is_empty());
     }
 
     #[test]
