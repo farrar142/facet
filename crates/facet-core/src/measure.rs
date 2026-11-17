@@ -37,6 +37,8 @@ pub const ENV_MENU: &str = "FACET_MEASURE_MENU";
 /// 시작한 때부터 결과가 하나 이상 든 첫 프레임이 화면에 나갈 때까지를 잰다(`search_frame`). 이때 `rows`는 그
 /// 프레임의 결과 수이고 스크롤은 하지 않는다.
 pub const ENV_SEARCH: &str = "FACET_MEASURE_SEARCH";
+/// #227: 측정 모드에서 첫 화면 뒤 즉시 검색에 넘길 질의 글자.
+pub const ENV_INSTANT: &str = "FACET_MEASURE_INSTANT";
 /// 2 이상이면 창이 이만큼 뜰 때까지를 첫 화면으로 잰다(세션 복원 콜드 스타트). 창마다 목록이 든 첫 프레임이
 /// 나온 뒤, 마지막 창의 첫 프레임까지의 시간이 `first_frame`이다. `rows`는 마지막 창이 읽은 항목 수이고 스크롤과
 /// 폴더 열기는 하지 않는다.
@@ -61,6 +63,10 @@ pub struct ScreenReport {
     pub menu_frame: Option<Duration>,
     /// 실시간 탐색을 시작한 때부터 첫 결과가 든 프레임이 창에 나올 때까지.
     pub search_frame: Option<Duration>,
+    /// #227: 즉시 검색 글자를 넘긴 때부터 첫 결과가 든 프레임까지(줄 `instant_frame_us`).
+    pub instant_frame: Option<Duration>,
+    /// #227: 즉시 검색이 강등됐다(줄 `instant_demoted 1`).
+    pub instant_demoted: bool,
     /// 스크롤하는 동안의 프레임 시간들.
     pub frames: Vec<Duration>,
 }
@@ -154,6 +160,8 @@ mod tests {
             rename_frame: Some(Duration::from_micros(9_000)),
             menu_frame: Some(Duration::from_micros(20_000)),
             search_frame: Some(Duration::from_micros(40_000)),
+            instant_frame: None,
+            instant_demoted: false,
             frames: vec![Duration::from_micros(16_700), Duration::from_micros(33_000)],
         };
         assert_eq!(ScreenReport::parse(&report.to_text()), Ok(report));
