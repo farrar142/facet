@@ -48,6 +48,12 @@ pub const SEARCH_FIRST_LIMIT: Duration = Duration::from_millis(100);
 /// 하나가 맞으므로 시험 폴더에 항목이 하나라도 있으면 반드시 결과가 있다(실시간 탐색 벤치마크와 같은 조각).
 pub const SEARCH_QUERY: &str = "보고서";
 
+/// #227: 「즉시 검색 글자 입력부터 결과 첫 화면까지」 통과 기준(중앙값 50ms 미만).
+pub const INSTANT_FIRST_LIMIT: Duration = Duration::from_millis(50);
+
+/// #227: 즉시 검색 첫 결과를 잴 때 넘기는 질의 글자(시험 폴더 0번 항목에 맞음).
+pub const INSTANT_QUERY: &str = "보고서";
+
 /// 프레임 시간 통과 기준: 최악값이 한 프레임 시간의 이 배수 이하여야 한다.
 pub const FRAME_WORST_FACTOR: f64 = 2.0;
 
@@ -188,6 +194,8 @@ pub struct ScreenResult {
     pub menus: Vec<Duration>,
     /// 실시간 탐색을 시작해 첫 결과가 든 프레임까지(회차마다 하나).
     pub searches: Vec<Duration>,
+    /// #227: 즉시 검색 글자를 넘겨 첫 결과가 든 프레임까지(회차마다 하나).
+    pub instant_searches: Vec<Duration>,
     /// 스크롤하는 동안의 프레임 시간들(스크롤 회차 전체).
     pub frames: Vec<Duration>,
     pub scroll_runs: usize,
@@ -216,6 +224,10 @@ pub struct Verdict {
     pub search_median: Duration,
     pub search_worst: Duration,
     pub search_pass: bool,
+    /// #227: 즉시 검색 첫 결과 중앙값·최악값·통과 여부.
+    pub instant_median: Duration,
+    pub instant_worst: Duration,
+    pub instant_pass: bool,
     pub frame_median: Duration,
     pub frame_worst: Duration,
     /// 프레임 최악값의 상한(한 프레임의 두 배).
@@ -269,6 +281,9 @@ impl ScreenResult {
             search_median,
             search_worst: worst(&self.searches),
             search_pass: !self.searches.is_empty() && search_median < SEARCH_FIRST_LIMIT,
+            instant_median: Duration::ZERO, // #227
+            instant_worst: Duration::ZERO,  // #227
+            instant_pass: false,            // #227
             frame_median: median(&self.frames),
             frame_worst,
             frame_worst_limit,
@@ -685,6 +700,21 @@ pub fn search_frame(report: &ScreenReport) -> Result<Duration, String> {
     Ok(frame)
 }
 
+/// #227: 즉시 검색 첫 결과 측정의 보고에서 잰 시간을 꺼낸다(시간 없음·결과 0·강등이면 오류).
+pub fn instant_frame(_report: &ScreenReport) -> Result<Duration, String> {
+    todo!("#227")
+}
+
+/// #227: `folder`가 든 볼륨의 합성 인덱스(`folder` 아래 항목 `count`개)를 거르지 않는 백엔드로 `pipe`에 띄운다.
+#[cfg(windows)]
+pub fn serve_instant_index(
+    _pipe: &str,
+    _folder: &Path,
+    _count: usize,
+) -> io::Result<facet_indexer::pipe::PipeServer> {
+    todo!("#227")
+}
+
 /// 세션 복원 콜드 스타트를 잰다: 인자 없이 `session` 파일(`FACET_SESSION_PATH`)로 앱을 띄워 창 `windows`개의
 /// 첫 프레임까지를 잰다. 사용자의 세션 파일은 건드리지 않는다(앱은 환경 변수가 가리키는 이 파일만 읽고 쓴다).
 pub fn run_app_session(
@@ -837,6 +867,7 @@ pub fn measure(plan: &Plan<'_>) -> Result<ScreenResult, String> {
         renames,
         menus,
         searches,
+        instant_searches: Vec::new(), // #227
         frames,
         scroll_runs: plan.scroll_runs,
         spec,

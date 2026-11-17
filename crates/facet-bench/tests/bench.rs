@@ -301,6 +301,7 @@ mod screen {
             renames: vec![ms(10)],
             menus: vec![ms(20)],
             searches: vec![ms(50)],
+            instant_searches: vec![ms(30)],
             frames: frames.iter().map(|n| ms(*n)).collect(),
             scroll_runs: 1,
             spec: SystemSpec {
