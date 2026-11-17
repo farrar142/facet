@@ -96,6 +96,107 @@ pub fn line_of(status: Option<&SearchStatus>) -> Option<Line> {
     })
 }
 
+/// 「이름」 검색창에서 입력이 바뀌었을 때 즉시 검색에 넘길 글자. 이름 전환에서만 넘기고(앞뒤 공백은 질의 해석이 다룬다, 비면
+/// 검색 끝내기), 한글 조합 중(`composing`)이면 확정 때까지 넘기지 않는다. 내용 전환은 Enter로만 시작하므로 `None`이다.
+pub fn instant_text(mode: Mode, text: &str, composing: bool) -> Option<&str> {
+    match mode {
+        Mode::Name if !composing => Some(text),
+        _ => None,
+    }
+}
+
+/// 즉시 검색 상태 줄의 내용(화면 글자는 [`crate::text::instant_status_text`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstantLine {
+    /// 결과 개수.
+    pub count: InstantCount,
+    /// 인덱스를 만드는 중인 볼륨(덜 찼을 수 있음).
+    pub building: Vec<String>,
+    /// 서비스에 닿지 못해 기다리는 중이면 까닭.
+    pub waiting: Option<Waiting>,
+    /// 실시간 탐색으로 강등했으면 그 까닭.
+    pub demotion: Option<facet_core::instant_search::Demotion>,
+}
+
+/// 결과 개수.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstantCount {
+    /// 아직 응답이 없다.
+    Unknown,
+    /// 전체 개수. `upper_bound`이면 권한으로 거르기 전의 상한이다.
+    Total { total: u64, upper_bound: bool },
+    /// 강등한 실시간 탐색이 지금까지 찾은 수.
+    Found(usize),
+}
+
+/// 서비스를 기다리는 까닭.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Waiting {
+    /// 연결을 판정하는 중.
+    Connecting,
+    /// 연결이 끊겼거나 서비스가 오류로 답했다.
+    NoAnswer,
+}
+
+/// 탭의 즉시 검색 상태에서 상태 줄을 만든다. `found`는 목록의 결과 수(강등했을 때 쓴다).
+pub fn instant_line(
+    status: &facet_core::instant_search::InstantStatus,
+    found: usize,
+) -> InstantLine {
+    use facet_core::indexer_client::Connection;
+    use facet_core::instant_search::Unavailable;
+    let count = if status.demotion.is_some() {
+        InstantCount::Found(found)
+    } else {
+        status
+            .total
+            .map_or(InstantCount::Unknown, |total| InstantCount::Total {
+                total,
+                upper_bound: status.total_is_upper_bound,
+            })
+    };
+    let waiting = status.unavailable.as_ref().map(|why| match why {
+        Unavailable::Connection(Connection::Connecting) => Waiting::Connecting,
+        _ => Waiting::NoAnswer,
+    });
+    InstantLine {
+        count,
+        building: status.building.clone(),
+        waiting,
+        demotion: status.demotion,
+    }
+}
+
+/// 질의 문법 오류에서 틀린 글자 조각(UTF-8 바이트 범위를 글자 경계로 맞춰 자름). 범위가 비면 `None`.
+pub fn wrong_part<'a>(query: &'a str, range: &std::ops::Range<usize>) -> Option<&'a str> {
+    let mut start = range.start.min(query.len());
+    let mut end = range.end.min(query.len());
+    while !query.is_char_boundary(start) {
+        start -= 1;
+    }
+    while !query.is_char_boundary(end) {
+        end += 1;
+    }
+    let part = &query[start..end];
+    (!part.is_empty()).then_some(part)
+}
+
+/// 스크롤이 목록 끝 가까이인가: 보이는 맨 아래가 마지막 행에서 `rows_before_end`행 안이면 이어 받을 때다.
+/// `scroll`은 위로 넘긴 거리, 모두 같은 단위(픽셀).
+pub fn near_end(
+    scroll: f32,
+    view_height: f32,
+    row_height: f32,
+    rows: usize,
+    rows_before_end: usize,
+) -> bool {
+    if row_height <= 0.0 {
+        return false;
+    }
+    let total = rows as f32 * row_height;
+    scroll + view_height + rows_before_end as f32 * row_height >= total
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,5 +291,73 @@ mod tests {
             Some(Line::Stopped { found: 7, .. })
         ));
         assert!(!line_of(Some(&stopped)).unwrap().is_running());
+    }
+
+    #[test]
+    fn 즉시_검색은_이름_전환에서만_조합이_끝난_글자를_넘긴다() {
+        assert_eq!(instant_text(Mode::Name, "보고", false), Some("보고"));
+        assert_eq!(instant_text(Mode::Name, "", false), Some(""));
+        assert_eq!(instant_text(Mode::Name, "보고", true), None);
+        assert_eq!(instant_text(Mode::Content, "보고", false), None);
+    }
+
+    #[test]
+    fn 즉시_검색_상태는_개수_덜_참_강등을_담는다() {
+        use facet_core::instant_search::{Demotion, DemotionReason, InstantStatus, Unavailable};
+        let status = InstantStatus {
+            total: Some(1234),
+            total_is_upper_bound: true,
+            building: vec!["C:".to_owned()],
+            ..InstantStatus::default()
+        };
+        let line = instant_line(&status, 100);
+        assert_eq!(
+            line.count,
+            InstantCount::Total {
+                total: 1234,
+                upper_bound: true
+            }
+        );
+        assert_eq!(line.building, vec!["C:".to_owned()]);
+        assert_eq!(line.waiting, None);
+        assert_eq!(
+            instant_line(&InstantStatus::default(), 0).count,
+            InstantCount::Unknown
+        );
+
+        let demoted = InstantStatus {
+            total: Some(5),
+            demotion: Some(Demotion {
+                reason: DemotionReason::NoService,
+                narrowed_to_folder: true,
+            }),
+            ..InstantStatus::default()
+        };
+        let line = instant_line(&demoted, 7);
+        assert_eq!(line.count, InstantCount::Found(7));
+        assert!(line.demotion.is_some());
+
+        let waiting = InstantStatus {
+            unavailable: Some(Unavailable::Disconnected),
+            ..InstantStatus::default()
+        };
+        assert_eq!(instant_line(&waiting, 0).waiting, Some(Waiting::NoAnswer));
+    }
+
+    #[test]
+    fn 틀린_범위는_글자_경계로_맞춰_자른다() {
+        assert_eq!(wrong_part("보고서 <초안", &(10..11)), Some("<"));
+        assert_eq!(wrong_part("보고서", &(1..4)), Some("보고"));
+        assert_eq!(wrong_part("abc", &(5..9)), None);
+        assert_eq!(wrong_part("abc", &(1..1)), None);
+    }
+
+    #[test]
+    fn 목록_끝_가까이_스크롤하면_이어_받는다() {
+        // 100행, 행 24, 보이는 높이 240.
+        assert!(!near_end(0.0, 240.0, 24.0, 100, 10));
+        assert!(near_end(2000.0, 240.0, 24.0, 100, 10));
+        assert!(near_end(0.0, 240.0, 24.0, 5, 10));
+        assert!(!near_end(0.0, 240.0, 0.0, 5, 10));
     }
 }

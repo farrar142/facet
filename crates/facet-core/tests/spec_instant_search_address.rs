@@ -29,7 +29,6 @@ fn folder_pairs() -> Vec<(String, Location)> {
 }
 
 #[test]
-#[ignore = "#226"]
 fn 모든_볼륨_즉시_검색_위치의_경로_조각은_검색어_하나뿐이다() {
     let location = Location::instant_search_results(folder(), "보고서 ext:xlsx", false);
     let segments = pairs(provider_for(&location).segments(&location));
@@ -41,7 +40,6 @@ fn 모든_볼륨_즉시_검색_위치의_경로_조각은_검색어_하나뿐이
 }
 
 #[test]
-#[ignore = "#226"]
 fn 현재_폴더_아래만_즉시_검색_위치는_그_폴더_조각_뒤에_검색어가_온다() {
     let location = Location::instant_search_results(folder(), "보고서", true);
     let mut expected = folder_pairs();
@@ -51,7 +49,6 @@ fn 현재_폴더_아래만_즉시_검색_위치는_그_폴더_조각_뒤에_검�
 }
 
 #[test]
-#[ignore = "#226"]
 fn 이름_검색과_내용_검색_결과_위치의_경로_조각은_그대로다() {
     let name = Location::search_results(folder(), "보고서");
     let mut expected = folder_pairs();

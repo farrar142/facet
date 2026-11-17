@@ -625,6 +625,63 @@ pub fn search_error_text(query: &str, error: &facet_core::window::SearchError) -
     }
 }
 
+/// 즉시 검색 상태 줄 글자: 전체 개수(상한이면 그렇게)·「덜 찼을 수 있음」, 강등이면 「인덱스 없음 · 실시간 탐색」과 까닭.
+pub fn instant_status_text(line: &crate::search_bar::InstantLine) -> String {
+    use crate::search_bar::{InstantCount, Waiting};
+    use facet_core::instant_search::DemotionReason;
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(demotion) = line.demotion {
+        parts.push("인덱스 없음 · 실시간 탐색".to_owned());
+        parts.push(
+            match demotion.reason {
+                DemotionReason::NoService => "서비스 없음",
+                DemotionReason::VersionMismatch => "서비스 버전이 다름",
+                DemotionReason::VolumeNotIndexed => "이 볼륨은 인덱스 대상 아님",
+            }
+            .to_owned(),
+        );
+        if demotion.narrowed_to_folder {
+            parts.push("현재 폴더로 좁힘".to_owned());
+        }
+    } else if let Some(waiting) = line.waiting {
+        parts.push(
+            match waiting {
+                Waiting::Connecting => "서비스에 연결하는 중…",
+                Waiting::NoAnswer => "서비스가 답하지 않음",
+            }
+            .to_owned(),
+        );
+    }
+    match line.count {
+        InstantCount::Unknown => {}
+        InstantCount::Total { total, upper_bound } => parts.push(if upper_bound {
+            format!("최대 {total}개 (접근 권한으로 줄 수 있음)")
+        } else {
+            format!("{total}개")
+        }),
+        InstantCount::Found(found) => parts.push(format!("{found}개 찾음")),
+    }
+    if !line.building.is_empty() {
+        parts.push(format!(
+            "덜 찼을 수 있음 (인덱스 만드는 중: {})",
+            line.building.join(", ")
+        ));
+    }
+    parts.join(" · ")
+}
+
+/// 즉시 검색 문법 오류 글자: 틀린 곳(글자 순서)과 까닭, 틀린 글자 조각.
+pub fn instant_problem_text(query: &str, error: &facet_core::query_syntax::ParseError) -> String {
+    let base = search_error_text(
+        query,
+        &facet_core::window::SearchError::Syntax(error.clone()),
+    );
+    match crate::search_bar::wrong_part(query, &error.range) {
+        Some(part) => format!("{base} — 「{part}」"),
+        None => base,
+    }
+}
+
 /// 운영 체제가 준 오류 문장과 코드(HRESULT)를 한 글자로: `메시지 (0x80070005)`.
 /// 문장은 운영 체제의 언어로 오므로 번역하지 않는다.
 pub fn os_error_detail(message: &str, code: i32) -> String {
@@ -634,6 +691,50 @@ pub fn os_error_detail(message: &str, code: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 즉시_검색_상태_글자() {
+        use crate::search_bar::{InstantCount, InstantLine};
+        use facet_core::instant_search::{Demotion, DemotionReason};
+        let base = InstantLine {
+            count: InstantCount::Total {
+                total: 12,
+                upper_bound: false,
+            },
+            building: Vec::new(),
+            waiting: None,
+            demotion: None,
+        };
+        assert_eq!(instant_status_text(&base), "12개");
+        let upper = InstantLine {
+            count: InstantCount::Total {
+                total: 9,
+                upper_bound: true,
+            },
+            building: vec!["C:".to_owned()],
+            ..base.clone()
+        };
+        let text = instant_status_text(&upper);
+        assert!(
+            text.contains("최대 9개") && text.contains("덜 찼을 수 있음"),
+            "{text}"
+        );
+        let demoted = InstantLine {
+            count: InstantCount::Found(3),
+            demotion: Some(Demotion {
+                reason: DemotionReason::VolumeNotIndexed,
+                narrowed_to_folder: true,
+            }),
+            ..base
+        };
+        let text = instant_status_text(&demoted);
+        assert!(text.starts_with("인덱스 없음 · 실시간 탐색"), "{text}");
+        assert!(
+            text.contains("인덱스 대상 아님") && text.contains("현재 폴더로 좁힘"),
+            "{text}"
+        );
+        assert!(text.contains("3개 찾음"), "{text}");
+    }
 
     #[test]
     fn 탐색_상태_줄_글자() {

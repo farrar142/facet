@@ -110,6 +110,9 @@ export struct PanelData {
     content-results: bool,
     search-status: string,
     search-running: bool,
+    // 즉시 검색 결과인가(범위 전환을 보인다), 「현재 폴더 아래만」이 켜졌는가.
+    instant: bool,
+    instant-under: bool,
     selected-count: int,
     selected-size: string,
 }
@@ -1144,6 +1147,9 @@ component SearchBar inherits Rectangle {
     callback submit(string);
     callback escape();
     callback mode-changed();
+    // 「이름」 입력이 바뀜(한글은 조합이 끝난 글자, 즉시 검색이 받는다), 아래 화살표(결과 목록으로).
+    callback edited(string);
+    callback down();
 
     height: problem == "" ? 28px : 48px;
     background: Palette.background;
@@ -1170,9 +1176,16 @@ component SearchBar inherits Rectangle {
                 accepted => {
                     root.submit(self.text);
                 }
+                edited => {
+                    root.edited(self.text);
+                }
                 key-pressed(event) => {
                     if (event.text == Key.Escape) {
                         root.escape();
+                        return accept;
+                    }
+                    if (event.text == Key.DownArrow) {
+                        root.down();
                         return accept;
                     }
                     reject
@@ -1399,6 +1412,10 @@ component PanelView inherits Rectangle {
     callback search-submit(string);
     callback cancel-search();
     callback stop-search();
+    callback search-edited(string);
+    callback search-down();
+    callback search-under();
+    callback scrolled();
 
     // 활성 패널의 테두리. 패널이 하나면 그리지 않는다.
     border-width: root.split ? 2px : 0px;
@@ -1639,6 +1656,13 @@ component PanelView inherits Rectangle {
                 root.search-submit(text);
                 root.focus-keys();
             }
+            edited(text) => {
+                root.search-edited(text);
+            }
+            down => {
+                root.search-down();
+                root.focus-keys();
+            }
             escape => {
                 root.cancel-search();
                 root.focus-keys();
@@ -1702,6 +1726,22 @@ component PanelView inherits Rectangle {
                     overflow: elide;
                     vertical-alignment: center;
                     color: Palette.foreground;
+                }
+                if root.data.instant: Rectangle {
+                    width: 132px;
+                    border-width: 1px;
+                    border-radius: 3px;
+                    border-color: Palette.border;
+                    Text {
+                        text: root.data.instant-under ? @tr("☑ 현재 폴더 아래만") : @tr("☐ 현재 폴더 아래만");
+                        color: Palette.foreground;
+                    }
+                    TouchArea {
+                        clicked => {
+                            root.activate();
+                            root.search-under();
+                        }
+                    }
                 }
                 if root.data.search-running: Rectangle {
                     width: 52px;
@@ -1804,6 +1844,9 @@ component PanelView inherits Rectangle {
             list := ListView {
                 y: 0;
                 height: floor(parent.height / root.row-height) * root.row-height;
+                changed viewport-y => {
+                    root.scrolled();
+                }
                 // 내용 높이에 빈 곳 한 행 높이를 더한다: 꽉 찬 목록도 끝까지 넘기면 아래 빈 곳 TouchArea가 닿는다.
                 content-height: root.rows.length * root.row-height + root.row-height;
                 for row[i] in root.rows: Rectangle {
@@ -2505,6 +2548,10 @@ export component AppWindow inherits Window {
     callback search-submit(string);
     callback cancel-search();
     callback stop-search();
+    callback search-edited(string);
+    callback search-down();
+    callback search-under();
+    callback scrolled(int);
 
     // 명령 팔레트: 글자가 바뀌었다(검색), 화살표(1·-1)로 골랐다, 줄을 실행한다(참이면 실행했다. 꺼진 명령이면 거짓),
     // 닫는다.
@@ -2828,6 +2875,18 @@ export component AppWindow inherits Window {
             stop-search => {
                 root.stop-search();
             }
+            search-edited(text) => {
+                root.search-edited(text);
+            }
+            search-down => {
+                root.search-down();
+            }
+            search-under => {
+                root.search-under();
+            }
+            scrolled => {
+                root.scrolled(0);
+            }
         }
         // 패널 사이 경계: 끌어 분할 비율을 바꾸고, 두 번 누르면 반반으로 맞춘다.
         if root.split: Rectangle {
@@ -2995,6 +3054,18 @@ export component AppWindow inherits Window {
             }
             stop-search => {
                 root.stop-search();
+            }
+            search-edited(text) => {
+                root.search-edited(text);
+            }
+            search-down => {
+                root.search-down();
+            }
+            search-under => {
+                root.search-under();
+            }
+            scrolled => {
+                root.scrolled(1);
             }
         }
     }
