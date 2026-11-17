@@ -94,7 +94,6 @@ fn names(presets: &Presets) -> Vec<&str> {
 }
 
 #[test]
-#[ignore = "#282"]
 fn 모든_규칙_종류가_저장한_뒤_읽어도_그대로다() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("rename-presets.toml");
@@ -123,7 +122,6 @@ fn 모든_규칙_종류가_저장한_뒤_읽어도_그대로다() {
 }
 
 #[test]
-#[ignore = "#282"]
 fn 파일은_버전과_묶음_이름과_규칙_종류가_보이는_toml이다() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("rename-presets.toml");
@@ -160,7 +158,6 @@ fn 파일은_버전과_묶음_이름과_규칙_종류가_보이는_toml이다() 
 }
 
 #[test]
-#[ignore = "#282"]
 fn 같은_이름으로_다시_저장하면_그_묶음의_규칙이_바뀌고_빈_이름은_거부한다() {
     let mut presets = Presets::new();
     assert!(presets.presets().is_empty());
@@ -190,7 +187,6 @@ fn 같은_이름으로_다시_저장하면_그_묶음의_규칙이_바뀌고_빈
 }
 
 #[test]
-#[ignore = "#282"]
 fn 이름을_바꾸고_지운다() {
     let mut presets = Presets::new();
     presets.save_preset("가", replace("1")).unwrap();
@@ -230,7 +226,6 @@ fn 이름을_바꾸고_지운다() {
 }
 
 #[test]
-#[ignore = "#282"]
 fn 마지막에_쓴_규칙은_묶음_목록에_나오지_않고_저장한_뒤에도_그대로다() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("rename-presets.toml");
@@ -311,7 +306,6 @@ mode = "title"
 "#;
 
 #[test]
-#[ignore = "#282"]
 fn 깨진_묶음은_건너뛰고_까닭을_남기며_나머지는_읽힌다() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("rename-presets.toml");
@@ -347,7 +341,6 @@ fn 깨진_묶음은_건너뛰고_까닭을_남기며_나머지는_읽힌다() {
 }
 
 #[test]
-#[ignore = "#282"]
 fn 다시_저장해도_깨진_묶음은_파일에서_사라지지_않는다() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("rename-presets.toml");
@@ -380,7 +373,6 @@ fn 다시_저장해도_깨진_묶음은_파일에서_사라지지_않는다() {
 }
 
 #[test]
-#[ignore = "#282"]
 fn 파일이_없으면_missing이고_아무_파일도_만들지_않는다() {
     let dir = TempDir::new().unwrap();
     let loaded = rename_presets::load(&dir.path().join("rename-presets.toml"));
@@ -389,7 +381,6 @@ fn 파일이_없으면_missing이고_아무_파일도_만들지_않는다() {
 }
 
 #[test]
-#[ignore = "#282"]
 fn 통째로_깨진_파일은_옆에_남기고_broken이다() {
     let cases = [
         ("TOML 아님", "version = 1\n[[preset]\nname = "),
@@ -436,7 +427,6 @@ fn 통째로_깨진_파일은_옆에_남기고_broken이다() {
 }
 
 #[test]
-#[ignore = "#282"]
 fn 저장은_옆_임시_파일을_거치고_폴더가_없으면_만든다() {
     let dir = TempDir::new().unwrap();
     let path = dir
@@ -468,7 +458,6 @@ fn 저장은_옆_임시_파일을_거치고_폴더가_없으면_만든다() {
 }
 
 #[test]
-#[ignore = "#282"]
 fn 파일_자리는_appdata_아래_facet_폴더다() {
     let appdata = PathBuf::from("C:/Users/사용자/AppData/Roaming");
     let given = appdata.clone();
@@ -488,7 +477,6 @@ fn 파일_자리는_appdata_아래_facet_폴더다() {
 }
 
 #[test]
-#[ignore = "#282"]
 fn glossary에_규칙_묶음이_있다() {
     let glossary = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../GLOSSARY.md");
     let text = fs::read_to_string(glossary).unwrap();
