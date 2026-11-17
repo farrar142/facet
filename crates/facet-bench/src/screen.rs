@@ -12,8 +12,8 @@ use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use facet_core::measure::{
-    ENV_MENU, ENV_OPEN, ENV_OUT, ENV_RENAME, ENV_SCROLL_ROWS, ENV_SEARCH, ENV_START_US,
-    ENV_WINDOWS, ScreenReport,
+    ENV_INSTANT, ENV_MENU, ENV_OPEN, ENV_OUT, ENV_RENAME, ENV_SCROLL_ROWS, ENV_SEARCH,
+    ENV_START_US, ENV_WINDOWS, ScreenReport,
 };
 
 /// 콜드 스타트 통과 기준: 중앙값이 이보다 짧아야 한다.
@@ -48,10 +48,10 @@ pub const SEARCH_FIRST_LIMIT: Duration = Duration::from_millis(100);
 /// 하나가 맞으므로 시험 폴더에 항목이 하나라도 있으면 반드시 결과가 있다(실시간 탐색 벤치마크와 같은 조각).
 pub const SEARCH_QUERY: &str = "보고서";
 
-/// #227: 「즉시 검색 글자 입력부터 결과 첫 화면까지」 통과 기준(중앙값 50ms 미만).
+/// 「즉시 검색 글자 입력부터 결과 첫 화면까지」 통과 기준(중앙값 50ms 미만).
 pub const INSTANT_FIRST_LIMIT: Duration = Duration::from_millis(50);
 
-/// #227: 즉시 검색 첫 결과를 잴 때 넘기는 질의 글자(시험 폴더 0번 항목에 맞음).
+/// 즉시 검색 첫 결과를 잴 때 넘기는 질의 글자(시험 폴더 0번 항목에 맞음).
 pub const INSTANT_QUERY: &str = "보고서";
 
 /// 프레임 시간 통과 기준: 최악값이 한 프레임 시간의 이 배수 이하여야 한다.
@@ -194,7 +194,7 @@ pub struct ScreenResult {
     pub menus: Vec<Duration>,
     /// 실시간 탐색을 시작해 첫 결과가 든 프레임까지(회차마다 하나).
     pub searches: Vec<Duration>,
-    /// #227: 즉시 검색 글자를 넘겨 첫 결과가 든 프레임까지(회차마다 하나).
+    /// 즉시 검색 글자를 넘겨 첫 결과가 든 프레임까지(회차마다 하나).
     pub instant_searches: Vec<Duration>,
     /// 스크롤하는 동안의 프레임 시간들(스크롤 회차 전체).
     pub frames: Vec<Duration>,
@@ -224,7 +224,7 @@ pub struct Verdict {
     pub search_median: Duration,
     pub search_worst: Duration,
     pub search_pass: bool,
-    /// #227: 즉시 검색 첫 결과 중앙값·최악값·통과 여부.
+    /// 즉시 검색 첫 결과 중앙값·최악값·통과 여부.
     pub instant_median: Duration,
     pub instant_worst: Duration,
     pub instant_pass: bool,
@@ -247,6 +247,7 @@ impl Verdict {
             && self.rename_pass
             && self.menu_pass
             && self.search_pass
+            && self.instant_pass
             && self.frame_pass
     }
 }
@@ -260,6 +261,7 @@ impl ScreenResult {
         let rename_median = median(&self.renames);
         let menu_median = median(&self.menus);
         let search_median = median(&self.searches);
+        let instant_median = median(&self.instant_searches);
         let frame_worst = worst(&self.frames);
         let frame_worst_limit = frame_budget(self.spec.refresh_hz).mul_f64(FRAME_WORST_FACTOR);
         Verdict {
@@ -281,9 +283,9 @@ impl ScreenResult {
             search_median,
             search_worst: worst(&self.searches),
             search_pass: !self.searches.is_empty() && search_median < SEARCH_FIRST_LIMIT,
-            instant_median: Duration::ZERO, // #227
-            instant_worst: Duration::ZERO,  // #227
-            instant_pass: false,            // #227
+            instant_median,
+            instant_worst: worst(&self.instant_searches),
+            instant_pass: !self.instant_searches.is_empty() && instant_median < INSTANT_FIRST_LIMIT,
             frame_median: median(&self.frames),
             frame_worst,
             frame_worst_limit,
@@ -426,6 +428,19 @@ impl ScreenResult {
         );
         let _ = writeln!(
             t,
+            "즉시 검색 첫 결과 중앙값 ({}회)  {:<10}  < {}ms                   {}",
+            self.instant_searches.len(),
+            ms(v.instant_median),
+            INSTANT_FIRST_LIMIT.as_millis(),
+            mark(v.instant_pass)
+        );
+        let _ = writeln!(
+            t,
+            "즉시 검색 첫 결과 최악값  {:<10}  (참고)",
+            ms(v.instant_worst)
+        );
+        let _ = writeln!(
+            t,
             "프레임 시간 중앙값        {:<10}  (참고: 한 프레임 {})",
             ms(v.frame_median),
             ms(frame_budget(self.spec.refresh_hz))
@@ -536,6 +551,15 @@ impl ScreenResult {
         let _ = writeln!(j, "    \"limit_ms\": {},", SEARCH_FIRST_LIMIT.as_millis());
         let _ = writeln!(j, "    \"pass\": {}", v.search_pass);
         let _ = writeln!(j, "  }},");
+        let _ = writeln!(j, "  \"instant_search_first_result\": {{");
+        let _ = writeln!(j, "    \"query\": {},", json_string(INSTANT_QUERY));
+        let _ = writeln!(j, "    \"index_items\": {INDEX_COUNT},");
+        let _ = writeln!(j, "    \"runs_ms\": [{}],", list(&self.instant_searches));
+        let _ = writeln!(j, "    \"median_ms\": {},", ms(v.instant_median));
+        let _ = writeln!(j, "    \"worst_ms\": {},", ms(v.instant_worst));
+        let _ = writeln!(j, "    \"limit_ms\": {},", INSTANT_FIRST_LIMIT.as_millis());
+        let _ = writeln!(j, "    \"pass\": {}", v.instant_pass);
+        let _ = writeln!(j, "  }},");
         let _ = writeln!(j, "  \"scroll\": {{");
         let _ = writeln!(j, "    \"rows_per_frame\": {},", self.scroll_rows);
         let _ = writeln!(j, "    \"runs\": {},", self.scroll_runs);
@@ -601,6 +625,7 @@ pub fn run_app(
         .env_remove(ENV_RENAME)
         .env_remove(ENV_MENU)
         .env_remove(ENV_SEARCH)
+        .env_remove(ENV_INSTANT)
         .stdin(Stdio::null());
     if let Some(open) = open {
         command.env(ENV_OPEN, open);
@@ -633,6 +658,7 @@ pub fn run_app_rename(
         .env(ENV_RENAME, format!("{from}|{to}"))
         .env_remove(ENV_MENU)
         .env_remove(ENV_SEARCH)
+        .env_remove(ENV_INSTANT)
         .stdin(Stdio::null());
     run_to_report(command, &out, timeout)
 }
@@ -656,6 +682,7 @@ pub fn run_app_menu(app: &Path, folder: &Path, timeout: Duration) -> io::Result<
         .env_remove(ENV_RENAME)
         .env(ENV_MENU, "1")
         .env_remove(ENV_SEARCH)
+        .env_remove(ENV_INSTANT)
         .stdin(Stdio::null());
     run_to_report(command, &out, timeout)
 }
@@ -684,6 +711,7 @@ pub fn run_app_search(
         .env_remove(ENV_RENAME)
         .env_remove(ENV_MENU)
         .env(ENV_SEARCH, query)
+        .env_remove(ENV_INSTANT)
         .stdin(Stdio::null());
     run_to_report(command, &out, timeout)
 }
@@ -700,19 +728,143 @@ pub fn search_frame(report: &ScreenReport) -> Result<Duration, String> {
     Ok(frame)
 }
 
-/// #227: 즉시 검색 첫 결과 측정의 보고에서 잰 시간을 꺼낸다(시간 없음·결과 0·강등이면 오류).
-pub fn instant_frame(_report: &ScreenReport) -> Result<Duration, String> {
-    todo!("#227")
+/// 즉시 검색 첫 결과 측정의 보고에서 잰 시간을 꺼낸다. 시간이 없거나 그 프레임에 결과가 없거나 즉시 검색이 실시간
+/// 탐색으로 강등됐으면 오류다(인덱스가 아니라 강등한 탐색의 시간을 재면 안 된다).
+pub fn instant_frame(report: &ScreenReport) -> Result<Duration, String> {
+    if report.instant_demoted {
+        return Err("즉시 검색이 실시간 탐색으로 강등됐습니다".to_owned());
+    }
+    let frame = report
+        .instant_frame
+        .ok_or("앱이 즉시 검색 첫 결과 프레임 시각을 알리지 않았습니다")?;
+    if report.rows == 0 {
+        return Err("즉시 검색 첫 결과 프레임에 결과가 없습니다".to_owned());
+    }
+    Ok(frame)
 }
 
-/// #227: `folder`가 든 볼륨의 합성 인덱스(`folder` 아래 항목 `count`개)를 거르지 않는 백엔드로 `pipe`에 띄운다.
+/// 즉시 검색 첫 결과를 재는 합성 인덱스의 항목 수(spec #23의 속도 기준).
+pub const INDEX_COUNT: usize = 1_000_000;
+
+/// `folder`가 든 볼륨의 합성 인덱스(`folder` 아래 항목 `count`개, 이름은 시험 폴더와 같다)를 권한으로 거르지 않는
+/// 백엔드로 `pipe`에 띄운다. 볼륨은 「준비됨」이라 「모든 볼륨」 범위의 상태 질의가 인덱스 있음으로 본다.
 #[cfg(windows)]
 pub fn serve_instant_index(
-    _pipe: &str,
-    _folder: &Path,
-    _count: usize,
+    pipe: &str,
+    folder: &Path,
+    count: usize,
 ) -> io::Result<facet_indexer::pipe::PipeServer> {
-    todo!("#227")
+    use std::path::Component;
+    use std::sync::Arc;
+
+    use facet_indexer::sample::SampleBackend;
+    use facet_indexer::volumes::Volumes;
+
+    let folder = std::path::absolute(folder)?;
+    let mut components = folder.components();
+    let volume = match components.next() {
+        Some(Component::Prefix(prefix)) => prefix.as_os_str().to_string_lossy().into_owned(),
+        _ => {
+            return Err(io::Error::other(format!(
+                "드라이브 경로가 아닙니다: {}",
+                folder.display()
+            )));
+        }
+    };
+    const ROOT: u64 = 5;
+    let mut index = facet_index::Index::new(&volume, ROOT);
+    let mut parent = ROOT;
+    let mut next = 100u64;
+    let bad = |e: &dyn std::fmt::Debug| io::Error::other(format!("{e:?}"));
+    for component in components {
+        if let Component::Normal(name) = component {
+            index
+                .insert(facet_index::NewItem {
+                    number: next,
+                    parent,
+                    name: &name.to_string_lossy(),
+                    size: 0,
+                    modified: 133_000_000_000_000_000,
+                    attributes: facet_index::ATTRIBUTE_DIRECTORY,
+                })
+                .map_err(|e| bad(&e))?;
+            parent = next;
+            next += 1;
+        }
+    }
+    let first = 1_000_000u64;
+    for i in 0..count {
+        let entry = crate::test_folder_entry(i);
+        index
+            .insert(facet_index::NewItem {
+                number: first + i as u64,
+                parent,
+                name: &entry.name,
+                size: entry.size,
+                modified: 133_000_000_000_000_000 + i as u64 * 10_000_000,
+                attributes: if entry.is_folder {
+                    facet_index::ATTRIBUTE_DIRECTORY
+                } else {
+                    0x20
+                },
+            })
+            .map_err(|e| bad(&e))?;
+    }
+    let backend = Arc::new(SampleBackend(Volumes::with_index(&volume, index)));
+    facet_indexer::pipe::PipeServer::start(pipe, backend)
+}
+
+/// 즉시 검색 첫 결과를 잴 앱을 띄운다: `pipe`의 인덱서 서비스에 붙게 하고, 첫 화면 뒤 `query`를 검색창 입력과 같은
+/// 길로 넘겨 그때부터 결과가 든 첫 프레임까지를 앱이 알린다.
+pub fn run_app_instant(
+    app: &Path,
+    folder: &Path,
+    query: &str,
+    pipe: &str,
+    timeout: Duration,
+) -> io::Result<ScreenReport> {
+    let out = std::env::temp_dir().join(format!("facet-measure-{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&out);
+    let start_us = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_micros() as u64);
+    let mut command = Command::new(app);
+    command
+        .arg(folder)
+        .env_remove(ENV_WINDOWS)
+        .env(ENV_OUT, &out)
+        .env(ENV_START_US, start_us.to_string())
+        .env(ENV_SCROLL_ROWS, "0")
+        .env_remove(ENV_OPEN)
+        .env_remove(ENV_RENAME)
+        .env_remove(ENV_MENU)
+        .env_remove(ENV_SEARCH)
+        .env(ENV_INSTANT, query)
+        .env(facet_core::indexer_client::ENV_PIPE, pipe)
+        .stdin(Stdio::null());
+    run_to_report(command, &out, timeout)
+}
+
+/// 100만 항목 합성 인덱스 서버를 시험용 파이프로 띄우고 앱을 `plan.runs`번 띄워 즉시 검색 첫 결과를 잰다.
+#[cfg(windows)]
+fn measure_instant_searches(plan: &Plan<'_>) -> Result<Vec<Duration>, String> {
+    let pipe = format!(r"\\.\pipe\facet-measure-instant-{}", std::process::id());
+    eprintln!("합성 인덱스 {INDEX_COUNT}개 만드는 중…");
+    let folder = std::path::absolute(plan.folder).map_err(|e| e.to_string())?;
+    let _server = serve_instant_index(&pipe, &folder, INDEX_COUNT).map_err(|e| e.to_string())?;
+    let mut times = Vec::new();
+    for n in 1..=plan.runs {
+        eprintln!("즉시 검색 첫 결과 {n}/{}…", plan.runs);
+        let r = run_app_instant(plan.app, plan.folder, INSTANT_QUERY, &pipe, RUN_TIMEOUT)
+            .map_err(|e| e.to_string())?;
+        times.push(instant_frame(&r)?);
+    }
+    Ok(times)
+}
+
+#[cfg(not(windows))]
+fn measure_instant_searches(_plan: &Plan<'_>) -> Result<Vec<Duration>, String> {
+    Err("즉시 검색 측정은 Windows에서만 할 수 있습니다".to_owned())
 }
 
 /// 세션 복원 콜드 스타트를 잰다: 인자 없이 `session` 파일(`FACET_SESSION_PATH`)로 앱을 띄워 창 `windows`개의
@@ -739,6 +891,7 @@ pub fn run_app_session(
         .env_remove(ENV_RENAME)
         .env_remove(ENV_MENU)
         .env_remove(ENV_SEARCH)
+        .env_remove(ENV_INSTANT)
         .stdin(Stdio::null());
     run_to_report(command, &out, timeout)
 }
@@ -845,6 +998,7 @@ pub fn measure(plan: &Plan<'_>) -> Result<ScreenResult, String> {
             .map_err(|e| e.to_string())?;
         searches.push(search_frame(&r)?);
     }
+    let instant_searches = measure_instant_searches(plan)?;
     let mut frames = Vec::new();
     for n in 1..=plan.scroll_runs {
         eprintln!("스크롤 {n}/{}…", plan.scroll_runs);
@@ -867,7 +1021,7 @@ pub fn measure(plan: &Plan<'_>) -> Result<ScreenResult, String> {
         renames,
         menus,
         searches,
-        instant_searches: Vec::new(), // #227
+        instant_searches,
         frames,
         scroll_runs: plan.scroll_runs,
         spec,

@@ -199,7 +199,8 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     // 인덱서 서비스 연결(즉시 검색). 코어는 스스로 띄우지 않는다. 측정 모드는 띄우지 않는다. 연결은 뒤에서 열려 UI 스레드는
     // 기다리지 않고, 서비스가 없으면 즉시 검색이 실시간 탐색으로 강등한다.
-    if !measure::is_enabled() {
+    // 즉시 검색 측정(`ENV_INSTANT`)만 예외로 시험용 파이프(`ENV_PIPE`)에 붙는다.
+    if !measure::is_enabled() || measure::instant_enabled() {
         app.borrow_mut()
             .enable_indexer(facet_core::indexer_client::ClientOptions::default());
     }
@@ -1749,6 +1750,13 @@ impl View {
         self.search_submit(query)
     }
 
+    /// 측정 모드: `query`를 검색창 「이름」 입력과 같은 길(`search_edited`)로 즉시 검색에 넘긴다. 시작했으면 `true`.
+    fn measure_instant(&self, query: &str) -> bool {
+        self.ui.set_search_content(false);
+        self.search_edited(query);
+        self.app.borrow().active_tab().instant_error().is_none()
+    }
+
     /// 측정 모드: 활성 탭의 항목을 모두 선택하고 그 모습을 그린다. 그릴 것이 있으면 `true`.
     fn measure_select_all(&self) -> bool {
         self.app.borrow_mut().active_tab_mut().select_all();
@@ -1772,10 +1780,9 @@ impl View {
     fn mark_loaded(&self) {
         let app = self.app.borrow();
         if let Some(window) = app.window(self.window) {
-            measure::mark_loaded(
-                measure::window_key(self.window),
-                window.active_panel().active_tab().len(),
-            );
+            let tab = window.active_panel().active_tab();
+            measure::mark_demoted(tab.instant().is_some_and(|i| i.demotion.is_some()));
+            measure::mark_loaded(measure::window_key(self.window), tab.len());
         }
     }
 

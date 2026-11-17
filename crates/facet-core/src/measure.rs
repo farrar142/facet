@@ -13,6 +13,8 @@
 //! rename_frame_us 9 # [`ENV_RENAME`]의 이름바꾸기를 확정한 때부터 목록에 새 이름이 든 첫 프레임이 나올 때까지
 //! menu_frame_us 20000 # [`ENV_MENU`]의 오른쪽 메뉴를 열 때부터 메뉴가 그려진 첫 프레임이 나올 때까지
 //! search_frame_us 40000 # [`ENV_SEARCH`]의 실시간 탐색을 시작한 때부터 첫 결과가 든 프레임이 나올 때까지
+//! instant_frame_us 30000 # [`ENV_INSTANT`]의 즉시 검색 글자를 넘긴 때부터 첫 결과가 든 프레임이 나올 때까지
+//! instant_demoted 1  # 즉시 검색이 실시간 탐색으로 강등됐다(있으면 측정 실패)
 //! frame_us 16700     # 스크롤 중 프레임 하나의 시간(마이크로초). 프레임마다 한 줄
 //! ```
 
@@ -37,7 +39,10 @@ pub const ENV_MENU: &str = "FACET_MEASURE_MENU";
 /// 시작한 때부터 결과가 하나 이상 든 첫 프레임이 화면에 나갈 때까지를 잰다(`search_frame`). 이때 `rows`는 그
 /// 프레임의 결과 수이고 스크롤은 하지 않는다.
 pub const ENV_SEARCH: &str = "FACET_MEASURE_SEARCH";
-/// #227: 측정 모드에서 첫 화면 뒤 즉시 검색에 넘길 질의 글자.
+/// 질의 글자를 주면 첫 화면 뒤 그 글자를 검색창 입력과 같은 길(`App::set_instant_query`)로 즉시 검색에 넘기고, 넘긴 때부터
+/// 결과가 하나 이상 든 첫 프레임이 화면에 나갈 때까지를 잰다(`instant_frame`). 이때 `rows`는 그 프레임의 결과 수이고
+/// 스크롤은 하지 않는다. 인덱서 서비스 파이프 이름은 `indexer_client::ENV_PIPE`로 넘기고, 이 변수가 있을 때만 앱이
+/// 측정 모드에서도 인덱서 연결을 띄운다.
 pub const ENV_INSTANT: &str = "FACET_MEASURE_INSTANT";
 /// 2 이상이면 창이 이만큼 뜰 때까지를 첫 화면으로 잰다(세션 복원 콜드 스타트). 창마다 목록이 든 첫 프레임이
 /// 나온 뒤, 마지막 창의 첫 프레임까지의 시간이 `first_frame`이다. `rows`는 마지막 창이 읽은 항목 수이고 스크롤과
@@ -63,9 +68,9 @@ pub struct ScreenReport {
     pub menu_frame: Option<Duration>,
     /// 실시간 탐색을 시작한 때부터 첫 결과가 든 프레임이 창에 나올 때까지.
     pub search_frame: Option<Duration>,
-    /// #227: 즉시 검색 글자를 넘긴 때부터 첫 결과가 든 프레임까지(줄 `instant_frame_us`).
+    /// 즉시 검색 글자를 넘긴 때부터 첫 결과가 든 프레임까지(줄 `instant_frame_us`).
     pub instant_frame: Option<Duration>,
-    /// #227: 즉시 검색이 강등됐다(줄 `instant_demoted 1`).
+    /// 즉시 검색이 강등됐다(줄 `instant_demoted 1`).
     pub instant_demoted: bool,
     /// 스크롤하는 동안의 프레임 시간들.
     pub frames: Vec<Duration>,
@@ -113,6 +118,12 @@ impl ScreenReport {
                 d.as_micros()
             ));
         }
+        if let Some(d) = self.instant_frame {
+            out.push_str(&format!("instant_frame_us {}\n", d.as_micros()));
+        }
+        if self.instant_demoted {
+            out.push_str("instant_demoted 1\n");
+        }
         for f in &self.frames {
             out.push_str(&format!("frame_us {}\n", f.as_micros()));
         }
@@ -138,6 +149,8 @@ impl ScreenReport {
                 "rename_frame_us" => report.rename_frame = Some(Duration::from_micros(number)),
                 "menu_frame_us" => report.menu_frame = Some(Duration::from_micros(number)),
                 "search_frame_us" => report.search_frame = Some(Duration::from_micros(number)),
+                "instant_frame_us" => report.instant_frame = Some(Duration::from_micros(number)),
+                "instant_demoted" => report.instant_demoted = number != 0,
                 "frame_us" => report.frames.push(Duration::from_micros(number)),
                 _ => return Err(format!("모르는 항목: {line}")),
             }
@@ -160,8 +173,8 @@ mod tests {
             rename_frame: Some(Duration::from_micros(9_000)),
             menu_frame: Some(Duration::from_micros(20_000)),
             search_frame: Some(Duration::from_micros(40_000)),
-            instant_frame: None,
-            instant_demoted: false,
+            instant_frame: Some(Duration::from_micros(30_000)),
+            instant_demoted: true,
             frames: vec![Duration::from_micros(16_700), Duration::from_micros(33_000)],
         };
         assert_eq!(ScreenReport::parse(&report.to_text()), Ok(report));
