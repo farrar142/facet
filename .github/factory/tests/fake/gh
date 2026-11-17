@@ -5,6 +5,10 @@
 #   issue-<n>.json      the issue as the REST API returns it ({number, state, body, labels: [{name}]})
 #   comments-<n>.json   its comments ([{id, created_at, body}]); posting a comment appends to it
 #   fail-comments       if present, posting a comment fails
+#   sub-issues-<n>.json the sub-issues of issue <n> ([{number, state}]), default []
+#   pulls.json          pull requests ([{number, state, title, body, head: {ref}, base: {ref}}]); opening a
+#                       PR appends to it and writes issue-<pr>.json (with pull_request) for its labels
+#   fail-dispatch       if present, workflow dispatches fail
 #   calls.log           every call's arguments, one line each
 # New comments get created_at $FAKE_GH_NOW (default 2026-11-17T03:00:00Z).
 set -u
@@ -68,6 +72,36 @@ case "$path" in
     l=$(field 'labels[]') || fail "no label"
     jqf --arg l "$l" 'if any(.labels[]; .name == $l) then . else .labels += [{name: $l}] end' "$f" > "$f.new" && mv "$f.new" "$f"
     echo '[]'
+    ;;
+  repos/*/*/issues/*/sub_issues)
+    n=${path%/sub_issues}; n=${n##*/}
+    [ -f "$d/issue-$n.json" ] || fail "no issue #$n"
+    if [ -f "$d/sub-issues-$n.json" ]; then cat "$d/sub-issues-$n.json"; else echo '[]'; fi
+    ;;
+  repos/*/*/issues/*/labels/*)
+    [ "$method" = DELETE ] || fail "unsupported $method $path"
+    l=${path##*/}; n=${path%/labels/*}; n=${n##*/}
+    f="$d/issue-$n.json"
+    [ -f "$f" ] || fail "no issue #$n"
+    jqf --arg l "$l" '.labels |= map(select(.name != $l))' "$f" > "$f.new" && mv "$f.new" "$f"
+    echo '[]'
+    ;;
+  repos/*/*/pulls)
+    f="$d/pulls.json"
+    [ -f "$f" ] || echo '[]' > "$f"
+    if [ "$method" = GET ]; then jqf '[.[] | select(.state == "open")]' "$f"; exit 0; fi
+    n=$(jqf '500 + length' "$f")
+    jqf --argjson n "$n" --arg t "$(field title)" --arg b "$(field body)" --arg h "$(field head)" \
+      --arg base "$(field base)" \
+      '. + [{number: $n, state: "open", title: $t, body: $b, head: {ref: $h}, base: {ref: $base}}]' \
+      "$f" > "$f.new" && mv "$f.new" "$f"
+    jqf -n --argjson n "$n" '{number: $n, state: "open", body: "", labels: [], pull_request: {}}' \
+      > "$d/issue-$n.json"
+    jqf -n --argjson n "$n" '{number: $n}'
+    ;;
+  repos/*/*/actions/workflows/*/dispatches)
+    [ -e "$d/fail-dispatch" ] && fail "dispatch is broken"
+    exit 0
     ;;
   repos/*/*/issues/*)
     n=${path##*/}
