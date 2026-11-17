@@ -1,6 +1,8 @@
 //! 일괄 이름 바꾸기의 규칙과 미리 보기(순수 함수, 화면·파일 시스템·시계를 부르지 않음, ADR-0007).
 //!
-//! 규칙은 찾아 바꾸기 → 앞·뒤 붙이기 → 번호 매기기를 파일의 줄기(확장자 앞)에만 쓴다.
+//! S14a 규칙(`RenameRule`, `preview`)은 찾아 바꾸기 → 앞·뒤 붙이기 → 번호 매기기를 파일의 줄기(확장자 앞)에만 쓴다.
+//! 규칙 목록(`Rule`, `preview_rules`)은 켜진 규칙을 차례로 이름 부분·확장자·전체에 쓴다(`RenameRule::to_rules`가 S14a
+//! 규칙을 같은 결과의 목록으로 바꿈).
 //! 겹침 검사는 폴더별 해시 집합이라 항목·이름 수에 거의 비례한다.
 
 use std::collections::{HashMap, HashSet};
@@ -79,6 +81,7 @@ pub struct Preview {
     renames: usize,
     unchanged: usize,
     problems: usize,
+    rule_problems: Vec<RuleProblem>,
 }
 
 impl Preview {
@@ -178,16 +181,19 @@ fn split_stem(name: &str, is_folder: bool) -> (&str, &str) {
     }
 }
 
-/// 줄기에서 `find`(이미 접은 글자들)를 왼쪽부터 겹치지 않게 모두 `replace`로 바꾼다.
-fn replace_folded(stem: &str, find: &[char], replace: &str) -> String {
+/// 줄기에서 `find`(이미 접은 글자들)를 왼쪽부터 겹치지 않게 `replace`로 바꾼다(`all`이 거짓이면 첫 번째만).
+fn replace_folded(stem: &str, find: &[char], replace: &str, all: bool) -> String {
     let chars: Vec<char> = stem.chars().collect();
     let folded: Vec<char> = chars.iter().copied().map(fold).collect();
     let mut out = String::with_capacity(stem.len());
     let mut i = 0;
+    let mut replaced = false;
     while i < chars.len() {
-        if i + find.len() <= chars.len() && folded[i..i + find.len()] == *find {
+        if (all || !replaced) && i + find.len() <= chars.len() && folded[i..i + find.len()] == *find
+        {
             out.push_str(replace);
             i += find.len();
+            replaced = true;
         } else {
             out.push(chars[i]);
             i += 1;
@@ -208,7 +214,7 @@ fn new_name_for(
     let stem = if find.is_empty() {
         stem
     } else {
-        replaced = replace_folded(stem, find, &rule.replace);
+        replaced = replace_folded(stem, find, &rule.replace, true);
         &replaced
     };
     let mut out = String::with_capacity(item_name.len() + rule.prefix.len() + rule.suffix.len());
@@ -248,7 +254,17 @@ struct FolderNames {
 /// 규칙을 항목들에 써 본다(아무것도 바꾸지 않는다).
 pub fn preview(items: &[BatchItem], rule: &RenameRule, existing: &ExistingNames) -> Preview {
     let find: Vec<char> = rule.find.chars().map(fold).collect();
+    let entries = initial_entries(items, |original, is_folder, index| {
+        new_name_for(original, is_folder, index, rule, &find)
+    });
+    check(entries, existing, Vec::new())
+}
 
+/// 항목마다 새 이름을 만들고 이름 하나만 보는 상태(그대로·쓸 수 없음·유니코드 아님)를 붙인다.
+fn initial_entries(
+    items: &[BatchItem],
+    mut new_name: impl FnMut(&str, bool, usize) -> String,
+) -> Vec<PreviewEntry> {
     let mut entries: Vec<PreviewEntry> = Vec::with_capacity(items.len());
     for (index, item) in items.iter().enumerate() {
         let (new_name, status) = match item.name.to_str() {
@@ -257,7 +273,7 @@ pub fn preview(items: &[BatchItem], rule: &RenameRule, existing: &ExistingNames)
                 EntryStatus::Problem(BatchProblem::NotUnicode),
             ),
             Some(original) => {
-                let new_name = new_name_for(original, item.is_folder, index, rule, &find);
+                let new_name = new_name(original, item.is_folder, index);
                 let status = if new_name == original {
                     EntryStatus::Unchanged
                 } else if let Err(reason) = validate_name(&new_name) {
@@ -275,7 +291,15 @@ pub fn preview(items: &[BatchItem], rule: &RenameRule, existing: &ExistingNames)
             status,
         });
     }
+    entries
+}
 
+/// 폴더마다 겹침·남는 이름을 보고 수치를 센다.
+fn check(
+    mut entries: Vec<PreviewEntry>,
+    existing: &ExistingNames,
+    rule_problems: Vec<RuleProblem>,
+) -> Preview {
     let mut folders: HashMap<String, FolderNames> = HashMap::new();
     let mut keys: Vec<(String, String)> = Vec::with_capacity(entries.len());
     for entry in &entries {
@@ -324,6 +348,7 @@ pub fn preview(items: &[BatchItem], rule: &RenameRule, existing: &ExistingNames)
         renames,
         unchanged,
         problems,
+        rule_problems,
     }
 }
 
@@ -337,8 +362,12 @@ pub struct Rule {
 
 impl Rule {
     /// #272: 켜짐 `true`, 대상 `Target::Stem`인 규칙.
-    pub fn new(_kind: RuleKind) -> Rule {
-        todo!("#272")
+    pub fn new(kind: RuleKind) -> Rule {
+        Rule {
+            kind,
+            enabled: true,
+            target: Target::Stem,
+        }
     }
 }
 
@@ -436,23 +465,282 @@ pub enum RuleError {
 impl Preview {
     /// #272: 적용하지 못한 규칙들.
     pub fn rule_problems(&self) -> &[RuleProblem] {
-        todo!("#272")
+        &self.rule_problems
     }
 }
 
 impl RenameRule {
-    /// #272: 같은 결과를 내는 규칙 목록.
+    /// #272: 같은 결과를 내는 규칙 목록: 찾아 바꾸기(글자, 대소문자 무시, 모두) → 번호(증가 1) →
+    /// 앞에 붙이기(앞 0번째 자리 넣기) → 뒤에 붙이기(뒤 0번째 자리 넣기), 모두 이름 부분 대상.
+    /// 빈 찾을 글자·빈 붙일 글자·번호 없음은 규칙을 만들지 않는다.
     pub fn to_rules(&self) -> Vec<Rule> {
-        todo!("#272")
+        let mut rules = Vec::new();
+        if !self.find.is_empty() {
+            rules.push(Rule::new(RuleKind::Replace {
+                find: self.find.clone(),
+                replace: self.replace.clone(),
+                regex: false,
+                case_sensitive: false,
+                all: true,
+            }));
+        }
+        if let Some(n) = &self.numbering {
+            rules.push(Rule::new(RuleKind::Number {
+                start: n.start,
+                step: 1,
+                digits: n.digits,
+                place: match n.position {
+                    NumberPosition::Start => Place::Start,
+                    NumberPosition::End => Place::End,
+                },
+                separator: n.separator.clone(),
+            }));
+        }
+        if !self.prefix.is_empty() {
+            rules.push(Rule::new(RuleKind::Insert {
+                text: self.prefix.clone(),
+                from: Edge::Start,
+                at: 0,
+            }));
+        }
+        if !self.suffix.is_empty() {
+            rules.push(Rule::new(RuleKind::Insert {
+                text: self.suffix.clone(),
+                from: Edge::End,
+                at: 0,
+            }));
+        }
+        rules
+    }
+}
+
+/// 미리 보기 한 번 동안 규칙마다 한 번만 준비한 것(정규식은 여기서 한 번 컴파일).
+enum Prepared<'a> {
+    /// 적용하지 않음(꺼짐, 빈 찾을 글자, 틀린 정규식, 아직 없는 종류).
+    Skip,
+    /// 글자 그대로, 대소문자 무시: 접은 찾을 글자.
+    Folded {
+        find: Vec<char>,
+        replace: &'a str,
+        all: bool,
+    },
+    /// 글자 그대로, 대소문자 구분.
+    Exact {
+        find: &'a str,
+        replace: &'a str,
+        all: bool,
+    },
+    Regex {
+        regex: regex::Regex,
+        replace: &'a str,
+        all: bool,
+    },
+    Insert {
+        text: &'a str,
+        from: Edge,
+        at: usize,
+    },
+    Number {
+        start: u64,
+        step: u64,
+        digits: usize,
+        place: &'a Place,
+        separator: &'a str,
+    },
+}
+
+fn prepare<'a>(index: usize, rule: &'a Rule, problems: &mut Vec<RuleProblem>) -> Prepared<'a> {
+    if !rule.enabled {
+        return Prepared::Skip;
+    }
+    match &rule.kind {
+        RuleKind::Replace {
+            find,
+            replace,
+            regex,
+            case_sensitive,
+            all,
+        } => {
+            if find.is_empty() {
+                Prepared::Skip
+            } else if *regex {
+                match regex::RegexBuilder::new(find)
+                    .case_insensitive(!case_sensitive)
+                    .build()
+                {
+                    Ok(regex) => Prepared::Regex {
+                        regex,
+                        replace,
+                        all: *all,
+                    },
+                    Err(error) => {
+                        problems.push(RuleProblem {
+                            rule: index,
+                            error: RuleError::Regex(error.to_string()),
+                        });
+                        Prepared::Skip
+                    }
+                }
+            } else if *case_sensitive {
+                Prepared::Exact {
+                    find,
+                    replace,
+                    all: *all,
+                }
+            } else {
+                Prepared::Folded {
+                    find: find.chars().map(fold).collect(),
+                    replace,
+                    all: *all,
+                }
+            }
+        }
+        RuleKind::Insert { text, from, at } => Prepared::Insert {
+            text,
+            from: *from,
+            at: *at,
+        },
+        RuleKind::Number {
+            start,
+            step,
+            digits,
+            place,
+            separator,
+        } => Prepared::Number {
+            start: *start,
+            step: *step,
+            digits: *digits,
+            place,
+            separator,
+        },
+        // 지우기·대소문자·확장자 바꾸기·수정 날짜는 뒤 티켓이 채운다. 그때까지는 아무것도 하지 않는다.
+        RuleKind::Delete { .. }
+        | RuleKind::Case(_)
+        | RuleKind::Extension { .. }
+        | RuleKind::Date { .. } => Prepared::Skip,
+    }
+}
+
+/// `text`의 `char` 자리(`from` 끝에서 센 `at`번째, 길이보다 크면 반대쪽 끝)의 바이트 오프셋.
+fn char_offset(text: &str, from: Edge, at: usize) -> usize {
+    let len = text.chars().count();
+    let at = at.min(len);
+    let index = match from {
+        Edge::Start => at,
+        Edge::End => len - at,
+    };
+    text.char_indices()
+        .nth(index)
+        .map_or(text.len(), |(offset, _)| offset)
+}
+
+fn insert_at(text: &str, from: Edge, at: usize, insert: &str) -> String {
+    let offset = char_offset(text, from, at);
+    let mut out = String::with_capacity(text.len() + insert.len());
+    out.push_str(&text[..offset]);
+    out.push_str(insert);
+    out.push_str(&text[offset..]);
+    out
+}
+
+/// 대상 글자 하나에 준비한 규칙 하나를 쓴다(`index`는 항목 목록의 0부터 센 자리).
+fn apply_prepared(rule: &Prepared, text: &str, index: usize) -> String {
+    match rule {
+        Prepared::Skip => text.to_string(),
+        Prepared::Folded { find, replace, all } => replace_folded(text, find, replace, *all),
+        Prepared::Exact { find, replace, all } => {
+            if *all {
+                text.replace(find, replace)
+            } else {
+                text.replacen(find, replace, 1)
+            }
+        }
+        Prepared::Regex {
+            regex,
+            replace,
+            all,
+        } => {
+            if *all {
+                regex.replace_all(text, *replace).into_owned()
+            } else {
+                regex.replace(text, *replace).into_owned()
+            }
+        }
+        Prepared::Insert {
+            text: insert,
+            from,
+            at,
+        } => insert_at(text, *from, *at, insert),
+        Prepared::Number {
+            start,
+            step,
+            digits,
+            place,
+            separator,
+        } => {
+            let number = start.saturating_add(step.saturating_mul(index as u64));
+            let number = format!("{number:0>digits$}");
+            match place {
+                Place::Start => format!("{number}{separator}{text}"),
+                Place::End => format!("{text}{separator}{number}"),
+                Place::At { from, at } => {
+                    insert_at(text, *from, *at, &format!("{number}{separator}"))
+                }
+            }
+        }
     }
 }
 
 /// #272: 켜진 규칙을 차례로 적용한 미리 보기.
+///
+/// 이름 부분과 확장자는 처음 이름에서 한 번 가르고(마지막 `.`, `split_stem`) 규칙을 지나는 동안 그 경계를
+/// 지킨다: 이름 부분 대상 규칙은 이름 부분만, 확장자 대상 규칙은 점 뒤 글자만 바꾸므로 규칙이 이름 부분에
+/// 점을 넣어도 확장자가 바뀌지 않는다. 전체 대상 규칙은 이름 전체를 바꾸고 그 결과를 다시 가른다.
+/// 그 밖의 검사(쓸 수 없는 이름·겹침·남는 이름·그대로)는 `preview`와 같다.
 pub fn preview_rules(
-    _items: &[BatchItem],
-    _rules: &[Rule],
+    items: &[BatchItem],
+    rules: &[Rule],
     _context: &RuleContext,
-    _existing: &ExistingNames,
+    existing: &ExistingNames,
 ) -> Preview {
-    todo!("#272")
+    let mut problems = Vec::new();
+    let prepared: Vec<(Target, Prepared)> = rules
+        .iter()
+        .enumerate()
+        .map(|(index, rule)| (rule.target, prepare(index, rule, &mut problems)))
+        .filter(|(_, rule)| !matches!(rule, Prepared::Skip))
+        .collect();
+
+    let entries = initial_entries(items, |original, is_folder, index| {
+        let (stem, ext) = split_stem(original, is_folder);
+        let mut stem = stem.to_string();
+        // 점 뒤 글자. `None`이면 확장자가 없다.
+        let mut ext = ext.strip_prefix('.').map(str::to_string);
+        for (target, rule) in &prepared {
+            match target {
+                Target::Stem => stem = apply_prepared(rule, &stem, index),
+                Target::Extension => {
+                    if let Some(ext) = ext.as_mut() {
+                        *ext = apply_prepared(rule, ext, index);
+                    }
+                }
+                Target::Whole => {
+                    let whole = join(&stem, ext.as_deref());
+                    let whole = apply_prepared(rule, &whole, index);
+                    let (new_stem, new_ext) = split_stem(&whole, is_folder);
+                    stem = new_stem.to_string();
+                    ext = new_ext.strip_prefix('.').map(str::to_string);
+                }
+            }
+        }
+        join(&stem, ext.as_deref())
+    });
+    check(entries, existing, problems)
+}
+
+fn join(stem: &str, ext: Option<&str>) -> String {
+    match ext {
+        None => stem.to_string(),
+        Some(ext) => format!("{stem}.{ext}"),
+    }
 }
