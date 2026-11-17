@@ -18,6 +18,8 @@ pub const WIDTH: f32 = 260.0;
 pub const MAX_VISIBLE_ROWS: usize = 14;
 /// › 단추의 너비(Slint의 `Segment` 뒤 단추와 같다).
 pub const ARROW_WIDTH: f32 = 16.0;
+/// 주소창 맨 앞 › 단추의 조각 번호(#308). 조각 사이 › 단추는 0부터다.
+pub const ROOT_SEGMENT: usize = usize::MAX;
 
 /// 메뉴가 보이는 내용.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +34,8 @@ pub enum Content {
     Folders {
         folders: Vec<Candidate>,
         current: Option<usize>,
+        /// 사용자 홈 폴더 줄의 번호(맨 앞 › 메뉴만).
+        home: Option<usize>,
     },
 }
 
@@ -57,6 +61,16 @@ impl CrumbMenu {
             content: Content::Loading,
             selected: None,
         }
+    }
+
+    /// 패널 `panel`의 주소창 맨 앞 › 메뉴를 연다(#308). 나머지는 [`CrumbMenu::loading`]과 같다.
+    pub fn loading_root(panel: usize, id: SubfoldersId) -> CrumbMenu {
+        CrumbMenu::loading(panel, ROOT_SEGMENT, id)
+    }
+
+    /// 맨 앞 › 메뉴인가.
+    pub fn is_root(&self) -> bool {
+        self.segment == ROOT_SEGMENT
     }
 
     pub fn panel(&self) -> usize {
@@ -97,6 +111,7 @@ impl CrumbMenu {
             Ok(list) => Content::Folders {
                 folders: list.folders,
                 current: list.current,
+                home: list.home,
             },
         };
         true
@@ -121,6 +136,11 @@ impl CrumbMenu {
     /// `index`번 줄이 「다음 조각」 폴더(굵게)인가.
     pub fn is_current(&self, index: usize) -> bool {
         matches!(&self.content, Content::Folders { current: Some(c), .. } if *c == index)
+    }
+
+    /// `index`번 줄이 사용자 홈 폴더인가(맨 앞 › 메뉴).
+    pub fn is_home(&self, index: usize) -> bool {
+        matches!(&self.content, Content::Folders { home: Some(h), .. } if *h == index)
     }
 
     /// 메뉴가 보이는 줄 수.
@@ -366,6 +386,20 @@ mod tests {
         menu.step(1);
         assert_eq!(menu.selected(), Some(0));
         assert_eq!(menu.scroll_to_selected(900.0 * ROW_HEIGHT), 0.0);
+    }
+
+    #[test]
+    fn 맨_앞_메뉴는_홈_줄과_지금_드라이브를_알린다() {
+        let id = ids(1);
+        let mut menu = CrumbMenu::loading_root(1, id[0]);
+        assert!(menu.is_root());
+        assert_eq!((menu.panel(), menu.segment()), (1, ROOT_SEGMENT));
+        let mut l = list(&["C:", "D:", "me"], Some(1));
+        l.home = Some(2);
+        assert!(menu.receive(id[0], Some(Ok(l))));
+        assert!(menu.is_current(1) && !menu.is_current(2));
+        assert!(menu.is_home(2) && !menu.is_home(0));
+        assert!(!CrumbMenu::loading(0, 0, id[0]).is_root());
     }
 
     #[test]

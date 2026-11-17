@@ -1581,10 +1581,29 @@ component PanelView inherits Rectangle {
                 HorizontalLayout {
                     padding: 2px;
                     alignment: start;
+                    // 맨 앞 ›: 드라이브와 홈 폴더 메뉴(#308). 번호 -2. 조각이 없으면 그리지 않는다.
+                    if root.segments.length > 0: Rectangle {
+                        width: 16px;
+                        border-radius: 3px;
+                        background: root.crumb-open == -2 || root-arrow-touch.has-hover ? Palette.alternate-background : transparent;
+                        Text {
+                            text: "›";
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                            color: Palette.foreground.transparentize(40%);
+                        }
+                        root-arrow-touch := TouchArea {
+                            clicked => {
+                                root.activate();
+                                root.crumb-arrow(-2);
+                                root.focus-keys();
+                            }
+                        }
+                    }
                     for segment[i] in root.segments: HorizontalLayout {
                         Segment {
                             // 현재 폴더(마지막 조각)는 온전히 보인다. 자리가 모자라면 앞쪽(상위) 조각이 줄어든다.
-                            min-width: i == root.segments.length - 1 ? min(self.preferred-width, address-bar.width - 8px - 16px) : 0px;
+                            min-width: i == root.segments.length - 1 ? min(self.preferred-width, address-bar.width - 8px - 32px) : 0px;
                             text: segment;
                             drop-target: i == root.drop-segment;
                             geometry(x, w) => {
