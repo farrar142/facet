@@ -78,7 +78,6 @@ fn segment_at(segments: &[PathSegment], location: &Location) -> PathSegment {
 }
 
 #[test]
-#[ignore = "#303"]
 fn 하위_폴더_목록은_폴더만_자연_정렬로_담는다() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
@@ -110,7 +109,6 @@ fn 하위_폴더_목록은_폴더만_자연_정렬로_담는다() {
 }
 
 #[test]
-#[ignore = "#303"]
 fn 하위_폴더가_없으면_빈_목록이다() {
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("only-file.txt"), b"x").unwrap();
@@ -132,7 +130,6 @@ fn attrib(flag: &str, path: &Path) {
 
 #[cfg(windows)]
 #[test]
-#[ignore = "#303"]
 fn 숨김과_시스템_폴더는_숨김_보이기를_따른다() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
@@ -161,7 +158,6 @@ fn 숨김과_시스템_폴더는_숨김_보이기를_따른다() {
 }
 
 #[test]
-#[ignore = "#303"]
 fn 다음_조각_번호는_활성_탭_경로의_다음_폴더를_가리킨다() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
@@ -193,7 +189,6 @@ fn 다음_조각_번호는_활성_탭_경로의_다음_폴더를_가리킨다() 
 }
 
 #[test]
-#[ignore = "#303"]
 fn 다음_조각은_요청_때의_활성_탭을_따른다() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
@@ -210,7 +205,6 @@ fn 다음_조각은_요청_때의_활성_탭을_따른다() {
 }
 
 #[test]
-#[ignore = "#303"]
 fn 없는_폴더는_없음을_까닭으로_돌려준다() {
     let dir = TempDir::new().unwrap();
     let mut app = app_at(dir.path());
@@ -240,7 +234,6 @@ impl Drop for Denied {
 
 #[cfg(windows)]
 #[test]
-#[ignore = "#303"]
 fn 권한_없는_폴더는_권한_없음을_까닭으로_돌려준다() {
     let dir = TempDir::new().unwrap();
     let locked = dir.path().join("잠긴 폴더");
@@ -259,7 +252,6 @@ fn 권한_없는_폴더는_권한_없음을_까닭으로_돌려준다() {
 }
 
 #[test]
-#[ignore = "#303"]
 fn 늦게_온_앞선_요청의_결과는_목록_없이_온다() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
@@ -300,7 +292,6 @@ fn 늦게_온_앞선_요청의_결과는_목록_없이_온다() {
 }
 
 #[test]
-#[ignore = "#303"]
 fn 하위_폴더_1만_개여도_요청은_곧바로_돌아온다() {
     const COUNT: usize = 10_000;
     let dir = TempDir::new().unwrap();
@@ -330,7 +321,6 @@ fn 하위_폴더_1만_개여도_요청은_곧바로_돌아온다() {
 }
 
 #[test]
-#[ignore = "#303"]
 fn 검색_결과_위치에서는_검색어_조각만_요청이_없다() {
     let dir = TempDir::new().unwrap();
     let folder = dir.path().join("a");
@@ -366,7 +356,6 @@ fn 검색_결과_위치에서는_검색어_조각만_요청이_없다() {
 }
 
 #[test]
-#[ignore = "#303"]
 fn 검색_결과_위치의_다음_조각은_검색한_폴더까지다() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
@@ -390,7 +379,6 @@ fn 검색_결과_위치의_다음_조각은_검색한_폴더까지다() {
 }
 
 #[test]
-#[ignore = "#303"]
 fn 하위_폴더_이름은_디스크의_이름_그대로다() {
     let dir = TempDir::new().unwrap();
     fs::create_dir(dir.path().join("MiXeD 대소문자")).unwrap();

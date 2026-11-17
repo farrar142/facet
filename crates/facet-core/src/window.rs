@@ -98,6 +98,7 @@ use crate::tab::{
 use crate::watch::ChangeBatch;
 use crate::work_area::WorkArea;
 use crate::{Candidate, Location, provider_for};
+use crate::{FileSystemProvider, ListError, Provider};
 
 /// 닫은 탭 목록에 남기는 최근 탭 수. 넘으면 가장 오래된 탭이 빠진다.
 pub const CLOSED_TABS_LIMIT: usize = 20;
@@ -382,6 +383,12 @@ enum Message {
         id: BatchPreviewId,
         preview: Option<Preview>,
     },
+    /// 하위 폴더 목록 일꾼의 결과(#303).
+    Subfolders {
+        tab: TabId,
+        id: SubfoldersId,
+        list: Result<Subfolders, SubfoldersError>,
+    },
     Edited {
         tab: TabId,
         result: Result<Edited, EditError>,
@@ -475,6 +482,42 @@ pub enum SubfoldersError {
     PermissionDenied,
     NotAFolder,
     Io(std::io::ErrorKind),
+}
+
+/// 폴더 하나의 하위 폴더를 자연 정렬로 읽는다. 숨김·시스템 속성 폴더는 `show_hidden`이 꺼져 있으면 뺀다.
+fn read_subfolders(
+    path: &Path,
+    show_hidden: bool,
+    next: Option<&Location>,
+) -> Result<Subfolders, SubfoldersError> {
+    let location = Location::file_system(path);
+    let items = FileSystemProvider
+        .list(&location)
+        .map_err(|error| match error {
+            ListError::NotFound { .. } => SubfoldersError::NotFound,
+            ListError::PermissionDenied { .. } => SubfoldersError::PermissionDenied,
+            ListError::NotAFolder { .. } => SubfoldersError::NotAFolder,
+            ListError::Io { source, .. } => SubfoldersError::Io(source.kind()),
+        })?;
+    let mut folders: Vec<Candidate> = items
+        .into_iter()
+        .filter(|item| {
+            item.is_folder && (show_hidden || !(item.attributes.hidden || item.attributes.system))
+        })
+        .map(|item| Candidate {
+            location: Location::file_system(path.join(&item.name)),
+            name: item.name,
+        })
+        .collect();
+    folders.sort_by(|a, b| {
+        crate::details::compare_names(&a.name.to_string_lossy(), &b.name.to_string_lossy())
+    });
+    let current = next.and_then(|next| folders.iter().position(|f| &f.location == next));
+    Ok(Subfolders {
+        folders,
+        current,
+        home: None,
+    })
 }
 
 /// #292: 일괄 이름 바꾸기 미리 보기 요청의 번호.
@@ -715,6 +758,8 @@ pub struct App {
     /// 마지막 일괄 이름 바꾸기 미리 보기 요청의 번호([`App::request_batch_rename_preview`]). 일꾼이 보고 앞선 요청의
     /// 계산을 건너뛰고, 받을 때 앞선 요청의 결과를 버린다. 0은 요청 없음.
     batch_preview: Arc<AtomicU64>,
+    /// 하위 폴더 목록·맨 앞 목록 요청 번호(#303).
+    subfolders: Arc<AtomicU64>,
     outbox: Outbox,
     receiver: Receiver<Message>,
 }
@@ -923,6 +968,7 @@ impl App {
             indexer: None,
             follow_wake: None,
             batch_preview: Arc::default(),
+            subfolders: Arc::default(),
             outbox: Outbox {
                 sender,
                 waker: Arc::default(),
@@ -2104,6 +2150,17 @@ impl App {
                 let preview = preview.filter(|_| latest);
                 (tab, Update::BatchPreview { id, preview })
             }
+            Message::Subfolders { tab, id, list } => {
+                // 받기 전에 뒤 요청이 왔으면 목록을 버린다: 마지막 요청의 결과만 담는다.
+                let latest = self.subfolders.load(Ordering::SeqCst) == id.0;
+                (
+                    tab,
+                    Update::Subfolders {
+                        id,
+                        list: latest.then_some(list),
+                    },
+                )
+            }
             Message::Completed { tab: id, result } => {
                 let completion = result.id();
                 let candidates = self
@@ -2159,8 +2216,30 @@ impl App {
     }
 
     /// #303: 위치의 하위 폴더 목록을 일꾼 스레드에서 읽기 시작한다(실제 폴더가 아니면 `None`).
-    pub fn request_subfolders(&mut self, _location: &Location) -> Option<SubfoldersId> {
-        todo!("#303")
+    pub fn request_subfolders(&mut self, location: &Location) -> Option<SubfoldersId> {
+        let path = location.file_system_path()?.to_path_buf();
+        let tab = self.active_tab_id();
+        let show_hidden = self.active_tab().show_hidden();
+        let active = self.active_tab().location().clone();
+        let next = {
+            let segments = provider_for(&active).segments(&active);
+            segments
+                .iter()
+                .position(|segment| &segment.location == location)
+                .and_then(|i| segments.get(i + 1))
+                .map(|segment| segment.location.clone())
+        };
+        let id = SubfoldersId(self.subfolders.fetch_add(1, Ordering::SeqCst) + 1);
+        let outbox = self.outbox.clone();
+        let run = move || {
+            let list = read_subfolders(&path, show_hidden, next.as_ref());
+            outbox.send(Message::Subfolders { tab, id, list });
+        };
+        thread::Builder::new()
+            .name("facet-subfolders".into())
+            .spawn(run)
+            .expect("하위 폴더 일꾼 스레드를 만들지 못했다");
+        Some(id)
     }
 
     /// #305: 맨 앞 › 목록(드라이브와 홈 폴더)을 일꾼 스레드에서 만들기 시작한다.
