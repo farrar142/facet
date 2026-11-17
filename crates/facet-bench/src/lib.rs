@@ -1346,22 +1346,77 @@ pub fn measure_live_search(path: &Path, count: usize, runs: usize) -> Result<Mea
 /// #293: 일괄 이름 바꾸기 실행 벤치마크의 기본 파일 수(1만).
 pub const BATCH_RENAME_JOB_COUNT: usize = 10_000; // #293
 
-/// #293: 일괄 이름 바꾸기 실행 벤치마크의 로컬 기준.
-pub const BATCH_RENAME_JOB_TARGET: Duration = Duration::ZERO; // #293
+/// 일괄 이름 바꾸기 실행 벤치마크(10k 파일 같은 폴더 이름바꾸기)의 로컬 기준: 1초(파일당 0.1ms).
+///
+/// 작업은 항목마다 디스크 확인(원본 있음·새 이름 자리 비었음)과 이름 바꾸기 한 번씩이라 영구 삭제(1만 개
+/// 러너 중앙값 약 2초)와 같은 종류의 파일당 비용이다. GitHub 호스트 Windows 러너에서 재어 보니(2026-11-17,
+/// 릴리스 빌드, 5회) 중앙값 2.5초(2.1~3.5초)였고, 로컬 SSD는 더 빠르므로 기준은 1초로 둔다.
+pub const BATCH_RENAME_JOB_TARGET: Duration = Duration::from_secs(1);
 
-/// #293: 일괄 이름 바꾸기 실행 벤치마크의 CI 상한(기준의 10배).
-pub const BATCH_RENAME_JOB_LIMIT: Duration = Duration::ZERO; // #293
+/// 일괄 이름 바꾸기 실행 벤치마크의 CI 상한: 로컬 기준의 10배(10초, 파일당 1ms).
+pub const BATCH_RENAME_JOB_LIMIT: Duration = Duration::from_secs(10);
 
-/// #293: `root` 안에 파일 `count`개 폴더를 만들어 일괄 이름 바꾸기 작업으로 바꾸는 시간을 잰다.
+/// `root` 안에 파일 `count`개가 든 폴더를 만들어 작업 대기열의 일괄 이름 바꾸기 작업(끝남 사건까지)으로 모두
+/// 바꾸는 시간을 한 번 데운 뒤 `runs`번 잰다. 회차마다 폴더를 새로 만들고(재는 시간 밖), 끝나면(실패해도) 만든
+/// 폴더를 지운다. [`Measurement::item_count`]는 바꾼 항목 수다. Windows가 아니면 `Err`.
 pub fn measure_batch_rename_job(
-    _root: &Path,
-    _count: usize,
-    _runs: usize,
+    root: &Path,
+    count: usize,
+    runs: usize,
 ) -> Result<Measurement, String> {
-    todo!("#293")
+    use facet_core::job::{JobEvent, JobQueue, RenameItem};
+    use std::ffi::OsString;
+
+    if !cfg!(windows) {
+        return Err("일괄 이름 바꾸기 실행 벤치마크는 Windows에서만 잴 수 있습니다".into());
+    }
+    let folder = root.join("일괄 이름 바꾸기 시험");
+    let mut queue = JobQueue::new();
+    let mut once = || -> Result<Duration, String> {
+        let _ = fs::remove_dir_all(&folder);
+        fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+        let mut items = Vec::with_capacity(count);
+        for i in 0..count {
+            let from = format!("시험 {i:05}.txt");
+            fs::write(folder.join(&from), b"x").map_err(|e| format!("{from}: {e}"))?;
+            items.push(RenameItem {
+                folder: folder.clone(),
+                from: OsString::from(from),
+                to: OsString::from(format!("바뀐 시험 {i:05}.txt")),
+            });
+        }
+        let start = Instant::now();
+        let id = queue.batch_rename(items, 0);
+        let deadline = start + Duration::from_secs(30 * 60);
+        let summary = loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match queue.wait_event(left) {
+                Some(JobEvent::Finished { job, summary }) if job == id => break summary,
+                Some(_) => {}
+                None => return Err("일괄 이름 바꾸기 작업이 제때 끝나지 않았습니다".into()),
+            }
+        };
+        let elapsed = start.elapsed();
+        if !summary.failures.is_empty() || summary.items_renamed != count as u64 {
+            return Err(format!(
+                "일괄 이름 바꾸기 작업이 다 바꾸지 못했습니다(기대한 항목 {count}개): {summary:?}"
+            ));
+        }
+        Ok(elapsed)
+    };
+    let result = (|| {
+        once()?;
+        let times = (0..runs).map(|_| once()).collect::<Result<Vec<_>, _>>()?;
+        Ok(Measurement {
+            item_count: count,
+            times,
+        })
+    })();
+    let _ = fs::remove_dir_all(&folder);
+    result
 }
 
-/// #293: 중앙값이 `limit`을 넘으면 중앙값·상한(ms)을 담은 메시지.
-pub fn check_batch_rename_job_limit(_m: &Measurement, _limit: Duration) -> Result<(), String> {
-    todo!("#293")
+/// 중앙값이 `limit`을 넘으면 중앙값·상한(ms)을 담은 메시지.
+pub fn check_batch_rename_job_limit(m: &Measurement, limit: Duration) -> Result<(), String> {
+    check_median("일괄 이름 바꾸기 실행", m, limit)
 }
