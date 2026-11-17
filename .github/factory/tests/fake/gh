@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fake `gh` for the factory script tests: put this folder first on PATH.
 #
-# Only `gh api` is supported. State lives in $FAKE_GH:
+# `gh api` is supported, plus the `gh issue list` and `gh workflow run` calls of dispatch-next.sh (below).
 #   issue-<n>.json      the issue as the REST API returns it ({number, state, body, labels: [{name}]})
 #   comments-<n>.json   its comments ([{id, created_at, body}]); posting a comment appends to it
 #   fail-comments       if present, posting a comment fails
@@ -16,6 +16,52 @@ d=${FAKE_GH:?FAKE_GH is not set}
 printf '%s\n' "$*" >> "$d/calls.log"
 fail() { echo "fake gh: $*" >&2; exit 1; }
 jqf() { jq "$@" | tr -d '\r'; }
+
+# Calls of dispatch-next.sh (odin.sh tests, #252):
+#   gh issue list … --label <l> --json number [--jq <expr>]   open issues (not PRs) with label <l>
+#   gh workflow run <file> …                                  only logged (calls.log)
+#   gh api … --jq <expr>                                      the same call, filtered through jq -r
+case "${1:-}" in
+  issue)
+    [ "${2:-}" = list ] || fail "unsupported command: $*"
+    shift 2
+    label= expr=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --label) label=$2; shift 2 ;;
+        --jq) expr=$2; shift 2 ;;
+        --repo|--state|--limit|--json) shift 2 ;;
+        *) fail "unsupported issue list argument $1" ;;
+      esac
+    done
+    shopt -s nullglob
+    files=("$d"/issue-*.json)
+    if [ ${#files[@]} -eq 0 ]; then list='[]'; else
+      list=$(jqf -s --arg l "$label" \
+        '[.[] | select(.state == "open" and (has("pull_request") | not)
+          and ($l == "" or any(.labels[]; .name == $l))) | {number}]' "${files[@]}")
+    fi
+    if [ -n "$expr" ]; then printf '%s' "$list" | jqf -r "$expr"; else printf '%s\n' "$list"; fi
+    exit 0 ;;
+  workflow)
+    [ "${2:-}" = run ] || fail "unsupported command: $*"
+    [ -e "$d/fail-dispatch" ] && fail "dispatch is broken"
+    exit 0 ;;
+  api)
+    for a in "$@"; do
+      if [ "$a" = --jq ]; then
+        args=() expr= skip=false
+        for a in "$@"; do
+          if $skip; then expr=$a; skip=false
+          elif [ "$a" = --jq ]; then skip=true
+          else args+=("$a"); fi
+        done
+        out=$("$0" "${args[@]}") || exit 1
+        printf '%s' "$out" | jqf -r "$expr"
+        exit 0
+      fi
+    done ;;
+esac
 
 [ "${1:-}" = api ] || fail "unsupported command: $*"
 shift

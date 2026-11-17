@@ -99,6 +99,25 @@ mech_run
 eq "exit" 1 "$status"
 has "report" "crates/core/tests/other.rs" "$report"
 
+# Odin's stub of the contract (todo!("#7")) must be gone; another ticket's stub may stay.
+repo stub-left
+sed -i '/#\[ignore = "#7"\]/d' "$SPEC"
+printf 'pub fn seven() -> u32 {\n    todo!("#7")\n}\npub fn seventy() -> u32 {\n    todo!("#70")\n}\n' > crates/core/src/lib.rs
+commit
+mech_run
+eq "exit" 1 "$status"
+has "report" 'todo!("#7")` 스텁이 남아 있다' "$report"
+has "report names the file" "crates/core/src/lib.rs:2" "$report"
+lacks "another ticket's stub" '#70' "$report"
+
+repo stub-replaced
+sed -i '/#\[ignore = "#7"\]/d' "$SPEC"
+printf 'pub fn seven() -> u32 {\n    7\n}\npub fn eight() -> u32 {\n    todo!("#8")\n}\n' > crates/core/src/lib.rs
+commit
+mech_run
+eq "exit" 0 "$status"
+has "report" '기계 검사 통과' "$report"
+
 repo assertion-changed
 sed -i '/#\[ignore = "#7"\]/d; s/assert_eq!(core::seven(), 7);/assert_eq!(core::seven(), 0);/' "$SPEC"
 commit

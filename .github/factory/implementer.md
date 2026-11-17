@@ -16,6 +16,7 @@ The workflow around you has already created your branch. After you finish, it ru
 - Do exactly what the ticket's "What to build" and acceptance criteria ask. No scope beyond them: Verify sends back changes that the ticket does not ask for and that could break other features.
 - **Acceptance tests.** The ticket's acceptance tests already exist in `crates/<crate>/tests/spec_*.rs`, each switched off with `#[ignore = "#<n>"]` where `<n>` is your ticket. Find them with `git grep -n '#\[ignore = "#<n>"\]'`.
   - Delete exactly those `#[ignore = "#<n>"]` lines, all of them, and make the tests pass by implementing the behaviour.
+  - Odin stubbed the names of your ticket's 「계약」 so the tests compile: function bodies are `todo!("#<n>")`. Replace every one of them with the real implementation (`git grep -n 'todo!("#<n>")'`). Verify rejects the PR while any is left, mechanically.
   - Change no other line of any `spec_*.rs` file: not an assertion, not a name, not a test you think is wrong, not another ticket's `#[ignore = "#…"]`, and do not add tests to those files (put your own tests in other test files). Verify rejects the PR on any such change, mechanically.
   - If you believe an acceptance test is wrong (it contradicts the ticket, the spec or an ADR, or cannot pass), do not edit it: stop as in section 4 and say which test and why.
 - Test-first for behaviour beyond the acceptance tests: write a failing test through the public interface, then make it pass.

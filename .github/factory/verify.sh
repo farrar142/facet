@@ -9,7 +9,9 @@
 #                                           (crates/*/tests/spec_*.rs, `git diff <base>...HEAD`)
 #                                           only deletes `#[ignore = "#N"]` lines. Any other added,
 #                                           deleted or changed line (an assertion, a removed test,
-#                                           another ticket's ignore) is "the acceptance test changed".
+#                                           another ticket's ignore) is "the acceptance test changed";
+#                                        3. no `todo!("#N")` stub (Odin's placeholder for a name of
+#                                           ticket #N's contract) is left in any tracked *.rs file.
 #   verify.sh sendback <N> <PR> <file>   send ticket #N back: comment `<!-- factory-sendback -->` and the
 #                                        reason (<file>) on the ticket, close the PR and delete its
 #                                        branch, drop `in-progress`. On the ticket's second send-back
@@ -42,12 +44,22 @@ usage() {
 # --- mech ----------------------------------------------------------------------------------------
 
 mech() {
-  local n=$1 base=$2 attr problems=0 left line file
+  local n=$1 base=$2 attr stub problems=0 left line file
   attr="#[ignore = \"#$n\"]"
+  stub="todo!(\"#$n\")"
 
   left=$(git grep -n -F "$attr" HEAD -- '*.rs' | sed 's/^HEAD://')
   if [ -n "$left" ]; then
     echo "- \`$attr\`이 남아 있다(이 티켓의 인수 시험을 모두 켜야 한다):"
+    printf '%s\n' "$left" | sed 's/^/  - /'
+    problems=1
+  fi
+
+  # Odin stubs the contract names the acceptance tests use with todo!("#N") (odin.md); the ticket
+  # replaces every one of them with the real thing.
+  left=$(git grep -n -F "$stub" HEAD -- '*.rs' | sed 's/^HEAD://')
+  if [ -n "$left" ]; then
+    echo "- \`$stub\` 스텁이 남아 있다(계약의 이름을 실제로 구현해야 한다):"
     printf '%s\n' "$left" | sed 's/^/  - /'
     problems=1
   fi
@@ -79,7 +91,7 @@ mech() {
   done < <(git diff --unified=0 --no-color --no-ext-diff --no-renames "$base"...HEAD -- 'crates/*/tests/spec_*.rs')
 
   if [ "$problems" -ne 0 ]; then return 1; fi
-  echo "기계 검사 통과: \`$attr\` 없음, 인수 시험의 변경은 이 티켓의 ignore 줄 지우기뿐"
+  echo "기계 검사 통과: \`$attr\`·\`$stub\` 없음, 인수 시험의 변경은 이 티켓의 ignore 줄 지우기뿐"
 }
 
 # --- GitHub helpers ------------------------------------------------------------------------------
