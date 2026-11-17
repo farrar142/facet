@@ -1,6 +1,6 @@
 // target: crates/facet-core/tests/spec_batch_rename_command.rs
 // AC: AC-8, AC-10, AC-17, AC-18, AC-20
-//! 일괄 이름 바꾸기 명령(`CommandId::BatchRename`)의 id·단축키·켜짐, 항목 오른쪽 메뉴의 새 줄(16줄), 임시 폴더의 앱에서
+//! 일괄 이름 바꾸기 명령(`CommandId::BatchRename`)의 id·켜짐, 항목 오른쪽 메뉴의 새 줄(16줄), 임시 폴더의 앱에서
 //! 메뉴·팔레트 켜짐이 `App::can_execute`와 같음, 선택 항목 모으기와 선택 밖 이름과의 겹침, 실행 전에 막힌 실행이
 //! 작업을 만들지 않음을 확인한다. 파일을 바꾸지 않으므로 모든 환경에서 돈다.
 
@@ -115,7 +115,7 @@ fn batch_row_enabled(menu: &Menu) -> bool {
 }
 
 #[test]
-fn the_command_has_an_id_no_shortcut_and_sits_after_rename() {
+fn the_command_has_an_id_and_sits_after_rename() {
     let all = CommandId::ALL;
     let at = all
         .iter()
@@ -127,7 +127,7 @@ fn the_command_has_an_id_no_shortcut_and_sits_after_rename() {
         CommandId::from_id("batch-rename"),
         Some(CommandId::BatchRename)
     );
-    assert!(CommandId::BatchRename.shortcuts().is_empty());
+    // 기본 단축키는 #247(S14d)이 Ctrl+M으로 정했다: spec_batch_rename_entry_command.rs가 본다.
 }
 
 #[test]

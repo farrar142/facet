@@ -109,6 +109,11 @@ impl Preview {
     pub fn can_execute(&self) -> bool {
         self.problems == 0 && self.renames > 0
     }
+
+    /// #294: 상태가 `EntryStatus::Problem`인 항목의 `entries()` 안 번호(오름차순).
+    pub fn problem_rows(&self) -> Vec<usize> {
+        todo!("#294")
+    }
 }
 
 /// 항목 하나의 미리 보기.

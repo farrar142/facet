@@ -437,7 +437,16 @@ pub enum Update {
     /// 검색 결과 위치의 결과·진행이 바뀌었다(찾은 항목이 들어왔거나 검색이 끝났다, [`Tab::search`]). facet이 한 작업이
     /// 결과 목록을 바꿨을 때도 온다.
     Search,
+    /// #292: 일괄 이름 바꾸기 미리 보기 요청([`App::request_batch_rename_preview`])의 결과.
+    BatchPreview {
+        id: BatchPreviewId,
+        preview: Option<Preview>,
+    },
 }
+
+/// #292: 일괄 이름 바꾸기 미리 보기 요청의 번호.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BatchPreviewId(u64);
 
 /// 내용 검색을 시작하지 못한 까닭([`App::start_content_search`]). 위치는 바뀌지 않았다. 화면 문장은 앱 몫이다(ADR-0007).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3061,6 +3070,20 @@ impl App {
             })
             .collect();
         Ok(self.submit_batch_rename(items, unchanged))
+    }
+
+    /// #292: 미리 보기를 일꾼 스레드에서 계산하도록 요청한다. 명령이 꺼져 있으면 `None`.
+    pub fn request_batch_rename_preview(
+        &mut self,
+        _rules: &[Rule],
+        _utc_offset_seconds: i64,
+    ) -> Option<BatchPreviewId> {
+        todo!("#292")
+    }
+
+    /// #291: 활성 탭의 선택(둘 이상)을 친 이름에 번호를 붙인 이름으로 바꾸는 일괄 이름 바꾸기 작업을 넣는다.
+    pub fn rename_numbered(&mut self, _new_name: &str) -> Result<JobId, BatchRenameError> {
+        todo!("#291")
     }
 
     /// 선택 항목([`App::batch_rename_items`], 목록 순서)에 목록이 가진 수정 시각(`FILETIME`)과 부르는 쪽이 넘긴 UTC와의
