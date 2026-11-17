@@ -17,6 +17,13 @@
 #    whose decompose stopped (no sub-issues and no decompose run going), or labels the next spec of
 #    FACTORY_SPEC_QUEUE and dispatches its decompose (decision 2026-11-15, roadmap order). An empty
 #    queue never moves on to another spec (spec #249: the trial runs one labelled spec only).
+# 3. Tells the mail bridge (bridge.sh) through a marker comment on the ledger issue, once per marker
+#    (a comment starting with the same marker line is not left again; failing to comment only warns):
+#      <!-- factory-queue-empty S -->  the spec S just labelled was the last open unlabelled spec of
+#                                      the queue (a warning ahead: S is still running)
+#      <!-- factory-idle Q -->         every spec of the queue is labelled; Q is the queue with its
+#                                      numbers joined by `-` (`none` when empty), so a new queue
+#                                      is told again
 #
 # Environment: REPO, GH_TOKEN, FACTORY_SPEC_QUEUE (spec numbers in order; the repository variable of
 # the same name), FACTORY_LIST_RETRY_WAIT, and the budget variables of ledger.sh.
@@ -47,6 +54,31 @@ go() {
   rm -f "$out"
   echo "$r"
   [ "$g" = true ]
+}
+
+# notify <marker line> <text>: leaves "<marker>\n<text>" on the ledger issue (the open issue labelled
+# `factory-ledger`, as ledger.sh finds it) unless a comment there already starts with that marker line.
+# bridge.sh mails it. Never fails: a missing ledger or a failed call only warns.
+notify() {
+  local marker=$1 text=$2 ledger firsts
+  ledger=$(gh api "repos/$REPO/issues?labels=factory-ledger&state=open&per_page=100" \
+    --jq '[.[] | select(.pull_request | not)] | sort_by(.number) | .[0].number // empty') \
+    || { echo "::warning::dispatch-next: could not find the ledger issue for $marker"; return 0; }
+  ledger=$(printf '%s' "$ledger" | tr -d '\r')
+  if [ -z "$ledger" ]; then
+    echo "::warning::dispatch-next: no open factory-ledger issue; $marker not left"
+    return 0
+  fi
+  firsts=$(gh api "repos/$REPO/issues/$ledger/comments?per_page=100" --paginate \
+    --jq '.[].body | split("\n")[0]') \
+    || { echo "::warning::dispatch-next: could not read the ledger #$ledger; $marker not left"; return 0; }
+  if printf '%s\n' "$firsts" | tr -d '\r' | grep -qxF -- "$marker"; then
+    return 0
+  fi
+  gh api "repos/$REPO/issues/$ledger/comments" -f "body=$marker
+$text" > /dev/null \
+    || echo "::warning::dispatch-next: could not leave $marker on the ledger #$ledger"
+  return 0
 }
 
 # listed: open `ready-for-agent` issues by the label search, ascending.
@@ -109,10 +141,17 @@ for s in $(gh issue list --repo "$REPO" --state open --label spec --json number 
     gh issue close "$s" --repo "$REPO" --reason completed --comment "All $total tickets merged."
   fi
 done
+# The queue's open specs without the `spec` label, in queue order.
+pending=
 for s in ${FACTORY_SPEC_QUEUE:-}; do
   read -r state labels < <(gh issue view "$s" --repo "$REPO" --json state,labels --jq '[.state, ([.labels[].name] | join(","))] | @tsv')
   [ "$state" = OPEN ] || continue
   case ",$labels," in *,spec,*) continue;; esac
+  pending="$pending $s"
+done
+set -- $pending
+if [ $# -gt 0 ]; then
+  s=$1
   if ! reason=$(go "$s"); then
     echo "::notice::next spec #$s may not start ($reason)"
     exit 0
@@ -120,6 +159,12 @@ for s in ${FACTORY_SPEC_QUEUE:-}; do
   echo "next spec: #$s"
   gh issue edit "$s" --repo "$REPO" --add-label spec
   gh workflow run factory-decompose.yml --repo "$REPO" -f issue="$s"
+  if [ $# -eq 1 ]; then
+    notify "<!-- factory-queue-empty $s -->" "spec 큐 바닥남: #$s가 FACTORY_SPEC_QUEUE에 남은 마지막 spec이다. 공장은 #$s를 돌리는 중이고, 이것이 끝나면 할 일이 없다. 다음 spec을 FACTORY_SPEC_QUEUE에 넣는다."
+  fi
   exit 0
-done
+fi
 echo "::notice::every spec in the queue is labelled; the factory is idle"
+q=$(printf '%s' "${FACTORY_SPEC_QUEUE:-}" | tr -s ' \t\r\n,' '-' | sed 's/^-//; s/-$//')
+notify "<!-- factory-idle ${q:-none} -->" "공장 idle: FACTORY_SPEC_QUEUE(${FACTORY_SPEC_QUEUE:-비어 있음})의 spec이 모두 라벨을 받아 띄울 spec이 없다. FACTORY_SPEC_QUEUE에 spec을 넣고 dispatch-next를 다시 돌린다."
+exit 0

@@ -73,7 +73,7 @@ facet은 Windows 파일 탐색기를 대체할 앱이다. 스택은 아직 정�
 대표가 자는 동안에도 공장이 멈추지 않게, 다음 spec으로 넘어가는 일도 공장이 한다.
 
 - Implementer run이 끝날 때 다음 티켓이 없고, `in-progress`도 막힌 `ready-for-agent`도 남지 않았으면 다음 spec으로 넘어간다.
-- 먼저 하위 이슈가 모두 닫힌 spec 이슈를 닫는다. 그다음 저장소 변수 `FACTORY_SPEC_QUEUE`(로드맵 순서, 비어 있으면 다음 spec으로 넘어가지 않음)에서 아직 `spec` 라벨이 없는 첫 spec에 라벨을 붙이고 Decompose를 dispatch한다. 분해 중인 spec(하위 이슈 0개)이 있으면 기다린다.
+- 먼저 하위 이슈가 모두 닫힌 spec 이슈를 닫는다. 그다음 저장소 변수 `FACTORY_SPEC_QUEUE`(로드맵 순서, 비어 있으면 다음 spec으로 넘어가지 않음)에서 아직 `spec` 라벨이 없는 첫 spec에 라벨을 붙이고 Decompose를 dispatch한다. 분해 중인 spec(하위 이슈 0개)이 있으면 기다린다. 라벨을 붙인 spec이 큐의 마지막이면 장부 이슈에 `<!-- factory-queue-empty S -->`, 큐의 spec이 모두 라벨을 받아 띄울 것이 없으면 `<!-- factory-idle Q -->`(Q는 큐 번호를 `-`로 이음, 비면 `none`)를 같은 표식마다 한 번 남겨 알림 다리가 보낸다(댓글 실패는 경고만).
 - Decompose는 스펙 PR을 열고, Odin이 그것을 병합한 뒤 티켓에 `ready-for-agent`를 붙이고 사슬을 시작한다(라벨 검색 색인이 늦을 수 있어 방금 승인한 티켓 번호를 `dispatch-next.sh --candidates`로 넘긴다).
 - 두 번 실패한 티켓(`ready-for-human`)은 사슬을 멈추지 않는다. 관리 세션이 따로 처리한다.
 
@@ -85,5 +85,5 @@ facet은 Windows 파일 탐색기를 대체할 앱이다. 스택은 아직 정�
 - **해법이 갈리면 묻는다.** Decompose·Odin은 사용자에게 보이는 선택이 여럿이거나 앞 spec과 부딪히면 고르지 않고 spec에 `<!-- factory-question -->` 댓글(선택지와 권장안)과 `needs-decision`을 남긴다. 그 spec만 멈춘다. 사람이 답 댓글을 달고 라벨을 떼면 재개 workflow(`factory-resume.yml`)가 멈춘 단계부터 잇는다. 답 댓글은 다음 run에 구속력이 있다.
 - **병합은 구현한 run이 아닌 Verify가 한다.** Verify(Sonnet)가 기계 검사와 인수 판단을 하고 병합한다. 문제면 사유를 남기고 되돌리고, 같은 티켓의 두 번째 되돌림이면 사람에게 넘긴다. 공장이 `GITHUB_TOKEN`으로 연 PR의 `ci.yml` pull_request run은 승인 대기(job 0개)로 생겨 병합·닫힘 뒤 실패로 남으므로, Odin·Verify가 PR을 병합하거나 닫은 뒤 `prune-runs.sh`로 지우고 main에서 `ci.yml`을 dispatch한다(#270).
 - **비용 장부와 상한**(`.github/factory/ledger.sh`): Claude 단계마다 끝날 때 `factory-ledger` 라벨의 장부 이슈에 `<!-- ledger -->` 댓글 하나(spec·단계·티켓·run·API 정가 비용·턴·토큰). 단계를 시작하기 전 가드가 spec 합계(상한은 spec 본문의 `예산: $N` 줄, 없으면 저장소 변수 `FACTORY_SPEC_BUDGET_USD`, 없으면 $60)와 KST 하루 합계(`FACTORY_DAILY_BUDGET_USD`, 없으면 $150)를 본다. spec 상한이면 그 spec에 `factory-paused`와 `<!-- factory-budget-spec -->`, 하루 상한이면 장부에 `<!-- factory-budget-daily <날짜> -->`를 한 번 남기고 돌지 않는다. 하루 상한 뒤에는 Implementer의 예약 실행(KST 00:05)이 사슬을 다시 시작한다. 단계 하나의 중간에는 막지 않는다.
-- **알림 다리**(`.github/factory/bridge.sh`): 공장은 Agent Mail을 부르지 않는다. 공장 밖 서버의 크론(2분)이 `gh`로 질문·상한 멈춤·사람 넘김(`<!-- factory-human -->`) 표식을 찾아 새 것만 관리 세션 메일함으로 보낸다(보낸 댓글 ID를 상태 파일에 기억). 공개 저장소라 `github-actions[bot]`과 쓰기 권한자(admin·maintain·write)가 단 표식만 보내고, 그 밖의 작성자 댓글은 보내지 않고 기억해 다시 보지 않는다. 스크립트에는 주소·토큰·호스트가 없고 받는 곳은 agent-mail 프로필이 안다. 첫 설치는 `--seed`로 옛 표식을 기억만 한다.
+- **알림 다리**(`.github/factory/bridge.sh`): 공장은 Agent Mail을 부르지 않는다. 공장 밖 서버의 크론(2분)이 `gh`로 질문·상한 멈춤·사람 넘김(`<!-- factory-human -->`)·spec 큐 바닥남·공장 idle 표식을 찾아 새 것만 관리 세션 메일함으로 보낸다(보낸 댓글 ID를 상태 파일에 기억). 공개 저장소라 `github-actions[bot]`과 쓰기 권한자(admin·maintain·write)가 단 표식만 보내고, 그 밖의 작성자 댓글은 보내지 않고 기억해 다시 보지 않는다. 스크립트에는 주소·토큰·호스트가 없고 받는 곳은 agent-mail 프로필이 안다. 첫 설치는 `--seed`로 옛 표식을 기억만 한다.
 - 공장 스크립트는 가짜 `gh`·`agent-mail`로 시험하고(`.github/factory/test.sh`), `cargo xtask ci`의 「공장 스크립트 시험」 단계가 돌린다. workflow YAML의 연결은 자동 시험하지 않고 시범으로 확인한다.

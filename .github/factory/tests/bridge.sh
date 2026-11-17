@@ -261,5 +261,36 @@ eq "http" 0 "$(grep -c 'https\?://' "$script" || true)"
 eq "home" 0 "$(grep -ci '/home/\|/Users/\|C:\\' "$script" || true)"
 eq "token" 0 "$(grep -ci 'token' "$script" || true)"
 
+# --- spec queue markers on the ledger (#280) ------------------------------------------------
+
+setup "queue-empty and idle are sent with their label and what to do"
+issue 900 open factory-ledger "장부"
+comment 21 900 "<!-- factory-queue-empty 245 -->
+spec 큐 바닥남: #245"
+comment 22 900 "<!-- factory-idle 245 -->
+공장 idle"
+run
+eq code 0 "$(code)"
+eq sends 2 "$(sent_count)"
+has "queue-empty subject" "spec 큐 바닥남: #900 장부" "$(arg 0 --subject)"
+has "queue-empty kind" "종류: spec 큐 바닥남" "$(arg 0 --body)"
+has "queue-empty comment" "<!-- factory-queue-empty 245 -->" "$(arg 0 --body)"
+has "queue-empty todo" "할 일: 다음 spec을 FACTORY_SPEC_QUEUE에 넣는다(조율자 몫)." "$(arg 0 --body)"
+has "idle subject" "공장 idle: #900 장부" "$(arg 1 --subject)"
+has "idle todo" "할 일: FACTORY_SPEC_QUEUE에 spec을 넣고 dispatch-next를 다시 돌린다(조율자 몫)." "$(arg 1 --body)"
+eq key facet-factory-22 "$(arg 1 --idempotency-key)"
+eq remembered "21 22" "$(remembered)"
+run
+eq "not again" 2 "$(sent_count)"
+
+setup "queue markers by someone without write access are not sent"
+issue 900 open factory-ledger "장부"
+comment 23 900 "<!-- factory-idle none -->" mallory
+comment 24 900 "<!-- factory-queue-empty 1 -->" mallory
+run
+eq code 0 "$(code)"
+eq sends 0 "$(sent_count)"
+eq remembered "23 24" "$(remembered)"
+
 echo "bridge.sh: $passes passed, $fails failed"
 [ "$fails" -eq 0 ]
