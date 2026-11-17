@@ -11,6 +11,8 @@
 #   fail-dispatch       if present, workflow dispatches fail
 #   list-empty          if present, `gh issue list` finds nothing (a lagging search index);
 #   list-empty-once     the same for the next `gh issue list` only
+#   runs-list.json      runs for `gh run list`; `gh workflow run` adds one (runs-hidden: it does not)
+#   events-<n>.json     the events of issue <n> (`…/issues/<n>/events`), default []
 #   calls.log           every call's arguments, one line each
 # New comments get created_at $FAKE_GH_NOW (default 2026-11-17T03:00:00Z).
 set -u
@@ -78,15 +80,48 @@ case "${1:-}" in
     if [ -n "$expr" ]; then printf '%s' "$list" | jqf -r "$expr"; else printf '%s\n' "$list"; fi
     exit 0 ;;
   run)
-    # gh run list … [--jq <expr>]: no runs (#280).
+    # gh run list --workflow <file> [--limit N] [--json …] [--jq <expr>]: the runs of runs-list.json
+    # ([{databaseId, workflow, status, event, displayTitle}], newest first, default []) of that
+    # workflow, at most N (#286).
     [ "${2:-}" = list ] || fail "unsupported command: $*"
-    expr=
-    while [ $# -gt 0 ]; do [ "$1" = --jq ] && expr=$2; shift; done
-    if [ -n "$expr" ]; then printf '[]' | jqf -r "$expr"; else echo '[]'; fi
+    shift 2
+    expr= wf= limit=20
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --jq) expr=$2; shift 2 ;;
+        --workflow) wf=$2; shift 2 ;;
+        --limit) limit=$2; shift 2 ;;
+        --repo|--json) shift 2 ;;
+        *) fail "unsupported run list argument $1" ;;
+      esac
+    done
+    f="$d/runs-list.json"; [ -f "$f" ] || echo '[]' > "$f"
+    list=$(jqf --arg w "$wf" --argjson l "$limit" '[.[] | select($w == "" or .workflow == $w)] | .[:$l]' "$f")
+    if [ -n "$expr" ]; then printf '%s' "$list" | jqf -r "$expr"; else printf '%s\n' "$list"; fi
     exit 0 ;;
   workflow)
+    # gh workflow run <file> --repo R -f k=v …: adds a queued workflow_dispatch run to runs-list.json
+    # (title as the workflow's run-name; not while runs-hidden exists: a run not listed yet).
     [ "${2:-}" = run ] || fail "unsupported command: $*"
     [ -e "$d/fail-dispatch" ] && fail "dispatch is broken"
+    wf=$3; shift 3
+    issue= track= pr=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -f) case "$2" in issue=*) issue=${2#issue=} ;; track=*) track=${2#track=} ;; pr=*) pr=${2#pr=} ;; esac; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    [ -e "$d/runs-hidden" ] && exit 0
+    case "$wf" in
+      factory-implementer.yml) title="implement #$issue (track ${track:-1})" ;;
+      factory-verify.yml) title="verify #$issue (PR #$pr)" ;;
+      *) title=${wf%.yml} ;;
+    esac
+    f="$d/runs-list.json"; [ -f "$f" ] || echo '[]' > "$f"
+    jqf --arg w "$wf" --arg t "$title" \
+      '[{databaseId: (([.[].databaseId] | max // 1000) + 1), workflow: $w, status: "queued",
+         event: "workflow_dispatch", displayTitle: $t}] + .' "$f" > "$f.new" && mv "$f.new" "$f"
     exit 0 ;;
   api)
     for a in "$@"; do
@@ -220,6 +255,11 @@ case "$path" in
     files=("$d"/issue-*.json)
     if [ ${#files[@]} -eq 0 ]; then echo '[]'; exit 0; fi
     jqf -s --arg l "$label" '[.[] | select(.state == "open" and ($l == "" or any(.labels[]; .name == $l)))]' "${files[@]}"
+    ;;
+  # ledger.sh event: the issue's events, events-<n>.json ([{event, created_at, label: {name}}], default []).
+  repos/*/*/issues/*/events)
+    n=${path%/events}; n=${n##*/}
+    if [ -f "$d/events-$n.json" ]; then cat "$d/events-$n.json"; else echo '[]'; fi
     ;;
   repos/*/*/issues/*/comments)
     n=${path%/comments}; n=${n##*/}

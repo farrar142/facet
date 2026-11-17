@@ -19,6 +19,19 @@
 #                                     has `needs-decision` or `factory-paused`, the KST day's total reached the
 #                                     daily budget, or the spec's total reached its budget. A budget stop leaves
 #                                     its marker comment once (and labels the spec `factory-paused`).
+#   ledger.sh event <kind> <issue> [key=value …]
+#                                     a measurement comment (#286), never failing:
+#                                       <!-- factory-event -->
+#                                       event=<kind> issue=#N [key=value …] [wait=<seconds>] run=<run id>
+#                                     impl-start (Implementer claimed the ticket; key track=T; wait since
+#                                     the ticket's last `ready-for-agent` label), impl-end (handed to
+#                                     Verify; track=T), verify-start (pr=#P; wait since the last impl-end
+#                                     of the ticket), verify-end (pr=#P outcome=merged|mech|conflict|
+#                                     rebase-ci|push|review|merge-failed|cancelled|stopped). Not a cost: the sums
+#                                     read only `<!-- ledger -->` comments.
+#   ledger.sh stats                   verify runs and the share sent back for a conflict (outcome
+#                                     conflict, rebase-ci or push), the Implementer wait per track and
+#                                     the Verify wait (count, mean, max) from the event comments
 #
 # Environment:
 #   REPO (or GITHUB_REPOSITORY)   owner/name; gh needs GH_TOKEN
@@ -203,12 +216,71 @@ budget=$budget
   output go=true reason=
 }
 
+# Seconds of an ISO 8601 time.
+secs() { j -rn --arg t "$1" '$t | fromdateiso8601'; }
+
+# event <kind> <issue> [key=value …]: one measurement comment on the ledger (#286). Never fails.
+event() {
+  local kind=$1 issue=$2; shift 2
+  command -v jq >/dev/null 2>&1 || { warn "jq is missing; event $kind #$issue not recorded"; return 0; }
+  local n; n=$(ledger_issue 2>/dev/null)
+  [ -n "$n" ] || { warn "no open factory-ledger issue; event $kind #$issue not recorded"; return 0; }
+  local since=
+  case "$kind" in
+    impl-start)
+      # the last time the ticket was labelled `ready-for-agent`
+      since=$(gh api "repos/$REPO/issues/$issue/events?per_page=100" --paginate 2>/dev/null \
+        | j -rs 'add // [] | [.[] | select(.event == "labeled" and .label.name == "ready-for-agent")]
+          | last | .created_at // empty' 2>/dev/null) ;;
+    verify-start)
+      # the last hand-over of the ticket to Verify
+      since=$(comments "$n" 2>/dev/null | j -rs --arg i "#$issue" '[.[]
+        | select((.body | startswith("<!-- factory-event -->"))
+          and (.body | test("event=impl-end issue=" + $i + "( |$)")))] | last | .created_at // empty' 2>/dev/null) ;;
+  esac
+  local line="event=$kind issue=#$issue${*:+ $*}"
+  if [ -n "$since" ]; then
+    local s; s=$(secs "$since" 2>/dev/null)
+    [ -n "$s" ] && line="$line wait=$(( $(now) - s ))"
+  fi
+  line="$line run=${GITHUB_RUN_ID:-local}"
+  if post_comment "$n" "<!-- factory-event -->
+$line"; then
+    echo "ledger #$n: $line"
+  else
+    warn "could not comment on the ledger #$n: $line"
+  fi
+  return 0
+}
+
+# stats: the measurements of the event comments (#286).
+#   verify runs, of them sent back for a conflict (outcome conflict, rebase-ci or push), and the ratio
+#   the wait from `ready-for-agent` to the Implementer's start, per track: count, mean, max (seconds)
+#   the wait from the hand-over to Verify's start: count, mean, max (seconds)
+stats() {
+  local n; n=$(ledger_issue)
+  [ -n "$n" ] || { echo "no open factory-ledger issue" >&2; return 1; }
+  comments "$n" | j -rs '
+    [.[] | select(.body | startswith("<!-- factory-event -->")) | .body | split("\n")[1] // ""
+      | [scan("([a-z_]+)=([^ ]+)") | {key: .[0], value: .[1]}] | from_entries] as $e
+    | def waits: [.[] | .wait | select(. != null) | tonumber];
+      def summary: if length == 0 then "n=0" else
+        "n=\(length) mean=\((add / length) | floor)s max=\(max)s" end;
+    ([$e[] | select(.event == "verify-end")]) as $v
+    | ([$v[] | select(.outcome == "conflict" or .outcome == "rebase-ci" or .outcome == "push")] | length) as $c
+    | "verify: \($v | length) runs, conflict send-backs \($c)"
+      + (if ($v | length) > 0 then " (ratio \(($c * 100 / ($v | length)) | floor)%)" else "" end),
+      ([$e[] | select(.event == "impl-start")] | group_by(.track // "1")[]
+        | "implementer wait, track \(.[0].track // "1"): \(waits | summary)"),
+      "verify wait: \([$e[] | select(.event == "verify-start")] | waits | summary)"'
+}
+
 usage() {
-  echo "usage: ledger.sh record <node> <issue> | spec-total <spec> | day-total [YYYY-MM-DD] | spec-of <issue> | guard <issue>" >&2
+  echo "usage: ledger.sh record <node> <issue> | spec-total <spec> | day-total [YYYY-MM-DD] | spec-of <issue> | guard <issue> | event <kind> <issue> [key=value …] | stats" >&2
   exit 2
 }
 
-[ -n "$REPO" ] || { echo "ledger.sh: REPO (or GITHUB_REPOSITORY) is not set" >&2; [ "${1:-}" = record ] && exit 0; exit 2; }
+[ -n "$REPO" ] || { echo "ledger.sh: REPO (or GITHUB_REPOSITORY) is not set" >&2; case "${1:-}" in record|event) exit 0 ;; esac; exit 2; }
 
 case "${1:-}" in
   record) [ $# -eq 3 ] || usage; record "$2" "$3" ;;
@@ -216,5 +288,7 @@ case "${1:-}" in
   day-total) [ $# -le 2 ] || usage; day_total "${2:-}" ;;
   spec-of) [ $# -eq 2 ] || usage; spec_of "$2" ;;
   guard) [ $# -eq 2 ] || usage; guard "$2" ;;
+  event) [ $# -ge 3 ] || usage; shift; event "$@" ;;
+  stats) [ $# -eq 1 ] || usage; stats ;;
   *) usage ;;
 esac

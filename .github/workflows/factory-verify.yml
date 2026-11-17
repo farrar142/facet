@@ -38,15 +38,19 @@ env:
   FACTORY_SPEC_QUEUE: ${{ vars.FACTORY_SPEC_QUEUE }}
   FACTORY_SPEC_BUDGET_USD: ${{ vars.FACTORY_SPEC_BUDGET_USD }}
   FACTORY_DAILY_BUDGET_USD: ${{ vars.FACTORY_DAILY_BUDGET_USD }}
+  # Implementer tracks (#286); unset means 2. 1 keeps one line for implementing and verifying.
+  FACTORY_TRACKS: ${{ vars.FACTORY_TRACKS }}
 
 jobs:
   verify:
     runs-on: windows-latest
     timeout-minutes: 120
-    # The same group as the Implementer: implementing and verifying run in one line, so the next
-    # ticket starts only after this verdict (and is checked against the main this run merged into).
+    # One Verify at a time, so every verdict is checked against the main the one before merged
+    # into. With one track (FACTORY_TRACKS=1) the same group as the Implementer: implementing and
+    # verifying run in one line, as before #286. A group keeps one pending run and a newer one
+    # cancels it, so the last step starts Verify for any PR left waiting (verify.sh next-verify).
     concurrency:
-      group: factory-implementer
+      group: ${{ vars.FACTORY_TRACKS == '1' && 'factory-implementer' || 'factory-verify' }}
       cancel-in-progress: false
     defaults:
       run:
@@ -89,6 +93,7 @@ jobs:
           echo ".factory/" >> .git/info/exclude
           echo "*.log" >> .git/info/exclude
           echo "::notice::PR #$PR, branch $branch at $(git rev-parse HEAD), checked ${checked:-(none)}"
+          bash .github/factory/ledger.sh event verify-start "$N" "pr=#$PR"
           {
             echo "go=true"
             echo "branch=$branch"
@@ -187,17 +192,24 @@ jobs:
           CI_OUTCOME: ${{ steps.ci.outcome }}
           PUSH_OUTCOME: ${{ steps.push.outcome }}
         run: |
+          # the verdict, for the ledger's conflict send-back ratio (ledger.sh stats, #286)
+          outcome=stopped
+          trap 'bash .github/factory/ledger.sh event verify-end "$N" "pr=#$PR" "outcome=$outcome"' EXIT
           if [ "$CANCELLED" = true ]; then
             echo "::warning::cancelled; PR #$PR stays open and #$N in progress"
+            outcome=cancelled
             exit 0
           fi
           reason=.factory/sendback.md
           verdict=$(tr -d '[:space:]' < .factory/verify-verdict 2>/dev/null || true)
           if [ "$MECH" != pass ]; then
+            outcome=mech
             { echo "### 기계 검사 실패"; echo; cat .factory/mech.md 2>/dev/null; } > "$reason"
           elif [ "$BASE" = conflict ]; then
+            outcome=conflict
             cp .factory/conflict.md "$reason"
           elif [ "$BASE" = run ] && [ "$CI_OUTCOME" != success ]; then
+            outcome=rebase-ci
             {
               echo "### main 위로 rebase한 뒤 \`cargo xtask ci\` 실패"
               echo
@@ -206,16 +218,20 @@ jobs:
               echo '```'
             } > "$reason"
           elif [ "$BASE" = run ] && [ "$PUSH_OUTCOME" != success ]; then
+            outcome=push
             echo "### main 위로 rebase한 브랜치를 push하지 못했다(그 사이 브랜치가 바뀌었을 수 있다)" > "$reason"
           elif [ "$verdict" != pass ]; then
+            outcome=review
             {
               if [ "$verdict" = fail ]; then echo "### 인수 판단: 실패"; else echo "### 인수 판단이 결론을 남기지 않았다"; fi
               echo
               cat .factory/verify-report.md 2>/dev/null
             } > "$reason"
           elif bash .github/factory/verify.sh pass "$N" "$PR" .factory/verify-report.md; then
+            outcome=merged
             exit 0
           else
+            outcome=merge-failed
             { echo "### 판단은 통과였지만 PR을 병합하지 못했다"; echo; cat .factory/verify-report.md 2>/dev/null; } > "$reason"
           fi
           cat "$reason"
@@ -228,3 +244,9 @@ jobs:
       - name: Dispatch next ticket
         if: always() && steps.pr.outputs.go != 'true' && steps.budget.outputs.reason != 'daily'
         run: bash .github/factory/dispatch-next.sh
+
+      # Verify runs one at a time in its group, which keeps one pending run: a newer hand-over
+      # cancels an older pending one. Start Verify for a PR left waiting that way (#286).
+      - name: Start Verify for a waiting PR
+        if: always() && vars.FACTORY_TRACKS != '1'
+        run: bash .github/factory/verify.sh next-verify "$PR"

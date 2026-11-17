@@ -17,7 +17,11 @@
 #                                        branch and its job-less bot ci.yml runs (prune-runs.sh), drop `in-progress`. On the ticket's second send-back
 #                                        hand it to a human (`ready-for-human`, `<!-- factory-human -->`)
 #                                        and move the chain on (dispatch-next.sh); otherwise label it
-#                                        `ready-for-agent` again and dispatch factory-implementer.yml.
+#                                        `ready-for-agent` again and run dispatch-next.sh --first <N>
+#                                        (the ticket first, into an empty Implementer track, #286).
+#   verify.sh next-verify [PR]           when no other Verify run is going, dispatch Verify for the
+#                                        oldest open PR still waiting for one (not [PR]); the guard
+#                                        against a lost pending run (#286).
 #   verify.sh pass <N> <PR> [report]     squash-merge the PR (retrying while GitHub computes
 #                                        mergeability), delete its branch and its job-less bot
 #                                        ci.yml runs (prune-runs.sh), comment the report on the
@@ -39,7 +43,7 @@ SENDBACK_LIMIT=2
 j() { jq "$@" | tr -d '\r'; }
 
 usage() {
-  echo "usage: verify.sh mech <N> <base> | sendback <N> <PR> <reason file> | pass <N> <PR> [report file]" >&2
+  echo "usage: verify.sh mech <N> <base> | sendback <N> <PR> <reason file> | pass <N> <PR> [report file] | next-verify [skip PR]" >&2
   exit 2
 }
 
@@ -114,9 +118,9 @@ prune_runs() {
 }
 next_ticket() {
   if [ -n "${FACTORY_DISPATCH_NEXT:-}" ]; then
-    $FACTORY_DISPATCH_NEXT
+    $FACTORY_DISPATCH_NEXT "$@"
   else
-    bash "$here/dispatch-next.sh"
+    bash "$here/dispatch-next.sh" "$@"
   fi
 }
 pr_branch() { gh api "repos/$REPO/pulls/$1" | j -r '.head.ref // empty'; }
@@ -156,8 +160,8 @@ Verify가 이 티켓을 ${count}번 되돌렸다. 공장은 더 돌리지 않는
     next_ticket
   else
     add_label "$n" ready-for-agent
-    dispatch factory-implementer.yml "issue=$n"
-    echo "#$n: send-back $count, dispatched the Implementer again"
+    next_ticket --first "$n"
+    echo "#$n: send-back $count, back to ready-for-agent (dispatch-next.sh tries it first)"
   fi
 }
 
@@ -195,9 +199,46 @@ $(cat "$report")" >/dev/null || true
   next_ticket
 }
 
+# --- next-verify ---------------------------------------------------------------------------------
+
+# Verify is serial (one concurrency group), and a group keeps one pending run: a newer pending run
+# cancels the older one without a trace. Two Implementer tracks that hand over while Verify runs
+# lose one hand-over that way (#286). Each Verify run therefore ends here: when no other Verify run
+# is going, start one for the oldest PR still waiting (open, `Closes #N` and the Implementer's
+# `<!-- factory-checked ` marker in its body, ticket #N open and `in-progress`, no Verify run going
+# for #N), other than <skip> (the PR this run was about, e.g. one it was cancelled on).
+next_verify() {
+  local skip=${1:-0} others waiting p n
+  others=$(gh run list --repo "$REPO" --workflow factory-verify.yml --limit 50 \
+    --json databaseId,status,displayTitle \
+    --jq "[.[] | select(.status != \"completed\" and .databaseId != ${GITHUB_RUN_ID:-0})] | length" | tr -d '\r') \
+    || { echo "::warning::could not list the Verify runs"; return 0; }
+  if [ "${others:-0}" -gt 0 ]; then
+    echo "::notice::$others other Verify run(s) going; they start the next one"
+    return 0
+  fi
+  waiting=$(gh api "repos/$REPO/pulls?state=open&per_page=100" --paginate \
+    | j -r --argjson skip "$skip" '[.[] | select(.number != $skip)
+        | (.body // "") as $b | select($b | contains("<!-- factory-checked "))
+        | ($b | capture("Closes #(?<n>[0-9]+)").n // empty) as $n | "\(.number) \($n)"] | sort_by(split(" ")[0] | tonumber) | .[]') \
+    || { echo "::warning::could not list the open PRs"; return 0; }
+  while read -r p n; do
+    [ -n "${n:-}" ] || continue
+    read -r state progress < <(gh api "repos/$REPO/issues/$n" \
+      | j -r '[.state, (any(.labels[]; .name == "in-progress") | tostring)] | @tsv')
+    [ "${state:-}" = open ] && [ "${progress:-}" = true ] || continue
+    echo "PR #$p of #$n waits for Verify"
+    gh workflow run factory-verify.yml --repo "$REPO" -f issue="$n" -f pr="$p" \
+      || echo "::warning::could not dispatch Verify for PR #$p"
+    return 0
+  done <<< "$waiting"
+  echo "no PR waits for Verify"
+}
+
 case "${1:-}" in
   mech) [ $# -eq 3 ] || usage; mech "$2" "$3" ;;
   sendback) [ $# -eq 4 ] || usage; : "${REPO:?REPO is not set}"; sendback "$2" "$3" "$4" ;;
   pass) [ $# -ge 3 ] || usage; : "${REPO:?REPO is not set}"; pass "$2" "$3" "${4:-}" ;;
+  next-verify) [ $# -le 2 ] || usage; : "${REPO:?REPO is not set}"; next_verify "${2:-0}" ;;
   *) usage ;;
 esac
