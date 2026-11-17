@@ -324,7 +324,9 @@ with_ledger
 for l in "impl-start issue=#1 track=1 wait=100" "impl-start issue=#2 track=2 wait=300" \
          "impl-start issue=#3 track=1 wait=200" "verify-start issue=#1 pr=#40 wait=10" \
          "verify-start issue=#2 pr=#41 wait=50" "verify-end issue=#1 pr=#40 outcome=merged" \
-         "verify-end issue=#2 pr=#41 outcome=conflict" "verify-end issue=#3 pr=#42 outcome=rebase-ci" \
+         "verify-end issue=#2 pr=#41 outcome=conflict files=AGENTS.md,crates/app/src/text.rs" \
+         "verify-end issue=#3 pr=#42 outcome=rebase-ci" \
+         "verify-end issue=#5 pr=#44 outcome=conflict files=crates/app/src/main.rs,AGENTS.md" \
          "verify-end issue=#4 pr=#43 outcome=review"; do
   jq --arg b "<!-- factory-event -->
 event=$l run=1" '. + [{id: (length + 1), created_at: "2026-11-17T01:00:00Z", body: $b}]' \
@@ -335,11 +337,22 @@ event=$l run=1" '[{id: 1, created_at: "2026-11-17T01:00:00Z", body: $b}]' | tr -
 done
 ledger_comment 2026-11-17T01:00:00Z 1 5
 stats=$(bash "$ledger" stats | tr -d '\r')
-eq "stats" "verify: 4 runs, conflict send-backs 2 (ratio 50%)
+eq "stats" "verify: 5 runs, conflict send-backs 3 (ratio 60%)
 implementer wait, track 1: n=2 mean=150s max=200s
 implementer wait, track 2: n=1 mean=300s max=300s
-verify wait: n=2 mean=30s max=50s" "$stats"
+verify wait: n=2 mean=30s max=50s
+conflicts per file:
+  2 AGENTS.md
+  1 crates/app/src/main.rs
+  1 crates/app/src/text.rs" "$stats"
 eq "sums untouched" 5.0000 "$(bash "$ledger" spec-total 1 | tr -d '\r')"
+
+setup "stats: no conflicting files"
+with_ledger
+jq -n '[{id: 1, created_at: "2026-11-17T01:00:00Z",
+  body: "<!-- factory-event -->\nevent=verify-end issue=#1 pr=#40 outcome=merged run=1"}]' \
+  | tr -d '\r' > "$FAKE_GH/comments-900.json"
+eq "none" "conflicts per file: none" "$(bash "$ledger" stats | tr -d '\r' | tail -n 1)"
 
 echo "ledger: $passes passed, $fails failed"
 [ "$fails" -eq 0 ]

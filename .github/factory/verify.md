@@ -13,7 +13,7 @@ So do not rerun builds or tests. Your job is the judgement those checks cannot m
 
 ## Read
 
-- The ticket with comments: `gh issue view <ticket> --json number,title,body,comments`. Its "Parent" section names the spec issue: read its decisions that touch the ticket (`gh issue view <spec>`). Earlier `<!-- factory-sendback -->` comments say what a previous Verify run rejected.
+- The ticket with comments: `gh issue view <ticket> --json number,title,body,comments`. Its "Parent" section names the spec issue: read its decisions that touch the ticket (`gh issue view <spec>`). Earlier `<!-- factory-sendback` comments say what a previous Verify run rejected (`kind=acceptance`, or unmarked) or that the PR conflicted with main (`kind=conflict`; the same PR then came back with main merged in, so judge its whole diff again).
 - The PR: `gh pr view <pr> --json title,body`.
 - The change: `git diff origin/main...HEAD --stat` first, then the diff of the files that matter (`git diff origin/main...HEAD -- <path>`), and `git log origin/main..HEAD`.
 - The ticket's acceptance tests: the `spec_*.rs` tests whose ignore line the PR deleted (`git diff origin/main...HEAD -- 'crates/*/tests/spec_*.rs'`), read in full with Read.
