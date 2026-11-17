@@ -512,6 +512,11 @@ impl RenameRule {
         }
         rules
     }
+
+    /// #283: 규칙 목록이 `to_rules`가 만드는 모양이면 그 규칙, 아니면 None.
+    pub fn from_rules(_rules: &[Rule]) -> Option<RenameRule> {
+        todo!("#283")
+    }
 }
 
 /// 미리 보기 한 번 동안 규칙마다 한 번만 준비한 것(정규식은 여기서 한 번 컴파일).
