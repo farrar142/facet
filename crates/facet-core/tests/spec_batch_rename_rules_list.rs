@@ -110,7 +110,6 @@ fn off(rule: Rule) -> Rule {
 }
 
 #[test]
-#[ignore = "#272"]
 fn a_new_rule_is_enabled_and_targets_the_stem() {
     let rule = Rule::new(replace("a", "b"));
     assert!(rule.enabled);
@@ -119,7 +118,6 @@ fn a_new_rule_is_enabled_and_targets_the_stem() {
 }
 
 #[test]
-#[ignore = "#272"]
 fn enabled_rules_apply_in_order_and_disabled_rules_are_skipped() {
     let a_to_b = Rule::new(replace("a", "b"));
     let b_to_c = Rule::new(replace("b", "c"));
@@ -150,7 +148,6 @@ fn enabled_rules_apply_in_order_and_disabled_rules_are_skipped() {
 }
 
 #[test]
-#[ignore = "#272"]
 fn the_target_picks_the_stem_the_extension_or_the_whole_name() {
     let o_to_0 = replace("o", "0");
     let three = |item: fn(&str) -> BatchItem, name: &str| {
@@ -213,7 +210,6 @@ fn the_target_picks_the_stem_the_extension_or_the_whole_name() {
 }
 
 #[test]
-#[ignore = "#272"]
 fn replace_can_match_case_and_stop_after_the_first() {
     let cases = [
         // (대소문자 구분, 모두, 기대)
@@ -244,7 +240,6 @@ fn replace_can_match_case_and_stop_after_the_first() {
 }
 
 #[test]
-#[ignore = "#272"]
 fn plain_replace_takes_regex_symbols_and_dollars_literally() {
     assert_eq!(
         renamed(file("a(1).txt"), &[Rule::new(replace("(1)", ""))]),
@@ -271,7 +266,6 @@ fn plain_replace_takes_regex_symbols_and_dollars_literally() {
 }
 
 #[test]
-#[ignore = "#272"]
 fn regex_replace_uses_numbered_and_named_groups() {
     assert_eq!(
         renamed(file("123-abc.txt"), &[regex(r"(\d+)-(\w+)", "$2-$1")]),
@@ -321,7 +315,6 @@ fn regex_replace_uses_numbered_and_named_groups() {
 }
 
 #[test]
-#[ignore = "#272"]
 fn a_broken_regex_is_reported_and_only_that_rule_is_skipped() {
     let items = [file("a.txt"), file("b.txt")];
     let result = apply(&items, &[regex("(", "x"), insert("x_", Edge::Start, 0)]);
@@ -363,7 +356,6 @@ fn a_broken_regex_is_reported_and_only_that_rule_is_skipped() {
 }
 
 #[test]
-#[ignore = "#272"]
 fn insert_counts_chars_from_either_end_and_clamps() {
     let cases = [
         (Edge::Start, 0, "-abcd.txt"),
@@ -392,7 +384,6 @@ fn insert_counts_chars_from_either_end_and_clamps() {
 }
 
 #[test]
-#[ignore = "#272"]
 fn numbers_follow_the_item_order_with_step_padding_place_and_separator() {
     let items = [file("a.jpg"), file("b.jpg"), dir("c")];
     let result = apply(&items, &[number(1, 2, 3, Place::End, "_")]);
@@ -495,7 +486,6 @@ fn s14a_rules() -> Vec<RenameRule> {
 }
 
 #[test]
-#[ignore = "#272"]
 fn s14a_rules_turned_into_a_rule_list_give_the_same_preview() {
     let items = [
         file("IMG_img.img"),
@@ -542,7 +532,6 @@ fn s14a_rules_turned_into_a_rule_list_give_the_same_preview() {
 }
 
 #[test]
-#[ignore = "#272"]
 fn the_s14a_checks_hold_for_rule_list_results() {
     // 같은 폴더의 같은 새 이름(대소문자 무시)은 겹친다.
     let result = apply(&[file("a1.txt"), file("A2.TXT")], &[regex(r"\d+", "")]);
@@ -606,7 +595,6 @@ fn the_s14a_checks_hold_for_rule_list_results() {
 }
 
 #[test]
-#[ignore = "#272"]
 fn ten_thousand_items_preview_a_rule_list_quickly() {
     let items: Vec<BatchItem> = (0..10_000)
         .map(|n| file(&format!("사진 {n}.jpg")))
