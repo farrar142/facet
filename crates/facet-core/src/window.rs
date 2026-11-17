@@ -449,6 +449,32 @@ pub enum Update {
         id: BatchPreviewId,
         preview: Option<Preview>,
     },
+    /// #303: 하위 폴더 목록·맨 앞 목록 요청의 결과(마지막 요청이면 `Some`).
+    Subfolders {
+        id: SubfoldersId,
+        list: Option<Result<Subfolders, SubfoldersError>>,
+    },
+}
+
+/// #303: 하위 폴더 목록·맨 앞 목록 요청의 번호.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SubfoldersId(u64);
+
+/// #303: 주소창 › 펼침 메뉴의 목록.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Subfolders {
+    pub folders: Vec<Candidate>,
+    pub current: Option<usize>,
+    pub home: Option<usize>,
+}
+
+/// #303: 하위 폴더 목록을 읽지 못한 까닭.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubfoldersError {
+    NotFound,
+    PermissionDenied,
+    NotAFolder,
+    Io(std::io::ErrorKind),
 }
 
 /// #292: 일괄 이름 바꾸기 미리 보기 요청의 번호.
@@ -2130,6 +2156,16 @@ impl App {
             .spawn(read)
             .expect("자동 완성 일꾼 스레드를 만들지 못했다");
         id
+    }
+
+    /// #303: 위치의 하위 폴더 목록을 일꾼 스레드에서 읽기 시작한다(실제 폴더가 아니면 `None`).
+    pub fn request_subfolders(&mut self, _location: &Location) -> Option<SubfoldersId> {
+        todo!("#303")
+    }
+
+    /// #305: 맨 앞 › 목록(드라이브와 홈 폴더)을 일꾼 스레드에서 만들기 시작한다.
+    pub fn request_root_folders(&mut self) -> SubfoldersId {
+        todo!("#305")
     }
 
     /// 활성 탭의 필터 글자를 정한다([`Tab::request_filter`]). 이미 읽은 목록만 일꾼 스레드에서 거르고 막지 않는다.
