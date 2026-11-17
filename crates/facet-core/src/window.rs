@@ -63,7 +63,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::batch_rename::{self, BatchItem, EntryStatus, Preview, RenameRule};
+use crate::batch_rename::{self, BatchItem, EntryStatus, Preview, RenameRule, Rule};
 use crate::clipboard::CutMarks;
 use facet_win::clipboard::format::ClipboardOperation;
 use facet_win::clipboard::{Clipboard, ClipboardError, ClipboardFiles};
@@ -3057,6 +3057,24 @@ impl App {
             })
             .collect();
         Ok(self.submit_batch_rename(items, unchanged))
+    }
+
+    /// #274: 선택 항목과 목록의 수정 시각으로 규칙 목록 미리 보기, 명령이 꺼져 있으면 `None`.
+    pub fn batch_rename_preview_rules(
+        &self,
+        _rules: &[Rule],
+        _utc_offset_seconds: i64,
+    ) -> Option<Preview> {
+        todo!("#274")
+    }
+
+    /// #274: 규칙 목록으로 `start_batch_rename`과 같은 규칙의 일괄 이름 바꾸기 작업을 넣는다.
+    pub fn start_batch_rename_rules(
+        &mut self,
+        _rules: &[Rule],
+        _utc_offset_seconds: i64,
+    ) -> Result<JobId, BatchRenameError> {
+        todo!("#274")
     }
 
     /// **일괄 이름 바꾸기** 작업을 작업 대기열에 넣어 곧바로 시작하고([`JobQueue::batch_rename`]: 차례를 기다리지
