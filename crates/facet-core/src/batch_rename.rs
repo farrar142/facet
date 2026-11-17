@@ -74,6 +74,22 @@ impl ExistingNames {
     }
 }
 
+impl ExistingNames {
+    /// `folder`에 `name`(대소문자 무시) 항목이 적혀 있는가.
+    pub fn contains(&self, folder: &Path, name: &OsStr) -> bool {
+        self.folders
+            .get(&folder_key(folder))
+            .is_some_and(|names| names.contains(&name_key(&name.to_string_lossy())))
+    }
+
+    /// `folder`의 `name` 항목을 뺀다(바뀌어 비울 이름).
+    pub fn remove(&mut self, folder: &Path, name: &OsStr) {
+        if let Some(names) = self.folders.get_mut(&folder_key(folder)) {
+            names.remove(&name_key(&name.to_string_lossy()));
+        }
+    }
+}
+
 /// 규칙을 쓴 결과(아무것도 바꾸지 않는다).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Preview {

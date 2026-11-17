@@ -56,7 +56,7 @@
 //! 작업(이름바꾸기, 삭제·휴지통 삭제·이동, 그 실행취소·다시 실행)은 끝날 때 모든 검색 결과 탭에 반영한다.
 
 use std::collections::{HashMap, VecDeque};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -3082,8 +3082,81 @@ impl App {
     }
 
     /// #291: 활성 탭의 선택(둘 이상)을 친 이름에 번호를 붙인 이름으로 바꾸는 일괄 이름 바꾸기 작업을 넣는다.
-    pub fn rename_numbered(&mut self, _new_name: &str) -> Result<JobId, BatchRenameError> {
-        todo!("#291")
+    ///
+    /// 바탕 이름은 친 이름에서 커서 항목의 확장자(대소문자 무시)를 뗀 것이고, 항목마다 `바탕 (n)` + 제 확장자다.
+    /// 번호는 1부터 목록 순서로 매기되 선택 밖 항목의 이름과 겹치면 건너뛴다. 쓸 수 없는 이름이 있으면
+    /// `Problems`, 모두 그대로면 `NothingToRename`, 선택이 둘 미만이면 `Unavailable`이고 작업은 만들지 않는다.
+    pub fn rename_numbered(&mut self, new_name: &str) -> Result<JobId, BatchRenameError> {
+        let items = self
+            .batch_rename_items()
+            .ok_or(BatchRenameError::Unavailable)?;
+        let tab = self.active_window().active_panel().active_tab();
+        let cursor_ext = tab
+            .cursor_item()
+            .filter(|item| !item.is_folder)
+            .and_then(|item| {
+                let name = item.name.to_string_lossy();
+                name.rfind('.')
+                    .filter(|&dot| dot > 0)
+                    .map(|dot| name[dot..].to_string())
+            });
+        let typed = new_name.trim();
+        let base = match &cursor_ext {
+            Some(ext)
+                if typed.chars().count() > ext.chars().count()
+                    && typed.to_lowercase().ends_with(&ext.to_lowercase()) =>
+            {
+                let cut = typed.len() - ext.len();
+                typed
+                    .get(..cut)
+                    .filter(|_| typed.is_char_boundary(cut))
+                    .unwrap_or(typed)
+            }
+            _ => typed,
+        };
+        let mut existing = tab.existing_names();
+        for item in &items {
+            existing.remove(&item.folder, &item.name);
+        }
+
+        let mut problems = false;
+        let mut rename_items = Vec::new();
+        let mut unchanged = 0u64;
+        let mut number = 1u32;
+        for item in &items {
+            let name = item.name.to_string_lossy();
+            let ext = match (item.is_folder, name.rfind('.')) {
+                (false, Some(dot)) if dot > 0 => name[dot..].to_string(),
+                _ => String::new(),
+            };
+            let candidate = loop {
+                let candidate = format!("{base} ({number}){ext}");
+                number += 1;
+                if !existing.contains(&item.folder, OsStr::new(&candidate)) {
+                    break candidate;
+                }
+            };
+            if crate::name_input::validate_name(&candidate).is_err() {
+                problems = true;
+                continue;
+            }
+            if OsStr::new(&candidate) == item.name.as_os_str() {
+                unchanged += 1;
+            } else {
+                rename_items.push(RenameItem {
+                    folder: item.folder.clone(),
+                    from: item.name.clone(),
+                    to: OsString::from(candidate),
+                });
+            }
+        }
+        if problems {
+            return Err(BatchRenameError::Problems);
+        }
+        if rename_items.is_empty() {
+            return Err(BatchRenameError::NothingToRename);
+        }
+        Ok(self.submit_batch_rename(rename_items, unchanged))
     }
 
     /// 선택 항목([`App::batch_rename_items`], 목록 순서)에 목록이 가진 수정 시각(`FILETIME`)과 부르는 쪽이 넘긴 UTC와의

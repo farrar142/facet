@@ -167,6 +167,7 @@ pub fn rename_problem_text(problem: crate::rename::Problem) -> String {
     match problem {
         crate::rename::Problem::Name(error) => name_error_text(error),
         crate::rename::Problem::Edit(error) => edit_error_text(error),
+        crate::rename::Problem::Batch(error) => batch_error_text(error),
     }
 }
 
