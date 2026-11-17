@@ -72,6 +72,13 @@ unsafe extern "system" fn add_monitor(
     true.into()
 }
 
+/// 지금 있는 드라이브 문자들(대문자, 문자 순서). `GetLogicalDrives`의 비트 마스크에서 읽는다.
+pub fn drive_letters() -> Vec<char> {
+    // SAFETY: 인자가 없고 비트 마스크 값만 돌려준다.
+    let mask = unsafe { windows::Win32::Storage::FileSystem::GetLogicalDrives() };
+    crate::letters_from_mask(mask)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

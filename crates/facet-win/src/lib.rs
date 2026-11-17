@@ -10,6 +10,8 @@
 //!   Windows에서만 있다.
 //! - [`monitors`]: 붙어 있는 모니터마다 작업 영역과 주 모니터 여부(`EnumDisplayMonitors`). 세션의 창 자리를 보이는
 //!   곳으로 고칠 때 쓴다. Windows가 아니면 빈 목록이다.
+//! - [`drive_letters`]: 지금 있는 드라이브 문자들(`GetLogicalDrives`, 문자 순서). 주소창 맨 앞 › 목록이 쓴다.
+//!   Windows가 아니면 빈 목록이다.
 //! - [`single_instance`]: 단일 실행. 주인 되기([`single_instance::claim`], 사용자 로그온 세션 범위 뮤텍스),
 //!   받기([`single_instance::Owner::listen`], 같은 사용자만 여는 파이프의 수신기 스레드),
 //!   넘기기([`single_instance::forward`], 인자와 작업 폴더). Windows가 아니면 늘 주인이 된다.
@@ -103,6 +105,28 @@ pub fn monitors() -> Vec<MonitorInfo> {
 #[cfg(not(windows))]
 pub fn monitors() -> Vec<MonitorInfo> {
     Vec::new()
+}
+
+/// 지금 있는 드라이브 문자들(대문자 `'A'..='Z'`, 문자 순서, `GetLogicalDrives`). 주소창 맨 앞 › 목록이 쓴다.
+/// 얻지 못하면 빈 목록이다.
+#[cfg(windows)]
+pub fn drive_letters() -> Vec<char> {
+    windows_screen::drive_letters()
+}
+
+/// 지금 있는 드라이브 문자들. Windows가 아니면 늘 빈 목록이다.
+#[cfg(not(windows))]
+pub fn drive_letters() -> Vec<char> {
+    Vec::new()
+}
+
+/// `GetLogicalDrives`의 비트 마스크(비트 0이 A)를 드라이브 문자들로 바꾼다.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn letters_from_mask(mask: u32) -> Vec<char> {
+    (0..26u8)
+        .filter(|bit| mask & (1 << bit) != 0)
+        .map(|bit| char::from(b'A' + bit))
+        .collect()
 }
 
 /// 기본 프로그램으로 열기가 실패한 까닭.
@@ -355,6 +379,16 @@ mod tests {
             classify_shell_failure(by_instance),
             OpenError::NoAssociation
         );
+    }
+
+    #[test]
+    fn 드라이브_마스크는_문자_순서의_대문자다() {
+        assert_eq!(letters_from_mask(0), Vec::<char>::new());
+        assert_eq!(
+            letters_from_mask(0b1 | 0b100 | 0b1000 | (1 << 25)),
+            vec!['A', 'C', 'D', 'Z']
+        );
+        assert_eq!(letters_from_mask(u32::MAX).len(), 26);
     }
 
     #[test]
