@@ -1,3 +1,5 @@
+# 글자 파일은 커밋할 때 늘 LF로 둔다(작업자가 CRLF로 써도 index에는 LF). 바이너리는 git이 알아서 가린다.
+* text=auto eol=lf
 # MFT 조각은 디스크에서 떠 낸 원시 바이트다. 줄 끝 변환이나 diff를 하지 않는다.
 testdata/mft/*.mft binary
 # 기대값 목록은 체크아웃한 플랫폼과 상관없이 같은 바이트로 둔다.
