@@ -6,6 +6,7 @@ The workflow has already checked, mechanically:
 
 - no `#[ignore = "#<ticket>"]` is left anywhere, so all of the ticket's acceptance tests run;
 - the PR's change to the acceptance-test files (`crates/*/tests/spec_*.rs`) only deletes those ignore lines;
+- no `todo!("#<ticket>")` stub (Odin's placeholder for a name of the ticket's 「계약」) is left anywhere;
 - the branch sits on today's `main` and the full `cargo xtask ci` (format, lint, build, every test including the acceptance tests, benchmarks) passed on it.
 
 So do not rerun builds or tests. Your job is the judgement those checks cannot make.

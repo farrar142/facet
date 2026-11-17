@@ -1,0 +1,254 @@
+# Factory task: Odin (spec #249 "Odin", docs/adr/0001-software-factory.md)
+#
+# Decompose opens the spec PR (head factory/spec-<S>, label spec-pr: each ticket's acceptance tests
+# with #[ignore = "#<ticket>"]) and dispatches this run. Odin (Opus, .github/factory/odin.md) checks
+# the tickets and tests against the code, the earlier specs' merged spec_* tests, AGENTS.md, the ADRs
+# and the glossary, fixes what it can (test files, ticket bodies, the todo!("#<ticket>") stubs that make
+# the tests compile) and asks (needs-decision) when the fix would change scope or a user-visible choice.
+# The workflow then runs `cargo fmt --all --check` and `cargo clippy --all-targets -- -D warnings`
+# (the ignored tests only compile: this is the compile check). A failure goes back to the agent once in
+# the same run; a second failure hands the spec to a human. On a pass the workflow pushes the fixes,
+# squash-merges the spec PR, labels the spec's open tickets ready-for-agent and dispatches the first
+# one (.github/factory/odin.sh).
+# Trigger: Decompose and the resume job dispatch it with the spec number, or a manual run.
+name: factory-odin
+run-name: 'odin #${{ inputs.spec }}'
+
+on:
+  workflow_dispatch:
+    inputs:
+      spec:
+        description: Spec issue number whose spec PR to review
+        required: true
+        type: number
+
+concurrency:
+  group: factory-odin-${{ inputs.spec }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: write
+  id-token: write
+
+env:
+  # dispatch-next.sh (starting the chain) and ledger.sh read these.
+  FACTORY_SPEC_QUEUE: ${{ vars.FACTORY_SPEC_QUEUE }}
+  FACTORY_SPEC_BUDGET_USD: ${{ vars.FACTORY_SPEC_BUDGET_USD }}
+  FACTORY_DAILY_BUDGET_USD: ${{ vars.FACTORY_DAILY_BUDGET_USD }}
+
+jobs:
+  odin:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      SPEC: ${{ inputs.spec }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+      BASE: ${{ github.event.repository.default_branch }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      # Same build settings as the Implementer and Verify, so rust-cache artifacts are shared.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Spec #249 "비용 장부와 상한": stop on needs-decision / factory-paused and on the budgets.
+      - name: Budget guard
+        id: budget
+        run: bash .github/factory/ledger.sh guard "$SPEC"
+
+      # none (no open spec PR: warn and stop) / empty (no test: close it and start the tickets) /
+      # review (.github/factory/odin.sh state).
+      - name: Find the spec PR
+        id: state
+        if: steps.budget.outputs.go == 'true'
+        run: bash .github/factory/odin.sh state "$SPEC"
+
+      - name: Start the tickets without acceptance tests
+        if: steps.state.outputs.mode == 'empty'
+        run: bash .github/factory/odin.sh empty "$SPEC" "${{ steps.state.outputs.pr }}"
+
+      # Review the spec PR on today's main: the merge must land what fmt and clippy checked.
+      - name: Check out the spec PR
+        id: pr
+        if: steps.state.outputs.mode == 'review'
+        env:
+          BRANCH: ${{ steps.state.outputs.branch }}
+        run: |
+          git config user.name "facet-factory[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin "$BASE" "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
+          git switch -C "$BRANCH" "origin/$BRANCH"
+          mkdir -p .factory
+          echo ".factory/" >> .git/info/exclude
+          echo "*.log" >> .git/info/exclude
+          if git rebase "origin/$BASE"; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          else
+            files=$(git diff --name-only --diff-filter=U | sed 's/^/- /')
+            git rebase --abort
+            printf '### 스펙 PR을 %s 위로 rebase하면 충돌한다\n\n%s\n' "$BASE" "$files" > .factory/human.md
+            cat .factory/human.md
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.pr.outputs.go == 'true'
+
+      # The action's own installer is a shell script that refuses Windows, so install
+      # the native Windows build and hand the action its path.
+      - name: Install Claude Code
+        id: claude
+        if: steps.pr.outputs.go == 'true'
+        shell: pwsh
+        run: |
+          irm https://claude.ai/install.ps1 | iex
+          $exe = Join-Path $env:USERPROFILE ".local\bin\claude.exe"
+          if (-not (Test-Path $exe)) { throw "claude.exe not found at $exe" }
+          & $exe --version
+          "path=$exe" >> $env:GITHUB_OUTPUT
+
+      - name: Review
+        if: steps.claude.outcome == 'success'
+        timeout-minutes: 60
+        uses: anthropics/claude-code-action@v1
+        with:
+          path_to_claude_code_executable: ${{ steps.claude.outputs.path }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          # Decompose and the resume job dispatch this run with GITHUB_TOKEN: the actor is the bot.
+          allowed_bots: github-actions
+          prompt: |
+            You are the Odin run of this repo's software factory.
+            Spec issue: #${{ env.SPEC }} in ${{ github.repository }}.
+            Spec PR: #${{ steps.state.outputs.pr }}, branch ${{ steps.state.outputs.branch }} (checked out, rebased on ${{ env.BASE }}).
+            Read .github/factory/odin.md and follow it exactly.
+          claude_args: >-
+            --model claude-opus-5-5
+            --max-turns 150
+            --allowedTools "Bash,Read,Edit,Write,Glob,Grep"
+
+      - name: Record cost (odin)
+        if: always() && steps.claude.outcome == 'success'
+        run: bash .github/factory/ledger.sh record odin "$SPEC"
+
+      # question (needs-decision, or the verdict file says so) / go (pass, fixed) / missing.
+      - name: Read the verdict
+        id: verdict
+        if: steps.pr.outputs.go == 'true'
+        run: bash .github/factory/odin.sh verdict "$SPEC" .factory/odin-verdict
+
+      # The compile check: the acceptance tests are ignored, so clippy only compiles them.
+      - name: Format and lint (first)
+        id: check_first
+        if: steps.verdict.outputs.verdict == 'go'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          r=0
+          cargo fmt --all --check 2>&1 | tee .factory/check.log || r=1
+          cargo clippy --all-targets -- -D warnings 2>&1 | tee -a .factory/check.log || r=1
+          exit $r
+
+      - name: Fix the failed checks
+        if: steps.verdict.outputs.verdict == 'go' && steps.check_first.outcome == 'failure'
+        timeout-minutes: 40
+        uses: anthropics/claude-code-action@v1
+        with:
+          path_to_claude_code_executable: ${{ steps.claude.outputs.path }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          allowed_bots: github-actions
+          prompt: |
+            You are the Odin run for spec #${{ env.SPEC }} in ${{ github.repository }}, spec PR #${{ steps.state.outputs.pr }}
+            (branch ${{ steps.state.outputs.branch }}, checked out). You reviewed and fixed it. The workflow then ran
+            `cargo fmt --all --check` and `cargo clippy --all-targets -- -D warnings`, and they failed.
+            Their output is in .factory/check.log (search it for "error", "warning" and "Diff in" instead of
+            reading it whole). Follow .github/factory/odin.md, section "Make it build".
+            Fix the cause (format with `cargo fmt --all`; fix the test files or the todo! stubs; never weaken
+            what a test asserts), check with the failing command, and add what you fixed to .factory/odin-report.md.
+            Do not commit or push.
+          claude_args: >-
+            --model claude-opus-5-5
+            --max-turns 60
+            --allowedTools "Bash,Read,Edit,Write,Glob,Grep"
+
+      - name: Record cost (odin-fix)
+        if: always() && steps.verdict.outputs.verdict == 'go' && steps.check_first.outcome == 'failure'
+        run: bash .github/factory/ledger.sh record odin-fix "$SPEC"
+
+      - name: Format and lint
+        id: check
+        if: steps.verdict.outputs.verdict == 'go' && steps.check_first.outcome == 'failure'
+        run: |
+          set -o pipefail
+          r=0
+          cargo fmt --all --check 2>&1 | tee .factory/check.log || r=1
+          cargo clippy --all-targets -- -D warnings 2>&1 | tee -a .factory/check.log || r=1
+          exit $r
+
+      # Odin's fixes land on the factory branch (rebased on main above, so pushed with a lease).
+      - name: Push Odin's fixes
+        id: push
+        if: >-
+          steps.verdict.outputs.verdict == 'go' &&
+          (steps.check_first.outcome == 'success' || steps.check.outcome == 'success')
+        env:
+          BRANCH: ${{ steps.state.outputs.branch }}
+        run: |
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -q -m "스펙: Odin 검토 고침 (#$SPEC)"
+          fi
+          git push --force-with-lease="$BRANCH" origin "HEAD:refs/heads/$BRANCH"
+
+      - name: Merge, or ask, or hand to a human
+        if: always() && steps.pr.outputs.go != ''
+        env:
+          CANCELLED: ${{ job.status == 'cancelled' }}
+          PR: ${{ steps.state.outputs.pr }}
+          GO: ${{ steps.pr.outputs.go }}
+          VERDICT: ${{ steps.verdict.outputs.verdict }}
+          FIRST: ${{ steps.check_first.outcome }}
+          SECOND: ${{ steps.check.outcome }}
+          PUSH: ${{ steps.push.outcome }}
+        run: |
+          if [ "$CANCELLED" = true ]; then
+            echo "::warning::cancelled; spec PR #$PR stays open"
+            exit 0
+          fi
+          reason=.factory/human.md
+          report=.factory/odin-report.md
+          if [ "$GO" != true ]; then
+            : # the rebase conflict wrote .factory/human.md
+          elif [ "$VERDICT" = question ]; then
+            bash .github/factory/odin.sh question "$SPEC" "$PR" "$report"
+            exit 0
+          elif [ "$VERDICT" != go ]; then
+            { echo "### Odin이 판정(.factory/odin-verdict)을 남기지 않았다"; echo; cat "$report" 2>/dev/null; } > "$reason"
+          elif [ "$FIRST" != success ] && [ "$SECOND" != success ]; then
+            {
+              echo "### 고칠 기회를 한 번 준 뒤에도 \`cargo fmt --all --check\`·\`cargo clippy --all-targets -- -D warnings\` 실패"
+              echo
+              echo '```'
+              grep -E '^(error|warning)|Diff in|-->' .factory/check.log 2>/dev/null | head -n 60
+              echo '```'
+              echo
+              cat "$report" 2>/dev/null
+            } > "$reason"
+          elif [ "$PUSH" != success ]; then
+            echo "### Odin의 고침을 push하지 못했다(그 사이 브랜치가 바뀌었을 수 있다)" > "$reason"
+          elif bash .github/factory/odin.sh pass "$SPEC" "$PR" "$report"; then
+            exit 0
+          else
+            { echo "### 검사는 통과했지만 스펙 PR을 병합하지 못했다"; echo; cat "$report" 2>/dev/null; } > "$reason"
+          fi
+          cat "$reason"
+          bash .github/factory/odin.sh human "$SPEC" "$PR" "$reason"
