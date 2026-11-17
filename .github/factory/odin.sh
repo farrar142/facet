@@ -20,14 +20,15 @@
 #                                       report on the spec PR, squash-merge it (retrying while GitHub
 #                                       computes mergeability), delete its branch, build main, label the
 #                                       spec's open tickets `ready-for-agent` and dispatch the first one
-#                                       (dispatch-next.sh --tickets-only: the lowest-numbered approved
-#                                       ticket with no open blocker). Exits 1 when the PR could not be
-#                                       merged (nothing else is done then).
+#                                       (dispatch-next.sh --tickets-only --candidates <them>: the
+#                                       label search may lag, so the approved tickets are named: the
+#                                       lowest-numbered approved ticket with no open blocker). Exits 1
+#                                       when the PR could not be merged (nothing else is done then).
 #   odin.sh empty <S> <PR>              the spec PR has no test: close it and delete its branch, then
 #                                       label the tickets and dispatch the first one as `pass` does.
 #
 # Environment: REPO (or GITHUB_REPOSITORY), GH_TOKEN, BASE (default main); RUN_URL (link in comments,
-# optional); FACTORY_DISPATCH_NEXT (command run instead of dispatch-next.sh --tickets-only, tests);
+# optional); FACTORY_DISPATCH_NEXT (command run instead of dispatch-next.sh, tests);
 # FACTORY_MERGE_WAIT (seconds between merge attempts, default 15). Needs bash, gh and jq.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
@@ -153,7 +154,7 @@ start_chain() {
   if [ -n "${FACTORY_DISPATCH_NEXT:-}" ]; then
     $FACTORY_DISPATCH_NEXT
   else
-    bash "$here/dispatch-next.sh" --tickets-only
+    bash "$here/dispatch-next.sh" --tickets-only --candidates "$(echo $tickets)"
   fi
 }
 

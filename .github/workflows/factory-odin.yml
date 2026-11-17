@@ -34,7 +34,8 @@ permissions:
   id-token: write
 
 env:
-  # dispatch-next.sh (starting the chain) and ledger.sh read these.
+  # dispatch-next.sh (starting the chain with the approved tickets as --candidates) and ledger.sh read
+  # these.
   FACTORY_SPEC_QUEUE: ${{ vars.FACTORY_SPEC_QUEUE }}
   FACTORY_SPEC_BUDGET_USD: ${{ vars.FACTORY_SPEC_BUDGET_USD }}
   FACTORY_DAILY_BUDGET_USD: ${{ vars.FACTORY_DAILY_BUDGET_USD }}
