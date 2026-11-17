@@ -326,6 +326,11 @@ pub const CRUMB_LOADING: &str = "읽는 중…";
 /// 주소창 › 펼침 메뉴의 빈 목록 줄(#306).
 pub const CRUMB_EMPTY: &str = "하위 폴더가 없습니다";
 
+/// 주소창 맨 앞 › 메뉴의 사용자 홈 폴더 줄: 홈임을 알 수 있게 이름 뒤에 붙인다(#308).
+pub fn home_row_text(name: &str) -> String {
+    format!("{name} (홈 폴더)")
+}
+
 /// 주소창 › 펼침 메뉴에서 하위 폴더를 읽지 못한 까닭 줄(#306).
 pub fn crumb_error_text(error: facet_core::window::SubfoldersError) -> String {
     use facet_core::window::SubfoldersError;

@@ -1141,6 +1141,18 @@ fn job_number(job: JobId) -> i32 {
 
 /// 메뉴의 명령 항목을 화면 줄로: 이름은 앱의 명령 이름, 단축키 글자는 팔레트와 같다.
 /// › 메뉴의 안내 줄(읽는 중·까닭·빈 목록).
+/// Slint가 맨 앞 › 단추를 가리키는 번호(조각 사이 › 단추는 0부터, 없음은 -1).
+const ROOT_ARROW: i32 = -2;
+
+/// 코어 쪽 › 단추 번호를 Slint 번호로.
+fn slint_arrow(segment: usize) -> i32 {
+    if segment == crumb_menu::ROOT_SEGMENT {
+        ROOT_ARROW
+    } else {
+        count(segment)
+    }
+}
+
 fn info_row(text: &str) -> CrumbRow {
     CrumbRow {
         name: text.into(),
@@ -2462,14 +2474,20 @@ impl View {
 
     /// 패널 `panel`의 `index`번 조각 뒤 › 단추를 눌렀다: 그 메뉴를 열고, 이미 열려 있으면 닫는다.
     fn crumb_arrow(&self, panel: i32, index: i32) {
-        let (Ok(panel), Ok(index)) = (usize::try_from(panel), usize::try_from(index)) else {
+        let panel = usize::try_from(panel);
+        let index = if index == ROOT_ARROW {
+            Ok(crumb_menu::ROOT_SEGMENT)
+        } else {
+            usize::try_from(index)
+        };
+        let (Ok(panel), Ok(index)) = (panel, index) else {
             return;
         };
-        let same = self
-            .crumb_menu
-            .borrow()
-            .as_ref()
-            .is_some_and(|menu| menu.panel() == panel && menu.segment() == index);
+        let same = self.crumb_menu.borrow().as_ref().is_some_and(|menu| {
+            menu.panel() == panel
+                && menu.segment() == index
+                && menu.is_root() == (index == crumb_menu::ROOT_SEGMENT)
+        });
         if same {
             self.close_crumb_menu();
         } else {
@@ -2486,7 +2504,9 @@ impl View {
         if panel != self.active_panel() {
             self.panel_pressed(count(panel));
         }
-        let opened = {
+        let opened = if index == crumb_menu::ROOT_SEGMENT {
+            Some(self.app.borrow_mut().request_root_folders())
+        } else {
             let mut app = self.app.borrow_mut();
             let location = app.active_tab().location().clone();
             let target = provider_for(&location)
@@ -2500,7 +2520,11 @@ impl View {
             self.close_crumb_menu();
             return;
         };
-        *self.crumb_menu.borrow_mut() = Some(CrumbMenu::loading(panel, index, id));
+        *self.crumb_menu.borrow_mut() = Some(if index == crumb_menu::ROOT_SEGMENT {
+            CrumbMenu::loading_root(panel, id)
+        } else {
+            CrumbMenu::loading(panel, index, id)
+        });
         self.sync_crumb_menu(Some(0.0));
         self.ui.set_crumb_menu_open(true);
     }
@@ -2528,13 +2552,20 @@ impl View {
                 .iter()
                 .enumerate()
                 .map(|(i, folder)| CrumbRow {
-                    name: folder.name.to_string_lossy().as_ref().into(),
+                    name: if menu.is_home(i) {
+                        text::home_row_text(&folder.name.to_string_lossy())
+                            .as_str()
+                            .into()
+                    } else {
+                        folder.name.to_string_lossy().as_ref().into()
+                    },
                     bold: menu.is_current(i),
                     info: false,
                 })
                 .collect(),
         };
         let height = menu.height();
+        let slint_segment = slint_arrow(menu.segment());
         let (x, y) = match self.arrow_rect(menu.panel(), menu.segment()) {
             Some((left, top, _, h)) => crumb_menu::place(
                 (left, top + h),
@@ -2552,24 +2583,24 @@ impl View {
         if let Some(offset) = scroll {
             ui.set_crumb_menu_viewport_y(-offset);
         }
-        ui.set_left_crumb_open(if menu.panel() == 0 {
-            count(menu.segment())
-        } else {
-            -1
-        });
-        ui.set_right_crumb_open(if menu.panel() == 1 {
-            count(menu.segment())
-        } else {
-            -1
-        });
+        ui.set_left_crumb_open(if menu.panel() == 0 { slint_segment } else { -1 });
+        ui.set_right_crumb_open(if menu.panel() == 1 { slint_segment } else { -1 });
     }
 
     /// 패널 `panel`의 `index`번 조각 뒤 › 단추의 창 기준 자리 `(왼쪽, 위쪽, 너비, 높이)`.
     fn arrow_rect(&self, panel: usize, index: usize) -> Option<(f32, f32, f32, f32)> {
-        let crumb = *self.crumbs.try_borrow().ok()?.get(panel)?.get(index)?;
+        let crumbs = self.crumbs.try_borrow().ok()?;
+        let list = crumbs.get(panel)?;
+        let left = if index == crumb_menu::ROOT_SEGMENT {
+            // 맨 앞 › 단추는 첫 조각 바로 앞이다.
+            list.first()?.left - crumb_menu::ARROW_WIDTH
+        } else {
+            let crumb = list.get(index)?;
+            crumb.left + crumb.width
+        };
         let ui = PanelUi::of(&self.ui, panel);
         Some((
-            crumb.left + crumb.width,
+            left,
             ui.address_top(),
             crumb_menu::ARROW_WIDTH,
             ui.address_height(),
@@ -2580,6 +2611,13 @@ impl View {
     fn arrow_at(&self, x: f32, y: f32) -> Option<(usize, usize)> {
         (0..MAX_PANELS).find_map(|panel| {
             let arrows = &self.panels[panel].arrows;
+            let root = crumb_menu::ROOT_SEGMENT;
+            if self
+                .arrow_rect(panel, root)
+                .is_some_and(|rect| crumb_menu::contains(rect, x, y))
+            {
+                return Some((panel, root));
+            }
             (0..arrows.row_count()).find_map(|index| {
                 if !arrows.row_data(index)? {
                     return None;
@@ -2694,7 +2732,7 @@ impl View {
     /// 메뉴 밖을 눌렀다: 열린 메뉴의 › 단추면 닫고, 다른 › 단추면 그 메뉴로 바꾸고, 그 밖이면 닫는다.
     fn crumb_outside(&self, x: f32, y: f32) {
         match self.arrow_at(x, y) {
-            Some((panel, index)) => self.crumb_arrow(count(panel), count(index)),
+            Some((panel, index)) => self.crumb_arrow(count(panel), slint_arrow(index)),
             None => {
                 self.close_crumb_menu();
             }
