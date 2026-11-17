@@ -555,6 +555,11 @@ enum Prepared<'a> {
     Case(CaseMode),
     /// 새 확장자(점 뒤 글자). `None`이면 확장자를 지운다. 적용 대상은 무시한다.
     Extension(Option<&'a str>),
+    Date {
+        format: &'a str,
+        place: &'a Place,
+        separator: &'a str,
+    },
 }
 
 fn prepare<'a>(index: usize, rule: &'a Rule, problems: &mut Vec<RuleProblem>) -> Prepared<'a> {
@@ -632,8 +637,15 @@ fn prepare<'a>(index: usize, rule: &'a Rule, problems: &mut Vec<RuleProblem>) ->
                 .map(|e| e.strip_prefix('.').unwrap_or(e))
                 .filter(|e| !e.is_empty()),
         ),
-        // 수정 날짜는 뒤 티켓이 채운다. 그때까지는 아무것도 하지 않는다.
-        RuleKind::Date { .. } => Prepared::Skip,
+        RuleKind::Date {
+            format,
+            place,
+            separator,
+        } => Prepared::Date {
+            format,
+            place,
+            separator,
+        },
     }
 }
 
@@ -703,9 +715,27 @@ fn insert_at(text: &str, from: Edge, at: usize, insert: &str) -> String {
 }
 
 /// 대상 글자 하나에 준비한 규칙 하나를 쓴다(`index`는 항목 목록의 0부터 센 자리).
-fn apply_prepared(rule: &Prepared, text: &str, index: usize) -> String {
+fn apply_prepared(rule: &Prepared, text: &str, index: usize, time: Option<(u64, i64)>) -> String {
     match rule {
         Prepared::Skip | Prepared::Extension(_) => text.to_string(),
+        Prepared::Date {
+            format,
+            place,
+            separator,
+        } => {
+            // 수정 시각을 모르는 항목은 이 규칙을 건너뛴다.
+            let Some((modified, offset)) = time else {
+                return text.to_string();
+            };
+            let date = format_date(format, modified, offset);
+            match place {
+                Place::Start => format!("{date}{separator}{text}"),
+                Place::End => format!("{text}{separator}{date}"),
+                Place::At { from, at } => {
+                    insert_at(text, *from, *at, &format!("{date}{separator}"))
+                }
+            }
+        }
         Prepared::Delete { from, at, count } => delete_range(text, *from, *at, *count),
         Prepared::Case(mode) => change_case(text, *mode),
         Prepared::Folded { find, replace, all } => replace_folded(text, find, replace, *all),
@@ -761,7 +791,7 @@ fn apply_prepared(rule: &Prepared, text: &str, index: usize) -> String {
 pub fn preview_rules(
     items: &[BatchItem],
     rules: &[Rule],
-    _context: &RuleContext,
+    context: &RuleContext,
     existing: &ExistingNames,
 ) -> Preview {
     let mut problems = Vec::new();
@@ -777,6 +807,12 @@ pub fn preview_rules(
         let mut stem = stem.to_string();
         // 점 뒤 글자. `None`이면 확장자가 없다.
         let mut ext = ext.strip_prefix('.').map(str::to_string);
+        let time = context
+            .modified
+            .get(index)
+            .copied()
+            .flatten()
+            .map(|modified| (modified, context.utc_offset_seconds));
         for (target, rule) in &prepared {
             if let Prepared::Extension(new) = rule {
                 if !is_folder {
@@ -785,15 +821,15 @@ pub fn preview_rules(
                 continue;
             }
             match target {
-                Target::Stem => stem = apply_prepared(rule, &stem, index),
+                Target::Stem => stem = apply_prepared(rule, &stem, index, time),
                 Target::Extension => {
                     if let Some(ext) = ext.as_mut() {
-                        *ext = apply_prepared(rule, ext, index);
+                        *ext = apply_prepared(rule, ext, index, time);
                     }
                 }
                 Target::Whole => {
                     let whole = join(&stem, ext.as_deref());
-                    let whole = apply_prepared(rule, &whole, index);
+                    let whole = apply_prepared(rule, &whole, index, time);
                     let (new_stem, new_ext) = split_stem(&whole, is_folder);
                     stem = new_stem.to_string();
                     ext = new_ext.strip_prefix('.').map(str::to_string);
@@ -803,6 +839,48 @@ pub fn preview_rules(
         join(&stem, ext.as_deref())
     });
     check(entries, existing, problems)
+}
+
+/// `FILETIME`을 UTC와의 차이 초만큼 옮긴 지역 시각으로 `format`의 낱말(`yyyy` `yy` `MM` `dd` `HH` `mm` `ss`)을 바꾼다.
+fn format_date(format: &str, filetime: u64, offset: i64) -> String {
+    const EPOCH_GAP: i64 = 11_644_473_600;
+    let seconds = (filetime / 10_000_000) as i64 - EPOCH_GAP + offset;
+    let days = seconds.div_euclid(86_400);
+    let rest = seconds.rem_euclid(86_400);
+    // 1970-01-01 기준 날수 → 그레고리력 날짜(Hinnant의 civil_from_days).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    let words: [(&str, String); 7] = [
+        ("yyyy", format!("{year:04}")),
+        ("yy", format!("{:02}", year.rem_euclid(100))),
+        ("MM", format!("{month:02}")),
+        ("dd", format!("{day:02}")),
+        ("HH", format!("{:02}", rest / 3600)),
+        ("mm", format!("{:02}", rest % 3600 / 60)),
+        ("ss", format!("{:02}", rest % 60)),
+    ];
+    let mut out = String::new();
+    let mut tail = format;
+    'outer: while !tail.is_empty() {
+        for (word, value) in &words {
+            if let Some(next) = tail.strip_prefix(word) {
+                out.push_str(value);
+                tail = next;
+                continue 'outer;
+            }
+        }
+        let c = tail.chars().next().unwrap();
+        out.push(c);
+        tail = &tail[c.len_utf8()..];
+    }
+    out
 }
 
 fn join(stem: &str, ext: Option<&str>) -> String {

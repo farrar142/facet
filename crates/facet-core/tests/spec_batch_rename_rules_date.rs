@@ -60,7 +60,6 @@ fn dated(name: &str, rule: Rule, time: u64, offset: i64) -> String {
 }
 
 #[test]
-#[ignore = "#274"]
 fn format_words_become_the_date_and_other_text_stays() {
     assert_eq!(
         dated(
@@ -91,7 +90,6 @@ fn format_words_become_the_date_and_other_text_stays() {
 }
 
 #[test]
-#[ignore = "#274"]
 fn the_utc_offset_can_move_the_date_to_another_day_or_year() {
     let rule = || date("yyyy-MM-dd_HH", Place::Start, " ");
     assert_eq!(dated("a.txt", rule(), NOV_15, 0), "2026-11-15_23 a.txt");
@@ -125,7 +123,6 @@ fn the_utc_offset_can_move_the_date_to_another_day_or_year() {
 }
 
 #[test]
-#[ignore = "#274"]
 fn the_date_goes_where_the_place_says_with_the_separator() {
     let format = "yyyy-MM-dd";
     assert_eq!(
@@ -153,7 +150,6 @@ fn the_date_goes_where_the_place_says_with_the_separator() {
 }
 
 #[test]
-#[ignore = "#274"]
 fn items_without_a_known_time_skip_only_the_date_rule() {
     let items = [file("a.jpg"), file("b.jpg"), file("c.jpg")];
     let rule = date("yyyy-MM-dd", Place::End, "_");

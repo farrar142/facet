@@ -91,7 +91,6 @@ fn replace(find: &str, with: &str) -> Rule {
 }
 
 #[test]
-#[ignore = "#274"]
 fn preview_rules_uses_the_modified_time_from_the_list() {
     let dir = folder_with(&[("b.txt", DEC_31), ("a.txt", NOV_15), ("c.txt", NOV_15)]);
     let mut app = app_at(dir.path());
@@ -118,7 +117,6 @@ fn preview_rules_uses_the_modified_time_from_the_list() {
 }
 
 #[test]
-#[ignore = "#274"]
 fn preview_rules_checks_names_left_in_the_folder() {
     let dir = folder_with(&[("a.txt", NOV_15), ("b.txt", NOV_15), ("c.txt", NOV_15)]);
     let mut app = app_at(dir.path());
@@ -140,7 +138,6 @@ fn preview_rules_checks_names_left_in_the_folder() {
 }
 
 #[test]
-#[ignore = "#274"]
 fn preview_rules_matches_the_s14a_entry_point() {
     let dir = folder_with(&[
         ("사진 1.jpg", NOV_15),
@@ -187,7 +184,6 @@ fn preview_rules_matches_the_s14a_entry_point() {
 }
 
 #[test]
-#[ignore = "#274"]
 fn nothing_happens_when_the_command_is_off_or_blocked() {
     let dir = folder_with(&[("a.txt", NOV_15), ("b.txt", NOV_15), ("c.txt", NOV_15)]);
     let mut app = app_at(dir.path());
@@ -269,7 +265,6 @@ mod on_disk {
     }
 
     #[test]
-    #[ignore = "#274"]
     fn start_rules_renames_on_disk_as_one_job_and_undoes_once() {
         let dir = folder_with(&[
             ("사진 1.jpeg", NOV_15),

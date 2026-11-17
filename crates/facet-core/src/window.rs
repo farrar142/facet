@@ -3039,6 +3039,10 @@ impl App {
         let preview = self
             .batch_rename_preview(rule)
             .ok_or(BatchRenameError::Unavailable)?;
+        self.start_from_preview(preview)
+    }
+
+    fn start_from_preview(&mut self, preview: Preview) -> Result<JobId, BatchRenameError> {
         if preview.problem_count() > 0 {
             return Err(BatchRenameError::Problems);
         }
@@ -3059,22 +3063,44 @@ impl App {
         Ok(self.submit_batch_rename(items, unchanged))
     }
 
-    /// #274: 선택 항목과 목록의 수정 시각으로 규칙 목록 미리 보기, 명령이 꺼져 있으면 `None`.
+    /// 선택 항목([`App::batch_rename_items`], 목록 순서)에 목록이 가진 수정 시각(`FILETIME`)과 부르는 쪽이 넘긴 UTC와의
+    /// 차이 초로 규칙 목록을 쓴 미리 보기([`batch_rename::preview_rules`]). 겹침은 [`App::batch_rename_preview`]와
+    /// 같다. 명령이 꺼져 있으면 `None`.
     pub fn batch_rename_preview_rules(
         &self,
-        _rules: &[Rule],
-        _utc_offset_seconds: i64,
+        rules: &[Rule],
+        utc_offset_seconds: i64,
     ) -> Option<Preview> {
-        todo!("#274")
+        let items = self.batch_rename_items()?;
+        let tab = self.active_window().active_panel().active_tab();
+        let modified = tab
+            .selected_indices()
+            .filter_map(|i| {
+                tab.get(i)?;
+                tab.folder_of(i)?;
+                Some(filetime_of(tab.get(i)?.modified))
+            })
+            .collect();
+        let context = batch_rename::RuleContext {
+            modified,
+            utc_offset_seconds,
+        };
+        let existing = tab.existing_names();
+        Some(batch_rename::preview_rules(
+            &items, rules, &context, &existing,
+        ))
     }
 
-    /// #274: 규칙 목록으로 `start_batch_rename`과 같은 규칙의 일괄 이름 바꾸기 작업을 넣는다.
+    /// 규칙 목록으로 [`App::start_batch_rename`]과 같은 규칙의 일괄 이름 바꾸기 작업을 넣는다.
     pub fn start_batch_rename_rules(
         &mut self,
-        _rules: &[Rule],
-        _utc_offset_seconds: i64,
+        rules: &[Rule],
+        utc_offset_seconds: i64,
     ) -> Result<JobId, BatchRenameError> {
-        todo!("#274")
+        let preview = self
+            .batch_rename_preview_rules(rules, utc_offset_seconds)
+            .ok_or(BatchRenameError::Unavailable)?;
+        self.start_from_preview(preview)
     }
 
     /// **일괄 이름 바꾸기** 작업을 작업 대기열에 넣어 곧바로 시작하고([`JobQueue::batch_rename`]: 차례를 기다리지
@@ -3405,4 +3431,14 @@ fn store_clipboard(
         }
     }
     *files.lock().unwrap_or_else(|e| e.into_inner()) = summary;
+}
+
+/// 수정 시각을 `FILETIME`(1601-01-01부터 100ns 단위)으로. 1601년 이전이면 `None`.
+fn filetime_of(time: std::time::SystemTime) -> Option<u64> {
+    const EPOCH_GAP_100NS: i128 = 11_644_473_600 * 10_000_000;
+    let unix = match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => i128::try_from(d.as_nanos() / 100).ok()?,
+        Err(e) => -i128::try_from(e.duration().as_nanos() / 100).ok()?,
+    };
+    u64::try_from(unix + EPOCH_GAP_100NS).ok()
 }

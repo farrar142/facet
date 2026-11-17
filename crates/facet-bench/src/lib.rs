@@ -939,7 +939,7 @@ pub struct BatchRenameMeasurement {
 }
 
 /// 시험 폴더(항목 [`BATCH_RENAME_SELECTED`]개)를 열어 모두 선택하고, 찾아 바꾸기·앞·뒤 붙이기·번호를 모두 쓴 규칙으로
-/// `App::batch_rename_preview`(항목 모으기 포함)를 만드는 시간을 `runs`번 잰다(한 번 데운 뒤).
+/// `App::batch_rename_preview_rules`(항목 모으기 포함)를 만드는 시간을 `runs`번 잰다(한 번 데운 뒤).
 /// 선택 수나 바뀌는 항목 수가 다르면 실패한다.
 pub fn measure_batch_rename(runs: usize) -> Result<BatchRenameMeasurement, String> {
     use facet_core::Location;
@@ -976,8 +976,9 @@ pub fn measure_batch_rename(runs: usize) -> Result<BatchRenameMeasurement, Strin
             separator: "_".to_owned(),
         }),
     };
+    let rules = rule.to_rules();
     let preview = |app: &facet_core::window::App| {
-        app.batch_rename_preview(&rule)
+        app.batch_rename_preview_rules(&rules, 0)
             .ok_or_else(|| "미리 보기를 만들 수 없습니다".to_owned())
     };
     let rename_count = preview(&app)?.rename_count();
