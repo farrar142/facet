@@ -1,11 +1,13 @@
 name: ci
 
 on:
+  # 공장이 GITHUB_TOKEN으로 연 PR(factory/spec-*, agent/issue-*)에서는 이 run이 승인 대기
+  # (job 0개)로 생겨 병합·닫힘 뒤 실패로 남는다. 기준 브랜치만 거르는 pull_request 필터로는
+  # 막을 수 없어, Odin·Verify가 PR을 병합하거나 닫은 뒤 .github/factory/prune-runs.sh로 지운다(#270).
   pull_request:
   push:
     branches: [main]
-  # 공장 Implementer가 GITHUB_TOKEN으로 연 PR은 CI가 자동으로 돌지 않으므로
-  # `gh workflow run ci.yml --ref <브랜치>`로 직접 띄운다.
+  # 공장 병합(GITHUB_TOKEN)은 push 사건을 내지 않으므로 Odin·Verify가 병합 뒤 main에서 띄운다.
   workflow_dispatch:
 
 permissions:

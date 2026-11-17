@@ -147,13 +147,17 @@ eq "spec keeps needs-decision" "needs-decision,spec" "$(labels_of 50)"
 
 # --- pass: merge, approve, dispatch the lowest unblocked ticket -----------------------------------
 
+runs_left() { jq -r '[.[].id] | join(",")' "$FAKE_GH/runs.json" | tr -d ''; }
+
 setup pass
+jq -n '[{id: 1, event: "pull_request", head_branch: "factory/spec-50", triggering_actor: {login: "github-actions[bot]"}, jobs: 0}]' | tr -d '' > "$FAKE_GH/runs.json"
 printf -- '- 이름 불일치 하나를 고쳤다\n' > "$tmp/report.md"
 bash "$odin" pass 50 70 "$tmp/report.md" > "$tmp/log" 2>&1
 eq "exit" 0 "$?"
 eq "merged" true "$(merged)"
 has "squash" "pulls/70/merge -f merge_method=squash" "$(calls)"
 has "branch deleted" "git/refs/heads/factory/spec-50" "$(calls)"
+eq "bot pull_request run deleted (#270)" "" "$(runs_left)"
 has "main built" "actions/workflows/ci.yml/dispatches" "$(calls)"
 eq "open tickets approved" "61 62 63" "$(approved)"
 # #61 is blocked (an open blocker); #62 is the lowest-numbered unblocked ticket.
@@ -201,11 +205,13 @@ lacks "branch kept" "git/refs/heads/factory/spec-50" "$(calls)"
 # --- empty spec PR --------------------------------------------------------------------------------
 
 setup empty 0
+jq -n '[{id: 1, event: "pull_request", head_branch: "factory/spec-50", triggering_actor: {login: "github-actions[bot]"}, jobs: 0}]' | tr -d '' > "$FAKE_GH/runs.json"
 bash "$odin" empty 50 70 > /dev/null 2>&1
 eq "exit" 0 "$?"
 eq "closed" closed "$(jq -r .state "$FAKE_GH/pull-70.json" | tr -d '\r')"
 eq "not merged" false "$(merged)"
 has "branch deleted" "git/refs/heads/factory/spec-50" "$(calls)"
+eq "bot pull_request run deleted (#270)" "" "$(runs_left)"
 eq "open tickets approved" "61 62 63" "$(approved)"
 eq "first dispatch" 62 "$(dispatched)"
 has "says why" "인수 시험 0개" "$(pr_comments)"

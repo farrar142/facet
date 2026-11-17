@@ -13,19 +13,21 @@
 #                                        3. no `todo!("#N")` stub (Odin's placeholder for a name of
 #                                           ticket #N's contract) is left in any tracked *.rs file.
 #   verify.sh sendback <N> <PR> <file>   send ticket #N back: comment `<!-- factory-sendback -->` and the
-#                                        reason (<file>) on the ticket, close the PR and delete its
-#                                        branch, drop `in-progress`. On the ticket's second send-back
+#                                        reason (<file>) on the ticket, close the PR, delete its
+#                                        branch and its job-less bot ci.yml runs (prune-runs.sh), drop `in-progress`. On the ticket's second send-back
 #                                        hand it to a human (`ready-for-human`, `<!-- factory-human -->`)
 #                                        and move the chain on (dispatch-next.sh); otherwise label it
 #                                        `ready-for-agent` again and dispatch factory-implementer.yml.
 #   verify.sh pass <N> <PR> [report]     squash-merge the PR (retrying while GitHub computes
-#                                        mergeability), delete its branch, comment the report on the
+#                                        mergeability), delete its branch and its job-less bot
+#                                        ci.yml runs (prune-runs.sh), comment the report on the
 #                                        PR, close the ticket, dispatch ci.yml and release.yml on main
 #                                        and then the next ticket (dispatch-next.sh). Exits 1 when the
 #                                        PR could not be merged (nothing else is done then).
 #
 # Environment: REPO (or GITHUB_REPOSITORY), GH_TOKEN; RUN_URL (link in comments, optional);
-# FACTORY_DISPATCH_NEXT (command run instead of dispatch-next.sh, tests); FACTORY_MERGE_WAIT
+# FACTORY_DISPATCH_NEXT (command run instead of dispatch-next.sh, tests); FACTORY_PRUNE_RUNS (command
+# run with the branch instead of prune-runs.sh, tests); FACTORY_MERGE_WAIT
 # (seconds between merge attempts, default 15). Needs bash, git, gh and jq.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
@@ -105,6 +107,11 @@ dispatch() { # dispatch <workflow file> [<input>=<value> ...]
   for kv in "$@"; do args+=(-f "inputs[${kv%%=*}]=${kv#*=}"); done
   gh api -X POST "repos/$REPO/actions/workflows/$wf/dispatches" -f ref=main "${args[@]}" >/dev/null
 }
+# Delete the job-less ci.yml pull_request runs GitHub left on a factory PR branch (prune-runs.sh, #270).
+prune_runs() {
+  [ -n "$1" ] || return 0
+  if [ -n "${FACTORY_PRUNE_RUNS:-}" ]; then $FACTORY_PRUNE_RUNS "$1"; else bash "$here/prune-runs.sh" "$1"; fi
+}
 next_ticket() {
   if [ -n "${FACTORY_DISPATCH_NEXT:-}" ]; then
     $FACTORY_DISPATCH_NEXT
@@ -137,6 +144,7 @@ Verify가 PR #$pr을 되돌렸다$(run_link).
 $reason"
   gh api -X PATCH "repos/$REPO/pulls/$pr" -f state=closed >/dev/null || echo "::warning::could not close PR #$pr"
   delete_branch "$branch"
+  prune_runs "$branch"
   remove_label "$n" in-progress
 
   count=$(sendback_count "$n")
@@ -170,6 +178,7 @@ pass() {
     return 1
   fi
   delete_branch "$branch"
+  prune_runs "$branch"
   if [ -n "$report" ] && [ -s "$report" ]; then
     gh api "repos/$REPO/issues/$pr/comments" -f "body=Verify$(run_link): 통과
 

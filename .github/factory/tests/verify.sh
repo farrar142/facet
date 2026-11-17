@@ -208,13 +208,17 @@ count_marker() { # count_marker <n> <marker>
 calls() { cat "$FAKE_GH/calls.log"; }
 next_dispatched() { [ -e "$tmp/next-dispatched" ] && echo yes || echo no; }
 
+runs_left() { jq -r '[.[].id] | join(",")' "$FAKE_GH/runs.json" | tr -d ''; }
+
 setup first-sendback
+jq -n '[{id: 1, event: "pull_request", head_branch: "agent/issue-7", triggering_actor: {login: "github-actions[bot]"}, jobs: 0}]' | tr -d '' > "$FAKE_GH/runs.json"
 bash "$verify" sendback 7 40 "$tmp/reason.md" > /dev/null
 eq "exit" 0 "$?"
 eq "sendback comments" 1 "$(count_marker 7 '<!-- factory-sendback -->')"
 has "the reason is in the comment" "AC-1: 미충족" "$(jq -r '.[0].body' "$FAKE_GH/comments-7.json")"
 eq "PR state" closed "$(state_of pull-40)"
 has "branch deleted" "git/refs/heads/agent/issue-7" "$(calls)"
+eq "bot pull_request run deleted (#270)" "" "$(runs_left)"
 eq "labels" ready-for-agent "$(labels_of 7)"
 has "implementer dispatched" "actions/workflows/factory-implementer.yml/dispatches -f ref=main -f inputs[issue]=7" "$(calls)"
 eq "next ticket" no "$(next_dispatched)"
@@ -241,6 +245,7 @@ eq "labels" ready-for-agent "$(labels_of 7)"
 has "implementer dispatched" "factory-implementer.yml/dispatches" "$(calls)"
 
 setup pass
+jq -n '[{id: 1, event: "pull_request", head_branch: "agent/issue-7", triggering_actor: {login: "github-actions[bot]"}, jobs: 0}]' | tr -d '' > "$FAKE_GH/runs.json"
 printf 'AC-1: 충족 — spec_demo_a::seven_does_it\n' > "$tmp/report.md"
 issue 40 ""
 bash "$verify" pass 7 40 "$tmp/report.md" > /dev/null
@@ -248,6 +253,7 @@ eq "exit" 0 "$?"
 eq "merged" true "$(jq -r .merged "$FAKE_GH/pull-40.json" | tr -d '\r')"
 has "squash" "pulls/40/merge -f merge_method=squash" "$(calls)"
 has "branch deleted" "git/refs/heads/agent/issue-7" "$(calls)"
+eq "bot pull_request run deleted (#270)" "" "$(runs_left)"
 eq "ticket closed" closed "$(state_of issue-7)"
 eq "labels" "" "$(labels_of 7)"
 has "ci dispatched" "actions/workflows/ci.yml/dispatches -f ref=main" "$(calls)"

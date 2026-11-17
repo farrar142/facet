@@ -119,6 +119,33 @@ case "$method $path" in
     fi
     cat "$f"; exit 0 ;;
   "DELETE repos/"*/*/git/refs/heads/*) echo '{}'; exit 0 ;;
+  # prune-runs.sh: runs.json ([{id, event, head_branch, triggering_actor: {login}, jobs, cancelled}],
+  # default []). GET …/workflows/<f>/runs filters by the query's branch= and event=; …/runs/<id>/jobs
+  # gives {total_count: jobs}; DELETE …/runs/<id> removes the run (fails while fail-delete-run exists);
+  # POST …/runs/<id>/cancel sets cancelled (fails while fail-cancel-run exists).
+  "GET repos/"*/*/actions/workflows/*/runs)
+    f="$d/runs.json"; [ -f "$f" ] || echo '[]' > "$f"
+    b=$(printf '%s' "$query" | tr '&' '\n' | sed -n 's/^branch=//p')
+    e=$(printf '%s' "$query" | tr '&' '\n' | sed -n 's/^event=//p')
+    jqf --arg b "$b" --arg e "$e" \
+      '{workflow_runs: [.[] | select(($b == "" or .head_branch == $b) and ($e == "" or .event == $e))]}' "$f"
+    exit 0 ;;
+  "GET repos/"*/*/actions/runs/*/jobs)
+    id=${path%/jobs}; id=${id##*/}
+    jqf --argjson id "$id" '[.[] | select(.id == $id)][0] // error("no run") | {total_count: .jobs}' "$d/runs.json" \
+      || fail "no run $id"
+    exit 0 ;;
+  "DELETE repos/"*/*/actions/runs/*)
+    id=${path##*/}
+    [ -e "$d/fail-delete-run" ] && fail "deleting runs is broken"
+    jqf --argjson id "$id" 'map(select(.id != $id))' "$d/runs.json" > "$d/runs.json.new" && mv "$d/runs.json.new" "$d/runs.json"
+    exit 0 ;;
+  "POST repos/"*/*/actions/runs/*/cancel)
+    id=${path%/cancel}; id=${id##*/}
+    [ -e "$d/fail-cancel-run" ] && fail "cancelling runs is broken"
+    jqf --argjson id "$id" 'map(if .id == $id then .cancelled = true else . end)' "$d/runs.json" > "$d/runs.json.new" \
+      && mv "$d/runs.json.new" "$d/runs.json"
+    echo '{}'; exit 0 ;;
   "POST repos/"*/*/actions/workflows/*/dispatches)
     [ -e "$d/fail-dispatch" ] && fail "dispatch is broken"
     exit 0 ;;
