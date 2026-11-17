@@ -547,6 +547,14 @@ enum Prepared<'a> {
         place: &'a Place,
         separator: &'a str,
     },
+    Delete {
+        from: Edge,
+        at: usize,
+        count: usize,
+    },
+    Case(CaseMode),
+    /// 새 확장자(점 뒤 글자). `None`이면 확장자를 지운다. 적용 대상은 무시한다.
+    Extension(Option<&'a str>),
 }
 
 fn prepare<'a>(index: usize, rule: &'a Rule, problems: &mut Vec<RuleProblem>) -> Prepared<'a> {
@@ -613,11 +621,19 @@ fn prepare<'a>(index: usize, rule: &'a Rule, problems: &mut Vec<RuleProblem>) ->
             place,
             separator,
         },
-        // 지우기·대소문자·확장자 바꾸기·수정 날짜는 뒤 티켓이 채운다. 그때까지는 아무것도 하지 않는다.
-        RuleKind::Delete { .. }
-        | RuleKind::Case(_)
-        | RuleKind::Extension { .. }
-        | RuleKind::Date { .. } => Prepared::Skip,
+        RuleKind::Delete { from, at, count } => Prepared::Delete {
+            from: *from,
+            at: *at,
+            count: *count,
+        },
+        RuleKind::Case(mode) => Prepared::Case(*mode),
+        RuleKind::Extension { new } => Prepared::Extension(
+            new.as_deref()
+                .map(|e| e.strip_prefix('.').unwrap_or(e))
+                .filter(|e| !e.is_empty()),
+        ),
+        // 수정 날짜는 뒤 티켓이 채운다. 그때까지는 아무것도 하지 않는다.
+        RuleKind::Date { .. } => Prepared::Skip,
     }
 }
 
@@ -634,6 +650,49 @@ fn char_offset(text: &str, from: Edge, at: usize) -> usize {
         .map_or(text.len(), |(offset, _)| offset)
 }
 
+/// `from` 끝에서 센 `at`번째 `char` 자리부터 안쪽으로 `count`글자를 지운다(범위 밖은 무시).
+fn delete_range(text: &str, from: Edge, at: usize, count: usize) -> String {
+    let len = text.chars().count();
+    let (start, end) = match from {
+        Edge::Start => (at.min(len), at.saturating_add(count).min(len)),
+        Edge::End => {
+            if at >= len {
+                return text.to_string();
+            }
+            let end = len - at;
+            (end.saturating_sub(count), end)
+        }
+    };
+    if start >= end {
+        return text.to_string();
+    }
+    text.chars()
+        .enumerate()
+        .filter(|(i, _)| *i < start || *i >= end)
+        .map(|(_, c)| c)
+        .collect()
+}
+
+fn change_case(text: &str, mode: CaseMode) -> String {
+    match mode {
+        CaseMode::Lower => text.to_lowercase(),
+        CaseMode::Upper => text.to_uppercase(),
+        CaseMode::Title | CaseMode::Sentence => {
+            let mut out = String::with_capacity(text.len());
+            let mut capital = true;
+            for c in text.chars() {
+                if capital {
+                    out.extend(c.to_uppercase());
+                } else {
+                    out.extend(c.to_lowercase());
+                }
+                capital = mode == CaseMode::Title && matches!(c, ' ' | '_' | '-' | '.');
+            }
+            out
+        }
+    }
+}
+
 fn insert_at(text: &str, from: Edge, at: usize, insert: &str) -> String {
     let offset = char_offset(text, from, at);
     let mut out = String::with_capacity(text.len() + insert.len());
@@ -646,7 +705,9 @@ fn insert_at(text: &str, from: Edge, at: usize, insert: &str) -> String {
 /// 대상 글자 하나에 준비한 규칙 하나를 쓴다(`index`는 항목 목록의 0부터 센 자리).
 fn apply_prepared(rule: &Prepared, text: &str, index: usize) -> String {
     match rule {
-        Prepared::Skip => text.to_string(),
+        Prepared::Skip | Prepared::Extension(_) => text.to_string(),
+        Prepared::Delete { from, at, count } => delete_range(text, *from, *at, *count),
+        Prepared::Case(mode) => change_case(text, *mode),
         Prepared::Folded { find, replace, all } => replace_folded(text, find, replace, *all),
         Prepared::Exact { find, replace, all } => {
             if *all {
@@ -717,6 +778,12 @@ pub fn preview_rules(
         // 점 뒤 글자. `None`이면 확장자가 없다.
         let mut ext = ext.strip_prefix('.').map(str::to_string);
         for (target, rule) in &prepared {
+            if let Prepared::Extension(new) = rule {
+                if !is_folder {
+                    ext = new.map(str::to_string);
+                }
+                continue;
+            }
             match target {
                 Target::Stem => stem = apply_prepared(rule, &stem, index),
                 Target::Extension => {

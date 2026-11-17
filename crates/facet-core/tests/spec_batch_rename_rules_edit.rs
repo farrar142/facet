@@ -55,7 +55,6 @@ fn extension(new: Option<&str>) -> Rule {
 }
 
 #[test]
-#[ignore = "#273"]
 fn delete_removes_chars_inward_from_either_end() {
     let cases = [
         (Edge::Start, 0, 2, "cdef.txt"),
@@ -75,7 +74,6 @@ fn delete_removes_chars_inward_from_either_end() {
 }
 
 #[test]
-#[ignore = "#273"]
 fn delete_out_of_range_changes_nothing() {
     for rule in [
         delete(Edge::Start, 6, 3),
@@ -91,7 +89,6 @@ fn delete_out_of_range_changes_nothing() {
 }
 
 #[test]
-#[ignore = "#273"]
 fn delete_counts_korean_and_emoji_as_one_char_each() {
     assert_eq!(
         renamed(file("😀사진_2026.jpg"), delete(Edge::Start, 0, 1)),
@@ -113,7 +110,6 @@ fn delete_counts_korean_and_emoji_as_one_char_each() {
 }
 
 #[test]
-#[ignore = "#273"]
 fn case_rules_lower_upper_title_and_sentence() {
     assert_eq!(
         renamed(file("HeLLo WORLD.TXT"), case(CaseMode::Lower)),
@@ -138,7 +134,6 @@ fn case_rules_lower_upper_title_and_sentence() {
 }
 
 #[test]
-#[ignore = "#273"]
 fn case_rules_use_unicode_and_leave_korean_as_is() {
     assert_eq!(
         renamed(file("ÉCOLE Ñandú.txt"), case(CaseMode::Lower)),
@@ -165,7 +160,6 @@ fn case_rules_use_unicode_and_leave_korean_as_is() {
 }
 
 #[test]
-#[ignore = "#273"]
 fn the_same_case_rule_differs_by_target() {
     let upper = |target| targeted(case(CaseMode::Upper), target);
     assert_eq!(renamed(file("photo.jpg"), upper(Target::Stem)), "PHOTO.jpg");
@@ -196,7 +190,6 @@ fn the_same_case_rule_differs_by_target() {
 }
 
 #[test]
-#[ignore = "#273"]
 fn extension_rule_replaces_or_removes_the_extension() {
     assert_eq!(renamed(file("a.jpeg"), extension(Some("jpg"))), "a.jpg");
     assert_eq!(
@@ -214,7 +207,6 @@ fn extension_rule_replaces_or_removes_the_extension() {
 }
 
 #[test]
-#[ignore = "#273"]
 fn extension_rule_adds_to_names_without_one_and_skips_folders() {
     assert_eq!(renamed(file("README"), extension(Some("md"))), "README.md");
     assert_eq!(
@@ -234,7 +226,6 @@ fn extension_rule_adds_to_names_without_one_and_skips_folders() {
 }
 
 #[test]
-#[ignore = "#273"]
 fn extension_rule_ignores_its_target() {
     for target in [Target::Stem, Target::Extension, Target::Whole] {
         assert_eq!(
@@ -246,7 +237,6 @@ fn extension_rule_ignores_its_target() {
 }
 
 #[test]
-#[ignore = "#273"]
 fn rules_combine_in_order_and_keep_the_s14a_checks() {
     let rules = [
         delete(Edge::Start, 0, 4),
