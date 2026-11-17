@@ -12,6 +12,8 @@
 #   <!-- factory-budget-spec -->         a spec stopped at its budget (`factory-paused`)
 #   <!-- factory-budget-daily DATE -->   the whole factory stopped at the daily budget (ledger issue)
 #   <!-- factory-human -->               a ticket handed to a person
+#   <!-- factory-queue-empty S -->       the last spec S of FACTORY_SPEC_QUEUE was started (ledger issue)
+#   <!-- factory-idle Q -->              every spec of the queue is labelled; the factory is idle (ledger)
 #
 # Anyone can write those markers on a public repository, so only comments by `github-actions[bot]` or by
 # someone with write access (collaborator permission admin, maintain or write) are sent. A comment by
@@ -78,6 +80,8 @@ matches=$(printf '%s' "$comments" | j -s -r '
      elif ($b | contains("<!-- factory-budget-spec -->")) then "budget-spec"
      elif ($b | contains("<!-- factory-budget-daily ")) then "budget-daily"
      elif ($b | contains("<!-- factory-human -->")) then "human"
+     elif ($b | contains("<!-- factory-queue-empty ")) then "queue-empty"
+     elif ($b | contains("<!-- factory-idle ")) then "idle"
      else empty end) as $k
   | [(.id | tostring), $k, (.issue_url | sub(".*/"; "")), (.user.login // "")] | @tsv')
 
@@ -141,6 +145,12 @@ while IFS=$'\t' read -r id kind n author; do
     human)
       label="사람 넘김"
       todo="공장이 이 이슈를 사람에게 넘겼다(ready-for-human). 위 댓글의 까닭을 보고 이어 받는다." ;;
+    queue-empty)
+      label="spec 큐 바닥남"
+      todo="다음 spec을 FACTORY_SPEC_QUEUE에 넣는다(조율자 몫)." ;;
+    idle)
+      label="공장 idle"
+      todo="FACTORY_SPEC_QUEUE에 spec을 넣고 dispatch-next를 다시 돌린다(조율자 몫)." ;;
   esac
   text="종류: $label
 이슈: $url

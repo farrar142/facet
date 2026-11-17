@@ -25,6 +25,35 @@ jqf() { jq "$@" | tr -d '\r'; }
 #   gh api … --jq <expr>                                      the same call, filtered through jq -r
 case "${1:-}" in
   issue)
+    # gh issue view <n> … [--jq <expr>]: {state (upper case), labels}; gh issue edit <n> --add-label <l>;
+    # gh issue close <n> …: sets state closed (#280).
+    case "${2:-}" in
+      view|edit|close)
+        sub=$2 n=$3; shift 3
+        f="$d/issue-$n.json"
+        [ -f "$f" ] || fail "no issue #$n"
+        expr= add=
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --jq) expr=$2; shift 2 ;;
+            --add-label) add=$2; shift 2 ;;
+            --repo|--json|--reason|--comment) shift 2 ;;
+            *) fail "unsupported issue $sub argument $1" ;;
+          esac
+        done
+        case "$sub" in
+          view)
+            out=$(jqf '{state: (.state | ascii_upcase), labels}' "$f")
+            if [ -n "$expr" ]; then printf '%s' "$out" | jqf -r "$expr"; else printf '%s\n' "$out"; fi ;;
+          edit)
+            [ -n "$add" ] || fail "unsupported issue edit"
+            jqf --arg l "$add" 'if any(.labels[]; .name == $l) then . else .labels += [{name: $l}] end' "$f" \
+              > "$f.new" && mv "$f.new" "$f" ;;
+          close)
+            jqf '.state = "closed"' "$f" > "$f.new" && mv "$f.new" "$f" ;;
+        esac
+        exit 0 ;;
+    esac
     [ "${2:-}" = list ] || fail "unsupported command: $*"
     shift 2
     label= expr=
@@ -47,6 +76,13 @@ case "${1:-}" in
           and ($l == "" or any(.labels[]; .name == $l))) | {number}]' "${files[@]}")
     fi
     if [ -n "$expr" ]; then printf '%s' "$list" | jqf -r "$expr"; else printf '%s\n' "$list"; fi
+    exit 0 ;;
+  run)
+    # gh run list … [--jq <expr>]: no runs (#280).
+    [ "${2:-}" = list ] || fail "unsupported command: $*"
+    expr=
+    while [ $# -gt 0 ]; do [ "$1" = --jq ] && expr=$2; shift; done
+    if [ -n "$expr" ]; then printf '[]' | jqf -r "$expr"; else echo '[]'; fi
     exit 0 ;;
   workflow)
     [ "${2:-}" = run ] || fail "unsupported command: $*"
