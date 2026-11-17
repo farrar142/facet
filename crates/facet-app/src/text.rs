@@ -130,6 +130,40 @@ pub fn batch_no_problems_text() -> String {
     "문제 없음".to_owned()
 }
 
+/// 열 수 없는 규칙 묶음 줄의 까닭.
+pub const PRESET_UNOPENABLE: &str = "이 창에서 열 수 없음";
+
+/// 규칙 묶음 조작이 거부된 까닭(창에 보임).
+pub fn preset_error_text(error: facet_core::rename_presets::PresetError) -> String {
+    use facet_core::rename_presets::PresetError;
+    match error {
+        PresetError::EmptyName => "묶음 이름을 입력하세요".to_owned(),
+        PresetError::NameTaken => "같은 이름의 묶음이 이미 있습니다".to_owned(),
+        PresetError::NotFound => "목록에서 묶음을 먼저 고르세요".to_owned(),
+    }
+}
+
+/// 묶음 파일을 저장하지 못했다는 까닭(창에 보임).
+pub fn preset_save_failed_text(error: &str) -> String {
+    format!("규칙 묶음을 저장하지 못했습니다: {error}")
+}
+
+/// 묶음 파일을 읽을 때 생긴 일(건너뛴 묶음 수, 파일이 깨져 옆에 남긴 파일 이름). 알릴 것이 없으면 빈 글자.
+pub fn preset_notice_text(skipped: usize, broken: Option<&Option<String>>) -> String {
+    let mut parts = Vec::new();
+    match broken {
+        Some(Some(kept)) => {
+            parts.push(format!("묶음 파일이 깨져 옆에 남겼습니다: {kept}"));
+        }
+        Some(None) => parts.push("묶음 파일이 깨져 읽지 못했습니다".to_owned()),
+        None => {}
+    }
+    if skipped > 0 {
+        parts.push(format!("읽지 못해 건너뛴 묶음 {skipped}개"));
+    }
+    parts.join(" · ")
+}
+
 /// 「바꾸기」가 막힌 까닭(창 아래에 보임).
 pub fn batch_error_text(error: facet_core::window::BatchRenameError) -> String {
     match error {
@@ -1030,5 +1064,19 @@ mod tests {
             file_type_text(&file_type(&item("사진.zip", true))),
             "파일 폴더"
         );
+    }
+}
+
+#[cfg(test)]
+mod preset_tests {
+    use super::*;
+
+    #[test]
+    fn 묶음_파일_알림_글자() {
+        assert_eq!(preset_notice_text(0, None), "");
+        assert!(preset_notice_text(2, None).contains('2'));
+        let kept = Some("x.broken.toml".to_owned());
+        let text = preset_notice_text(0, Some(&kept));
+        assert!(text.contains("x.broken.toml"));
     }
 }

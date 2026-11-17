@@ -180,6 +180,14 @@ export struct BatchRow {
     problem: string,
 }
 
+// 일괄 이름 바꾸기 창의 규칙 묶음 줄 하나: 이름, 입력란으로 열 수 있는가, 열 수 없는 까닭(열 수 없을 때만), 고른 줄인가.
+export struct BatchPresetRow {
+    name: string,
+    enabled: bool,
+    reason: string,
+    selected: bool,
+}
+
 // 일괄 이름 바꾸기 창의 글자 입력란 하나: 이름표와 입력란. Enter는 `accepted`, Esc는 `escape`, 칠 때마다 `edited`.
 component BatchField inherits Rectangle {
     in property <string> label;
@@ -2437,6 +2445,14 @@ export component AppWindow inherits Window {
     in property <string> batch-counts;
     in property <bool> batch-can-execute;
     in property <string> batch-problem;
+    in property <[BatchPresetRow]> batch-presets;
+    in property <string> batch-presets-note;
+    in-out property <string> batch-preset-name;
+    in-out property <string> batch-selected-preset;
+    callback batch-preset-pick(int);
+    callback batch-preset-save();
+    callback batch-preset-rename();
+    callback batch-preset-delete();
     callback batch-edited();
     callback batch-filter-changed();
     callback batch-accept();
@@ -3703,11 +3719,100 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+            // 규칙 묶음: 이름 입력란과 「저장」「이름 바꾸기」「지우기」, 묶음 목록(누르면 입력란을 채움).
+            Text {
+                x: 14px;
+                y: 288px;
+                width: parent.width - 28px;
+                height: 16px;
+                font-size: 12px;
+                overflow: elide;
+                text: root.batch-presets-note;
+                color: #c42b1c;
+            }
+            Rectangle {
+                x: 14px;
+                y: 306px;
+                width: parent.width - 28px - 3 * 84px - 12px;
+                height: 26px;
+                border-width: 1px;
+                border-radius: 3px;
+                border-color: Palette.accent-background;
+                clip: true;
+                preset-name := TextInput {
+                    x: 6px;
+                    width: parent.width - 12px;
+                    single-line: true;
+                    vertical-alignment: center;
+                    color: Palette.foreground;
+                    text <=> root.batch-preset-name;
+                    accepted => { root.batch-preset-save(); }
+                    key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            keys.focus();
+                            root.batch-cancel();
+                            return accept;
+                        }
+                        reject
+                    }
+                }
+                Text {
+                    x: 6px;
+                    width: parent.width - 12px;
+                    height: parent.height;
+                    vertical-alignment: center;
+                    visible: root.batch-preset-name == "";
+                    text: @tr("묶음 이름");
+                    color: Palette.foreground.transparentize(60%);
+                }
+            }
+            HorizontalLayout {
+                x: parent.width - 14px - 3 * 84px - 8px;
+                y: 306px;
+                width: 3 * 84px + 8px;
+                height: 26px;
+                spacing: 4px;
+                Button {
+                    text: @tr("저장");
+                    clicked => { root.batch-preset-save(); }
+                }
+                Button {
+                    text: @tr("이름 바꾸기");
+                    clicked => { root.batch-preset-rename(); }
+                }
+                Button {
+                    text: @tr("지우기");
+                    clicked => { root.batch-preset-delete(); }
+                }
+            }
+            ListView {
+                x: 14px;
+                y: 336px;
+                width: parent.width - 28px;
+                height: 60px;
+                for preset[i] in root.batch-presets: Rectangle {
+                    height: 20px;
+                    background: preset.selected ? Palette.accent-background.transparentize(70%) : transparent;
+                    Text {
+                        x: 6px;
+                        width: parent.width - 12px;
+                        height: parent.height;
+                        overflow: elide;
+                        vertical-alignment: center;
+                        font-size: 12px;
+                        text: preset.enabled ? preset.name : @tr("{} — {}", preset.name, preset.reason);
+                        color: preset.enabled ? Palette.foreground : Palette.foreground.transparentize(55%);
+                    }
+                    TouchArea {
+                        clicked => { root.batch-preset-pick(i); }
+                    }
+                }
+            }
             ListView {
                 x: 1px;
-                y: 288px;
+                y: 400px;
                 width: parent.width - 2px;
-                height: parent.height - 288px - 74px;
+                height: parent.height - 400px - 74px;
                 for row in root.batch-rows: Rectangle {
                     height: row.kind == BatchRowKind.problem ? 44px : 26px;
                     background: row.kind == BatchRowKind.problem ? #c42b1c20 : transparent;
@@ -3735,7 +3840,7 @@ export component AppWindow inherits Window {
             }
             Text {
                 x: 14px;
-                y: 296px;
+                y: 408px;
                 width: parent.width - 28px;
                 height: 24px;
                 text: root.batch-empty;
