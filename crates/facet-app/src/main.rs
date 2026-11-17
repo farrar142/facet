@@ -58,6 +58,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use facet_core::batch_rename::Preview;
 use facet_core::command::{self, CommandId, Key};
 use facet_core::details::{self, Column, Direction};
 use facet_core::dragdrop::{
@@ -77,8 +78,8 @@ use facet_core::selection::{CursorMove, Pick};
 use facet_core::session::{self, Loaded, SAVE_DELAY, Saver};
 use facet_core::tab::{AutoRefresh, Navigation, ReadOutcome, Relocation, Tab};
 use facet_core::window::{
-    App, ClipboardDone, DeletePlan, DeleteWarning, Execution, MAX_PANELS, Panel, TabDestination,
-    TabId, TargetError, TransferPlan, Update, WindowId,
+    App, BatchPreviewId, ClipboardDone, DeletePlan, DeleteWarning, Execution, MAX_PANELS, Panel,
+    TabDestination, TabId, TargetError, TransferPlan, Update, WindowId,
 };
 use facet_core::work_area::JobEntry;
 use facet_core::{ListError, Location, OpenError, ResolveError, provider_for};
@@ -1693,6 +1694,11 @@ impl View {
         let mut edits = Vec::new();
         let mut searched = false;
         for (tab, update) in updates {
+            if let Update::BatchPreview { id, preview } = update {
+                // 요청 번호로 이 창의 일괄 이름 바꾸기 창이 기다리던 것인지 가른다(탭과 상관없음).
+                self.receive_batch_preview(*id, preview.as_ref());
+                continue;
+            }
             let Some(panel) = visible.iter().position(|id| id == tab) else {
                 continue;
             };
@@ -2393,20 +2399,21 @@ impl View {
         ui.set_batch_separator(SharedString::new());
         ui.set_batch_problem(SharedString::new());
         let inputs = batch_rename::Inputs::default();
-        let preview = self
+        // 미리 보기는 일꾼 스레드에서 계산해 [`Update::BatchPreview`]로 받는다(목록은 그때 채워짐).
+        let Some(id) = self
             .app
-            .borrow()
-            .batch_rename_preview_rules(&inputs.rule().to_rules(), local_utc_offset());
-        if preview.is_none() {
+            .borrow_mut()
+            .request_batch_rename_preview(&inputs.rule().to_rules(), local_utc_offset())
+        else {
             return;
-        }
+        };
         self.close_rename();
         self.close_address_edit();
         self.close_palette();
         self.close_transfer();
         self.close_target();
         let mut window = batch_rename::BatchWindow::default();
-        window.update(inputs, preview);
+        window.request(inputs, id);
         *self.batch.borrow_mut() = Some(window);
         self.show_batch();
         ui.set_batch_open(true);
@@ -2428,21 +2435,33 @@ impl View {
         }
     }
 
-    /// 입력이 바뀌었다: 미리 보기를 UI 스레드에서 다시 계산해 그린다.
+    /// 입력이 바뀌었다: 미리 보기를 일꾼 스레드에 다시 맡긴다(앞선 계산은 코어가 버림). 결과가 오기 전에는 앞 미리
+    /// 보기를 그대로 보이고, 오면 [`View::receive_batch_preview`]가 그린다.
     fn batch_edited(&self) {
         if self.batch.borrow().is_none() {
             return;
         }
         let inputs = self.batch_inputs();
-        let preview = self
+        let id = self
             .app
-            .borrow()
-            .batch_rename_preview_rules(&inputs.rule().to_rules(), local_utc_offset());
-        if let Some(window) = self.batch.borrow_mut().as_mut() {
-            window.update(inputs, preview);
+            .borrow_mut()
+            .request_batch_rename_preview(&inputs.rule().to_rules(), local_utc_offset());
+        if let (Some(window), Some(id)) = (self.batch.borrow_mut().as_mut(), id) {
+            window.request(inputs, id);
         }
         self.ui.set_batch_problem(SharedString::new());
-        self.show_batch();
+    }
+
+    /// 미리 보기 결과가 왔다: 이 창이 기다리던 마지막 요청의 것이면 목록·수치 줄·「바꾸기」 켜짐을 바꾼다.
+    fn receive_batch_preview(&self, id: BatchPreviewId, preview: Option<&Preview>) {
+        let received = self
+            .batch
+            .borrow_mut()
+            .as_mut()
+            .is_some_and(|window| window.receive(id, preview));
+        if received {
+            self.show_batch();
+        }
     }
 
     /// 마지막 미리 보기를 화면에 둔다.
