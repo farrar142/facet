@@ -326,3 +326,133 @@ pub fn preview(items: &[BatchItem], rule: &RenameRule, existing: &ExistingNames)
         problems,
     }
 }
+
+/// #272: 규칙 목록의 규칙 하나(종류·켜짐·적용 대상).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rule {
+    pub kind: RuleKind,
+    pub enabled: bool,
+    pub target: Target,
+}
+
+impl Rule {
+    /// #272: 켜짐 `true`, 대상 `Target::Stem`인 규칙.
+    pub fn new(_kind: RuleKind) -> Rule {
+        todo!("#272")
+    }
+}
+
+/// #272: 규칙의 적용 대상(이름 부분·확장자·전체).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Target {
+    #[default]
+    Stem,
+    Extension,
+    Whole,
+}
+
+/// #272: 자리를 세는 끝.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edge {
+    Start,
+    End,
+}
+
+/// #272: 번호·날짜를 넣을 자리.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Place {
+    Start,
+    End,
+    At { from: Edge, at: usize },
+}
+
+/// #272: 대소문자 규칙의 방식.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseMode {
+    Lower,
+    Upper,
+    Title,
+    Sentence,
+}
+
+/// #272: 규칙 종류.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuleKind {
+    Replace {
+        find: String,
+        replace: String,
+        regex: bool,
+        case_sensitive: bool,
+        all: bool,
+    },
+    Insert {
+        text: String,
+        from: Edge,
+        at: usize,
+    },
+    Delete {
+        from: Edge,
+        at: usize,
+        count: usize,
+    },
+    Number {
+        start: u64,
+        step: u64,
+        digits: usize,
+        place: Place,
+        separator: String,
+    },
+    Case(CaseMode),
+    Extension {
+        new: Option<String>,
+    },
+    Date {
+        format: String,
+        place: Place,
+        separator: String,
+    },
+}
+
+/// #272: 항목 밖에서 오는 값(항목마다 수정 시각 `FILETIME`, UTC와의 차이 초).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuleContext {
+    pub modified: Vec<Option<u64>>,
+    pub utc_offset_seconds: i64,
+}
+
+/// #272: 적용하지 못한 규칙(`rule`은 넘긴 목록의 0부터 센 자리)과 까닭.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleProblem {
+    pub rule: usize,
+    pub error: RuleError,
+}
+
+/// #272: 규칙 문제의 까닭.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuleError {
+    Regex(String),
+}
+
+impl Preview {
+    /// #272: 적용하지 못한 규칙들.
+    pub fn rule_problems(&self) -> &[RuleProblem] {
+        todo!("#272")
+    }
+}
+
+impl RenameRule {
+    /// #272: 같은 결과를 내는 규칙 목록.
+    pub fn to_rules(&self) -> Vec<Rule> {
+        todo!("#272")
+    }
+}
+
+/// #272: 켜진 규칙을 차례로 적용한 미리 보기.
+pub fn preview_rules(
+    _items: &[BatchItem],
+    _rules: &[Rule],
+    _context: &RuleContext,
+    _existing: &ExistingNames,
+) -> Preview {
+    todo!("#272")
+}
