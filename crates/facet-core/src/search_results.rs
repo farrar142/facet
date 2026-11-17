@@ -55,7 +55,12 @@ impl Provider for SearchResultsProvider {
         let Some(scope) = location.search_scope() else {
             return Vec::new();
         };
-        let mut segments = FileSystemProvider.segments(&Location::file_system(&scope.folder));
+        // 모든 볼륨을 찾는 즉시 검색은 검색 전 폴더와 상관없으므로 검색어 조각 하나뿐이다.
+        let mut segments = if matches!(scope.kind, crate::SearchKind::Instant { under: false }) {
+            Vec::new()
+        } else {
+            FileSystemProvider.segments(&Location::file_system(&scope.folder))
+        };
         segments.push(PathSegment {
             label: scope.query.clone(),
             location: location.clone(),

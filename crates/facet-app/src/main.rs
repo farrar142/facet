@@ -197,6 +197,12 @@ fn main() -> Result<(), slint::PlatformError> {
         view.ui
             .set_notice(text::clipboard_error_text(&error).into());
     }
+    // 인덱서 서비스 연결(즉시 검색). 코어는 스스로 띄우지 않는다. 측정 모드는 띄우지 않는다. 연결은 뒤에서 열려 UI 스레드는
+    // 기다리지 않고, 서비스가 없으면 즉시 검색이 실시간 탐색으로 강등한다.
+    if !measure::is_enabled() {
+        app.borrow_mut()
+            .enable_indexer(facet_core::indexer_client::ClientOptions::default());
+    }
     drop(view);
 
     // 수신기는 이벤트 루프가 생긴 뒤(첫 창을 만든 뒤) 연다. 받은 인자는 수신기 스레드에서 해석하고 UI 스레드에는
@@ -793,10 +799,22 @@ fn connect(ui: &AppWindow, w: WindowId) {
     ui.on_cancel_filter(move || with_view(w, View::close_filter));
     ui.on_search_submit(move |text| {
         with_view(w, |view| {
-            view.search_submit(&text);
+            if view.ui.get_search_content() {
+                view.search_submit(&text);
+            } else {
+                // 「이름」은 타자마다 즉시 검색이라 Enter는 같은 글자를 다시 넘길 뿐이다.
+                view.search_edited(&text);
+            }
         })
     });
-    ui.on_cancel_search(move || with_view(w, View::hide_search_bar));
+    ui.on_search_edited(move |text| with_view(w, |view| view.search_edited(&text)));
+    ui.on_search_under(move || with_view(w, |view| view.execute(CommandId::InstantUnderFolder)));
+    ui.on_scrolled(move |panel| {
+        with_view(w, |view| {
+            view.load_more_if_near_end(usize::try_from(panel).unwrap_or(0))
+        })
+    });
+    ui.on_cancel_search(move || with_view(w, View::escape_search));
     ui.on_stop_search(move || with_view(w, |view| view.execute(CommandId::StopSearch)));
     ui.on_search_mode_changed(move || {
         with_view(w, |view| view.ui.set_search_problem(SharedString::new()))
@@ -1855,6 +1873,10 @@ impl View {
         let sort = tab.sort();
         let status = tab.status();
         let search_line = search_bar::line_of(tab.search());
+        let instant_text = tab.instant().map(|status| {
+            let found = tab.search().map_or(0, |search| search.progress.found);
+            text::instant_status_text(&search_bar::instant_line(status, found))
+        });
         let selected_size = if status.selected_size > 0 {
             file_list::format_size(status.selected_size)
         } else {
@@ -1892,10 +1914,14 @@ impl View {
                 content_results: tab.location().search_scope().is_some_and(|scope| {
                     matches!(scope.kind, facet_core::SearchKind::Content { .. })
                 }),
-                search_status: search_line
-                    .map_or_else(String::new, text::search_line_text)
+                search_status: instant_text
+                    .clone()
+                    .unwrap_or_else(|| search_line.map_or_else(String::new, text::search_line_text))
                     .into(),
-                search_running: search_line.is_some_and(search_bar::Line::is_running),
+                search_running: search_line.is_some_and(search_bar::Line::is_running)
+                    && tab.instant().is_none_or(|status| status.demotion.is_some()),
+                instant: instant_text.is_some(),
+                instant_under: tab.instant_under(),
                 selected_count: count(status.selected_count),
                 selected_size: selected_size.into(),
             },
@@ -2907,6 +2933,57 @@ impl View {
             self.ui.set_search_text(SharedString::new());
             self.ui.set_search_problem(SharedString::new());
         }
+    }
+
+    /// 「이름」 검색창의 입력이 바뀌었다(한글은 조합이 끝난 글자만 온다): 즉시 검색에 넘긴다. 틀린 문법이면 앞 결과를 그대로 두고
+    /// 까닭을 검색창 아래에 보인다.
+    fn search_edited(&self, text: &str) {
+        let mode = search_bar::Mode::from_content(self.ui.get_search_content());
+        let Some(query) = search_bar::instant_text(mode, text, false) else {
+            return;
+        };
+        self.remember_scroll();
+        let problem = {
+            let mut app = self.app.borrow_mut();
+            app.set_instant_query(query);
+            app.active_tab()
+                .instant_error()
+                .map(|error| text::instant_problem_text(query, error))
+        };
+        self.ui
+            .set_search_problem(problem.unwrap_or_default().into());
+        self.render();
+    }
+
+    /// 검색창에서 Esc: 「이름」이면 즉시 검색을 끝내 검색 전 위치로 돌아가고, 검색창을 비워 닫는다(키보드는 목록으로).
+    fn escape_search(&self) {
+        if !self.ui.get_search_content() {
+            self.remember_scroll();
+            self.app.borrow_mut().end_instant_search();
+        }
+        self.hide_search_bar();
+        self.render();
+    }
+
+    /// 목록을 넘기다 끝 가까이 닿았다: 즉시 검색 결과를 더 받는다(응답은 `App::poll`이 붙인다).
+    fn load_more_if_near_end(&self, panel: usize) {
+        let Some(id) = self.shown_tab_id(panel) else {
+            return;
+        };
+        let ui = PanelUi::of(&self.ui, panel);
+        let (scroll, height) = ((-ui.content_y()).max(0.0), ui.view_height());
+        let Ok(mut app) = self.app.try_borrow_mut() else {
+            return;
+        };
+        let Some(tab) = app.tab(id) else {
+            return;
+        };
+        if !tab.has_more_results()
+            || !search_bar::near_end(scroll, height, self.ui.get_row_height(), tab.len(), 10)
+        {
+            return;
+        }
+        app.load_more_results(id);
     }
 
     /// 검색창에서 Enter: 현재 폴더 아래 실시간 탐색을 시작한다. 검색어가 비었거나 시작할 수 없는 위치면 아무 일도 없다.
