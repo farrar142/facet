@@ -162,6 +162,13 @@ export struct MenuRow {
     submenu: bool,
 }
 
+// 주소창 › 펼침 메뉴의 줄 하나: 이름, 굵게(다음 조각 폴더)인가, 안내 줄(읽는 중·까닭·빈 목록)인가. 글자는 Rust가 만든다.
+export struct CrumbRow {
+    name: string,
+    bold: bool,
+    info: bool,
+}
+
 // 작업 기록 보기의 줄 하나: 작업 이름, 끝낸·건너뛴 항목 수, 되돌릴 수 없으면 그 까닭(되돌릴 수 있으면 비어 있음).
 // 글자는 Rust의 문장 모듈이 만든다.
 export struct HistoryRow {
@@ -1304,6 +1311,10 @@ component PanelView inherits Rectangle {
     in property <PanelData> data;
     in property <[TabItem]> tabs;
     in property <[string]> segments;
+    // 조각 뒤에 펼침 › 단추가 있는가(검색어 조각 뒤에는 없다), 메뉴가 열린 조각(없으면 -1).
+    in property <[bool]> segment-arrows;
+    in property <int> crumb-open: -1;
+    callback crumb-arrow(int);
     // 끌어 온 항목이 놓일 탭·경로 조각(없으면 -1).
     in property <int> drop-tab: -1;
     in property <int> drop-segment: -1;
@@ -1573,8 +1584,7 @@ component PanelView inherits Rectangle {
                     for segment[i] in root.segments: HorizontalLayout {
                         Segment {
                             // 현재 폴더(마지막 조각)는 온전히 보인다. 자리가 모자라면 앞쪽(상위) 조각이 줄어든다.
-                            min-width: i == root.segments.length - 1 ? min(self.preferred-width, address-bar.width - 8px) : 0px;
-                            horizontal-stretch: i == root.segments.length - 1 ? 1 : 0;
+                            min-width: i == root.segments.length - 1 ? min(self.preferred-width, address-bar.width - 8px - 16px) : 0px;
                             text: segment;
                             drop-target: i == root.drop-segment;
                             geometry(x, w) => {
@@ -1586,10 +1596,24 @@ component PanelView inherits Rectangle {
                                 root.focus-list();
                             }
                         }
-                        if i < root.segments.length - 1: Text {
-                            text: "›";
-                            vertical-alignment: center;
-                            color: Palette.foreground.transparentize(40%);
+                        if i < root.segments.length - 1 || root.segment-arrows[i]: Rectangle {
+                            width: 16px;
+                            border-radius: 3px;
+                            background: root.crumb-open == i || (arrow-touch.has-hover && root.segment-arrows[i]) ? Palette.alternate-background : transparent;
+                            Text {
+                                text: "›";
+                                vertical-alignment: center;
+                                horizontal-alignment: center;
+                                color: Palette.foreground.transparentize(40%);
+                            }
+                            arrow-touch := TouchArea {
+                                enabled: root.segment-arrows[i];
+                                clicked => {
+                                    root.activate();
+                                    root.crumb-arrow(i);
+                                    root.focus-keys();
+                                }
+                            }
                         }
                     }
                 }
@@ -2282,6 +2306,59 @@ component ContextMenuView inherits Rectangle {
     }
 }
 
+// 주소창 › 펼침 메뉴: 하위 폴더 줄을 보이는 것만 그린다(`ListView`). 줄 높이·여백은 Rust의 `crumb_menu::ROW_HEIGHT`·
+// `PADDING`과 같다. 안내 줄(읽는 중·까닭·빈 목록)은 흐리게 보이고 고를 수 없다.
+component CrumbMenuView inherits Rectangle {
+    in property <[CrumbRow]> rows;
+    in property <int> selected: -1;
+    in-out property <length> content-y <=> list.content-y;
+    callback hover(int);
+    callback activate(int);
+    background: Palette.background;
+    border-width: 1px;
+    border-color: Palette.border;
+    border-radius: 6px;
+    drop-shadow-blur: 8px;
+    drop-shadow-color: #00000060;
+    // 메뉴 안을 누르면 바깥 누르기로 닫히지 않게 받는다.
+    TouchArea { }
+    list := ListView {
+        x: 0px;
+        y: 4px;
+        width: parent.width;
+        height: parent.height - 8px;
+        for row[i] in root.rows: Rectangle {
+            height: 28px;
+            Rectangle {
+                x: 4px;
+                width: parent.width - 8px;
+                background: i == root.selected && !row.info ? Palette.selection-background : transparent;
+                border-radius: 4px;
+                Text {
+                    x: 8px;
+                    width: parent.width - 16px;
+                    text: row.name;
+                    font-weight: row.bold ? 700 : 400;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    color: (i == root.selected && !row.info ? Palette.selection-foreground : Palette.foreground)
+                        .transparentize(row.info ? 40% : 0%);
+                }
+                if !row.info: TouchArea {
+                    changed has-hover => {
+                        if (self.has-hover) {
+                            root.hover(i);
+                        }
+                    }
+                    clicked => {
+                        root.activate(i);
+                    }
+                }
+            }
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     // 활성 탭의 폴더 이름. 창 제목에 붙여 지금 어디에 있는지 보이게 한다.
     in property <string> folder-title;
@@ -2298,10 +2375,14 @@ export component AppWindow inherits Window {
     in property <PanelData> left-data;
     in property <[TabItem]> left-tabs;
     in property <[string]> left-segments;
+    in property <[bool]> left-segment-arrows;
+    in property <int> left-crumb-open: -1;
     in property <[Row]> left-rows;
     in property <PanelData> right-data;
     in property <[TabItem]> right-tabs;
     in property <[string]> right-segments;
+    in property <[bool]> right-segment-arrows;
+    in property <int> right-crumb-open: -1;
     in property <[Row]> right-rows;
     // 패널마다 목록의 스크롤 위치(0 이하, 목록 맨 위에서 화면 맨 위까지 내려간 거리의 음수)와 보이는 높이.
     in-out property <length> left-content-y <=> left.content-y;
@@ -2514,6 +2595,23 @@ export component AppWindow inherits Window {
     callback menu-activate(bool, int);
     callback menu-key(string);
     callback menu-close();
+    // 주소창 › 펼침 메뉴(#306): 어느 패널의 어느 조각 › 단추를 눌렀나, 열린 메뉴의 자리·줄·고른 줄·스크롤, 줄 위 마우스·누르기,
+    // 키, 메뉴 밖에서 움직이고 누른 점(다른 › 단추로 바꾸거나 닫는다).
+    callback crumb-arrow(int, int);
+    in property <bool> crumb-menu-open;
+    in property <length> crumb-menu-x;
+    in property <length> crumb-menu-y;
+    in property <length> crumb-menu-width;
+    in property <length> crumb-menu-height;
+    in property <[CrumbRow]> crumb-menu-rows;
+    in property <int> crumb-menu-selected: -1;
+    in-out property <length> crumb-menu-viewport-y;
+    callback crumb-hover(int);
+    callback crumb-activate(int);
+    callback crumb-key(string);
+    callback crumb-close();
+    callback crumb-moved(length, length);
+    callback crumb-outside(length, length);
     callback row-middle-pressed(int);
     // 탭 줄의 탭을 눌렀다: 그 탭으로 간다.
     callback tab-pressed(int);
@@ -2653,6 +2751,10 @@ export component AppWindow inherits Window {
         selection-background-color: transparent;
         key-pressed(event) => {
             // 오른쪽 메뉴가 열려 있으면 ↑↓→←·Enter·Esc가 메뉴를 고른다.
+            if (root.crumb-menu-open) {
+                root.crumb-key(event.text);
+                return accept;
+            }
             if (root.menu-open) {
                 root.menu-key(event.text);
                 return accept;
@@ -2757,6 +2859,11 @@ export component AppWindow inherits Window {
             data: root.left-data;
             tabs: root.left-tabs;
             segments: root.left-segments;
+            segment-arrows: root.left-segment-arrows;
+            crumb-open: root.left-crumb-open;
+            crumb-arrow(i) => {
+                root.crumb-arrow(0, i);
+            }
             rows: root.left-rows;
             active: root.active-panel == 0;
             split: root.split;
@@ -2937,6 +3044,11 @@ export component AppWindow inherits Window {
             data: root.right-data;
             tabs: root.right-tabs;
             segments: root.right-segments;
+            segment-arrows: root.right-segment-arrows;
+            crumb-open: root.right-crumb-open;
+            crumb-arrow(i) => {
+                root.crumb-arrow(1, i);
+            }
             rows: root.right-rows;
             active: root.active-panel == 1;
             split: root.split;
@@ -3167,7 +3279,7 @@ export component AppWindow inherits Window {
                     height: parent.height - 4px;
                     job: job;
                     // 다른 입력(이름 입력란, 주소창, 팔레트, 확인 줄, 정보 화면)이 열려 있으면 키보드를 뺏지 않는다.
-                    autofocus: root.editing < 0 && !root.address-editing && !root.filter-open && !root.search-open && !root.palette-open && !root.target-open && !root.confirm-open && !root.show-about && !root.history-open && !root.batch-open && !root.menu-open;
+                    autofocus: root.editing < 0 && !root.address-editing && !root.filter-open && !root.search-open && !root.palette-open && !root.target-open && !root.confirm-open && !root.show-about && !root.history-open && !root.batch-open && !root.menu-open && !root.crumb-menu-open;
                     answer-conflict(choice, rest) => {
                         root.job-answer-conflict(job.id, choice, rest);
                         keys.focus();
@@ -3886,6 +3998,37 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+            }
+        }
+    }
+
+    // 주소창 › 펼침 메뉴: 오른쪽 메뉴처럼 창 위에 직접 그린다. 메뉴 밖의 움직임·누르기는 Rust가 점으로 판단한다(다른 ›
+    // 단추 위면 그 메뉴로 바꾸고, 그 밖이면 닫는다).
+    if root.crumb-menu-open: Rectangle {
+        TouchArea {
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down) {
+                    root.crumb-outside(self.mouse-x, self.mouse-y);
+                    keys.focus();
+                } else if (event.kind == PointerEventKind.move) {
+                    root.crumb-moved(self.mouse-x, self.mouse-y);
+                }
+            }
+        }
+        CrumbMenuView {
+            x: root.crumb-menu-x;
+            y: root.crumb-menu-y;
+            width: root.crumb-menu-width;
+            height: root.crumb-menu-height;
+            rows: root.crumb-menu-rows;
+            selected: root.crumb-menu-selected;
+            content-y <=> root.crumb-menu-viewport-y;
+            hover(i) => {
+                root.crumb-hover(i);
+            }
+            activate(i) => {
+                root.crumb-activate(i);
+                keys.focus();
             }
         }
     }

@@ -92,6 +92,7 @@ use slint::{
 
 use crate::address::AddressEdit;
 use crate::context_menu::{ContextMenu, Outcome as MenuOutcome};
+use crate::crumb_menu::{Content as CrumbContent, CrumbMenu};
 use crate::drop_menu::{Choice as DropChoice, DropMenu};
 use crate::item_drag::{Button as ItemButton, ItemPress};
 use crate::marquee::Marquee;
@@ -103,6 +104,7 @@ use crate::target::{Section, TargetChooser};
 mod address;
 mod batch_rename;
 mod context_menu;
+mod crumb_menu;
 mod drop_menu;
 mod file_drop;
 mod history_view;
@@ -874,6 +876,13 @@ fn connect(ui: &AppWindow, w: WindowId) {
     ui.on_menu_activate(move |sub, index| with_view(w, |view| view.menu_activate(sub, index)));
     ui.on_menu_key(move |text| with_view(w, |view| view.menu_key(&text)));
     ui.on_menu_close(move || with_view(w, View::close_context_menu));
+    ui.on_crumb_arrow(move |panel, index| with_view(w, |view| view.crumb_arrow(panel, index)));
+    ui.on_crumb_hover(move |index| with_view(w, |view| view.crumb_hover(index)));
+    ui.on_crumb_activate(move |index| with_view(w, |view| view.crumb_activate(index)));
+    ui.on_crumb_key(move |text| with_view(w, |view| view.crumb_key(&text)));
+    ui.on_crumb_close(move || with_view(w, View::close_crumb_menu));
+    ui.on_crumb_moved(move |x, y| with_view(w, |view| view.crumb_moved(x, y)));
+    ui.on_crumb_outside(move |x, y| with_view(w, |view| view.crumb_outside(x, y)));
     ui.on_target_edited(move |text| with_view(w, |view| view.target_edited(&text)));
     ui.on_target_step(move |step| {
         let mut end = -1;
@@ -1131,6 +1140,15 @@ fn job_number(job: JobId) -> i32 {
 }
 
 /// 메뉴의 명령 항목을 화면 줄로: 이름은 앱의 명령 이름, 단축키 글자는 팔레트와 같다.
+/// › 메뉴의 안내 줄(읽는 중·까닭·빈 목록).
+fn info_row(text: &str) -> CrumbRow {
+    CrumbRow {
+        name: text.into(),
+        bold: false,
+        info: true,
+    }
+}
+
 fn menu_row(command: &facet_core::menu::MenuCommand) -> MenuRow {
     MenuRow {
         name: text::command_name(command.id).into(),
@@ -1281,6 +1299,9 @@ struct View {
     /// 오른쪽 메뉴의 줄과 열린 하위 메뉴의 줄.
     menu_rows: Rc<VecModel<MenuRow>>,
     menu_sub_rows: Rc<VecModel<MenuRow>>,
+    /// 열려 있는 주소창 › 펼침 메뉴(#306)와 그 줄. 화면의 `crumb-menu-open`과 함께 바뀐다.
+    crumb_menu: RefCell<Option<CrumbMenu>>,
+    crumb_rows: Rc<VecModel<CrumbRow>>,
     /// 「읽는 중」을 드러낼 때 다시 그리는 타이머.
     reading_timer: Timer,
     /// 켜져 있으면 다음 `render`가 행 모델을 reset하지 않는다(행 눌러 고르기가 바뀐 행만 알리는 동안).
@@ -1338,6 +1359,8 @@ struct PanelModels {
     rows: Rc<TabRows>,
     tabs: Rc<VecModel<TabItem>>,
     segments: Rc<VecModel<SharedString>>,
+    /// 조각 뒤에 › 펼침 단추가 있는가(조각마다).
+    arrows: Rc<VecModel<bool>>,
 }
 
 impl View {
@@ -1351,14 +1374,17 @@ impl View {
             }),
             tabs: Rc::new(VecModel::default()),
             segments: Rc::new(VecModel::default()),
+            arrows: Rc::new(VecModel::default()),
         });
         let [left, right] = &panels;
         ui.set_left_rows(ModelRc::from(Rc::clone(&left.rows)));
         ui.set_left_tabs(ModelRc::from(Rc::clone(&left.tabs)));
         ui.set_left_segments(ModelRc::from(Rc::clone(&left.segments)));
+        ui.set_left_segment_arrows(ModelRc::from(Rc::clone(&left.arrows)));
         ui.set_right_rows(ModelRc::from(Rc::clone(&right.rows)));
         ui.set_right_tabs(ModelRc::from(Rc::clone(&right.tabs)));
         ui.set_right_segments(ModelRc::from(Rc::clone(&right.segments)));
+        ui.set_right_segment_arrows(ModelRc::from(Rc::clone(&right.arrows)));
         let candidates = Rc::new(VecModel::default());
         ui.set_candidates(ModelRc::from(Rc::clone(&candidates)));
         let palette_rows = Rc::new(VecModel::default());
@@ -1367,6 +1393,8 @@ impl View {
         ui.set_menu_rows(ModelRc::from(Rc::clone(&menu_rows)));
         let menu_sub_rows = Rc::new(VecModel::default());
         ui.set_menu_sub_rows(ModelRc::from(Rc::clone(&menu_sub_rows)));
+        let crumb_rows = Rc::new(VecModel::default());
+        ui.set_crumb_menu_rows(ModelRc::from(Rc::clone(&crumb_rows)));
         let target_rows = Rc::new(VecModel::default());
         ui.set_target_rows(ModelRc::from(Rc::clone(&target_rows)));
         let jobs = Rc::new(VecModel::default());
@@ -1385,6 +1413,8 @@ impl View {
             context_menu: RefCell::default(),
             menu_rows,
             menu_sub_rows,
+            crumb_menu: RefCell::default(),
+            crumb_rows,
             reading_timer: Timer::default(),
             keep_rows: Cell::new(false),
             crumbs: RefCell::default(),
@@ -1733,6 +1763,11 @@ impl View {
                 self.receive_batch_preview(*id, preview.as_ref());
                 continue;
             }
+            if let Update::Subfolders { id, list } = update {
+                // 하위 폴더 목록은 요청 번호로 열린 › 메뉴가 기다리던 것인지 가른다(탭과 상관없음).
+                self.receive_subfolders(*id, list.clone());
+                continue;
+            }
             let Some(panel) = visible.iter().position(|id| id == tab) else {
                 continue;
             };
@@ -1879,6 +1914,7 @@ impl View {
             if models.tabs.row_count() > 0 {
                 models.tabs.set_vec(Vec::new());
                 models.segments.set_vec(Vec::new());
+                models.arrows.set_vec(Vec::new());
                 set_panel_data(ui, panel, PanelData::default());
                 models.rows.notify.reset();
             }
@@ -1897,6 +1933,11 @@ impl View {
             .collect();
         if !models.segments.iter().eq(labels.iter().cloned()) {
             models.segments.set_vec(labels);
+        }
+        // › 단추는 실제 폴더인 조각 뒤에만 있다(검색어 조각 뒤에는 없다). 그릴 때마다 요청하지 않고 위치만 본다.
+        let arrows = segment_arrows(tab.location());
+        if !models.arrows.iter().eq(arrows.iter().copied()) {
+            models.arrows.set_vec(arrows);
         }
 
         let (address_problem, address_problem_value, address_problem_detail) =
@@ -2416,6 +2457,247 @@ impl View {
                 self.execute(command);
             }
             MenuOutcome::None => self.sync_menu(),
+        }
+    }
+
+    /// 패널 `panel`의 `index`번 조각 뒤 › 단추를 눌렀다: 그 메뉴를 열고, 이미 열려 있으면 닫는다.
+    fn crumb_arrow(&self, panel: i32, index: i32) {
+        let (Ok(panel), Ok(index)) = (usize::try_from(panel), usize::try_from(index)) else {
+            return;
+        };
+        let same = self
+            .crumb_menu
+            .borrow()
+            .as_ref()
+            .is_some_and(|menu| menu.panel() == panel && menu.segment() == index);
+        if same {
+            self.close_crumb_menu();
+        } else {
+            self.open_crumb_menu(panel, index);
+        }
+    }
+
+    /// 패널 `panel`의 `index`번 조각 뒤 하위 폴더 메뉴를 연다: 코어에 목록을 요청하고(기다리지 않음) 「읽는 중」 줄을 먼저
+    /// 보인다. 조각이 실제 폴더가 아니면 열지 않는다. 열린 다른 메뉴는 이것으로 바뀐다.
+    fn open_crumb_menu(&self, panel: usize, index: usize) {
+        self.close_context_menu();
+        self.close_rename();
+        self.close_address_edit();
+        if panel != self.active_panel() {
+            self.panel_pressed(count(panel));
+        }
+        let opened = {
+            let mut app = self.app.borrow_mut();
+            let location = app.active_tab().location().clone();
+            let target = provider_for(&location)
+                .segments(&location)
+                .into_iter()
+                .nth(index)
+                .map(|segment| segment.location);
+            target.and_then(|target| app.request_subfolders(&target))
+        };
+        let Some(id) = opened else {
+            self.close_crumb_menu();
+            return;
+        };
+        *self.crumb_menu.borrow_mut() = Some(CrumbMenu::loading(panel, index, id));
+        self.sync_crumb_menu(Some(0.0));
+        self.ui.set_crumb_menu_open(true);
+    }
+
+    fn close_crumb_menu(&self) {
+        if self.crumb_menu.borrow_mut().take().is_some() {
+            self.ui.set_crumb_menu_open(false);
+            self.ui.set_left_crumb_open(-1);
+            self.ui.set_right_crumb_open(-1);
+        }
+    }
+
+    /// 열린 › 메뉴를 화면에 맞춘다: 줄·자리·크기·고른 줄. `scroll`이 있으면 그 위치로 넘긴다.
+    fn sync_crumb_menu(&self, scroll: Option<f32>) {
+        let guard = self.crumb_menu.borrow();
+        let Some(menu) = guard.as_ref() else {
+            return;
+        };
+        let ui = &self.ui;
+        let rows: Vec<CrumbRow> = match menu.content() {
+            CrumbContent::Loading => vec![info_row(text::CRUMB_LOADING)],
+            CrumbContent::Empty => vec![info_row(text::CRUMB_EMPTY)],
+            CrumbContent::Failed(error) => vec![info_row(&text::crumb_error_text(*error))],
+            CrumbContent::Folders { folders, .. } => folders
+                .iter()
+                .enumerate()
+                .map(|(i, folder)| CrumbRow {
+                    name: folder.name.to_string_lossy().as_ref().into(),
+                    bold: menu.is_current(i),
+                    info: false,
+                })
+                .collect(),
+        };
+        let height = menu.height();
+        let (x, y) = match self.arrow_rect(menu.panel(), menu.segment()) {
+            Some((left, top, _, h)) => crumb_menu::place(
+                (left, top + h),
+                (crumb_menu::WIDTH, height),
+                self.logical_size(),
+            ),
+            None => (0.0, 0.0),
+        };
+        ui.set_crumb_menu_x(x);
+        ui.set_crumb_menu_y(y);
+        ui.set_crumb_menu_width(crumb_menu::WIDTH);
+        ui.set_crumb_menu_height(height);
+        self.crumb_rows.set_vec(rows);
+        ui.set_crumb_menu_selected(menu.selected().map_or(-1, count));
+        if let Some(offset) = scroll {
+            ui.set_crumb_menu_viewport_y(-offset);
+        }
+        ui.set_left_crumb_open(if menu.panel() == 0 {
+            count(menu.segment())
+        } else {
+            -1
+        });
+        ui.set_right_crumb_open(if menu.panel() == 1 {
+            count(menu.segment())
+        } else {
+            -1
+        });
+    }
+
+    /// 패널 `panel`의 `index`번 조각 뒤 › 단추의 창 기준 자리 `(왼쪽, 위쪽, 너비, 높이)`.
+    fn arrow_rect(&self, panel: usize, index: usize) -> Option<(f32, f32, f32, f32)> {
+        let crumb = *self.crumbs.try_borrow().ok()?.get(panel)?.get(index)?;
+        let ui = PanelUi::of(&self.ui, panel);
+        Some((
+            crumb.left + crumb.width,
+            ui.address_top(),
+            crumb_menu::ARROW_WIDTH,
+            ui.address_height(),
+        ))
+    }
+
+    /// 창 기준 점 `(x, y)` 아래에 있는 › 단추(패널, 조각 번호).
+    fn arrow_at(&self, x: f32, y: f32) -> Option<(usize, usize)> {
+        (0..MAX_PANELS).find_map(|panel| {
+            let arrows = &self.panels[panel].arrows;
+            (0..arrows.row_count()).find_map(|index| {
+                if !arrows.row_data(index)? {
+                    return None;
+                }
+                let rect = self.arrow_rect(panel, index)?;
+                crumb_menu::contains(rect, x, y).then_some((panel, index))
+            })
+        })
+    }
+
+    /// 코어가 하위 폴더 목록을 보냈다: 열린 메뉴가 기다리던 요청의 결과면 채운다. 늦게 온 앞선 결과는 버린다.
+    fn receive_subfolders(
+        &self,
+        id: facet_core::window::SubfoldersId,
+        list: Option<Result<facet_core::window::Subfolders, facet_core::window::SubfoldersError>>,
+    ) {
+        let scroll = {
+            let mut guard = self.crumb_menu.borrow_mut();
+            let Some(menu) = guard.as_mut() else {
+                return;
+            };
+            if !menu.receive(id, list) {
+                return;
+            }
+            menu.initial_scroll()
+        };
+        self.sync_crumb_menu(Some(scroll));
+    }
+
+    /// › 메뉴 줄 위로 마우스가 왔다: 그 줄을 고른다.
+    fn crumb_hover(&self, index: i32) {
+        let Ok(index) = usize::try_from(index) else {
+            return;
+        };
+        if let Some(menu) = self.crumb_menu.borrow_mut().as_mut() {
+            menu.hover(index);
+        }
+        self.ui.set_crumb_menu_selected(
+            self.crumb_menu
+                .borrow()
+                .as_ref()
+                .and_then(CrumbMenu::selected)
+                .map_or(-1, count),
+        );
+    }
+
+    /// › 메뉴 줄을 눌렀다(또는 Enter): 메뉴를 닫고 그 폴더로 간다(주소창 조각 누르기와 같은 이동).
+    fn crumb_activate(&self, index: i32) {
+        let Ok(index) = usize::try_from(index) else {
+            return;
+        };
+        let location = self
+            .crumb_menu
+            .borrow()
+            .as_ref()
+            .and_then(|menu| menu.activate(index));
+        if let Some(location) = location {
+            self.close_crumb_menu();
+            self.go(location);
+        }
+    }
+
+    /// › 메뉴가 열려 있는 동안의 키: ↑↓로 고르고 Enter로 가고 Esc로 닫는다.
+    fn crumb_key(&self, text: &str) {
+        let Some(key) = keys::key_of(text) else {
+            return;
+        };
+        match key {
+            Key::Up | Key::Down => {
+                let offset = {
+                    let mut guard = self.crumb_menu.borrow_mut();
+                    let Some(menu) = guard.as_mut() else {
+                        return;
+                    };
+                    menu.step(if key == Key::Up { -1 } else { 1 });
+                    menu.scroll_to_selected(-self.ui.get_crumb_menu_viewport_y())
+                };
+                self.ui.set_crumb_menu_viewport_y(-offset);
+                let selected = self
+                    .crumb_menu
+                    .borrow()
+                    .as_ref()
+                    .and_then(CrumbMenu::selected);
+                self.ui.set_crumb_menu_selected(selected.map_or(-1, count));
+            }
+            Key::Enter => {
+                let location = self.crumb_menu.borrow().as_ref().and_then(CrumbMenu::enter);
+                if let Some(location) = location {
+                    self.close_crumb_menu();
+                    self.go(location);
+                }
+            }
+            Key::Escape => self.close_crumb_menu(),
+            _ => {}
+        }
+    }
+
+    /// 메뉴 밖에서 마우스가 움직였다: 다른 › 단추 위면 그 메뉴로 바꾼다(탐색기와 같음).
+    fn crumb_moved(&self, x: f32, y: f32) {
+        let open = self
+            .crumb_menu
+            .borrow()
+            .as_ref()
+            .map(|menu| (menu.panel(), menu.segment()));
+        if let Some(at) = self.arrow_at(x, y)
+            && Some(at) != open
+        {
+            self.open_crumb_menu(at.0, at.1);
+        }
+    }
+
+    /// 메뉴 밖을 눌렀다: 열린 메뉴의 › 단추면 닫고, 다른 › 단추면 그 메뉴로 바꾸고, 그 밖이면 닫는다.
+    fn crumb_outside(&self, x: f32, y: f32) {
+        match self.arrow_at(x, y) {
+            Some((panel, index)) => self.crumb_arrow(count(panel), count(index)),
+            None => {
+                self.close_crumb_menu();
+            }
         }
     }
 
@@ -4088,6 +4370,16 @@ fn segment_labels(location: &Location, mut labels: Vec<String>) -> Vec<String> {
         *last = text::search_title(last);
     }
     labels
+}
+
+/// 주소창 경로 조각마다 뒤에 › 펼침 단추가 있는가: 조각 위치가 실제 폴더일 때(`request_subfolders`가 `None`을
+/// 돌려주는 규칙과 같다). 검색 결과 위치의 검색어 조각은 없다.
+fn segment_arrows(location: &Location) -> Vec<bool> {
+    provider_for(location)
+        .segments(location)
+        .iter()
+        .map(|segment| segment.location.file_system_path().is_some())
+        .collect()
 }
 
 fn count(n: usize) -> i32 {

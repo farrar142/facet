@@ -320,6 +320,23 @@ pub fn missing_item_text(path: &std::path::Path) -> String {
     format!("항목이 더 이상 없어 결과에서 뺐습니다: {}", path.display())
 }
 
+/// 주소창 › 펼침 메뉴의 「읽는 중」 줄(#306).
+pub const CRUMB_LOADING: &str = "읽는 중…";
+
+/// 주소창 › 펼침 메뉴의 빈 목록 줄(#306).
+pub const CRUMB_EMPTY: &str = "하위 폴더가 없습니다";
+
+/// 주소창 › 펼침 메뉴에서 하위 폴더를 읽지 못한 까닭 줄(#306).
+pub fn crumb_error_text(error: facet_core::window::SubfoldersError) -> String {
+    use facet_core::window::SubfoldersError;
+    match error {
+        SubfoldersError::NotFound => "폴더를 찾을 수 없습니다".to_owned(),
+        SubfoldersError::PermissionDenied => "권한이 없어 읽을 수 없습니다".to_owned(),
+        SubfoldersError::NotAFolder => "폴더가 아닙니다".to_owned(),
+        SubfoldersError::Io(kind) => format!("읽지 못했습니다: {kind}"),
+    }
+}
+
 /// 클립보드를 쓰지 못한 까닭(상태 줄).
 pub fn clipboard_error_text(error: &ClipboardError) -> String {
     match error {
