@@ -138,6 +138,14 @@ case "$path" in
   repos/*/*/issues/comments)
     if [ -f "$d/repo-comments.json" ]; then cat "$d/repo-comments.json"; else echo '[]'; fi
     ;;
+  # bridge.sh: a commenter's permission, permission-<login>.json ({permission, role_name}),
+  # default read; fails while fail-permission exists.
+  repos/*/*/collaborators/*/permission)
+    [ -e "$d/fail-permission" ] && fail "permission lookup is broken"
+    login=${path%/permission}; login=${login##*/}
+    if [ -f "$d/permission-$login.json" ]; then cat "$d/permission-$login.json"
+    else echo '{"permission": "read", "role_name": "read"}'; fi
+    ;;
   repos/*/*/issues)
     label=$(printf '%s' "$query" | tr '&' '\n' | sed -n 's/^labels=//p')
     shopt -s nullglob
