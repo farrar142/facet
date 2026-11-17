@@ -125,6 +125,11 @@ pub fn batch_counts_text(renames: usize, unchanged: usize, problems: usize) -> S
     format!("바꿈 {renames} · 건너뜀 {unchanged} · 문제 {problems}")
 }
 
+/// 「문제 행만 보기」를 켰는데 문제 행이 없을 때의 안내.
+pub fn batch_no_problems_text() -> String {
+    "문제 없음".to_owned()
+}
+
 /// 「바꾸기」가 막힌 까닭(창 아래에 보임).
 pub fn batch_error_text(error: facet_core::window::BatchRenameError) -> String {
     match error {

@@ -831,6 +831,7 @@ fn connect(ui: &AppWindow, w: WindowId) {
     ui.on_palette_close(move || with_view(w, View::close_palette));
     ui.on_history_close(move || with_view(w, View::close_history));
     ui.on_batch_edited(move || with_view(w, View::batch_edited));
+    ui.on_batch_filter_changed(move || with_view(w, View::batch_filter_changed));
     ui.on_batch_accept(move || with_view(w, View::batch_accept));
     ui.on_batch_cancel(move || with_view(w, View::close_batch));
     ui.on_context_menu(move |panel, row, x, y| {
@@ -2398,6 +2399,7 @@ impl View {
         ui.set_batch_at_end(true);
         ui.set_batch_separator(SharedString::new());
         ui.set_batch_problem(SharedString::new());
+        ui.set_batch_problems_only(false);
         let inputs = batch_rename::Inputs::default();
         // 미리 보기는 일꾼 스레드에서 계산해 [`Update::BatchPreview`]로 받는다(목록은 그때 채워짐).
         let Some(id) = self
@@ -2464,6 +2466,15 @@ impl View {
         }
     }
 
+    /// 「문제 행만 보기」가 바뀌었다: 이미 받은 미리 보기를 다시 거른다.
+    fn batch_filter_changed(&self) {
+        let on = self.ui.get_batch_problems_only();
+        if let Some(window) = self.batch.borrow_mut().as_mut() {
+            window.set_problems_only(on);
+        }
+        self.show_batch();
+    }
+
     /// 마지막 미리 보기를 화면에 둔다.
     fn show_batch(&self) {
         let batch = self.batch.borrow();
@@ -2471,9 +2482,7 @@ impl View {
             return;
         };
         let rows: Vec<BatchRow> = window
-            .preview()
-            .map(batch_rename::lines)
-            .unwrap_or_default()
+            .visible_lines()
             .into_iter()
             .map(|line| BatchRow {
                 original: line.original.into(),
@@ -2488,6 +2497,7 @@ impl View {
             .collect();
         self.ui
             .set_batch_rows(ModelRc::from(Rc::new(VecModel::from(rows))));
+        self.ui.set_batch_empty(window.empty_text().into());
         self.ui.set_batch_counts(window.counts_text().into());
         self.ui.set_batch_can_execute(window.can_execute());
     }
