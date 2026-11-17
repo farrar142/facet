@@ -112,6 +112,7 @@ mod keys;
 mod marquee;
 mod measure;
 mod palette;
+mod preset_store;
 mod question;
 mod rename;
 mod search_bar;
@@ -264,6 +265,8 @@ thread_local! {
     static APP: RefCell<Option<Rc<RefCell<App>>>> = const { RefCell::new(None) };
     /// 세션 저장(일꾼 스레드). 세션 파일 자리가 없으면(측정 모드 등) `None`이다.
     static SAVER: RefCell<Option<Saver>> = const { RefCell::new(None) };
+    /// 일괄 이름 바꾸기 규칙 묶음(처음 창을 열 때 읽음).
+    static PRESETS: RefCell<Option<preset_store::PresetStore>> = const { RefCell::new(None) };
     /// UI 스레드의 화면 상태: 코어의 창마다 하나, 연 차례로.
     static VIEWS: RefCell<Vec<Rc<View>>> = const { RefCell::new(Vec::new()) };
     /// 탭을 창 밖에 놓아 생긴, 아직 띄우지 않은 창의 자리와 크기. `sync_windows`가 띄울 때 쓰고 지운다.
@@ -358,6 +361,32 @@ fn note_placement(window: WindowId) {
 }
 
 /// 열린 창의 화면 상태들. 부르는 동안 목록을 빌려 두지 않도록 복사해 준다.
+/// 규칙 묶음 저장소로 `f`를 부른다(처음이면 파일을 읽어 연다. 측정 모드는 파일을 건드리지 않음).
+fn with_presets<R>(f: impl FnOnce(&mut preset_store::PresetStore) -> R) -> R {
+    PRESETS.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let store = slot.get_or_insert_with(|| {
+            let path = (!measure::is_enabled())
+                .then(facet_core::rename_presets::presets_path)
+                .flatten();
+            preset_store::PresetStore::open(path, |error| {
+                let _ = slint::invoke_from_event_loop(move || preset_save_failed(&error));
+            })
+        });
+        f(store)
+    })
+}
+
+/// 묶음 파일 저장 실패를 열려 있는 일괄 이름 바꾸기 창에 보인다.
+fn preset_save_failed(error: &str) {
+    for view in views() {
+        if view.batch.borrow().is_some() {
+            view.ui
+                .set_batch_problem(text::preset_save_failed_text(error).into());
+        }
+    }
+}
+
 fn views() -> Vec<Rc<View>> {
     VIEWS.with(|slot| slot.borrow().clone())
 }
@@ -831,6 +860,10 @@ fn connect(ui: &AppWindow, w: WindowId) {
     ui.on_history_close(move || with_view(w, View::close_history));
     ui.on_batch_edited(move || with_view(w, View::batch_edited));
     ui.on_batch_accept(move || with_view(w, View::batch_accept));
+    ui.on_batch_preset_pick(move |i| with_view(w, |v| v.batch_preset_pick(i)));
+    ui.on_batch_preset_save(move || with_view(w, View::batch_preset_save));
+    ui.on_batch_preset_rename(move || with_view(w, View::batch_preset_rename));
+    ui.on_batch_preset_delete(move || with_view(w, View::batch_preset_delete));
     ui.on_batch_cancel(move || with_view(w, View::close_batch));
     ui.on_context_menu(move |panel, row, x, y| {
         with_view(w, |view| view.open_context_menu(panel, row, (x, y)));
@@ -2382,17 +2415,17 @@ impl View {
     /// 일괄 이름 바꾸기 창을 연다: 입력은 비어 있고 미리 보기는 모두 「그대로」다. 지금 할 수 없으면 열지 않는다.
     fn open_batch(&self) {
         let ui = &self.ui;
-        ui.set_batch_find(SharedString::new());
-        ui.set_batch_replace(SharedString::new());
-        ui.set_batch_prefix(SharedString::new());
-        ui.set_batch_suffix(SharedString::new());
-        ui.set_batch_numbering(false);
-        ui.set_batch_start("1".into());
-        ui.set_batch_digits("1".into());
-        ui.set_batch_at_end(true);
-        ui.set_batch_separator(SharedString::new());
         ui.set_batch_problem(SharedString::new());
-        let inputs = batch_rename::Inputs::default();
+        // 마지막에 쓴 규칙이 입력란으로 나타낼 수 있는 것이면 그것으로 채운다.
+        let inputs = with_presets(|store| {
+            store
+                .presets()
+                .last()
+                .and_then(facet_core::batch_rename::RenameRule::from_rules)
+        })
+        .map(|rule| batch_rename::Inputs::from_rule(&rule))
+        .unwrap_or_default();
+        self.set_batch_inputs(&inputs);
         let preview = self
             .app
             .borrow()
@@ -2408,8 +2441,131 @@ impl View {
         let mut window = batch_rename::BatchWindow::default();
         window.update(inputs, preview);
         *self.batch.borrow_mut() = Some(window);
+        ui.set_batch_preset_name(SharedString::new());
+        ui.set_batch_selected_preset(SharedString::new());
         self.show_batch();
+        self.show_presets();
         ui.set_batch_open(true);
+    }
+
+    /// 입력값을 입력란에 채운다.
+    fn set_batch_inputs(&self, inputs: &batch_rename::Inputs) {
+        let ui = &self.ui;
+        ui.set_batch_find(inputs.find.as_str().into());
+        ui.set_batch_replace(inputs.replace.as_str().into());
+        ui.set_batch_prefix(inputs.prefix.as_str().into());
+        ui.set_batch_suffix(inputs.suffix.as_str().into());
+        ui.set_batch_numbering(inputs.numbering);
+        ui.set_batch_start(inputs.start.as_str().into());
+        ui.set_batch_digits(inputs.digits.as_str().into());
+        ui.set_batch_at_end(inputs.at_end);
+        ui.set_batch_separator(inputs.separator.as_str().into());
+    }
+
+    /// 규칙 묶음 목록과 읽을 때 생긴 일을 화면에 둔다.
+    fn show_presets(&self) {
+        use facet_core::batch_rename::RenameRule;
+        let selected = self.ui.get_batch_selected_preset().to_string();
+        let (rows, note) = with_presets(|store| {
+            let rows: Vec<BatchPresetRow> = store
+                .presets()
+                .presets()
+                .iter()
+                .map(|preset| {
+                    let enabled = RenameRule::from_rules(&preset.rules).is_some();
+                    BatchPresetRow {
+                        name: preset.name.as_str().into(),
+                        enabled,
+                        reason: if enabled {
+                            SharedString::new()
+                        } else {
+                            text::PRESET_UNOPENABLE.into()
+                        },
+                        selected: !selected.is_empty() && preset.name == selected,
+                    }
+                })
+                .collect();
+            let note = text::preset_notice_text(
+                store.presets().skipped().len(),
+                store.notice().broken.as_ref(),
+            );
+            (rows, note)
+        });
+        self.ui
+            .set_batch_presets(ModelRc::from(Rc::new(VecModel::from(rows))));
+        self.ui.set_batch_presets_note(note.into());
+    }
+
+    /// 목록의 묶음을 고른다: 이름 입력란을 그 이름으로 하고, 열 수 있으면 입력란을 그 규칙으로 채워 미리 보기를 바꾼다.
+    fn batch_preset_pick(&self, index: i32) {
+        use facet_core::batch_rename::RenameRule;
+        if self.batch.borrow().is_none() {
+            return;
+        }
+        let picked = with_presets(|store| {
+            usize::try_from(index)
+                .ok()
+                .and_then(|i| store.presets().presets().get(i).cloned())
+        });
+        let Some(preset) = picked else { return };
+        self.ui
+            .set_batch_selected_preset(preset.name.as_str().into());
+        self.ui.set_batch_preset_name(preset.name.as_str().into());
+        if let Some(rule) = RenameRule::from_rules(&preset.rules) {
+            self.set_batch_inputs(&batch_rename::Inputs::from_rule(&rule));
+            self.batch_edited();
+        }
+        self.show_presets();
+    }
+
+    /// 묶음 조작의 결과를 창에 둔다: 성공하면 까닭 줄을 비우고 고른 묶음을 `selected`로, 거부되면 까닭을 보인다.
+    fn batch_preset_done(
+        &self,
+        result: Result<(), facet_core::rename_presets::PresetError>,
+        selected: String,
+    ) {
+        match result {
+            Ok(()) => {
+                self.ui.set_batch_problem(SharedString::new());
+                self.ui.set_batch_selected_preset(selected.into());
+            }
+            Err(error) => self
+                .ui
+                .set_batch_problem(text::preset_error_text(error).into()),
+        }
+        self.show_presets();
+    }
+
+    /// 「저장」: 지금 입력란의 규칙을 이름 입력란의 이름으로 저장한다(같은 이름이면 규칙을 바꿈).
+    fn batch_preset_save(&self) {
+        if self.batch.borrow().is_none() {
+            return;
+        }
+        let name = self.ui.get_batch_preset_name().to_string();
+        let rules = self.batch_inputs().rule().to_rules();
+        let result = with_presets(|store| store.edit(|p| p.save_preset(&name, rules)));
+        self.batch_preset_done(result, name.trim().to_owned());
+    }
+
+    /// 「이름 바꾸기」: 고른 묶음의 이름을 이름 입력란의 이름으로 바꾼다.
+    fn batch_preset_rename(&self) {
+        if self.batch.borrow().is_none() {
+            return;
+        }
+        let from = self.ui.get_batch_selected_preset().to_string();
+        let to = self.ui.get_batch_preset_name().to_string();
+        let result = with_presets(|store| store.edit(|p| p.rename_preset(&from, &to)));
+        self.batch_preset_done(result, to.trim().to_owned());
+    }
+
+    /// 「지우기」: 고른 묶음을 지운다.
+    fn batch_preset_delete(&self) {
+        if self.batch.borrow().is_none() {
+            return;
+        }
+        let name = self.ui.get_batch_selected_preset().to_string();
+        let result = with_presets(|store| store.edit(|p| p.delete_preset(&name)));
+        self.batch_preset_done(result, String::new());
     }
 
     /// 입력란의 값을 읽는다.
@@ -2490,6 +2646,8 @@ impl View {
             .start_batch_rename_rules(&rule.to_rules(), local_utc_offset());
         match result {
             Ok(_) => {
+                // 실행한 규칙을 다음에 창을 열 때 채우도록 남긴다(저장은 일꾼 스레드).
+                with_presets(|store| store.set_last(rule.to_rules()));
                 self.close_batch();
                 refresh_jobs();
             }
