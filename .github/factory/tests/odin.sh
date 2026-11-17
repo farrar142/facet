@@ -47,7 +47,7 @@ x"
 setup() {
   current=$1
   tmp=$(mktemp -d "$root/t.XXXXXX")
-  export FAKE_GH="$tmp/gh" GITHUB_OUTPUT="$tmp/output" FACTORY_MERGE_WAIT=0 RUN_URL=https://example.invalid/run/1
+  export FACTORY_LIST_RETRY_WAIT=0 FAKE_GH="$tmp/gh" GITHUB_OUTPUT="$tmp/output" FACTORY_MERGE_WAIT=0 RUN_URL=https://example.invalid/run/1
   unset FACTORY_DISPATCH_NEXT
   mkdir -p "$FAKE_GH"
   : > "$FAKE_GH/calls.log"
@@ -166,6 +166,15 @@ label_line=$(grep -n 'labels\[\]=ready-for-agent' "$FAKE_GH/calls.log" | head -n
 if [ -n "$merge_line" ] && [ -n "$label_line" ] && [ "$merge_line" -lt "$label_line" ]; then ok; else
   bad "merge ($merge_line) before ready-for-agent ($label_line)"
 fi
+
+setup pass-search-lags
+# The label search does not see the labels just added (#267): the approved tickets are named.
+touch "$FAKE_GH/list-empty"
+bash "$odin" pass 50 70 > "$tmp/log" 2>&1
+eq "exit" 0 "$?"
+eq "open tickets approved" "61 62 63" "$(approved)"
+eq "first dispatch despite the empty search" 62 "$(dispatched)"
+lacks "no second search" "asking again" "$(cat "$tmp/log")"
 
 setup pass-all-blocked
 ticket 62 1

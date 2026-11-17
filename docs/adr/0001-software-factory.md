@@ -74,7 +74,7 @@ facet은 Windows 파일 탐색기를 대체할 앱이다. 스택은 아직 정�
 
 - Implementer run이 끝날 때 다음 티켓이 없고, `in-progress`도 막힌 `ready-for-agent`도 남지 않았으면 다음 spec으로 넘어간다.
 - 먼저 하위 이슈가 모두 닫힌 spec 이슈를 닫는다. 그다음 저장소 변수 `FACTORY_SPEC_QUEUE`(로드맵 순서, 비어 있으면 다음 spec으로 넘어가지 않음)에서 아직 `spec` 라벨이 없는 첫 spec에 라벨을 붙이고 Decompose를 dispatch한다. 분해 중인 spec(하위 이슈 0개)이 있으면 기다린다.
-- Decompose는 스펙 PR을 열고, Odin이 그것을 병합한 뒤 티켓에 `ready-for-agent`를 붙이고 사슬을 시작한다.
+- Decompose는 스펙 PR을 열고, Odin이 그것을 병합한 뒤 티켓에 `ready-for-agent`를 붙이고 사슬을 시작한다(라벨 검색 색인이 늦을 수 있어 방금 승인한 티켓 번호를 `dispatch-next.sh --candidates`로 넘긴다).
 - 두 번 실패한 티켓(`ready-for-human`)은 사슬을 멈추지 않는다. 관리 세션이 따로 처리한다.
 
 ### 인수 시험·검토·비용 (2026-11-17, 대표 결정, spec #249)
