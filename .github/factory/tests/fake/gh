@@ -41,6 +41,45 @@ field() { # field <name>: value of -f/-F name=value, reading @file
   return 1
 }
 
+# Calls of verify.sh (all recorded in calls.log):
+#   pull-<n>.json       a PR ({number, state, merged, head: {ref}}); PATCH merges its fields,
+#                       PUT …/merge marks it merged and closed (fails while fail-merge exists)
+#   DELETE …/issues/<n>/labels/<name> removes the label; PATCH …/issues/<n> sets state
+#   DELETE …/git/refs/heads/<b> and POST …/actions/workflows/<f>/dispatches only log
+case "$method $path" in
+  "PUT repos/"*/*/pulls/*/merge)
+    n=${path%/merge}; n=${n##*/}
+    f="$d/pull-$n.json"
+    [ -f "$f" ] || fail "no PR #$n"
+    [ -e "$d/fail-merge" ] && fail "merging is broken"
+    jqf '.merged = true | .state = "closed"' "$f" > "$f.new" && mv "$f.new" "$f"
+    echo '{"merged": true}'; exit 0 ;;
+  "GET repos/"*/*/pulls/* | "PATCH repos/"*/*/pulls/*)
+    n=${path##*/}
+    f="$d/pull-$n.json"
+    [ -f "$f" ] || fail "no PR #$n"
+    if [ "$method" = PATCH ]; then
+      s=$(field state) || fail "no state"
+      jqf --arg s "$s" '.state = $s' "$f" > "$f.new" && mv "$f.new" "$f"
+    fi
+    cat "$f"; exit 0 ;;
+  "DELETE repos/"*/*/git/refs/heads/*) echo '{}'; exit 0 ;;
+  "POST repos/"*/*/actions/workflows/*/dispatches) exit 0 ;;
+  "DELETE repos/"*/*/issues/*/labels/*)
+    l=${path##*/}; n=${path%/labels/*}; n=${n##*/}
+    f="$d/issue-$n.json"
+    [ -f "$f" ] || fail "no issue #$n"
+    jqf --arg l "$l" '.labels |= map(select(.name != $l))' "$f" > "$f.new" && mv "$f.new" "$f"
+    echo '[]'; exit 0 ;;
+  "PATCH repos/"*/*/issues/*)
+    n=${path##*/}
+    f="$d/issue-$n.json"
+    [ -f "$f" ] || fail "no issue #$n"
+    s=$(field state) || fail "no state"
+    jqf --arg s "$s" '.state = $s' "$f" > "$f.new" && mv "$f.new" "$f"
+    cat "$f"; exit 0 ;;
+esac
+
 case "$path" in
   repos/*/*/issues)
     label=$(printf '%s' "$query" | tr '&' '\n' | sed -n 's/^labels=//p')

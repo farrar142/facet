@@ -70,6 +70,6 @@ PR이 쌓이면 Automated review task(그리고 그 짝인 Rework task)를 넣�
 대표가 자는 동안에도 공장이 멈추지 않게, 다음 spec으로 넘어가는 일도 공장이 한다.
 
 - Implementer run이 끝날 때 다음 티켓이 없고, `in-progress`도 막힌 `ready-for-agent`도 남지 않았으면 다음 spec으로 넘어간다.
-- 먼저 하위 이슈가 모두 닫힌 spec 이슈를 닫는다. 그다음 `SPEC_QUEUE`(로드맵 순서, `factory-implementer.yml`)에서 아직 `spec` 라벨이 없는 첫 spec에 라벨을 붙이고 Decompose를 dispatch한다. 분해 중인 spec(하위 이슈 0개)이 있으면 기다린다.
+- 먼저 하위 이슈가 모두 닫힌 spec 이슈를 닫는다. 그다음 저장소 변수 `FACTORY_SPEC_QUEUE`(로드맵 순서, 비어 있으면 다음 spec으로 넘어가지 않음)에서 아직 `spec` 라벨이 없는 첫 spec에 라벨을 붙이고 Decompose를 dispatch한다. 분해 중인 spec(하위 이슈 0개)이 있으면 기다린다.
 - Decompose는 끝나면 새 티켓에 `ready-for-agent`를 붙이고 사슬을 시작한다.
 - 두 번 실패한 티켓(`ready-for-human`)은 사슬을 멈추지 않는다. 관리 세션이 따로 처리한다.

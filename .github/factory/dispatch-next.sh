@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Keeps the factory chain going (factory-implementer.yml: the end of every implement run, the
-# frontier job and the daily schedule after KST midnight).
+# Keeps the factory chain going (factory-implementer.yml: the end of an implement run that did not
+# hand a PR to Verify, the frontier job and the daily schedule after KST midnight; verify.sh after a
+# merge or a hand-over to a human).
 #
 #   dispatch-next.sh [--tickets-only]
 #
@@ -10,10 +11,11 @@
 #    midnight).
 # 2. With no ticket to start (and without --tickets-only): closes finished specs, resumes a spec
 #    whose decompose stopped (no sub-issues and no decompose run going), or labels the next spec of
-#    SPEC_QUEUE and dispatches its decompose (decision 2026-11-15, roadmap order).
+#    FACTORY_SPEC_QUEUE and dispatches its decompose (decision 2026-11-15, roadmap order). An empty
+#    queue never moves on to another spec (spec #249: the trial runs one labelled spec only).
 #
-# Environment: REPO, GH_TOKEN, SPEC_QUEUE (spec numbers in order), and the budget variables of
-# ledger.sh.
+# Environment: REPO, GH_TOKEN, FACTORY_SPEC_QUEUE (spec numbers in order; the repository variable of
+# the same name), and the budget variables of ledger.sh.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 : "${REPO:?REPO is not set}"
@@ -76,7 +78,7 @@ for s in $(gh issue list --repo "$REPO" --state open --label spec --json number 
     gh issue close "$s" --repo "$REPO" --reason completed --comment "All $total tickets merged."
   fi
 done
-for s in ${SPEC_QUEUE:-}; do
+for s in ${FACTORY_SPEC_QUEUE:-}; do
   read -r state labels < <(gh issue view "$s" --repo "$REPO" --json state,labels --jq '[.state, ([.labels[].name] | join(","))] | @tsv')
   [ "$state" = OPEN ] || continue
   case ",$labels," in *,spec,*) continue;; esac

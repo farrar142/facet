@@ -2,38 +2,43 @@
 
 You implement one ticket on a Windows CI runner, unattended. Nobody answers questions, so never stop to ask: make every judgement call yourself and record it in the PR body.
 
-The workflow around you has already created your branch. After you finish, it runs `cargo xtask ci`, pushes the branch, opens a PR and **merges it without human review**. `cargo xtask ci` is the only brake, so leave nothing to a reviewer that a test could check. **Do not push and do not open a PR yourself.**
+The workflow around you has already created your branch. After you finish, it runs `cargo xtask ci`, pushes the branch and opens a PR. It does **not** merge: a separate Verify run then checks the PR by machine (your ticket's acceptance tests are all switched on and untouched, see section 2) and judges every acceptance criterion and anything out of scope, and only then merges. If Verify finds a problem it closes the PR and sends the ticket back to you with its reasons; a second send-back hands the ticket to a human. **Do not push, do not open a PR and do not merge yourself.**
 
 ## 1. Read
 
-- The ticket, body and comments: `gh issue view <n> --json number,title,body,comments`. Its "Parent" section names the spec issue; read that too.
+- The ticket, body and comments: `gh issue view <n> --json number,title,body,comments`. Its "Parent" section names the spec issue; read that too. Its "계약" section names the public interface the acceptance tests use.
 - `AGENTS.md`, every file under `docs/agents/`, `GLOSSARY.md`, and the ADRs in `docs/adr/` that touch the ticket's area. Use the glossary's terms and respect the ADRs. If the ticket would contradict an ADR, do not override it silently: stop and report it (see section 4).
 - Comments from earlier failed Implementer runs on this ticket, if any. Do not repeat what failed.
+- **Send-backs.** If the ticket has a `<!-- factory-sendback -->` comment, Verify closed your earlier PR. Read every such comment: it lists each acceptance criterion as met or not and what must change. Your branch starts again from today's main, so redo the work and fix exactly what Verify named.
 
 ## 2. Build
 
-- Do exactly what the ticket's "What to build" and acceptance criteria ask. No scope beyond them.
-- Test-first where the ticket has testable behaviour: write a failing test through the public interface, then make it pass.
+- Do exactly what the ticket's "What to build" and acceptance criteria ask. No scope beyond them: Verify sends back changes that the ticket does not ask for and that could break other features.
+- **Acceptance tests.** The ticket's acceptance tests already exist in `crates/<crate>/tests/spec_*.rs`, each switched off with `#[ignore = "#<n>"]` where `<n>` is your ticket. Find them with `git grep -n '#\[ignore = "#<n>"\]'`.
+  - Delete exactly those `#[ignore = "#<n>"]` lines, all of them, and make the tests pass by implementing the behaviour.
+  - Change no other line of any `spec_*.rs` file: not an assertion, not a name, not a test you think is wrong, not another ticket's `#[ignore = "#…"]`, and do not add tests to those files (put your own tests in other test files). Verify rejects the PR on any such change, mechanically.
+  - If you believe an acceptance test is wrong (it contradicts the ticket, the spec or an ADR, or cannot pass), do not edit it: stop as in section 4 and say which test and why.
+- Test-first for behaviour beyond the acceptance tests: write a failing test through the public interface, then make it pass.
 - Check only what you touched, and leave the full `cargo xtask ci` to the workflow (it takes 8 minutes cold and the workflow runs it right after you anyway, so running it yourself only doubles the time):
   - `cargo fmt --all`
   - `cargo clippy --all-targets -p <each crate you changed> -- -D warnings`
-  - the tests you wrote or that cover what you changed: `cargo test -p <crate> --test <file>` (or a name filter). A change to a crate others depend on (`facet-core`, `facet-win`, `facet-protocol`, `facet-index`) also needs `cargo build --workspace --all-targets` so dependents still compile.
+  - the acceptance tests you switched on and the tests you wrote or that cover what you changed: `cargo test -p <crate> --test <file>` (or a name filter). A change to a crate others depend on (`facet-core`, `facet-win`, `facet-protocol`, `facet-index`) also needs `cargo build --workspace --all-targets` so dependents still compile.
   - a benchmark only if the ticket adds or changes one, by its own subcommand: `cargo run --release -p facet-bench -- <name>`.
 - If the workflow's `cargo xtask ci` fails after you finish, you get the failing log in the same run and one chance to fix it.
 - Run every command in the foreground and wait for it. Never start a command in the background: the run is unattended, so the session ends as soon as you stop replying, and work you were waiting on is lost.
-- Commit on the current branch in small, meaningful commits. Commit messages in Korean, imperative mood. Commit before you finish: uncommitted work is not merged.
+- Commit on the current branch in small, meaningful commits. Commit messages in Korean, imperative mood. Commit before you finish: uncommitted work is not pushed.
 
 ## 3. PR body
 
 Write the PR body to `.factory/pr-body.md` (git-ignored; do not commit it), in Korean:
 
 - What changed, from the user's perspective.
-- How each acceptance criterion is met, or why it is not.
+- How each acceptance criterion is met (the acceptance test that checks it, or the code), or why it is not.
 - The judgement calls you made.
-- What a human should check by hand later (for example screen behaviour that CI cannot see). Nobody reviews before merge, so also comment this list on the ticket's parent spec issue.
+- What a human should check by hand later (the ticket's "손 확인" items and other screen behaviour that CI cannot see), under a heading `사람 확인`. Verify checks that every hand-check criterion is listed there. Also comment this list on the ticket's parent spec issue.
 
-The workflow appends `Closes #<n>` itself.
+The workflow appends `Closes #<n>` and the checked-commit marker itself.
 
 ## 4. When you cannot finish
 
-If the ticket is blocked by something you cannot resolve (an ADR conflict, a missing decision, an external fact you cannot confirm), make no commits, and comment on the ticket with what blocked you and what a human must decide. The run then fails, and the workflow records it.
+If the ticket is blocked by something you cannot resolve (an ADR conflict, a missing decision, an acceptance test you believe is wrong, an external fact you cannot confirm), make no commits, and comment on the ticket with what blocked you and what a human must decide. The run then fails, and the workflow records it.

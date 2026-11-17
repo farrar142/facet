@@ -4,9 +4,10 @@
 # when every blocker of the ticket is closed; otherwise the label stays and the
 # `frontier` job dispatches the ticket once its last blocker closes.
 #
-# The agent edits and commits. The workflow itself runs `cargo xtask ci`, pushes,
-# opens the PR and squash-merges it: no human review (decision 2026-11-15), so the
-# automated checks are the only brake.
+# The agent edits and commits (lifting only its own ticket's acceptance-test ignores). The
+# workflow itself runs `cargo xtask ci`, pushes and opens the PR, and hands it to
+# factory-verify.yml (spec #249), which checks the PR and merges it or sends the ticket back.
+# This workflow never merges.
 name: factory-implementer
 
 on:
@@ -30,9 +31,9 @@ permissions:
   id-token: write
 
 env:
-  # Spec issues in roadmap order (docs/roadmap.md, S2..S18 without S7 which ran with S1).
-  # Each spec's prerequisites come earlier in this list. S19 (#67) is a draft: add it after grilling.
-  SPEC_QUEUE: "17 18 19 20 21 23 24 25 26 27 28 29 30 31 32 33"
+  # Spec issues in roadmap order, from the repository variable (spec #249). Empty: the factory
+  # never moves on to another spec by itself (the trial runs only the spec labelled `spec`).
+  FACTORY_SPEC_QUEUE: ${{ vars.FACTORY_SPEC_QUEUE }}
   # Budgets of .github/factory/ledger.sh (spec #249 "비용 장부와 상한"); empty means its defaults.
   FACTORY_SPEC_BUDGET_USD: ${{ vars.FACTORY_SPEC_BUDGET_USD }}
   FACTORY_DAILY_BUDGET_USD: ${{ vars.FACTORY_DAILY_BUDGET_USD }}
@@ -80,8 +81,9 @@ jobs:
     timeout-minutes: 180
     # One ticket at a time across the repo (decision 2026-11-15): parallel runs kept
     # editing the same files. A group keeps at most one pending run and cancels older
-    # pending ones, so runs are chained instead: every run ends by dispatching the next
-    # unblocked ticket (the "Dispatch next ticket" step). A cancelled run leaves its
+    # pending ones, so runs are chained instead: a run that opened a PR dispatches Verify
+    # (same group, factory-verify.yml), which dispatches the next unblocked ticket; any other
+    # run does that itself (the "Dispatch next ticket" step). A cancelled run leaves its
     # ticket labelled `ready-for-agent`, so the chain picks it up later.
     concurrency:
       group: factory-implementer
@@ -129,14 +131,15 @@ jobs:
           fi
           echo "go=$go" >> "$GITHUB_OUTPUT"
           # Model: the ticket's model label (set by Decompose), Sonnet when there is none,
-          # and Opus for any retry after a code failure (checks or merge failed; an
-          # infrastructure failure retries on the same model, see "Record failure").
+          # and Opus for any retry after a code failure (the checks failed; an
+          # infrastructure failure retries on the same model, see "Record failure") or after
+          # Verify sent the ticket back (`<!-- factory-sendback -->`, spec #249).
           # Opus only for hard tickets (Windows API, OLE, concurrency safety); never Fable.
           model=claude-sonnet-5-5
           case ",$labels," in *,model:opus,*) model=claude-opus-5-5;; esac
-          fails=$(gh issue view "$N" --repo "$REPO" --json comments --jq '[.comments[].body | select(contains("<!-- factory-implementer-failed -->"))] | length')
+          fails=$(gh issue view "$N" --repo "$REPO" --json comments --jq '[.comments[].body | select(contains("<!-- factory-implementer-failed -->") or contains("<!-- factory-sendback -->"))] | length')
           if [ "$fails" -gt 0 ]; then model=claude-opus-5-5; fi
-          echo "::notice::#$N runs on $model (earlier failures: $fails)"
+          echo "::notice::#$N runs on $model (earlier code failures and send-backs: $fails)"
           echo "model=$model" >> "$GITHUB_OUTPUT"
 
       - name: Prepare branch
@@ -331,14 +334,19 @@ jobs:
           done
           cargo xtask ci
 
-      - name: Push and open draft PR
+      # The PR body carries `Closes #N` and the commit `cargo xtask ci` passed on
+      # (`<!-- factory-checked <sha> -->`): Verify skips its own `cargo xtask ci` when the PR head is
+      # still that commit and sits on today's main.
+      - name: Push and open PR
+        id: pr
         if: steps.guard.outputs.go == 'true'
         run: |
+          sha=$(git rev-parse HEAD)
           git push --force origin "$BRANCH"
           body=.factory/pr-body.md
           [ -s "$body" ] || echo "(the agent wrote no PR body)" > "$body"
-          printf '\n\nCloses #%s\n\n_Opened by the factory Implementer run: %s_\n' "$N" \
-            "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> "$body"
+          printf '\n\nCloses #%s\n\n_Opened by the factory Implementer run: %s_\n\n<!-- factory-checked %s -->\n' "$N" \
+            "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" "$sha" >> "$body"
           title=$(gh issue view "$N" --repo "$REPO" --json title --jq .title)
           url=$(gh pr list --repo "$REPO" --head "$BRANCH" --state open --json url --jq '.[0].url')
           if [ -n "$url" ]; then
@@ -346,61 +354,28 @@ jobs:
           else
             url=$(gh pr create --repo "$REPO" --base main --head "$BRANCH" --title "$title" --body-file "$body")
           fi
+          number=$(gh pr view "$url" --repo "$REPO" --json number --jq .number)
           echo "PR: $url"
-          echo "PR_URL=$url" >> "$GITHUB_ENV"
+          echo "number=$number" >> "$GITHUB_OUTPUT"
 
-      # No human review (decision 2026-11-15): `cargo xtask ci` above is the brake.
-      # A sibling ticket may merge while this run checks. Then rebase onto the new main,
-      # check again and retry. A rebase conflict at this point fails the run; the retry
-      # run (on Opus) starts from today's main.
-      - name: Merge
-        id: merge
+      # The Implementer does not merge (spec #249): Verify checks the PR (machine checks, acceptance
+      # review), then merges it and moves the chain on, or sends the ticket back. It shares the
+      # concurrency group, so it runs right after this run and before any next ticket.
+      - name: Hand over to Verify
+        id: handover
         if: steps.guard.outputs.go == 'true'
-        run: |
-          base=$(git rev-parse origin/main)
-          merged=false
-          for attempt in 1 2 3 4; do
-            if gh pr merge "$PR_URL" --squash; then merged=true; break; fi
-            sleep 15
-            git fetch origin main
-            if [ "$(git rev-parse origin/main)" = "$base" ]; then
-              echo "::notice::main unchanged; GitHub may still be computing mergeability (attempt $attempt)"
-              continue
-            fi
-            echo "::warning::main moved during the run; rebasing again (attempt $attempt)"
-            if ! git rebase origin/main; then
-              git rebase --abort
-              echo "::error::conflicts with tickets merged meanwhile: $(git diff --name-only origin/main...HEAD | tr '\n' ' ')"
-              exit 1
-            fi
-            base=$(git rev-parse origin/main)
-            cargo xtask ci
-            git push --force origin "$BRANCH"
-          done
-          $merged || { echo "::error::could not merge $PR_URL"; exit 1; }
-          git push origin --delete "$BRANCH" || true
-          # A GITHUB_TOKEN merge does not reliably close the ticket via `Closes #N`; close it here
-          # so its dependents become unblocked before the next step looks for them.
-          gh issue close "$N" --repo "$REPO" --reason completed --comment "Merged in $PR_URL" || true
-          gh issue edit "$N" --repo "$REPO" --remove-label in-progress || true
+        run: gh workflow run factory-verify.yml --repo "$REPO" -f issue="$N" -f pr="${{ steps.pr.outputs.number }}"
 
-      # A merge made with GITHUB_TOKEN fires no push event, so start main's CI and nightly here.
-      - name: Build main
-        if: steps.guard.outputs.go == 'true'
-        run: |
-          gh workflow run ci.yml --repo "$REPO" --ref main || echo "::warning::could not dispatch ci.yml"
-          gh workflow run release.yml --repo "$REPO" --ref main || echo "::warning::could not dispatch release.yml"
-
-      # A code failure (the automated checks or the merge failed) counts toward the model
-      # rule: one puts the ticket back in the queue and the retry runs on Opus, two leave
-      # it to the managing session (`ready-for-human`, ADR-0001).
+      # A code failure (the automated checks failed) counts toward the model rule: one puts the
+      # ticket back in the queue and the retry runs on Opus, two leave it to the managing session
+      # (`ready-for-human`, ADR-0001).
       # Any other failure (runner, network, installer, agent action crash) has nothing to do
       # with the code: retry on the same model (decision 2026-11-16), and hand the ticket
       # to the managing session only after three of them.
       - name: Record failure
         if: failure() && steps.guard.outputs.go == 'true'
         run: |
-          if [ "${{ steps.checks.outcome }}" = failure ] || [ "${{ steps.merge.outcome }}" = failure ]; then
+          if [ "${{ steps.checks.outcome }}" = failure ]; then
             marker='<!-- factory-implementer-failed -->'; limit=2; what="code"
           else
             marker='<!-- factory-implementer-infra-failed -->'; limit=3; what="infrastructure"
@@ -416,11 +391,11 @@ jobs:
             gh issue edit "$N" --repo "$REPO" --add-label ready-for-agent
           fi
 
-      # Keep the chain going whatever happened above, including skipped (blocked) runs:
-      # the merge closes the ticket without firing `issues: closed`, so the frontier job
-      # would not run. Lowest-numbered unblocked approved ticket first.
+      # Keep the chain going when this run did not hand a PR to Verify (failed, or skipped because
+      # the ticket was blocked, not approved or stopped by its budget guard). After a hand-over,
+      # Verify dispatches the next ticket. Lowest-numbered unblocked approved ticket first.
       - name: Dispatch next ticket
-        if: always()
+        if: always() && steps.handover.outcome != 'success'
         run: |
           sleep 10
           # A run stopped by the daily budget does not look for another ticket: none may start.
