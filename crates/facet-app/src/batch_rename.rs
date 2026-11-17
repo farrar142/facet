@@ -4,6 +4,7 @@
 //! 화면에 그릴 줄([`Line`])로 바꾼다. 화면 문장은 [`crate::text`]가 만든다(ADR-0007).
 
 use facet_core::batch_rename::{EntryStatus, NumberPosition, Numbering, Preview, RenameRule};
+use facet_core::window::BatchPreviewId;
 
 use crate::text;
 
@@ -116,18 +117,42 @@ pub fn lines(preview: &Preview) -> Vec<Line> {
         .collect()
 }
 
-/// 창의 상태: 지금 입력값과 마지막으로 계산한 미리 보기.
+/// 창의 상태: 지금 입력값과 마지막으로 받은 미리 보기, 결과를 기다리는 마지막 요청.
 #[derive(Debug, Default)]
 pub struct BatchWindow {
     inputs: Inputs,
     preview: Option<Preview>,
+    /// 일꾼 스레드에 맡긴 마지막 미리 보기 요청(`App::request_batch_rename_preview`). 결과가 오면 비운다.
+    pending: Option<BatchPreviewId>,
 }
 
 impl BatchWindow {
-    /// 입력값과 그 미리 보기를 새로 둔다(부른 쪽이 `Inputs::rule`을 `RenameRule::to_rules`로 바꿔 `App::batch_rename_preview_rules`로 계산해 넘김).
+    /// 입력값과 그 미리 보기를 곧바로 둔다(시험에서 동기 미리 보기를 넣을 때). 화면은 [`BatchWindow::request`]·
+    /// [`BatchWindow::receive`]로 일꾼 스레드의 결과를 받는다.
+    #[cfg(test)]
     pub fn update(&mut self, inputs: Inputs, preview: Option<Preview>) {
         self.inputs = inputs;
         self.preview = preview;
+    }
+
+    /// 입력이 바뀌어 미리 보기를 요청했다. 결과가 오기 전에는 앞 미리 보기를 그대로 둔다.
+    pub fn request(&mut self, inputs: Inputs, id: BatchPreviewId) {
+        self.inputs = inputs;
+        self.pending = Some(id);
+    }
+
+    /// 미리 보기 결과를 받는다. 기다리던 마지막 요청의 결과(미리 보기가 있음)면 두고 `true`, 앞선 요청이나 다른 창의
+    /// 요청이면 아무것도 바꾸지 않고 `false`다.
+    pub fn receive(&mut self, id: BatchPreviewId, preview: Option<&Preview>) -> bool {
+        if self.pending != Some(id) {
+            return false;
+        }
+        let Some(preview) = preview else {
+            return false;
+        };
+        self.pending = None;
+        self.preview = Some(preview.clone());
+        true
     }
 
     /// 마지막 미리 보기.
@@ -363,5 +388,63 @@ mod tests {
                 assert_eq!(lines(&rules), lines(&s14a));
             }
         }
+    }
+    #[test]
+    fn 마지막_요청의_결과만_받고_그_전에는_앞_미리_보기를_둔다() {
+        use std::time::Duration;
+
+        use facet_core::Location;
+        use facet_core::tab::ReadOutcome;
+        use facet_core::window::{App, Update};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        for name in ["a.txt", "b.txt"] {
+            std::fs::write(dir.path().join(name), name).unwrap();
+        }
+        let mut app = App::new(Some(Location::file_system(dir.path())));
+        let (_, outcome) = app.wait(Duration::from_secs(30)).expect("첫 읽기");
+        assert_eq!(outcome, ReadOutcome::Committed);
+        app.active_tab_mut().select_all();
+
+        let empty = RenameRule::default().to_rules();
+        let prefix = RenameRule {
+            prefix: "x".into(),
+            ..RenameRule::default()
+        }
+        .to_rules();
+        let first_preview = app.batch_rename_preview_rules(&empty, 0).unwrap();
+        let second_preview = app.batch_rename_preview_rules(&prefix, 0).unwrap();
+
+        let mut window = BatchWindow::default();
+        window.update(Inputs::default(), Some(first_preview.clone()));
+        let first = app.request_batch_rename_preview(&empty, 0).unwrap();
+        let second = app.request_batch_rename_preview(&prefix, 0).unwrap();
+        window.request(Inputs::default(), second);
+        assert_eq!(
+            window.preview(),
+            Some(&first_preview),
+            "결과 전에는 앞 미리 보기"
+        );
+
+        // 앞선 요청의 결과는 미리 보기가 있어도 받지 않는다.
+        assert!(!window.receive(first, Some(&second_preview)));
+        assert!(!window.receive(second, None));
+        assert_eq!(window.preview(), Some(&first_preview));
+
+        let mut got = None;
+        for _ in 0..100 {
+            if let Some((_, Update::BatchPreview { id, preview })) =
+                app.wait_update(Duration::from_millis(300))
+                && id == second
+            {
+                got = Some(preview);
+                break;
+            }
+        }
+        let preview = got.expect("마지막 요청의 결과");
+        assert!(window.receive(second, preview.as_ref()));
+        assert_eq!(window.preview(), Some(&second_preview));
+        assert!(window.can_execute());
+        assert!(!window.receive(second, preview.as_ref()), "한 번만 받는다");
     }
 }

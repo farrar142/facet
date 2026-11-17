@@ -58,6 +58,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -375,6 +376,12 @@ enum Message {
         target: PathBuf,
         result: Result<Option<ClipboardFiles>, ClipboardError>,
     },
+    /// 일괄 이름 바꾸기 미리 보기 일꾼의 결과. 앞선 요청이라 계산하지 않았으면 `None`.
+    BatchPreviewed {
+        tab: TabId,
+        id: BatchPreviewId,
+        preview: Option<Preview>,
+    },
     Edited {
         tab: TabId,
         result: Result<Edited, EditError>,
@@ -679,6 +686,9 @@ pub struct App {
     indexer: Option<IndexerClient>,
     /// 즉시 검색 결과의 인덱스 변경 확인([`App::poll`])을 깨우도록 잡아 둔 시각. 잡지 않았으면 `None`이다.
     follow_wake: Option<Instant>,
+    /// 마지막 일괄 이름 바꾸기 미리 보기 요청의 번호([`App::request_batch_rename_preview`]). 일꾼이 보고 앞선 요청의
+    /// 계산을 건너뛰고, 받을 때 앞선 요청의 결과를 버린다. 0은 요청 없음.
+    batch_preview: Arc<AtomicU64>,
     outbox: Outbox,
     receiver: Receiver<Message>,
 }
@@ -886,6 +896,7 @@ impl App {
             changed_results: Vec::new(),
             indexer: None,
             follow_wake: None,
+            batch_preview: Arc::default(),
             outbox: Outbox {
                 sender,
                 waker: Arc::default(),
@@ -2061,6 +2072,12 @@ impl App {
                     .is_some_and(|tab| tab.finish_filter(result));
                 (id, Update::Filtered(applied))
             }
+            Message::BatchPreviewed { tab, id, preview } => {
+                // 받기 전에 뒤 요청이 왔으면 계산했어도 버린다: 마지막 요청의 결과만 그린다.
+                let latest = self.batch_preview.load(Ordering::SeqCst) == id.0;
+                let preview = preview.filter(|_| latest);
+                (tab, Update::BatchPreview { id, preview })
+            }
             Message::Completed { tab: id, result } => {
                 let completion = result.id();
                 let candidates = self
@@ -3072,13 +3089,32 @@ impl App {
         Ok(self.submit_batch_rename(items, unchanged))
     }
 
-    /// #292: 미리 보기를 일꾼 스레드에서 계산하도록 요청한다. 명령이 꺼져 있으면 `None`.
+    /// [`App::batch_rename_preview_rules`]와 같은 미리 보기를 일꾼 스레드에서 계산하기 시작한다. 막지 않고 곧바로 요청
+    /// 번호를 돌려주며, 항목·수정 시각·겹침 이름은 지금(요청 때) 모아 넘기므로 뒤에 선택이 바뀌어도 결과는 요청 때의
+    /// 항목으로 만든 것이다. 결과는 요청마다 정확히 하나 [`Update::BatchPreview`](탭은 요청 때의 활성 탭)로 온다:
+    /// 받을 때 더 뒤 요청이 있으면 미리 보기 없이(`None`), 아니면 그 미리 보기다. 일꾼은 시작할 때 이미 뒤 요청이
+    /// 있으면 계산하지 않는다. 명령이 꺼져 있으면 `None`이고 결과도 오지 않는다.
     pub fn request_batch_rename_preview(
         &mut self,
-        _rules: &[Rule],
-        _utc_offset_seconds: i64,
+        rules: &[Rule],
+        utc_offset_seconds: i64,
     ) -> Option<BatchPreviewId> {
-        todo!("#292")
+        let (items, context, existing) = self.batch_rename_inputs(utc_offset_seconds)?;
+        let tab = self.active_tab_id();
+        let id = BatchPreviewId(self.batch_preview.fetch_add(1, Ordering::SeqCst) + 1);
+        let latest = Arc::clone(&self.batch_preview);
+        let rules = rules.to_vec();
+        let outbox = self.outbox.clone();
+        let run = move || {
+            let preview = (latest.load(Ordering::SeqCst) == id.0)
+                .then(|| batch_rename::preview_rules(&items, &rules, &context, &existing));
+            outbox.send(Message::BatchPreviewed { tab, id, preview });
+        };
+        thread::Builder::new()
+            .name("facet-batch-preview".into())
+            .spawn(run)
+            .expect("미리 보기 일꾼 스레드를 만들지 못했다");
+        Some(id)
     }
 
     /// #291: 활성 탭의 선택(둘 이상)을 친 이름에 번호를 붙인 이름으로 바꾸는 일괄 이름 바꾸기 작업을 넣는다.
@@ -3167,6 +3203,21 @@ impl App {
         rules: &[Rule],
         utc_offset_seconds: i64,
     ) -> Option<Preview> {
+        let (items, context, existing) = self.batch_rename_inputs(utc_offset_seconds)?;
+        Some(batch_rename::preview_rules(
+            &items, rules, &context, &existing,
+        ))
+    }
+
+    /// 규칙 목록 미리 보기의 입력: 항목, 수정 시각과 UTC 차이, 겹침 이름. 명령이 꺼져 있으면 `None`.
+    fn batch_rename_inputs(
+        &self,
+        utc_offset_seconds: i64,
+    ) -> Option<(
+        Vec<BatchItem>,
+        batch_rename::RuleContext,
+        batch_rename::ExistingNames,
+    )> {
         let items = self.batch_rename_items()?;
         let tab = self.active_window().active_panel().active_tab();
         let modified = tab
@@ -3182,9 +3233,7 @@ impl App {
             utc_offset_seconds,
         };
         let existing = tab.existing_names();
-        Some(batch_rename::preview_rules(
-            &items, rules, &context, &existing,
-        ))
+        Some((items, context, existing))
     }
 
     /// 규칙 목록으로 [`App::start_batch_rename`]과 같은 규칙의 일괄 이름 바꾸기 작업을 넣는다.
