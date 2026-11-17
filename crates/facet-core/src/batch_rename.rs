@@ -540,8 +540,70 @@ impl RenameRule {
     }
 
     /// #283: 규칙 목록이 `to_rules`가 만드는 모양이면 그 규칙, 아니면 None.
-    pub fn from_rules(_rules: &[Rule]) -> Option<RenameRule> {
-        todo!("#283")
+    pub fn from_rules(rules: &[Rule]) -> Option<RenameRule> {
+        let mut rule = RenameRule::default();
+        // 0 찾아 바꾸기, 1 번호, 2 앞 붙이기, 3 뒤 붙이기: 차례대로만, 한 번씩만.
+        let mut next = 0;
+        for r in rules {
+            if !r.enabled || r.target != Target::Stem {
+                return None;
+            }
+            let slot = match &r.kind {
+                RuleKind::Replace {
+                    find,
+                    replace,
+                    regex: false,
+                    case_sensitive: false,
+                    all: true,
+                } if !find.is_empty() => {
+                    rule.find = find.clone();
+                    rule.replace = replace.clone();
+                    0
+                }
+                RuleKind::Number {
+                    start,
+                    step: 1,
+                    digits,
+                    place,
+                    separator,
+                } => {
+                    let position = match place {
+                        Place::Start => NumberPosition::Start,
+                        Place::End => NumberPosition::End,
+                        Place::At { .. } => return None,
+                    };
+                    rule.numbering = Some(Numbering {
+                        start: *start,
+                        digits: *digits,
+                        position,
+                        separator: separator.clone(),
+                    });
+                    1
+                }
+                RuleKind::Insert {
+                    text,
+                    from: Edge::Start,
+                    at: 0,
+                } if !text.is_empty() => {
+                    rule.prefix = text.clone();
+                    2
+                }
+                RuleKind::Insert {
+                    text,
+                    from: Edge::End,
+                    at: 0,
+                } if !text.is_empty() => {
+                    rule.suffix = text.clone();
+                    3
+                }
+                _ => return None,
+            };
+            if slot < next {
+                return None;
+            }
+            next = slot + 1;
+        }
+        Some(rule)
     }
 }
 

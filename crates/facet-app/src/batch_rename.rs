@@ -47,6 +47,25 @@ impl Default for Inputs {
 }
 
 impl Inputs {
+    /// 입력란 규칙에서 입력값을 채운다(`rule`의 반대). 번호가 없으면 번호 입력란은 기본값 그대로다.
+    pub fn from_rule(rule: &RenameRule) -> Inputs {
+        let mut inputs = Inputs {
+            find: rule.find.clone(),
+            replace: rule.replace.clone(),
+            prefix: rule.prefix.clone(),
+            suffix: rule.suffix.clone(),
+            ..Inputs::default()
+        };
+        if let Some(n) = &rule.numbering {
+            inputs.numbering = true;
+            inputs.start = n.start.to_string();
+            inputs.digits = n.digits.to_string();
+            inputs.at_end = n.position == NumberPosition::End;
+            inputs.separator = n.separator.clone();
+        }
+        inputs
+    }
+
     /// 코어의 규칙으로 바꾼다. 번호 설정은 확인란이 켜졌을 때만 쓴다.
     pub fn rule(&self) -> RenameRule {
         RenameRule {
@@ -251,6 +270,23 @@ mod tests {
         assert_eq!(numbering.digits, 3);
         assert_eq!(numbering.position, NumberPosition::End);
         assert_eq!(numbering.separator, "_");
+    }
+
+    #[test]
+    fn 입력값은_규칙으로_바꿨다가_되돌려도_같다() {
+        let inputs = Inputs {
+            find: "IMG_".into(),
+            replace: "사진".into(),
+            prefix: "앞".into(),
+            suffix: "뒤".into(),
+            numbering: true,
+            start: "7".into(),
+            digits: "3".into(),
+            at_end: false,
+            separator: "-".into(),
+        };
+        assert_eq!(Inputs::from_rule(&inputs.rule()), inputs);
+        assert_eq!(Inputs::from_rule(&RenameRule::default()), Inputs::default());
     }
 
     #[test]

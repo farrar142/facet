@@ -86,7 +86,6 @@ fn insert(from: Edge, at: usize) -> Rule {
 }
 
 #[test]
-#[ignore = "#283"]
 fn 입력란_규칙을_규칙_목록으로_바꿨다가_되돌리면_같은_규칙이다() {
     for rule in window_rules() {
         assert_eq!(
@@ -103,7 +102,6 @@ fn 입력란_규칙을_규칙_목록으로_바꿨다가_되돌리면_같은_규�
 }
 
 #[test]
-#[ignore = "#283"]
 fn 입력란이_만드는_모양의_손으로_만든_목록도_채울_수_있다() {
     let rules = vec![
         literal("a", "b"),
@@ -124,7 +122,6 @@ fn 입력란이_만드는_모양의_손으로_만든_목록도_채울_수_있다
 }
 
 #[test]
-#[ignore = "#283"]
 fn 찾아_바꾸기가_입력란과_다르면_열_수_없다() {
     let variants = [
         ("정규식", true, false, true),
@@ -144,7 +141,6 @@ fn 찾아_바꾸기가_입력란과_다르면_열_수_없다() {
 }
 
 #[test]
-#[ignore = "#283"]
 fn 번호와_넣기가_입력란과_다르면_열_수_없다() {
     let cases: Vec<(&str, Vec<Rule>)> = vec![
         ("증가 2", vec![number(2, Place::Start)]),
@@ -167,7 +163,6 @@ fn 번호와_넣기가_입력란과_다르면_열_수_없다() {
 }
 
 #[test]
-#[ignore = "#283"]
 fn 입력란에_없는_종류는_열_수_없다() {
     let kinds = [
         RuleKind::Delete {
@@ -193,7 +188,6 @@ fn 입력란에_없는_종류는_열_수_없다() {
 }
 
 #[test]
-#[ignore = "#283"]
 fn 꺼진_규칙이나_이름_부분이_아닌_대상은_열_수_없다() {
     let mut off = literal("a", "b");
     off.enabled = false;
@@ -207,7 +201,6 @@ fn 꺼진_규칙이나_이름_부분이_아닌_대상은_열_수_없다() {
 }
 
 #[test]
-#[ignore = "#283"]
 fn 차례가_다르거나_같은_종류가_둘이면_열_수_없다() {
     let cases: Vec<(&str, Vec<Rule>)> = vec![
         (
