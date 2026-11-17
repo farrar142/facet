@@ -56,12 +56,14 @@
 //! 작업(이름바꾸기, 삭제·휴지통 삭제·이동, 그 실행취소·다시 실행)은 끝날 때 모든 검색 결과 탭에 반영한다.
 
 use std::collections::{HashMap, VecDeque};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::batch_rename::{self, BatchItem, EntryStatus, Preview, RenameRule};
 use crate::clipboard::CutMarks;
 use facet_win::clipboard::format::ClipboardOperation;
 use facet_win::clipboard::{Clipboard, ClipboardError, ClipboardFiles};
@@ -78,7 +80,7 @@ use crate::indexer_client::{ClientOptions, Connection, IndexerClient, IndexerEve
 use crate::instant_search::{DemotionReason, Follow};
 use crate::job::{
     AnswerError, ConflictAnswer, CopyRejection, DeleteRejection, ErrorAnswer, JobEvent, JobId,
-    JobKind, JobQueue, JournalSink, NotRecyclableAnswer, RevertJob,
+    JobKind, JobQueue, JournalSink, NotRecyclableAnswer, RenameItem, RevertJob,
 };
 use crate::launch::LaunchTarget;
 use crate::live_search::{LiveSearch, StartError};
@@ -483,6 +485,17 @@ pub enum ClipboardFailure {
     Rejected(CopyRejection),
 }
 
+/// [`App::start_batch_rename`]이 작업을 만들지 않은 까닭.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchRenameError {
+    /// 명령이 꺼져 있다(선택 둘 미만, 실제 폴더·검색 결과 위치가 아님, 창 없음).
+    Unavailable,
+    /// 미리 보기에 문제가 있다(`Preview::problem_count() > 0`).
+    Problems,
+    /// 바꿀 항목이 없다(모두 그대로).
+    NothingToRename,
+}
+
 /// 명령을 실행한 결과.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Execution {
@@ -505,6 +518,9 @@ pub enum Execution {
     ChooseTransferTarget(JobKind),
     /// 화면이 할 일: 커서 항목의 이름 입력란을 연다(F2). 확정하면 [`App::rename`]에 넘긴다.
     Rename,
+    /// 화면이 할 일: 일괄 이름 바꾸기 창을 연다. 규칙을 받아 [`App::batch_rename_preview`]로 미리 보이고 확정하면
+    /// [`App::start_batch_rename`]에 넘긴다.
+    BatchRename,
     /// 화면이 할 일: 활성 탭 위치에 새 폴더를 만든다. 처음 이름(바탕 이름)은 화면 문장이라 화면이 정해
     /// [`App::new_folder`]에 넘긴다.
     NewFolder,
@@ -2308,6 +2324,7 @@ impl App {
                 return Execution::ChooseTransferTarget(kind);
             }
             CommandId::Rename => return Execution::Rename,
+            CommandId::BatchRename => return Execution::BatchRename,
             CommandId::NewFolder => return Execution::NewFolder,
             CommandId::Undo | CommandId::Redo => {
                 let result = if command == CommandId::Undo {
@@ -2814,7 +2831,11 @@ impl App {
             JobKind::Copy => CommandId::CopyTo,
             JobKind::Move => CommandId::MoveTo,
             // 실행취소·다시 실행은 원본을 골라 넣는 작업이 아니다.
-            JobKind::Undo | JobKind::Redo | JobKind::Delete | JobKind::Recycle => return None,
+            JobKind::Undo
+            | JobKind::Redo
+            | JobKind::Delete
+            | JobKind::Recycle
+            | JobKind::BatchRename => return None,
         };
         if !self.can_execute(command) {
             return None;
@@ -2979,6 +3000,87 @@ impl App {
         Ok(id)
     }
 
+    /// 일괄 이름 바꾸기할 항목: 활성 탭의 선택(목록 순서, 커서 항목은 더하지 않음), 항목마다 든 폴더·이름·폴더 여부.
+    /// 명령이 꺼져 있으면 `None`.
+    pub fn batch_rename_items(&self) -> Option<Vec<BatchItem>> {
+        if !self.can_execute(CommandId::BatchRename) {
+            return None;
+        }
+        let tab = self.active_window().active_panel().active_tab();
+        Some(
+            tab.selected_indices()
+                .filter_map(|i| {
+                    let item = tab.get(i)?;
+                    Some(BatchItem {
+                        folder: tab.folder_of(i)?.to_path_buf(),
+                        name: item.name.clone(),
+                        is_folder: item.is_folder,
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    /// 그 항목들에 규칙을 쓴 미리 보기. 겹침은 실제 폴더 위치면 탭이 읽은 그 폴더의 모든 이름(숨김 포함), 검색 결과
+    /// 위치면 결과 목록의 그 폴더 항목 이름들로 본다(목록을 다시 읽지 않음). 명령이 꺼져 있으면 `None`.
+    pub fn batch_rename_preview(&self, rule: &RenameRule) -> Option<Preview> {
+        let items = self.batch_rename_items()?;
+        let existing = self
+            .active_window()
+            .active_panel()
+            .active_tab()
+            .existing_names();
+        Some(batch_rename::preview(&items, rule, &existing))
+    }
+
+    /// 지금 상태로 미리 보기를 다시 만들어 실행할 수 있으면 일괄 이름 바꾸기 작업을 넣고 곧바로 시작한다
+    /// ([`App::submit_batch_rename`]). `Err`면 작업을 만들지 않고 아무것도 바뀌지 않는다.
+    pub fn start_batch_rename(&mut self, rule: &RenameRule) -> Result<JobId, BatchRenameError> {
+        let preview = self
+            .batch_rename_preview(rule)
+            .ok_or(BatchRenameError::Unavailable)?;
+        if preview.problem_count() > 0 {
+            return Err(BatchRenameError::Problems);
+        }
+        if preview.rename_count() == 0 {
+            return Err(BatchRenameError::NothingToRename);
+        }
+        let unchanged = preview.unchanged_count() as u64;
+        let items = preview
+            .entries()
+            .iter()
+            .filter(|entry| entry.status == EntryStatus::Rename)
+            .map(|entry| RenameItem {
+                folder: entry.folder.clone(),
+                from: entry.original.clone(),
+                to: OsString::from(&entry.new_name),
+            })
+            .collect();
+        Ok(self.submit_batch_rename(items, unchanged))
+    }
+
+    /// **일괄 이름 바꾸기** 작업을 작업 대기열에 넣어 곧바로 시작하고([`JobQueue::batch_rename`]: 차례를 기다리지
+    /// 않음, 전부 아니면 전무) 작업 영역에 더한다([`JobKind::BatchRename`], 대상 자리에는 첫 항목의 폴더, 원본 수는
+    /// 바꿀 항목 수). `items`는 바뀌는 항목만, `unchanged`는 규칙이 바꾸지 않아 건너뛴 항목 수다. 규칙·미리 보기를
+    /// 거쳐 부르는 입구는 이 위에 선다. 진행·취소·끝남은 다른 작업과 같고 [`App::poll_jobs`]가 받는다.
+    ///
+    /// 끝나면([`crate::job::JobState::Finished`]) 작업 기록에 기록 **하나**([`OperationKind::BatchRename`], 바꾼 항목마다
+    /// [`crate::history::Step::Renamed`], 건너뛴 수 `unchanged`)로 남는다. 실패·취소로 모두 되돌렸으면 남지 않고,
+    /// 되돌리기마저 실패해 바뀐 채 남은 항목이 있으면 그 항목만 남는다. 바뀐 항목은 검색 결과 탭에도 반영된다.
+    pub fn submit_batch_rename(&mut self, items: Vec<RenameItem>, unchanged: u64) -> JobId {
+        let target = items
+            .first()
+            .map(|item| item.folder.clone())
+            .unwrap_or_default();
+        let count = items.len();
+        let (id, journal) = self.jobs.batch_rename_recorded(items, unchanged);
+        self.journals
+            .insert(id, (OperationKind::BatchRename, journal));
+        self.work_area.add(id, JobKind::BatchRename, target, count);
+        self.poll_jobs();
+        id
+    }
+
     /// 고른 항목들을 **삭제**한다(Delete): 모두 휴지통이 없는 위치에 있으면([`crate::job::deletes_permanently`])
     /// 영구 삭제 작업([`App::delete_permanently`]), 아니면 휴지통 삭제 작업([`App::recycle`])이다. 영구 삭제가 될
     /// 때 실행 전에 「영구 삭제됩니다」를 알리고 확인받는 것은 화면 몫이다(같은 함수로 미리 안다).
@@ -3060,6 +3162,11 @@ impl App {
                 .steps
                 .iter()
                 .any(|step| matches!(step, crate::history::Step::Recycled { .. }));
+        if kind == OperationKind::BatchRename {
+            self.history
+                .record(Record::batch_rename(journal.steps, summary.names_unchanged));
+            return;
+        }
         let record = if kind == OperationKind::Delete || all_deleted {
             // 영구 삭제(휴지통에 보낸 것 없이 모두 영구 삭제로 진행한 휴지통 삭제 포함): 되살릴 것이 남지 않는다.
             // 항목별 결과는 넘긴 원본뿐이라 지운 항목 수를 따로 준다.
@@ -3142,9 +3249,12 @@ impl App {
             .unwrap_or_default();
         let count = steps.len();
         let outcomes = Outcomes::default();
-        let job = self
-            .jobs
-            .revert(RevertJob::new(reversal, steps, Arc::clone(&outcomes)));
+        let job = self.jobs.revert(RevertJob::new(
+            reversal,
+            record.kind(),
+            steps,
+            Arc::clone(&outcomes),
+        ));
         self.history.begin(reversal, job, outcomes);
         let kind = match reversal {
             Reversal::Undo => JobKind::Undo,

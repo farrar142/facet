@@ -59,6 +59,7 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::CopyTo => "복사 위치…",
         CommandId::MoveTo => "이동 위치…",
         CommandId::Rename => "이름 바꾸기",
+        CommandId::BatchRename => "일괄 이름 바꾸기",
         CommandId::NewFolder => "새 폴더",
         CommandId::Undo => "실행취소",
         CommandId::Redo => "다시 실행",
@@ -102,6 +103,39 @@ pub fn name_error_text(error: NameError) -> String {
         NameError::TrailingSpace => "이름이 공백으로 끝날 수 없습니다".to_owned(),
         NameError::TooLong { units } => {
             format!("이름이 너무 깁니다: {units}자 (최대 {MAX_NAME_UNITS}자)")
+        }
+    }
+}
+
+/// 일괄 이름 바꾸기 미리 보기의 문제 줄에 보일 까닭.
+pub fn batch_problem_text(problem: facet_core::batch_rename::BatchProblem) -> String {
+    use facet_core::batch_rename::BatchProblem;
+    match problem {
+        BatchProblem::Invalid(error) => name_error_text(error),
+        BatchProblem::Duplicate => "겹침: 다른 항목과 바뀔 이름이 같습니다".to_owned(),
+        BatchProblem::NameTaken => {
+            "같은 이름이 있음: 폴더에 그 이름의 항목이 남아 있습니다".to_owned()
+        }
+        BatchProblem::NotUnicode => "읽을 수 없는 이름입니다".to_owned(),
+    }
+}
+
+/// 일괄 이름 바꾸기 창 아래의 수치 줄.
+pub fn batch_counts_text(renames: usize, unchanged: usize, problems: usize) -> String {
+    format!("바꿈 {renames} · 건너뜀 {unchanged} · 문제 {problems}")
+}
+
+/// 「바꾸기」가 막힌 까닭(창 아래에 보임).
+pub fn batch_error_text(error: facet_core::window::BatchRenameError) -> String {
+    match error {
+        facet_core::window::BatchRenameError::Unavailable => {
+            "지금은 일괄 이름 바꾸기를 할 수 없습니다".to_owned()
+        }
+        facet_core::window::BatchRenameError::Problems => {
+            "문제가 있는 이름을 먼저 고치세요".to_owned()
+        }
+        facet_core::window::BatchRenameError::NothingToRename => {
+            "바뀌는 이름이 없습니다".to_owned()
         }
     }
 }
@@ -295,6 +329,10 @@ pub fn operation_name(record: &Record) -> String {
         (OperationKind::Delete, None) => format!("항목 {n}개 영구 삭제"),
         (OperationKind::Recycle, Some(name)) => format!("「{name}」 삭제"),
         (OperationKind::Recycle, None) => format!("항목 {n}개 삭제"),
+        // 일괄 이름 바꾸기는 항목이 하나여도 수로 보인다(작업 이름이 한 줄로 같게).
+        (OperationKind::BatchRename, _) => {
+            format!("일괄 이름 바꾸기({}개)", record.steps().len())
+        }
     }
 }
 
@@ -736,6 +774,24 @@ mod tests {
             to: std::path::PathBuf::from(to),
             stamp: stamp(),
         }
+    }
+
+    #[test]
+    fn 일괄_이름_바꾸기는_바꾼_항목_수로_부른다() {
+        let batch = Record::batch_rename(
+            vec![
+                renamed(r"C:\a\사진 1.jpg", r"C:\a\휴가 1.jpg"),
+                renamed(r"C:\b\사진 2.jpg", r"C:\b\휴가 2.jpg"),
+                renamed(r"C:\a\사진 3.jpg", r"C:\a\휴가 3.jpg"),
+            ],
+            4,
+        );
+        assert_eq!(operation_name(&batch), "일괄 이름 바꾸기(3개)");
+        assert_eq!(undo_notice(&batch), "일괄 이름 바꾸기(3개) 실행취소");
+        assert_eq!(redo_notice(&batch), "일괄 이름 바꾸기(3개) 다시 실행");
+        // 항목이 하나여도 이름이 아니라 수다.
+        let one = Record::batch_rename(vec![renamed(r"C:\a\x", r"C:\a\y")], 0);
+        assert_eq!(operation_name(&one), "일괄 이름 바꾸기(1개)");
     }
 
     #[test]
