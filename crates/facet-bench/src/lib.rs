@@ -1420,3 +1420,18 @@ pub fn measure_batch_rename_job(
 pub fn check_batch_rename_job_limit(m: &Measurement, limit: Duration) -> Result<(), String> {
     check_median("일괄 이름 바꾸기 실행", m, limit)
 }
+
+/// #324: 셸 확장 도우미 요청 왕복의 로컬 기준(5ms).
+pub const SHELL_HELPER_TARGET: Duration = Duration::ZERO; // #324
+/// #324: 셸 확장 도우미 요청 왕복의 CI 상한(기준의 10배).
+pub const SHELL_HELPER_LIMIT: Duration = Duration::ZERO; // #324
+
+/// #324: 시험용 모드 도우미에 셸 메뉴 요청을 `runs`회 보내 왕복 시간을 잰다.
+pub fn measure_shell_helper(_helper: &Path, _runs: usize) -> Result<Measurement, String> {
+    todo!("#324")
+}
+
+/// #324: 왕복 중앙값이 상한을 넘으면 수치를 담아 실패한다.
+pub fn check_shell_helper_limit(_m: &Measurement, _limit: Duration) -> Result<(), String> {
+    todo!("#324")
+}

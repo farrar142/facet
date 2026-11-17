@@ -1211,6 +1211,7 @@ dependencies = [
  "facet-index",
  "facet-indexer",
  "facet-protocol",
+ "facet-shell-protocol",
  "facet-win",
  "regex",
  "serde",
@@ -1253,6 +1254,19 @@ dependencies = [
  "facet-indexer",
  "facet-protocol",
 ]
+
+[[package]]
+name = "facet-shell-helper"
+version = "0.1.0"
+dependencies = [
+ "facet-core",
+ "facet-shell-protocol",
+ "tempfile",
+]
+
+[[package]]
+name = "facet-shell-protocol"
+version = "0.1.0"
 
 [[package]]
 name = "facet-win"
