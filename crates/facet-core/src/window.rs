@@ -520,6 +520,40 @@ fn read_subfolders(
     })
 }
 
+/// #305: 맨 앞 › 목록. 드라이브 문자들(문자 순서로 맞춤) 뒤에 홈 폴더 하나. `first`는 활성 탭 위치의 첫 경로 조각
+/// 이름이고 그 이름(대소문자 무시)의 드라이브가 `current`다.
+fn root_folders(letters: &[char], home: Location, first: Option<&str>) -> Subfolders {
+    let mut letters: Vec<char> = letters.iter().map(char::to_ascii_uppercase).collect();
+    letters.sort_unstable();
+    letters.dedup();
+    let mut folders: Vec<Candidate> = letters
+        .into_iter()
+        .map(|letter| Candidate {
+            name: format!("{letter}:").into(),
+            location: Location::file_system(format!("{letter}:\\")),
+        })
+        .collect();
+    let current = first.and_then(|first| {
+        folders
+            .iter()
+            .position(|folder| folder.name.to_string_lossy().eq_ignore_ascii_case(first))
+    });
+    let name = home
+        .file_system_path()
+        .and_then(Path::file_name)
+        .map(|name| name.to_os_string())
+        .unwrap_or_else(|| home.to_string().into());
+    folders.push(Candidate {
+        name,
+        location: home,
+    });
+    Subfolders {
+        home: Some(folders.len() - 1),
+        folders,
+        current,
+    }
+}
+
 /// #292: 일괄 이름 바꾸기 미리 보기 요청의 번호.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BatchPreviewId(u64);
@@ -2243,8 +2277,38 @@ impl App {
     }
 
     /// #305: 맨 앞 › 목록(드라이브와 홈 폴더)을 일꾼 스레드에서 만들기 시작한다.
+    ///
+    /// 막지 않고 곧바로 번호를 돌려주고 결과는 [`Update::Subfolders`]로 온다(하위 폴더 목록 요청과 같은 번호 차례라
+    /// 뒤 요청이 있으면 목록 없이 옴). 목록은 드라이브(경로 조각과 같은 이름 `C:`, 위치 `C:\`, 문자 순서) 뒤에
+    /// 사용자 홈 폴더 하나이고, `home`은 홈 폴더 줄, `current`는 활성 탭 위치의 첫 경로 조각에 해당하는 드라이브
+    /// 줄(대소문자 무시, 없으면 `None`)이다.
     pub fn request_root_folders(&mut self) -> SubfoldersId {
-        todo!("#305")
+        let tab = self.active_tab_id();
+        let active = self.active_tab().location().clone();
+        let first = provider_for(&active)
+            .segments(&active)
+            .into_iter()
+            .next()
+            .map(|segment| segment.label);
+        let id = SubfoldersId(self.subfolders.fetch_add(1, Ordering::SeqCst) + 1);
+        let outbox = self.outbox.clone();
+        let run = move || {
+            let list = root_folders(
+                &facet_win::drive_letters(),
+                home_location(),
+                first.as_deref(),
+            );
+            outbox.send(Message::Subfolders {
+                tab,
+                id,
+                list: Ok(list),
+            });
+        };
+        thread::Builder::new()
+            .name("facet-root-folders".into())
+            .spawn(run)
+            .expect("맨 앞 목록 일꾼 스레드를 만들지 못했다");
+        id
     }
 
     /// 활성 탭의 필터 글자를 정한다([`Tab::request_filter`]). 이미 읽은 목록만 일꾼 스레드에서 거르고 막지 않는다.
