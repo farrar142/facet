@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use facet_core::batch_rename::{
-    BatchItem, CaseMode, Edge, ExistingNames, Place, Preview, Rule, RuleContext, RuleKind, Target,
+    BatchItem, Edge, ExistingNames, Place, Preview, Rule, RuleContext, RuleKind, Target,
     preview_rules,
 };
 
@@ -82,22 +82,11 @@ fn emptying_the_stem_keeps_the_extension() {
 
 #[test]
 fn kinds_not_built_yet_do_nothing() {
-    let rules = [
-        Rule::new(RuleKind::Delete {
-            from: Edge::Start,
-            at: 0,
-            count: 1,
-        }),
-        Rule::new(RuleKind::Case(CaseMode::Upper)),
-        Rule::new(RuleKind::Extension {
-            new: Some("md".to_string()),
-        }),
-        Rule::new(RuleKind::Date {
-            format: "YYYY".to_string(),
-            place: Place::Start,
-            separator: String::new(),
-        }),
-    ];
+    let rules = [Rule::new(RuleKind::Date {
+        format: "YYYY".to_string(),
+        place: Place::Start,
+        separator: String::new(),
+    })];
     let result = apply(&[file("a.txt")], &rules);
     assert_eq!(result.entries()[0].new_name, "a.txt");
     assert!(result.rule_problems().is_empty());
