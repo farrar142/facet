@@ -90,5 +90,12 @@ eq labels ready-for-agent "$(labels)"
 eq "failure marker" 1 "$(count '<!-- factory-implementer-infra-failed -->')"
 eq "no human marker" 0 "$(count '<!-- factory-human -->')"
 
+setup "a reason goes into the failure comment (#434)"
+FAILURE_REASON='충돌을 풀지 않고 끝남: 풀리지 않은 파일이 남았다: a.rs' \
+  bash "$script" 7 code https://example.invalid/run/1 > /dev/null 2>&1
+eq labels ready-for-agent "$(labels)"
+eq "failure marker" 1 "$(count '<!-- factory-implementer-failed -->')"
+eq "reason in the comment" true "$(jq '.[-1].body | contains("충돌을 풀지 않고 끝남: 풀리지 않은 파일이 남았다: a.rs")' "$FAKE_GH/comments-7.json" | tr -d '\r')"
+
 echo "record-failure.sh: $passes passed, $fails failed"
 [ "$fails" -eq 0 ]
