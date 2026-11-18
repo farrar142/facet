@@ -11,6 +11,7 @@ use facet_core::edit::EditError;
 use facet_core::history::{NotUndoable, OperationKind, Record, RevertSkip};
 use facet_core::job::{CopyRejection, Summary};
 use facet_core::name_input::{MAX_NAME_UNITS, NameError};
+use facet_core::view::GridSize;
 use facet_core::window::{ClipboardDone, ClipboardFailure};
 use facet_win::clipboard::ClipboardError;
 use facet_win::drag_source::DragError;
@@ -78,7 +79,11 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::ShowInFolder => "폴더에서 보기",
         CommandId::StopSearch => "검색 중지",
         CommandId::InstantUnderFolder => "현재 폴더 아래만",
-        CommandId::DetailsView | CommandId::GridView(_) => todo!("#327"),
+        CommandId::DetailsView => "자세히 보기",
+        CommandId::GridView(GridSize::Small) => "그리드 보기: 작게",
+        CommandId::GridView(GridSize::Medium) => "그리드 보기: 보통",
+        CommandId::GridView(GridSize::Large) => "그리드 보기: 크게",
+        CommandId::GridView(GridSize::ExtraLarge) => "그리드 보기: 아주 크게",
         CommandId::ClearThumbnailCache => todo!("#330"),
         CommandId::OpenWith | CommandId::Properties => todo!("#321"),
         CommandId::OpenThisPc => todo!("#350"),

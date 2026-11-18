@@ -37,6 +37,15 @@ pub struct PanelArea {
     pub address_height: f32,
     pub crumbs: Vec<CrumbArea>,
     pub list: List,
+    /// #327: 그리드 보기면 칸 폭과 열 수. 이때 `list`의 `row_height`는 칸 높이, `rows`는 항목 수다.
+    pub grid: Option<GridCells>,
+}
+
+/// 그리드 보기의 칸 폭과 열 수. 칸 줄 `i`의 `j`열이 `i * columns + j`번 항목이다.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GridCells {
+    pub cell_width: f32,
+    pub columns: usize,
 }
 
 impl PanelArea {
@@ -81,7 +90,22 @@ impl PanelArea {
         }
         let y = at.y - list.top + list.scroll;
         let row = (y / list.row_height).floor();
-        (row >= 0.0 && (row as usize) < list.rows).then_some(row as usize)
+        if row < 0.0 {
+            return None;
+        }
+        let row = row as usize;
+        let index = match self.grid {
+            Some(grid) => {
+                let column = ((at.x - list.left) / grid.cell_width).floor();
+                if grid.cell_width <= 0.0 || column < 0.0 || column as usize >= grid.columns {
+                    return None;
+                }
+                row.checked_mul(grid.columns)?
+                    .checked_add(column as usize)?
+            }
+            None => row,
+        };
+        (index < list.rows).then_some(index)
     }
 }
 
@@ -205,6 +229,7 @@ mod tests {
                     row_height: 24.0,
                     rows: 20,
                 },
+                grid: None,
             }),
             Some(PanelArea {
                 top: 0.0,
@@ -233,6 +258,7 @@ mod tests {
                     row_height: 24.0,
                     rows: 3,
                 },
+                grid: None,
             }),
         ]
     }
@@ -293,6 +319,48 @@ mod tests {
                 "{point:?}"
             );
         }
+    }
+
+    #[test]
+    fn 그리드_보기는_칸의_항목이다() {
+        // 왼쪽 패널을 그리드로: 칸 100×120, 3열, 항목 7개(줄 0: 0~2, 줄 1: 3~5, 줄 2: 6), 넘기지 않음.
+        let mut panels = panels();
+        if let Some(area) = panels[0].as_mut() {
+            area.list.row_height = 120.0;
+            area.list.rows = 7;
+            area.list.scroll = 0.0;
+            area.grid = Some(GridCells {
+                cell_width: 100.0,
+                columns: 3,
+            });
+        }
+        // 줄 1의 1열은 4번(짝수, 폴더).
+        assert_eq!(
+            place_at(at(150.0, 200.0), &panels, even_folders),
+            Place::FolderRow { panel: 0, row: 4 }
+        );
+        // 줄 1의 2열은 5번(파일).
+        assert_eq!(
+            place_at(at(250.0, 200.0), &panels, even_folders),
+            Place::FileRow
+        );
+        // 열 밖(3열 자리)과 마지막 줄의 빈 칸은 패널이다.
+        assert_eq!(
+            place_at(at(350.0, 100.0), &panels, even_folders),
+            Place::Panel { panel: 0 }
+        );
+        // 한 줄 넘기면 y 200은 줄 2이고 그 1열(7번)은 비어 있다.
+        if let Some(area) = panels[0].as_mut() {
+            area.list.scroll = 120.0;
+        }
+        assert_eq!(
+            place_at(at(150.0, 200.0), &panels, even_folders),
+            Place::Panel { panel: 0 }
+        );
+        assert_eq!(
+            place_at(at(50.0, 200.0), &panels, even_folders),
+            Place::FolderRow { panel: 0, row: 6 }
+        );
     }
 
     #[test]

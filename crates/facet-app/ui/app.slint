@@ -120,6 +120,9 @@ export struct PanelData {
     instant-under: bool,
     selected-count: int,
     selected-size: string,
+    // #327: 그리드 보기인가, 칸 크기(0 작게, 1 보통, 2 크게, 3 아주 크게).
+    grid: bool,
+    grid-size: int,
 }
 
 // 작업의 상태(코어의 `JobState`). 문장은 화면이 `@tr()`로 만든다.
@@ -1453,6 +1456,39 @@ component PanelView inherits Rectangle {
     callback search-down();
     callback search-under();
     callback scrolled();
+    // #327: 그리드 보기의 Ctrl+휠: 칸 크기를 `steps`단계(양수가 크게) 바꾼다.
+    callback grid-zoom(int);
+    // #327: 그리드의 빈 곳(칸 아래, 마지막 줄의 빈 칸, 열 오른쪽 여백)을 눌렀다. 왼쪽 버튼은 끌면 사각형 선택이고 끌지
+    // 않고 놓으면 선택을 푼다(Rust가 놓을 때 정한다). 오른쪽 버튼은 빈 곳 메뉴다. `x`·`y`는 창 기준 점이다.
+    function grid-blank-pointer(event: PointerEvent, x: length, y: length) {
+        if (event.kind == PointerEventKind.down) {
+            if (root.editing >= 0 && event.button == PointerEventButton.left) {
+                root.confirm-rename(root.edit-text);
+            }
+            root.activate();
+        }
+        root.pointer(event);
+        if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+            root.context-menu(-1, x, y);
+            root.focus-list();
+        } else if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+            root.marquee-press(-1, event.modifiers.control, event.modifiers.shift, x, y);
+            root.focus-list();
+        }
+    }
+    // #327: 칸 크기별 썸네일 한 변(코어의 `GridSize::thumbnail_side`와 같은 값)과 칸 크기.
+    property <length> grid-side: root.data.grid-size == 0 ? 64px : root.data.grid-size == 2 ? 160px : root.data.grid-size == 3 ? 256px : 96px;
+    property <length> grid-cell-width: root.grid-side + 28px;
+    property <length> grid-cell-height: root.grid-side + 48px;
+    out property <int> grid-columns: max(1, floor((grid-area.width - ScrollBarMetrics.thickness) / root.grid-cell-width));
+    in-out property <length> grid-content-y <=> grid-list.content-y;
+    out property <length> grid-view-height: grid-list.visible-height;
+    out property <length> grid-cell-h: root.grid-cell-height;
+    out property <length> grid-cell-w: root.grid-cell-width;
+    // 그리드 목록의 창 기준 왼쪽 위와 보이는 폭(사각형 선택·끌어 놓기 자리 계산).
+    out property <length> grid-left: grid-list.absolute-position.x;
+    out property <length> grid-top: grid-list.absolute-position.y;
+    out property <length> grid-width: grid-list.visible-width;
 
     // 활성 패널의 테두리. 패널이 하나면 그리지 않는다.
     border-width: root.split ? 2px : 0px;
@@ -1833,7 +1869,8 @@ component PanelView inherits Rectangle {
 
         // 열 머리글. 목록과 같은 만큼 가로로 넘어간다.
         Rectangle {
-            height: root.row-height;
+            height: root.data.grid ? 0px : root.row-height;
+            visible: !root.data.grid;
             clip: true;
             HorizontalLayout {
                 x: list.content-x;
@@ -1910,8 +1947,306 @@ component PanelView inherits Rectangle {
             }
         }
 
+        // #327: 그리드 보기. 보이는 행(칸 줄)만 화면 요소로 만든다(`ListView`).
+        grid-area := Rectangle {
+            vertical-stretch: root.data.grid ? 1 : 0;
+            visible: root.data.grid;
+            grid-list := ListView {
+                x: 0;
+                y: 0;
+                width: parent.width - ScrollBarMetrics.thickness;
+                height: floor(parent.height / root.grid-cell-height) * root.grid-cell-height;
+                vertical-scrollbar-policy: always-off;
+                horizontal-scrollbar-policy: always-off;
+                changed viewport-y => {
+                    root.scrolled();
+                }
+                for line in ceil(root.rows.length / root.grid-columns): Rectangle {
+                    height: root.grid-cell-height;
+                    property <int> line-index: line;
+                    // 칸 줄의 빈 곳(마지막 줄의 빈 칸, 열 오른쪽 여백): 눌러 끌면 사각형 선택, 누르기만 하면 선택을 푼다.
+                    TouchArea {
+                        scroll-event(event) => {
+                            if (event.modifiers.control && event.delta-y != 0) {
+                                root.grid-zoom(event.delta-y > 0 ? 1 : -1);
+                                return accept;
+                            }
+                            reject
+                        }
+                        pointer-event(event) => {
+                            root.grid-blank-pointer(event, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                        }
+                    }
+                    for column in root.grid-columns: Rectangle {
+                        property <int> i: line-index * root.grid-columns + column;
+                        x: column * root.grid-cell-width;
+                        width: root.grid-cell-width;
+                        height: root.grid-cell-height;
+                        if i < root.rows.length: Rectangle {
+                            property <Row> cell: root.rows[i];
+                            background: cell.selected ? Palette.selection-background : transparent;
+                            Rectangle {
+                                border-width: cell.cursor ? 1px : 0px;
+                                border-color: Palette.accent-background;
+                            }
+                            if i == root.drop-row: Rectangle {
+                                background: Palette.accent-background.transparentize(0.75);
+                                border-width: 2px;
+                                border-color: Palette.accent-background;
+                            }
+                            // 칸 가장자리 여백: 자세히 보기의 이름 글자 오른쪽 여백처럼 빈 곳이다. 끌면 사각형 선택이고
+                            // 끌지 않고 놓으면 이 칸을 누른 것이다(Rust가 놓을 때 고른다).
+                            TouchArea {
+                                scroll-event(event) => {
+                                    if (event.modifiers.control && event.delta-y != 0) {
+                                        root.grid-zoom(event.delta-y > 0 ? 1 : -1);
+                                        return accept;
+                                    }
+                                    reject
+                                }
+                                pointer-event(event) => {
+                                    if (event.kind == PointerEventKind.down) {
+                                        root.activate();
+                                    }
+                                    root.pointer(event);
+                                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right && i != root.editing) {
+                                        root.context-menu(i, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                                        root.focus-list();
+                                        return;
+                                    }
+                                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.middle) {
+                                        root.row-middle-pressed(i);
+                                        return;
+                                    }
+                                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                                        if (i == root.editing) {
+                                            return;
+                                        }
+                                        if (root.editing >= 0 && !root.confirm-rename(root.edit-text)) {
+                                            return;
+                                        }
+                                        root.marquee-press(i, event.modifiers.control, event.modifiers.shift,
+                                            self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                                        root.focus-list();
+                                    }
+                                }
+                                double-clicked => {
+                                    if (i != root.editing) {
+                                        root.row-opened(i);
+                                        root.focus-list();
+                                    }
+                                }
+                            }
+                            // 아이콘(내장 폴더·파일 아이콘을 칸 크기만큼 키운다).
+                            Rectangle {
+                                x: (parent.width - root.grid-side) / 2;
+                                y: 6px;
+                                width: root.grid-side;
+                                height: root.grid-side;
+                                opacity: cell.cut ? 0.45 : 1.0;
+                                ItemIcon {
+                                    x: (parent.width - 16px) / 2;
+                                    y: (parent.height - 16px) / 2;
+                                    folder: cell.folder;
+                                    transform-scale: root.grid-side / 24px;
+                                }
+                            }
+                            if i != root.editing: Text {
+                                x: 4px;
+                                y: root.grid-side + 10px;
+                                width: parent.width - 8px;
+                                height: parent.height - root.grid-side - 12px;
+                                text: cell.name;
+                                wrap: word-wrap;
+                                overflow: elide;
+                                horizontal-alignment: center;
+                                vertical-alignment: top;
+                                opacity: cell.cut ? 0.45 : 1.0;
+                                color: cell.selected ? Palette.selection-foreground : Palette.foreground;
+                            }
+                            // 아이콘과 이름 자리: 항목 위다(누르기·끌기·오른쪽 메뉴는 자세히 보기의 아이콘·이름 글자와 같다).
+                            // 입력란보다 아래에 둔다. 그래야 입력란 안을 누르면 입력란이 받는다.
+                            TouchArea {
+                                x: 6px;
+                                y: 2px;
+                                width: parent.width - 12px;
+                                height: parent.height - 4px;
+                                scroll-event(event) => {
+                                    // Ctrl+휠: 칸 크기를 한 단계씩. 휠을 한 칸 돌리면 한 단계다.
+                                    if (event.modifiers.control && event.delta-y != 0) {
+                                        root.grid-zoom(event.delta-y > 0 ? 1 : -1);
+                                        return accept;
+                                    }
+                                    reject
+                                }
+                                pointer-event(event) => {
+                                    if (event.kind == PointerEventKind.down) {
+                                        root.activate();
+                                    }
+                                    root.pointer(event);
+                                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right && i != root.editing) {
+                                        root.item-press(i, true, event.modifiers.control, event.modifiers.shift,
+                                            self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                                        root.focus-list();
+                                        return;
+                                    }
+                                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.middle) {
+                                        root.row-middle-pressed(i);
+                                        return;
+                                    }
+                                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                                        if (i == root.editing) {
+                                            return;
+                                        }
+                                        if (root.editing >= 0 && !root.confirm-rename(root.edit-text)) {
+                                            return;
+                                        }
+                                        root.item-press(i, false, event.modifiers.control, event.modifiers.shift,
+                                            self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                                        root.focus-list();
+                                    }
+                                }
+                                double-clicked => {
+                                    if (i != root.editing) {
+                                        root.row-opened(i);
+                                        root.focus-list();
+                                    }
+                                }
+                            }
+                            // 이름 입력란(자세히 보기의 입력란과 같은 동작). 한글 IME의 조합 글자는 TextInput이 처리한다.
+                            if i == root.editing: Rectangle {
+                                x: 2px;
+                                y: root.grid-side + 8px;
+                                width: parent.width - 4px;
+                                height: 22px;
+                                background: Palette.background;
+                                border-width: 1px;
+                                border-color: Palette.accent-background;
+                                clip: true;
+                                TextInput {
+                                    x: 3px;
+                                    width: parent.width - 6px;
+                                    single-line: true;
+                                    vertical-alignment: center;
+                                    color: Palette.foreground;
+                                    text <=> root.edit-text;
+                                    init => {
+                                        self.focus();
+                                        self.set-selection-offsets(root.edit-selection-start, root.edit-selection-end);
+                                    }
+                                    edited => {
+                                        root.rename-edited(self.text);
+                                    }
+                                    changed preedit-text => {
+                                        if (self.preedit-text != ""
+                                            && self.anchor-position-byte-offset != self.cursor-position-byte-offset) {
+                                            let start = min(self.anchor-position-byte-offset, self.cursor-position-byte-offset);
+                                            root.edit-text = root.remove-selection(self.text, self.anchor-position-byte-offset, self.cursor-position-byte-offset);
+                                            self.set-selection-offsets(start, start);
+                                        }
+                                    }
+                                    accepted => {
+                                        if (root.confirm-rename(self.text)) {
+                                            root.focus-keys();
+                                        }
+                                    }
+                                    key-pressed(event) => {
+                                        if (event.text == Key.Escape) {
+                                            if (root.cancel-rename()) {
+                                                root.focus-keys();
+                                            }
+                                            return accept;
+                                        }
+                                        if (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.PageUp
+                                            || event.text == Key.PageDown || event.text == Key.F2) {
+                                            return accept;
+                                        }
+                                        reject
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // 칸 아래 빈 곳: 눌러 끌면 사각형 선택, 누르기만 하면 선택을 푼다. 오른쪽 클릭은 빈 곳 메뉴다.
+            TouchArea {
+                y: clamp(ceil(root.rows.length / root.grid-columns) * root.grid-cell-height + grid-list.content-y, 0px, parent.height);
+                width: grid-list.width;
+                height: parent.height - self.y;
+                scroll-event(event) => {
+                    if (event.modifiers.control && event.delta-y != 0) {
+                        root.grid-zoom(event.delta-y > 0 ? 1 : -1);
+                        return accept;
+                    }
+                    reject
+                }
+                pointer-event(event) => {
+                    root.grid-blank-pointer(event, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                }
+            }
+            // 사각형 선택의 반투명 사각형. 목록과 함께 넘어가고 보이는 영역 밖은 자른다.
+            Rectangle {
+                width: grid-list.width;
+                height: grid-list.height;
+                clip: true;
+                if root.marquee.shown: Rectangle {
+                    x: root.marquee.x;
+                    y: root.marquee.y + grid-list.content-y;
+                    width: root.marquee.width;
+                    height: root.marquee.height;
+                    background: Palette.accent-background.transparentize(80%);
+                    border-width: 1px;
+                    border-color: Palette.accent-background;
+                }
+            }
+            // 이름 입력란 곁의 풍선: 막힌 까닭과 확장자 바꿈 확인. 입력란 칸 아래(자리가 없으면 위)에 뜬다.
+            if root.editing >= 0 && (root.edit-problem != "" || root.edit-asking-extension): Rectangle {
+                property <length> cell-top: floor(root.editing / root.grid-columns) * root.grid-cell-height + grid-list.content-y;
+                property <length> cell-left: mod(root.editing, root.grid-columns) * root.grid-cell-width;
+                x: clamp(self.cell-left, 0px, max(0px, grid-list.width - self.width));
+                width: min(grid-list.width - 8px, 360px);
+                height: grid-balloon-layout.preferred-height;
+                y: self.cell-top + root.grid-cell-height + self.height <= parent.height ? self.cell-top + root.grid-cell-height : max(0px, self.cell-top - self.height);
+                background: Palette.background;
+                border-width: 1px;
+                border-radius: 3px;
+                border-color: root.edit-asking-extension ? Palette.accent-background : #c42b1c;
+                drop-shadow-blur: 4px;
+                drop-shadow-color: #00000040;
+                TouchArea { }
+                grid-balloon-layout := VerticalLayout {
+                    padding: 6px;
+                    spacing: 4px;
+                    if root.edit-problem != "": Text {
+                        text: root.edit-problem;
+                        wrap: word-wrap;
+                        color: #c42b1c;
+                    }
+                    if root.edit-asking-extension: Text {
+                        text: @tr("확장자를 바꾸면 파일을 쓸 수 없게 될 수도 있습니다. 바꾸시겠습니까? (Enter 예, Esc 아니오)");
+                        wrap: word-wrap;
+                        color: Palette.foreground;
+                    }
+                }
+            }
+            ScrollBar {
+                x: parent.width - ScrollBarMetrics.thickness;
+                y: 0;
+                width: ScrollBarMetrics.thickness;
+                height: grid-list.height;
+                total: grid-list.content-height;
+                visible-length: grid-list.visible-height;
+                offset: -grid-list.content-y;
+                moved(offset) => {
+                    grid-list.content-y = -offset;
+                }
+            }
+        }
+
         list-area := Rectangle {
-            vertical-stretch: 1;
+            vertical-stretch: root.data.grid ? 0 : 1;
+            visible: !root.data.grid;
             // 스크롤 막대(facet의 `ScrollBar`): 목록 위에 덮지 않고 자리를 차지한다. 막대가 서로의 자리를 줄이므로
             // 바깥 크기만으로 정한다(가로 막대가 있으면 세로로 들어갈 행이 줄고, 세로 막대가 있으면 가로 폭이 준다).
             property <length> bar: ScrollBarMetrics.thickness;
@@ -2767,6 +3102,24 @@ export component AppWindow inherits Window {
     callback search-down();
     callback search-under();
     callback scrolled(int);
+    // #327: 그리드 보기의 Ctrl+휠(패널, 단계).
+    callback grid-zoom(int, int);
+    in-out property <length> left-grid-content-y <=> left.grid-content-y;
+    out property <length> left-grid-view-height: left.grid-view-height;
+    out property <int> left-grid-columns: left.grid-columns;
+    out property <length> left-grid-cell-height: left.grid-cell-h;
+    out property <length> left-grid-cell-width: left.grid-cell-w;
+    out property <length> left-grid-left: left.grid-left;
+    out property <length> left-grid-top: left.grid-top;
+    out property <length> left-grid-width: left.grid-width;
+    in-out property <length> right-grid-content-y <=> right.grid-content-y;
+    out property <length> right-grid-view-height: right.grid-view-height;
+    out property <int> right-grid-columns: right.grid-columns;
+    out property <length> right-grid-cell-height: right.grid-cell-h;
+    out property <length> right-grid-cell-width: right.grid-cell-w;
+    out property <length> right-grid-left: right.grid-left;
+    out property <length> right-grid-top: right.grid-top;
+    out property <length> right-grid-width: right.grid-width;
 
     // 명령 팔레트: 글자가 바뀌었다(검색), 화살표(1·-1)로 골랐다, 줄을 실행한다(참이면 실행했다. 꺼진 명령이면 거짓),
     // 닫는다.
@@ -3111,6 +3464,9 @@ export component AppWindow inherits Window {
             scrolled => {
                 root.scrolled(0);
             }
+            grid-zoom(steps) => {
+                root.grid-zoom(0, steps);
+            }
         }
         // 패널 사이 경계: 끌어 분할 비율을 바꾸고, 두 번 누르면 반반으로 맞춘다.
         if root.split: Rectangle {
@@ -3295,6 +3651,9 @@ export component AppWindow inherits Window {
             }
             scrolled => {
                 root.scrolled(1);
+            }
+            grid-zoom(steps) => {
+                root.grid-zoom(1, steps);
             }
         }
     }
