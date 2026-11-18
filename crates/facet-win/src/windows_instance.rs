@@ -265,6 +265,49 @@ fn security_descriptor(sddl: &str) -> io::Result<Local> {
     Ok(Local(descriptor.0))
 }
 
+/// 이 프로세스만 받는 사적인 파이프의 하나뿐인 서버 인스턴스를 만든다([`crate::pipe_client::private`]).
+///
+/// 보안 설명자는 단일 실행 파이프와 같다(모듈 문서의 「파이프 보안 설명자」: 소유자·유일한 허용 항목이 현재 사용자
+/// SID, NETWORK 거부, 무결성 수준 강제 레이블). 첫 인스턴스(`FILE_FLAG_FIRST_PIPE_INSTANCE`)로, 인스턴스는 하나만
+/// 둔다(다른 프로세스가 같은 이름의 인스턴스를 더 만들어 끼어들지 못하게). 원격 클라이언트는 거부한다.
+pub(crate) fn create_private_pipe(name: &str) -> io::Result<std::os::windows::io::OwnedHandle> {
+    use std::os::windows::io::FromRawHandle;
+
+    let descriptor = security_descriptor(&pipe_sddl(&identity()?))?;
+    let wide = to_wide(name.as_ref());
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: false.into(),
+    };
+    // SAFETY: wide는 NUL로 끝나는 UTF-16 문자열이고 attributes와 그 보안 설명자는 호출 동안 살아 있다.
+    let handle = unsafe {
+        CreateNamedPipeW(
+            PCWSTR(wide.as_ptr()),
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            1,
+            BUFFER,
+            BUFFER,
+            0,
+            Some(&attributes),
+        )
+    };
+    if handle.is_invalid() {
+        let code = last_error();
+        // 같은 이름이 있으면 첫 인스턴스 요구가 접근 거부로, 인스턴스 수 한도(1)가 바쁨으로 막힌다.
+        if code == ERROR_ACCESS_DENIED || code == ERROR_PIPE_BUSY {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                "같은 이름의 파이프가 이미 있습니다",
+            ));
+        }
+        return Err(io::Error::from_raw_os_error(code.0 as i32));
+    }
+    // SAFETY: 방금 만든 열린 핸들이고 std의 OwnedHandle이 맡아 한 번만 닫는다.
+    Ok(unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(handle.0) })
+}
+
 /// 주인 자리: 뮤텍스와 수신기.
 pub(crate) struct Owner {
     // 필드는 적은 순서대로 버려진다. 수신기를 먼저 멈추고 뮤텍스를 놓는다.
