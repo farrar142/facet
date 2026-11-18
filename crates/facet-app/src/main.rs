@@ -77,7 +77,7 @@ use facet_core::placement::{self, Monitor, Rect, WindowState};
 use facet_core::selection::{CursorMove, Pick};
 use facet_core::session::{self, Loaded, SAVE_DELAY, Saver};
 use facet_core::tab::{AutoRefresh, Navigation, ReadOutcome, Relocation, Tab};
-use facet_core::view::{GridLayout, GridMove};
+use facet_core::view::{GridLayout, GridMove, ViewMode};
 use facet_core::window::{
     App, BatchPreviewId, ClipboardDone, DeletePlan, DeleteWarning, Execution, MAX_PANELS, Panel,
     TabDestination, TabId, TargetError, TransferPlan, Update, WindowId,
@@ -1369,6 +1369,8 @@ struct MarqueeDrag {
     started: bool,
     /// 마지막으로 넘긴 걸친 행(시작한 점 쪽, 끄는 점 쪽).
     span: Option<(usize, usize)>,
+    /// #327: 그리드 보기에서 마지막으로 넘긴 덮은 칸의 항목 번호들과 끄는 점 쪽 칸.
+    cells: (Vec<usize>, Option<usize>),
 }
 
 /// 사각형 선택 중 끄는 점이 끝 밖일 때 목록을 넘기는 간격.
@@ -2364,10 +2366,22 @@ impl View {
         }
         let list = PanelUi::of(&self.ui, panel);
         let at = match cursor {
+            // #327: 그리드 보기면 커서 칸 바로 아래 가운데.
+            Some(index) if self.panel_is_grid(panel) => {
+                let columns = self.grid_columns(panel);
+                let (line, column) = GridLayout { columns }.position(index);
+                let width = list.grid_cell_width();
+                let height = list.grid_cell_height();
+                (
+                    list.grid_left() + column as f32 * width + width / 2.0,
+                    list.grid_top() + list.grid_content_y() + (line + 1) as f32 * height,
+                )
+            }
             Some(index) => (
                 list.list_left() + 40.0,
                 list.list_top() + list.content_y() + (index + 1) as f32 * self.ui.get_row_height(),
             ),
+            None if self.panel_is_grid(panel) => (list.grid_left(), list.grid_top()),
             None => (list.list_left(), list.list_top()),
         };
         let row = cursor.map_or(-1, count);
@@ -3846,15 +3860,15 @@ impl View {
 
     /// 패널 `panel`의 목록 자리와 행 수. 그 패널이 없으면 `None`이다.
     fn marquee_list(&self, panel: usize) -> Option<marquee::List> {
-        let rows = {
+        let (rows, grid) = {
             let app = self.app.borrow();
-            app.window(self.window)?
-                .panels()
-                .get(panel)?
-                .active_tab()
-                .len()
+            let tab = app.window(self.window)?.panels().get(panel)?.active_tab();
+            (tab.len(), tab.view().mode == ViewMode::Grid)
         };
         let ui = PanelUi::of(&self.ui, panel);
+        if grid {
+            return Some(ui.grid_list(rows));
+        }
         Some(marquee::List {
             left: ui.list_left(),
             top: ui.list_top(),
@@ -3893,6 +3907,7 @@ impl View {
             drag: Marquee::new(panel, tab, row, modifiers, at, &list),
             started: false,
             span: None,
+            cells: (Vec::new(), None),
         });
     }
 
@@ -3938,7 +3953,18 @@ impl View {
         };
         if step != 0.0 {
             let ui = PanelUi::of(&self.ui, panel);
-            ui.set_content_y(ui.content_y() - step);
+            if self.panel_is_grid(panel) {
+                // 그리드 목록 끝에는 빈 곳 한 행이 없어 칸 줄 끝까지만 넘긴다.
+                let columns = self.grid_columns(panel);
+                let lines = self
+                    .marquee_list(panel)
+                    .map_or(0, |list| list.rows.div_ceil(columns));
+                let max = (lines as f32 * ui.grid_cell_height() - ui.grid_view_height()).max(0.0);
+                let next = (-ui.grid_content_y() + step).clamp(0.0, max);
+                ui.set_grid_content_y(-next);
+            } else {
+                ui.set_content_y(ui.content_y() - step);
+            }
             self.marquee_update(false);
         }
     }
@@ -3971,6 +3997,10 @@ impl View {
             width: rect.width,
             height: rect.height,
         });
+        if self.panel_is_grid(panel) {
+            self.grid_marquee_update(panel, first);
+            return;
+        }
         if !first && span == previous {
             return;
         }
@@ -4010,6 +4040,70 @@ impl View {
         }
     }
 
+    /// #327: 그리드 보기의 사각형 선택: 사각형이 덮은 칸이 바뀌었으면(`first`면 늘) 그 칸들로 선택을 바꾸고, 선택·
+    /// 커서가 바뀐 칸만 다시 그린다(처음에는 끌기 전 선택이 통째로 바뀔 수 있어 목록을 다시 그린다).
+    fn grid_marquee_update(&self, panel: usize, first: bool) {
+        let columns = self.grid_columns(panel);
+        let cell_width = PanelUi::of(&self.ui, panel).grid_cell_width();
+        let cells = self.marquee.borrow().as_ref().and_then(|state| {
+            let list = self.marquee_list(state.drag.panel)?;
+            Some(state.drag.cells(&list, cell_width, columns))
+        });
+        let Some(cells) = cells else { return };
+        {
+            let mut state = self.marquee.borrow_mut();
+            let Some(state) = state.as_mut() else { return };
+            if !first && state.cells == cells {
+                return;
+            }
+            state.started = true;
+            state.cells = cells.clone();
+        }
+        let before = self.panel_marks(panel);
+        let (items, end) = cells;
+        self.with_marquee_tab(panel, |tab| tab.marquee_select_items(items, end));
+        if first {
+            self.render();
+            return;
+        }
+        let after = self.panel_marks(panel);
+        self.keep_rows.set(true);
+        self.render();
+        self.keep_rows.set(false);
+        if before.len() == after.len() {
+            let notify = &self.panels[panel].rows.notify;
+            for (i, (a, b)) in before.iter().zip(&after).enumerate() {
+                if a != b {
+                    notify.row_changed(i);
+                }
+            }
+        }
+    }
+
+    /// 패널 `panel`의 보이는 탭의 행마다 (선택됨, 커서).
+    fn panel_marks(&self, panel: usize) -> Vec<(bool, bool)> {
+        let app = self.app.borrow();
+        let Some(tab) = app
+            .window(self.window)
+            .and_then(|window| window.panels().get(panel))
+            .map(Panel::active_tab)
+        else {
+            return Vec::new();
+        };
+        let cursor = tab.cursor();
+        (0..tab.len())
+            .map(|i| (tab.is_selected(i), cursor == Some(i)))
+            .collect()
+    }
+
+    /// #327: 패널 `panel`의 보이는 탭이 그리드 보기인가.
+    fn panel_is_grid(&self, panel: usize) -> bool {
+        let app = self.app.borrow();
+        app.window(self.window)
+            .and_then(|window| window.panels().get(panel))
+            .is_some_and(|shown| shown.active_tab().view().mode == ViewMode::Grid)
+    }
+
     /// 패널 `panel`의 보이는 탭의 커서 행.
     fn marquee_cursor(&self, panel: usize) -> Option<usize> {
         let app = self.app.borrow();
@@ -4043,12 +4137,20 @@ impl View {
             return;
         }
         let drag = state.drag;
-        if let Some(row) = drag.row
-            && !drag.is_dragging()
-            && self.shown_tab_id(drag.panel) == Some(drag.tab)
-            && self.active_panel() == drag.panel
+        if drag.is_dragging()
+            || self.shown_tab_id(drag.panel) != Some(drag.tab)
+            || self.active_panel() != drag.panel
         {
-            self.row_pressed(count(row), Pick::for_click(drag.ctrl, drag.shift));
+            return;
+        }
+        match drag.row {
+            Some(row) => self.row_pressed(count(row), Pick::for_click(drag.ctrl, drag.shift)),
+            // #327: 그리드의 빈 곳을 누르기만 하면 탐색기처럼 선택을 푼다(Ctrl·Shift면 그대로 둔다).
+            None if self.panel_is_grid(drag.panel) && !drag.ctrl && !drag.shift => {
+                self.app.borrow_mut().active_tab_mut().clear_selection();
+                self.render();
+            }
+            None => {}
         }
     }
 
@@ -4586,6 +4688,52 @@ impl<'a> PanelUi<'a> {
         }
     }
 
+    fn grid_cell_width(&self) -> f32 {
+        if self.right {
+            self.ui.get_right_grid_cell_width()
+        } else {
+            self.ui.get_left_grid_cell_width()
+        }
+    }
+
+    fn grid_left(&self) -> f32 {
+        if self.right {
+            self.ui.get_right_grid_left()
+        } else {
+            self.ui.get_left_grid_left()
+        }
+    }
+
+    fn grid_top(&self) -> f32 {
+        if self.right {
+            self.ui.get_right_grid_top()
+        } else {
+            self.ui.get_left_grid_top()
+        }
+    }
+
+    fn grid_width(&self) -> f32 {
+        if self.right {
+            self.ui.get_right_grid_width()
+        } else {
+            self.ui.get_left_grid_width()
+        }
+    }
+
+    /// #327: 그리드 목록의 자리(사각형 선택·끌어 놓기). 칸 높이를 행 높이로, 항목 수를 행 수로 쓴다.
+    fn grid_list(&self, items: usize) -> marquee::List {
+        marquee::List {
+            left: self.grid_left(),
+            top: self.grid_top(),
+            width: self.grid_width(),
+            height: self.grid_view_height(),
+            scroll: (-self.grid_content_y()).max(0.0),
+            scroll_x: 0.0,
+            row_height: self.grid_cell_height(),
+            rows: items,
+        }
+    }
+
     fn tab_width(&self) -> f32 {
         if self.right {
             self.ui.get_right_tab_width()
@@ -4909,13 +5057,14 @@ impl View {
                 let ui = PanelUi::of(&self.ui, panel);
                 let mut crumbs = crumbs[panel].clone();
                 crumbs.truncate(provider_for(tab.location()).segments(tab.location()).len());
-                Some(PanelArea {
-                    top: ui.tab_strip_top(),
-                    strip: ui.tab_strip(window.panels().get(panel).map_or(0, |p| p.tabs().len())),
-                    address_top: ui.address_top(),
-                    address_height: ui.address_height(),
-                    crumbs,
-                    list: marquee::List {
+                let grid = (tab.view().mode == ViewMode::Grid).then(|| file_drop::GridCells {
+                    cell_width: ui.grid_cell_width(),
+                    columns: usize::try_from(ui.grid_columns()).unwrap_or(1).max(1),
+                });
+                let list = if grid.is_some() {
+                    ui.grid_list(tab.len())
+                } else {
+                    marquee::List {
                         left: ui.list_left(),
                         top: ui.list_top(),
                         width: ui.list_width(),
@@ -4924,7 +5073,16 @@ impl View {
                         scroll_x: (-ui.content_x()).max(0.0),
                         row_height,
                         rows: tab.len(),
-                    },
+                    }
+                };
+                Some(PanelArea {
+                    top: ui.tab_strip_top(),
+                    strip: ui.tab_strip(window.panels().get(panel).map_or(0, |p| p.tabs().len())),
+                    address_top: ui.address_top(),
+                    address_height: ui.address_height(),
+                    crumbs,
+                    list,
+                    grid,
                 })
             })
             .collect();

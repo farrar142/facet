@@ -2682,6 +2682,28 @@ impl Tab {
         }
     }
 
+    /// 그리드 보기의 사각형 선택: 사각형이 덮은 칸의 항목 번호 `items`로 선택을 바꾼다(그리드에서는 덮은 칸이 번호로
+    /// 이어지지 않아 [`Tab::marquee_select`]의 행 범위 대신 번호들을 받는다). 선택은 시작할 때 남긴 선택(Ctrl이면 끌기
+    /// 전 선택)과 `items`이고, 목록 밖 번호는 버린다. 커서와 범위 기준은 `end`(끄는 점 쪽 칸)에 두고, `end`가
+    /// `None`이거나 목록 밖이면 그대로다.
+    pub fn marquee_select_items(
+        &mut self,
+        items: impl IntoIterator<Item = usize>,
+        end: Option<usize>,
+    ) {
+        let mut selection = self.marquee_base.get_or_insert_with(HashSet::new).clone();
+        for i in items {
+            if let Some(key) = self.key(i) {
+                selection.insert(key);
+            }
+        }
+        self.selection = selection;
+        if let Some(end) = end.filter(|&end| end < self.len()) {
+            self.anchor = self.key(end);
+            self.set_cursor(end);
+        }
+    }
+
     /// 사각형 선택을 끝낸다. 선택은 마지막 [`Tab::marquee_select`] 그대로 남는다.
     pub fn end_marquee(&mut self) {
         self.marquee_base = None;

@@ -148,6 +148,57 @@ impl<T> Marquee<T> {
         })
     }
 
+    /// 그리드 보기(#327): 사각형이 덮은 칸의 항목 번호들(작은 것부터)과 끄는 점 쪽 칸. `list`의 `row_height`는 칸
+    /// 높이, `rows`는 항목 수다. 칸 줄 `i`의 `j`열이 `i * columns + j`번 항목이다. 칸의 어느 곳에 걸쳐도 그 칸이다.
+    /// 끄는 점 쪽 칸은 사각형 안에서 끄는 점에 가장 가까운 칸이고, 그 칸이 비어 있으면(마지막 줄 뒤) 덮은 칸 가운데
+    /// 가장 뒤 칸이다. 덮은 칸이 없으면 둘 다 비어 있다.
+    pub fn cells(
+        &self,
+        list: &List,
+        cell_width: f32,
+        columns: usize,
+    ) -> (Vec<usize>, Option<usize>) {
+        let len = list.rows;
+        if len == 0 || columns == 0 || list.row_height <= 0.0 || cell_width <= 0.0 {
+            return (Vec::new(), None);
+        }
+        let lines = len.div_ceil(columns);
+        let rect = self.rect(list);
+        let span = |low: f32, high: f32, size: f32, count: usize| {
+            let first = (low / size).floor().max(0.0) as usize;
+            if first >= count {
+                return None;
+            }
+            let last = if high > low {
+                ((high / size).ceil() as usize).saturating_sub(1)
+            } else {
+                first
+            }
+            .clamp(first, count - 1);
+            Some((first, last))
+        };
+        let (Some((top, bottom)), Some((left, right))) = (
+            span(rect.y, rect.y + rect.height, list.row_height, lines),
+            span(rect.x, rect.x + rect.width, cell_width, columns),
+        ) else {
+            return (Vec::new(), None);
+        };
+        let items: Vec<usize> = (top..=bottom)
+            .flat_map(|line| (left..=right).map(move |column| line * columns + column))
+            .filter(|&i| i < len)
+            .collect();
+        let (x, y) = self.end(list);
+        let line = ((y / list.row_height).floor().max(0.0) as usize).clamp(top, bottom);
+        let column = ((x / cell_width).floor().max(0.0) as usize).clamp(left, right);
+        let end = line * columns + column;
+        let end = if end < len {
+            Some(end)
+        } else {
+            items.last().copied()
+        };
+        (items, end)
+    }
+
     /// 자동으로 넘길 거리(아래로 양수). 끄는 점이 목록 위·아래 끝 밖이면 멀수록 빠르게 넘기고, 더 넘길 수 없거나
     /// 끝 안이면 0이다. 앱은 사각형 선택 중 정한 간격마다 이것만큼 넘긴다.
     pub fn scroll_step(&self, list: &List) -> f32 {
@@ -335,6 +386,49 @@ mod tests {
             ..LIST
         };
         assert_eq!(marquee.scroll_step(&near_bottom), 2.0);
+    }
+
+    /// 그리드: 칸 100×120, 4열, 항목 10개(줄 0: 0~3, 줄 1: 4~7, 줄 2: 8·9).
+    const GRID: List = List {
+        row_height: 120.0,
+        rows: 10,
+        ..LIST
+    };
+
+    #[test]
+    fn 그리드는_덮은_칸만_고른다() {
+        // 내용 (150, 10)에서 (250, 130)으로: 1·2열, 0·1줄.
+        let mut marquee = pressed(250.0, 60.0, &GRID);
+        marquee.moved(at(350.0, 180.0));
+        assert_eq!(marquee.cells(&GRID, 100.0, 4), (vec![1, 2, 5, 6], Some(6)));
+        // 왼쪽 위로 끌면 끄는 점 쪽은 왼쪽 위 칸이다.
+        let mut marquee = pressed(350.0, 180.0, &GRID);
+        marquee.moved(at(250.0, 60.0));
+        assert_eq!(marquee.cells(&GRID, 100.0, 4), (vec![1, 2, 5, 6], Some(1)));
+    }
+
+    #[test]
+    fn 그리드_마지막_줄의_빈_칸은_고르지_않고_끄는_쪽은_덮은_마지막_칸이다() {
+        // 내용 (210, 130)에서 (390, 239): 2·3열, 1줄(보이는 높이 240 안).
+        let mut marquee = pressed(310.0, 180.0, &GRID);
+        marquee.moved(at(490.0, 289.0));
+        assert_eq!(marquee.cells(&GRID, 100.0, 4), (vec![6, 7], Some(7)));
+        // 넘겨서 2줄까지 덮으면 2줄의 2·3열은 비어 있어 덮은 칸 가운데 마지막(7)이 끄는 쪽이다.
+        let scrolled = List {
+            scroll: 120.0,
+            ..GRID
+        };
+        assert_eq!(marquee.cells(&scrolled, 100.0, 4), (vec![6, 7], Some(7)));
+    }
+
+    #[test]
+    fn 그리드_열_밖이나_빈_목록이면_덮은_칸이_없다() {
+        let mut marquee = pressed(450.0, 60.0, &GRID);
+        marquee.moved(at(490.0, 100.0));
+        // 내용 x 350..390은 4열(없음) 자리다.
+        assert_eq!(marquee.cells(&GRID, 100.0, 3), (vec![], None));
+        let empty = List { rows: 0, ..GRID };
+        assert_eq!(marquee.cells(&empty, 100.0, 4), (vec![], None));
     }
 
     #[test]
