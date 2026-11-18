@@ -25,13 +25,18 @@ pub fn has_preview_handler(extension: &str) -> bool {
 }
 
 #[cfg(windows)]
-mod imp {
+pub(crate) mod imp {
     use windows::Win32::UI::Shell::{
         ASSOCF_NOTRUNCATE, ASSOCSTR_SHELLEXTENSION, AssocQueryStringW,
     };
     use windows::core::{HSTRING, PWSTR};
 
     pub fn has_preview_handler(extension: &str) -> bool {
+        handler_clsid(extension).is_some()
+    }
+
+    /// 그 확장자(점 없음)에 등록된 미리보기 처리기의 CLSID 글자(중괄호 포함). 없으면 `None`.
+    pub(crate) fn handler_clsid(extension: &str) -> Option<String> {
         let assoc = HSTRING::from(format!(".{extension}"));
         let extra = HSTRING::from(super::PREVIEW_HANDLER_IID);
         // CLSID 글자(중괄호 포함 38글자)와 끝 널이 들어가는 넉넉한 칸.
@@ -49,6 +54,10 @@ mod imp {
                 &mut len,
             )
         };
-        result.is_ok() && out.first().is_some_and(|c| *c != 0)
+        if result.is_err() {
+            return None;
+        }
+        let end = out.iter().position(|c| *c == 0).unwrap_or(out.len());
+        (end > 0).then(|| String::from_utf16_lossy(&out[..end]))
     }
 }

@@ -197,6 +197,9 @@ const TABLE: &[(&str, &[&str])] = &[
         &["menu", "batch-rename", "filter"],
     ),
     ("crates/facet-win/src/windows_screen.rs", &[]),
+    ("crates/facet-win/src/preview.rs", &[]),
+    ("crates/facet-win/src/preview_handler.rs", &[]),
+    ("crates/facet-win/src/windows_preview_handler.rs", &[]),
     // facet-index: 인덱스 질의·저장, MFT 파싱.
     ("crates/facet-index/src/lib.rs", &["index", "mft"]),
     ("crates/facet-index/src/store.rs", &["index"]),
