@@ -126,6 +126,7 @@ mod search_bar;
 mod tab_drag;
 mod target;
 mod text;
+mod thumbs;
 
 slint::include_modules!();
 
@@ -208,6 +209,13 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         view.ui
             .set_notice(text::clipboard_error_text(&error).into());
+    }
+    // 썸네일(그리드 칸). 캐시와 디코더는 처음 쓸 때 열리므로 여기서는 기다리지 않는다. 측정 모드는 켜지 않는다.
+    if !measure::is_enabled()
+        && let Some(dir) = facet_core::thumbnail_cache::default_cache_dir()
+    {
+        app.borrow_mut()
+            .enable_thumbnails(facet_core::window::ThumbnailOptions::new(dir));
     }
     // 인덱서 서비스 연결(즉시 검색). 코어는 스스로 띄우지 않는다. 측정 모드는 띄우지 않는다. 연결은 뒤에서 열려 UI 스레드는
     // 기다리지 않고, 서비스가 없으면 즉시 검색이 실시간 탐색으로 강등한다.
@@ -875,6 +883,7 @@ fn connect(ui: &AppWindow, w: WindowId) {
     });
     ui.on_scrolled(move |panel| {
         with_view(w, |view| {
+            view.request_thumbnails();
             view.load_more_if_near_end(usize::try_from(panel).unwrap_or(0))
         })
     });
@@ -1811,6 +1820,19 @@ impl View {
                 self.receive_batch_preview(*id, preview.as_ref());
                 continue;
             }
+            if let Update::Thumbnail {
+                path, side, result, ..
+            } = update
+            {
+                // 만든 칸만 그림을 두고 그 행만 다시 그린다. 실패한 칸은 종류별 아이콘으로 남는다(오류 창 없음).
+                if let Ok(thumbnail) = result {
+                    thumbs::store(path, *side, thumbnail);
+                    for panel in &self.panels {
+                        panel.rows.refresh_path(path);
+                    }
+                }
+                continue;
+            }
             if let Update::Subfolders { id, list } = update {
                 // 하위 폴더 목록은 요청 번호로 열린 › 메뉴가 기다리던 것인지 가른다(탭과 상관없음).
                 self.receive_subfolders(*id, list.clone());
@@ -1821,7 +1843,10 @@ impl View {
             };
             touched = true;
             match update {
-                Update::Read(ReadOutcome::Committed) => committed[panel] = true,
+                Update::Read(ReadOutcome::Committed) => {
+                    committed[panel] = true;
+                    thumbs::forget_request(self.window, panel);
+                }
                 Update::Read(ReadOutcome::Failed) if panel == active => self.mark_loaded(),
                 Update::Completion { id, candidates } if panel == active => {
                     self.receive_candidates(*id, candidates.clone());
@@ -1938,6 +1963,7 @@ impl View {
             }
         }
         self.follow_rename_row();
+        self.request_thumbnails();
         if let Some(at) = redraw_at {
             // 「읽는 중」을 드러낼 때가 오면 다시 그린다.
             let window = self.window;
@@ -4282,6 +4308,39 @@ impl View {
                 shown.active_tab_mut().set_scroll(top);
             }
         }
+        drop(app);
+        self.request_thumbnails();
+    }
+
+    /// 그리드 보기인 패널마다 보이는 칸과 위아래 한 화면의 썸네일을 코어에 요청한다(요청은 곧바로 돌아오고, 같은
+    /// 스크롤 위치에서는 되풀이하지 않는다). 화면 밖으로 나간 칸의 요청은 코어가 취소한다.
+    fn request_thumbnails(&self) {
+        for panel in 0..MAX_PANELS {
+            let list = PanelUi::of(&self.ui, panel);
+            let cell_height = list.grid_cell_height();
+            let view_height = list.grid_view_height();
+            let columns = usize::try_from(list.grid_columns()).unwrap_or(1).max(1);
+            let mut app = self.app.borrow_mut();
+            let Some(shown) = app
+                .window(self.window)
+                .and_then(|window| window.panels().get(panel))
+            else {
+                continue;
+            };
+            let tab = shown.active_tab();
+            let view = tab.view();
+            if view.mode != facet_core::view::ViewMode::Grid || cell_height <= 0.0 {
+                continue;
+            }
+            let (id, len) = (shown.active_tab_id(), tab.len());
+            let first_row = (-list.grid_content_y() / cell_height).max(0.0) as usize;
+            let visible_rows = (view_height / cell_height).ceil().max(1.0) as usize;
+            let spans = GridLayout { columns }.spans(first_row, visible_rows, len);
+            let side = view.grid_size.thumbnail_side();
+            if thumbs::note_request(self.window, panel, id, &spans, len, side) {
+                app.request_thumbnails(id, spans);
+            }
+        }
     }
 
     /// 패널의 보이는 탭이 기억한 스크롤 위치로 가고(뒤로 가면 되살아난다), 활성 패널이면 커서 항목을 보인다.
@@ -5013,6 +5072,24 @@ impl TabRows {
         }
     }
 
+    /// 그 경로 항목의 행을 다시 그리게 한다(썸네일을 받은 뒤). 보이는 목록에 없으면 아무것도 하지 않는다.
+    fn refresh_path(&self, path: &std::path::Path) {
+        let Some(name) = path.file_name() else { return };
+        let row = {
+            let Ok(app) = self.app.try_borrow() else {
+                return;
+            };
+            let Some(tab) = self.tab(&app) else { return };
+            (0..tab.len()).find(|&row| {
+                tab.get(row).is_some_and(|item| item.name == name)
+                    && tab.item_path(row).is_some_and(|p| p == path)
+            })
+        };
+        if let Some(row) = row {
+            self.notify.row_changed(row);
+        }
+    }
+
     /// 창 배율이 바뀌었으면 아이콘 크기를 바꾸고 모든 행을 다시 그린다.
     fn set_scale(&self, scale: f32) {
         let size = icons::pixel_size(scale);
@@ -5050,6 +5127,12 @@ impl Model for TabRows {
         if icon.is_none() {
             self.waiting_icons.borrow_mut().insert(row);
         }
+        // 그리드 칸의 썸네일: 코어가 이미 만들어 보낸 그림만 쓴다(UI 스레드는 만들지도 읽지도 않는다).
+        let view = tab.view();
+        let thumb = (view.mode == facet_core::view::ViewMode::Grid)
+            .then(|| tab.item_path(row))
+            .flatten()
+            .and_then(|path| thumbs::get(&path, view.grid_size.thumbnail_side()));
         Some(Row {
             name: item.name.to_string_lossy().as_ref().into(),
             folder: item.is_folder,
@@ -5061,6 +5144,8 @@ impl Model for TabRows {
             } else {
                 details::modified_text(item).into()
             },
+            has_thumb: thumb.is_some(),
+            thumb: thumb.unwrap_or_default(),
             kind: text::file_type_text(&details::file_type(item)).into(),
             size: details::size_text(item).into(),
             location: if tab.location().is_search_results() {

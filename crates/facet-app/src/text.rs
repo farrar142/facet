@@ -84,13 +84,13 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::GridView(GridSize::Medium) => "그리드 보기: 보통",
         CommandId::GridView(GridSize::Large) => "그리드 보기: 크게",
         CommandId::GridView(GridSize::ExtraLarge) => "그리드 보기: 아주 크게",
-        CommandId::ClearThumbnailCache => todo!("#330"),
+        CommandId::ClearThumbnailCache => "썸네일 캐시 비우기",
         CommandId::OpenWith | CommandId::Properties => todo!("#321"),
         CommandId::OpenThisPc => "내 PC 열기",
         CommandId::OpenRecycleBin => todo!("#352"),
         CommandId::Restore => todo!("#353"),
         CommandId::EmptyRecycleBin => todo!("#354"),
-        CommandId::TogglePreview => todo!("#339"),
+        CommandId::TogglePreview => "미리보기 영역",
     }
 }
 

@@ -119,7 +119,6 @@ fn shows_text(content: &PreviewContent, name: &str, text: &str) -> bool {
 }
 
 #[test]
-#[ignore = "#339"]
 fn alt_p_is_the_preview_pane_command() {
     let p = Shortcut::new(Key::Letter('P')).alt();
     assert_eq!(find_by_shortcut(p), Some(CommandId::TogglePreview));
@@ -129,7 +128,6 @@ fn alt_p_is_the_preview_pane_command() {
 }
 
 #[test]
-#[ignore = "#339"]
 fn the_command_toggles_the_active_window_pane_which_starts_off() {
     let dir = tree();
     let mut app = app_at(dir.path());
@@ -149,7 +147,6 @@ fn the_command_toggles_the_active_window_pane_which_starts_off() {
 }
 
 #[test]
-#[ignore = "#339"]
 fn the_width_starts_at_the_default_and_is_clamped() {
     assert_eq!(PREVIEW_WIDTH_DEFAULT, 320.0);
     assert_eq!(PREVIEW_WIDTH_MIN, 160.0);
@@ -169,7 +166,6 @@ fn the_width_starts_at_the_default_and_is_clamped() {
 }
 
 #[test]
-#[ignore = "#339"]
 fn each_window_keeps_its_own_pane_and_a_new_window_inherits_the_active_one() {
     let dir = tree();
     let mut app = app_at(dir.path());
@@ -203,7 +199,6 @@ fn each_window_keeps_its_own_pane_and_a_new_window_inherits_the_active_one() {
 }
 
 #[test]
-#[ignore = "#339"]
 fn the_pane_is_saved_in_the_session_and_restored() {
     let dir = tree();
     let mut app = app_at(dir.path());
@@ -224,7 +219,6 @@ fn the_pane_is_saved_in_the_session_and_restored() {
 }
 
 #[test]
-#[ignore = "#339"]
 fn an_older_session_without_the_field_reads_as_off() {
     let dir = tree();
     let mut app = app_at(dir.path());
@@ -243,7 +237,6 @@ fn an_older_session_without_the_field_reads_as_off() {
 }
 
 #[test]
-#[ignore = "#339"]
 fn one_text_file_shows_its_text_and_no_selection_shows_nothing() {
     let dir = tree();
     let mut app = app_at(dir.path());
@@ -267,7 +260,6 @@ fn one_text_file_shows_its_text_and_no_selection_shows_nothing() {
 }
 
 #[test]
-#[ignore = "#339"]
 fn several_items_show_the_count_and_the_file_size_sum() {
     let dir = tree();
     let mut app = app_at(dir.path());
@@ -286,7 +278,6 @@ fn several_items_show_the_count_and_the_file_size_sum() {
 }
 
 #[test]
-#[ignore = "#339"]
 fn a_folder_shows_its_item_count() {
     let dir = tree();
     let mut app = app_at(dir.path());
@@ -298,7 +289,6 @@ fn a_folder_shows_its_item_count() {
 }
 
 #[test]
-#[ignore = "#339"]
 fn rapid_selection_changes_end_on_the_last_item_only() {
     let dir = tree();
     let mut app = app_at(dir.path());
@@ -325,7 +315,6 @@ fn rapid_selection_changes_end_on_the_last_item_only() {
 }
 
 #[test]
-#[ignore = "#339"]
 fn the_pane_follows_the_active_panel() {
     let dir = tree();
     let mut app = app_at(dir.path());
@@ -349,7 +338,6 @@ fn the_pane_follows_the_active_panel() {
 }
 
 #[test]
-#[ignore = "#339"]
 fn turning_the_pane_on_shows_the_current_selection() {
     let dir = tree();
     let mut app = app_at(dir.path());
@@ -361,7 +349,6 @@ fn turning_the_pane_on_shows_the_current_selection() {
 }
 
 #[test]
-#[ignore = "#339"]
 fn a_preview_update_names_the_window() {
     let dir = tree();
     let mut app = app_at(dir.path());
@@ -381,7 +368,6 @@ fn a_preview_update_names_the_window() {
 
 #[cfg(windows)]
 #[test]
-#[ignore = "#339"]
 fn editing_the_previewed_file_outside_updates_the_preview() {
     let dir = tree();
     let mut app = app_at(dir.path());
@@ -395,7 +381,6 @@ fn editing_the_previewed_file_outside_updates_the_preview() {
 
 #[cfg(windows)]
 #[test]
-#[ignore = "#339"]
 fn deleting_the_previewed_file_shows_it_is_gone() {
     let dir = tree();
     let mut app = app_at(dir.path());
@@ -417,7 +402,6 @@ fn deleting_the_previewed_file_shows_it_is_gone() {
 
 #[cfg(windows)]
 #[test]
-#[ignore = "#339"]
 fn a_locked_file_shows_the_reason_and_the_app_keeps_going() {
     use std::os::windows::fs::OpenOptionsExt;
 

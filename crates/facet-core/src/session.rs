@@ -386,7 +386,26 @@ struct WindowV1 {
     placement: Option<serde_json::Value>,
     split_ratio: f32,
     active_panel: usize,
+    /// #339: 미리보기 영역. 이 필드를 더하기 전의 버전 1 파일에는 없으므로 꺼짐·기본 폭으로 읽는다.
+    #[serde(default)]
+    preview: PreviewV1,
     panels: Vec<PanelV1>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PreviewV1 {
+    visible: bool,
+    width: f32,
+}
+
+impl Default for PreviewV1 {
+    fn default() -> Self {
+        let pane = crate::preview::PreviewPane::default();
+        PreviewV1 {
+            visible: pane.visible,
+            width: pane.width,
+        }
+    }
 }
 
 /// 창 자리: 바깥 테두리 왼쪽 위(`x`, `y`)와 안쪽 크기(`width`, `height`), 가상 화면 기준 물리 픽셀. 최대화한 창은
@@ -522,6 +541,10 @@ impl FileV1 {
                     }),
                     split_ratio: window.split_ratio,
                     active_panel: window.active_panel,
+                    preview: PreviewV1 {
+                        visible: window.preview.visible,
+                        width: window.preview.width,
+                    },
                     panels: window
                         .panels
                         .iter()
@@ -543,7 +566,18 @@ impl FileV1 {
                 .windows
                 .into_iter()
                 .map(|window| WindowSession {
-                    preview: Default::default(), // #339
+                    preview: {
+                        use crate::preview::{PREVIEW_WIDTH_MAX, PREVIEW_WIDTH_MIN, PreviewPane};
+                        let width = window.preview.width;
+                        PreviewPane {
+                            visible: window.preview.visible,
+                            width: if width.is_finite() {
+                                width.clamp(PREVIEW_WIDTH_MIN, PREVIEW_WIDTH_MAX)
+                            } else {
+                                PreviewPane::default().width
+                            },
+                        }
+                    },
                     placement: PlacementV1::read(window.placement),
                     split_ratio: window.split_ratio,
                     active_panel: window.active_panel,

@@ -55,12 +55,12 @@
 //! ([`Update::Search`]). 탭이 다른 곳으로 가거나 닫히면(창 닫기 포함) 탭이 피드를 버려 탐색이 멈춘다. facet이 한
 //! 작업(이름바꾸기, 삭제·휴지통 삭제·이동, 그 실행취소·다시 실행)은 끝날 때 모든 검색 결과 탭에 반영한다.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -87,6 +87,10 @@ use crate::launch::LaunchTarget;
 use crate::live_search::{LiveSearch, StartError};
 use crate::menu::{self, Menu, MenuContext, MenuKind};
 use crate::placement::Placement;
+use crate::preview::{
+    PREVIEW_WIDTH_MAX, PREVIEW_WIDTH_MIN, PreviewBody, PreviewContent, PreviewPane, PreviewRequest,
+    Previewer, load_preview,
+};
 use crate::query_syntax::{self, ParseError, Parsed, Today};
 use crate::search_results::PathChange;
 use crate::selection::Pick;
@@ -95,8 +99,11 @@ use crate::tab::{
     ChangeOutcome, ClosedTab, CompletionId, CompletionResult, FilterResult, InstantReply,
     Navigation, ReadOutcome, ReadRequest, ReadResult, Retarget, Tab,
 };
-use crate::thumbnail::{Thumbnail, ThumbnailError};
-use crate::thumbnail_cache::CacheLimits;
+use crate::thumbnail::{
+    DecodeLimits, Thumbnail, ThumbnailError, ThumbnailKey, ThumbnailPlan, make_thumbnail_with, plan,
+};
+use crate::thumbnail_cache::{CacheLimits, ThumbnailCache};
+use crate::thumbnail_queue::{ThumbnailQueue, worker_count};
 use crate::view::GridSpans;
 use crate::watch::ChangeBatch;
 use crate::work_area::WorkArea;
@@ -259,6 +266,8 @@ pub struct Window {
     split_ratio: f32,
     /// 화면 자리·크기·최대화. 앱이 창을 띄우고 옮길 때마다 알린다. 아직 모르면 `None`이다.
     placement: Option<Placement>,
+    /// #339: 미리보기 영역(켜짐·폭).
+    preview: PreviewPane,
 }
 
 impl Window {
@@ -269,6 +278,7 @@ impl Window {
             active: 0,
             split_ratio: SPLIT_RATIO_DEFAULT,
             placement: None,
+            preview: PreviewPane::default(),
         }
     }
 
@@ -335,18 +345,21 @@ impl Window {
     }
 
     /// #339: 창의 미리보기 영역(켜짐·폭).
-    pub fn preview_pane(&self) -> crate::preview::PreviewPane {
-        todo!("#339")
+    pub fn preview_pane(&self) -> PreviewPane {
+        self.preview
     }
 
     /// #339: 미리보기 영역을 켜고 끈다.
-    pub fn set_preview_visible(&mut self, _visible: bool) {
-        todo!("#339")
+    pub fn set_preview_visible(&mut self, visible: bool) {
+        self.preview.visible = visible;
     }
 
     /// #339: 미리보기 영역의 폭을 정한다(자른 폭을 돌려줌).
-    pub fn set_preview_width(&mut self, _width: f32) -> f32 {
-        todo!("#339")
+    pub fn set_preview_width(&mut self, width: f32) -> f32 {
+        if !width.is_nan() {
+            self.preview.width = width.clamp(PREVIEW_WIDTH_MIN, PREVIEW_WIDTH_MAX);
+        }
+        self.preview.width
     }
 
     /// 창의 화면 자리·크기·최대화(가상 화면 기준 물리 픽셀, [`crate::placement`]). 세션에 남고, 되살린 창은 이
@@ -407,11 +420,22 @@ enum Message {
         id: BatchPreviewId,
         preview: Option<Preview>,
     },
+    /// #339: 그 창의 미리보기 요청을 낼 때가 됐을 수 있다.
+    PreviewDue(WindowId),
+    /// #339: 그 창의 미리보기 요청기에 결과가 왔다.
+    PreviewReady(WindowId),
     /// 하위 폴더 목록 일꾼의 결과(#303).
     Subfolders {
         tab: TabId,
         id: SubfoldersId,
         list: Result<Subfolders, SubfoldersError>,
+    },
+    Thumbnail {
+        tab: TabId,
+        path: PathBuf,
+        side: u32,
+        result: Result<Arc<Thumbnail>, ThumbnailError>,
+        from_cache: bool,
     },
     Edited {
         tab: TabId,
@@ -510,8 +534,134 @@ pub struct ThumbnailOptions {
 
 impl ThumbnailOptions {
     /// #330: 그 캐시 폴더와 기본 상한·작업자 수의 설정.
-    pub fn new(_cache_dir: impl Into<PathBuf>) -> ThumbnailOptions {
-        todo!("#330")
+    pub fn new(cache_dir: impl Into<PathBuf>) -> ThumbnailOptions {
+        ThumbnailOptions {
+            cache_dir: cache_dir.into(),
+            limits: CacheLimits::default(),
+            workers: worker_count(thread::available_parallelism().map_or(2, |n| n.get())),
+        }
+    }
+}
+
+/// 썸네일 작업자들이 나눠 쓰는 것.
+struct ThumbShared {
+    options: ThumbnailOptions,
+    /// 처음 쓸 때 연다(작업자 스레드에서). 열지 못하면 캐시 없이 만든다.
+    cache: OnceLock<Option<Arc<ThumbnailCache>>>,
+    /// 캐시에서 꺼낸 결과의 키(결과를 넘길 때 `from_cache`가 되고 지운다).
+    hits: Mutex<HashSet<ThumbnailKey>>,
+    /// 온라인 전용이라 캐시에서만 쓰는 키.
+    cache_only: Mutex<HashSet<ThumbnailKey>>,
+    /// 캐시를 비우는 중이면 참. 작업자는 끝날 때까지 기다린다.
+    clearing: (Mutex<bool>, Condvar),
+    puts: std::sync::atomic::AtomicUsize,
+}
+
+/// 캐시에 몇 번 넣을 때마다 상한을 정리한다(작업자 스레드에서).
+const THUMBNAIL_TRIM_EVERY: usize = 64;
+
+impl ThumbShared {
+    fn cache(&self) -> Option<&Arc<ThumbnailCache>> {
+        self.cache
+            .get_or_init(|| {
+                ThumbnailCache::open(&self.options.cache_dir, self.options.limits)
+                    .ok()
+                    .map(Arc::new)
+            })
+            .as_ref()
+    }
+
+    fn make(
+        &self,
+        key: &ThumbnailKey,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<Thumbnail, ThumbnailError> {
+        {
+            let (lock, cvar) = &self.clearing;
+            let mut clearing = lock.lock().unwrap_or_else(|e| e.into_inner());
+            while *clearing {
+                clearing = cvar.wait(clearing).unwrap_or_else(|e| e.into_inner());
+            }
+        }
+        let cache = self.cache();
+        if let Some(found) = cache.and_then(|c| c.get(key)) {
+            self.hits
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(key.clone());
+            return Ok((*found).clone());
+        }
+        if self
+            .cache_only
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(key)
+        {
+            return Err(ThumbnailError::Unsupported);
+        }
+        let thumbnail = make_thumbnail_with(&key.path, key.side, &DecodeLimits::default(), cancel)?;
+        if let Some(cache) = cache {
+            let _ = cache.put(key, Arc::new(thumbnail.clone()));
+            let puts = self.puts.fetch_add(1, Ordering::Relaxed) + 1;
+            if puts.is_multiple_of(THUMBNAIL_TRIM_EVERY) {
+                let _ = cache.trim();
+            }
+        }
+        Ok(thumbnail)
+    }
+}
+
+/// 켠 썸네일: 요청 대기열과 탭마다 마지막으로 요청한 범위.
+struct Thumbs {
+    shared: Arc<ThumbShared>,
+    queue: Arc<ThumbnailQueue>,
+    last: HashMap<TabId, GridSpans>,
+}
+
+impl Thumbs {
+    fn new(options: ThumbnailOptions, outbox: &Outbox) -> Thumbs {
+        let shared = Arc::new(ThumbShared {
+            options,
+            cache: OnceLock::new(),
+            hits: Mutex::default(),
+            cache_only: Mutex::default(),
+            clearing: (Mutex::new(false), Condvar::new()),
+            puts: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let queue = Self::queue(&shared, outbox);
+        Thumbs {
+            shared,
+            queue,
+            last: HashMap::new(),
+        }
+    }
+
+    fn queue(shared: &Arc<ThumbShared>, outbox: &Outbox) -> Arc<ThumbnailQueue> {
+        let maker = Arc::clone(shared);
+        let queue = Arc::new(ThumbnailQueue::new(shared.options.workers, move |k, c| {
+            maker.make(k, c)
+        }));
+        let weak: Weak<ThumbnailQueue> = Arc::downgrade(&queue);
+        let shared = Arc::clone(shared);
+        let outbox = outbox.clone();
+        queue.set_waker(move || {
+            let Some(queue) = weak.upgrade() else { return };
+            for done in queue.poll() {
+                let from_cache = shared
+                    .hits
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&done.key);
+                outbox.send(Message::Thumbnail {
+                    tab: TabId(done.owner),
+                    path: done.key.path,
+                    side: done.key.side,
+                    result: done.result,
+                    from_cache,
+                });
+            }
+        });
+        queue
     }
 }
 
@@ -851,9 +1001,28 @@ pub struct App {
     batch_preview: Arc<AtomicU64>,
     /// 하위 폴더 목록·맨 앞 목록 요청 번호(#303).
     subfolders: Arc<AtomicU64>,
+    /// #339: 창마다 미리보기 영역의 내용과 요청기.
+    previews: HashMap<WindowId, PreviewState>,
+    /// #339: 다음 [`App::poll`]이 [`Update::Preview`]로 알릴 창(변경 따라가기가 내용을 바꿨다).
+    preview_notes: Vec<WindowId>,
+    /// 썸네일([`App::enable_thumbnails`]). 켜지 않았으면 `None`.
+    thumbnails: Option<Thumbs>,
     outbox: Outbox,
     receiver: Receiver<Message>,
 }
+
+/// #339: 창 하나의 미리보기 영역 상태.
+struct PreviewState {
+    previewer: Previewer,
+    content: Option<PreviewContent>,
+    /// 지금 미리 보는 항목(경로와 요청한 항목).
+    key: Option<(PathBuf, crate::Item)>,
+    /// 미리 보던 항목이 지워졌다: 사용자가 다른 항목을 고를 때까지 「없음」 표시를 남긴다.
+    gone: bool,
+}
+
+/// #339: 미리보기 본문의 긴 변(물리 픽셀)의 기본값.
+const PREVIEW_IMAGE_SIDE: u32 = 512;
 
 impl std::fmt::Debug for App {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -952,6 +1121,7 @@ impl App {
             restored.active = active_panel;
             restored.set_split_ratio(window.split_ratio);
             restored.placement = window.placement;
+            restored.preview = window.preview;
             if w <= session.active_window {
                 active = Some(self.windows.len());
             }
@@ -1000,7 +1170,7 @@ impl App {
                 active_panel: window.active,
                 split_ratio: window.split_ratio,
                 placement: window.placement,
-                preview: Default::default(), // #339
+                preview: window.preview,
             })
             .collect();
         Some(Session {
@@ -1063,6 +1233,9 @@ impl App {
             follow_wake: None,
             batch_preview: Arc::default(),
             subfolders: Arc::default(),
+            previews: HashMap::new(),
+            preview_notes: Vec::new(),
+            thumbnails: None,
             outbox: Outbox {
                 sender,
                 waker: Arc::default(),
@@ -1129,7 +1302,12 @@ impl App {
     fn push_window_with(&mut self, tab_id: TabId, tab: Tab) -> WindowId {
         let id = WindowId(self.next_window);
         self.next_window += 1;
-        self.windows.push(Window::new(id, Panel::new(tab_id, tab)));
+        let mut window = Window::new(id, Panel::new(tab_id, tab));
+        // #339: 새 창은 활성 창의 미리보기 영역(켜짐·폭)을 물려받는다.
+        if let Some(active) = self.windows.get(self.active) {
+            window.preview = active.preview;
+        }
+        self.windows.push(window);
         self.active = self.windows.len() - 1;
         id
     }
@@ -1143,6 +1321,11 @@ impl App {
             return false;
         };
         let window = self.remove_window(w);
+        for panel in &window.panels {
+            for (tab, _) in &panel.tabs {
+                self.forget_thumbnails(*tab);
+            }
+        }
         let active = (window.active, window.panels[window.active].active);
         let mut last = None;
         let mut tabs = Vec::new();
@@ -1163,6 +1346,7 @@ impl App {
     /// `w`번째 창을 목록에서 빼고 활성 창 번호를 맞춘다.
     fn remove_window(&mut self, w: usize) -> Window {
         let window = self.windows.remove(w);
+        self.previews.remove(&window.id);
         if self.active > w || (self.active == w && self.active > 0) {
             self.active -= 1;
         }
@@ -1374,6 +1558,7 @@ impl App {
     pub fn close_tab(&mut self, id: TabId) -> Option<Closed> {
         let (w, p, t) = self.find(id)?;
         let (tab, closed) = self.take_tab(w, p, t);
+        self.forget_thumbnails(id);
         self.remember_closed(tab);
         Some(closed)
     }
@@ -1664,6 +1849,9 @@ impl App {
         updates.extend(self.pump_indexer());
         updates.extend(self.pump_demoted());
         self.pump_follow();
+        for window in std::mem::take(&mut self.preview_notes) {
+            updates.push((self.window_tab_id(window), Update::Preview(window)));
+        }
         for id in std::mem::take(&mut self.changed_results) {
             if !updates.contains(&(id, Update::Search)) {
                 updates.push((id, Update::Search));
@@ -1711,13 +1899,100 @@ impl App {
     }
 
     /// #330: 썸네일을 켠다(곧바로 돌아옴, 캐시는 처음 쓸 때 연다).
-    pub fn enable_thumbnails(&mut self, _options: ThumbnailOptions) {
-        todo!("#330")
+    pub fn enable_thumbnails(&mut self, options: ThumbnailOptions) {
+        self.thumbnails = Some(Thumbs::new(options, &self.outbox));
     }
 
     /// #330: 그 탭 목록의 순번 범위의 썸네일을 요청한다(크기는 탭의 칸 크기).
-    pub fn request_thumbnails(&mut self, _tab: TabId, _spans: GridSpans) {
-        todo!("#330")
+    pub fn request_thumbnails(&mut self, tab: TabId, spans: GridSpans) {
+        let Some(thumbs) = &mut self.thumbnails else {
+            return;
+        };
+        let Some((_, found)) = self
+            .windows
+            .iter()
+            .flat_map(|w| w.panels.iter())
+            .flat_map(|p| p.tabs.iter())
+            .find(|(id, _)| *id == tab)
+        else {
+            return;
+        };
+        let side = found.view().grid_size.thumbnail_side();
+        // 목록에 이미 있는 이름·크기·수정 시각으로 키를 만든다: 파일 시스템을 부르지 않는다.
+        let key_of = |index: usize| -> Option<ThumbnailKey> {
+            let item = found.get(index)?;
+            let kind = plan(item);
+            if kind == ThumbnailPlan::IconOnly {
+                return None;
+            }
+            let key = ThumbnailKey {
+                path: found.item_path(index)?,
+                side,
+                modified: item.modified,
+                file_size: item.size,
+            };
+            let mut only = thumbs
+                .shared
+                .cache_only
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if kind == ThumbnailPlan::CacheOnly {
+                only.insert(key.clone());
+            } else {
+                only.remove(&key);
+            }
+            Some(key)
+        };
+        let visible: Vec<ThumbnailKey> = spans.visible.clone().filter_map(key_of).collect();
+        let nearby: Vec<ThumbnailKey> = spans
+            .nearby
+            .clone()
+            .filter(|i| !spans.visible.contains(i))
+            .filter_map(key_of)
+            .collect();
+        thumbs.queue.want(tab.0, visible, nearby);
+        thumbs.last.insert(tab, spans);
+    }
+
+    /// 그 탭의 썸네일 요청을 모두 취소한다.
+    fn forget_thumbnails(&mut self, tab: TabId) {
+        if let Some(thumbs) = &mut self.thumbnails {
+            thumbs.queue.forget(tab.0);
+            thumbs.last.remove(&tab);
+        }
+    }
+
+    /// 「썸네일 캐시 비우기」: 메모리·디스크 캐시와 실패 기억을 비우고 보이는 칸을 다시 요청한다.
+    /// 디스크는 뒤 스레드에서 비우고 작업자는 끝날 때까지 기다린다.
+    fn clear_thumbnail_cache(&mut self) {
+        let Some(thumbs) = &mut self.thumbnails else {
+            return;
+        };
+        let shared = Arc::clone(&thumbs.shared);
+        *shared.clearing.0.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        let background = Arc::clone(&shared);
+        thread::Builder::new()
+            .name("facet-thumbnail-clear".into())
+            .spawn(move || {
+                if let Some(cache) = background.cache() {
+                    let _ = cache.clear();
+                }
+                let (lock, cvar) = &background.clearing;
+                *lock.lock().unwrap_or_else(|e| e.into_inner()) = false;
+                cvar.notify_all();
+            })
+            .expect("썸네일 캐시 비우기 스레드를 만들지 못했다");
+        // 새 대기열: 옛 대기열의 요청은 취소되고 실패 기억은 사라진다.
+        shared
+            .hits
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        thumbs.queue = Thumbs::queue(&shared, &self.outbox);
+        let last = std::mem::take(&mut thumbs.last);
+        for (tab, spans) in last {
+            self.request_thumbnails(tab, spans);
+        }
     }
 
     /// #321: 셸 확장 도우미 관리를 켠다(도우미는 첫 요청 때 뜬다).
@@ -1731,13 +2006,213 @@ impl App {
     }
 
     /// #339: 그 창의 미리보기 영역 내용(꺼져 있으면 `None`).
-    pub fn preview(&self, _window: WindowId) -> Option<&crate::preview::PreviewContent> {
-        todo!("#339")
+    pub fn preview(&self, window: WindowId) -> Option<&PreviewContent> {
+        self.previews.get(&window)?.content.as_ref()
     }
 
     /// #339: 선택·활성 탭·패널·창이 바뀐 뒤 미리보기 영역을 맞춘다.
     pub fn sync_preview(&mut self) {
-        todo!("#339")
+        let ids: Vec<WindowId> = self.windows.iter().map(|w| w.id).collect();
+        for id in ids {
+            self.sync_preview_window(id);
+        }
+    }
+
+    fn preview_state(&mut self, window: WindowId) -> &mut PreviewState {
+        let outbox = self.outbox.clone();
+        self.previews.entry(window).or_insert_with(|| {
+            let previewer =
+                Previewer::new(|request, cancel| load_preview(request, cancel, &|_| false));
+            previewer.set_waker(move || outbox.send(Message::PreviewReady(window)));
+            PreviewState {
+                previewer,
+                content: None,
+                key: None,
+                gone: false,
+            }
+        })
+    }
+
+    fn sync_preview_window(&mut self, id: WindowId) {
+        let Some(window) = self.windows.iter().find(|w| w.id == id) else {
+            return;
+        };
+        if !window.preview.visible {
+            self.previews.remove(&id);
+            return;
+        }
+        let tab = window.active_panel().active_tab();
+        let count = tab.selected_count();
+        let single = if count == 1 {
+            tab.selected_paths()
+                .into_iter()
+                .next()
+                .zip(tab.selected_items().next().cloned())
+        } else {
+            None
+        };
+        let total: u64 = if count > 1 {
+            tab.selected_items()
+                .filter(|item| !item.is_folder)
+                .map(|item| item.size)
+                .sum()
+        } else {
+            0
+        };
+        let show_hidden = tab.show_hidden();
+        let now = Instant::now();
+        let state = self.preview_state(id);
+        match (count, single) {
+            (0, _) => {
+                // 지워진 항목의 표시는 사용자가 다른 항목을 고를 때까지 남는다.
+                if state.gone {
+                    return;
+                }
+                state.previewer.request(None, now);
+                state.key = None;
+                state.content = Some(PreviewContent::Nothing);
+            }
+            (1, Some((path, item))) => {
+                state.gone = false;
+                if state.key.as_ref() == Some(&(path.clone(), item.clone())) {
+                    return;
+                }
+                state.key = Some((path.clone(), item.clone()));
+                state.content = Some(PreviewContent::Item {
+                    path: path.clone(),
+                    item: item.clone(),
+                    body: PreviewBody::Loading,
+                });
+                state.previewer.request(
+                    Some(PreviewRequest {
+                        path,
+                        item,
+                        show_hidden,
+                        image_side: PREVIEW_IMAGE_SIDE,
+                    }),
+                    now,
+                );
+                self.schedule_preview(id);
+            }
+            _ => {
+                state.gone = false;
+                state.previewer.request(None, now);
+                state.key = None;
+                state.content = Some(PreviewContent::Many {
+                    count,
+                    total_size: total,
+                });
+            }
+        }
+    }
+
+    /// 요청을 낼 때(기다림이 끝나는 때)에 앱을 깨운다.
+    fn schedule_preview(&self, window: WindowId) {
+        let outbox = self.outbox.clone();
+        let _ = thread::Builder::new()
+            .name("facet-preview-wake".into())
+            .spawn(move || {
+                thread::sleep(crate::preview::PREVIEW_DELAY);
+                outbox.send(Message::PreviewDue(window));
+            });
+    }
+
+    /// 창의 활성 탭 번호(미리보기 알림을 실을 탭).
+    fn window_tab_id(&self, window: WindowId) -> TabId {
+        self.windows
+            .iter()
+            .find(|w| w.id == window)
+            .map_or(TabId(0), |w| w.active_panel().active_tab_id())
+    }
+
+    /// 탭 `id`의 묶은 변경이 반영된 뒤, 그 탭에서 미리 보는 항목이 바뀌었거나 지워졌는지 본다.
+    fn follow_preview(&mut self, id: TabId) {
+        let now = Instant::now();
+        let mut changes = Vec::new();
+        for window in &self.windows {
+            if !window.preview.visible || window.active_panel().active_tab_id() != id {
+                continue;
+            }
+            let Some(state) = self.previews.get(&window.id) else {
+                continue;
+            };
+            let Some((path, item)) = &state.key else {
+                continue;
+            };
+            let tab = window.active_panel().active_tab();
+            if tab.location().file_system_path() != path.parent() {
+                continue;
+            }
+            match tab.items().find(|i| i.name == item.name) {
+                None => changes.push((window.id, path.clone(), None, tab.show_hidden())),
+                Some(found) if found != item => changes.push((
+                    window.id,
+                    path.clone(),
+                    Some(found.clone()),
+                    tab.show_hidden(),
+                )),
+                Some(_) => {}
+            }
+        }
+        for (window, path, found, show_hidden) in changes {
+            let state = self.preview_state(window);
+            match found {
+                None => {
+                    let Some((_, item)) = state.key.take() else {
+                        continue;
+                    };
+                    state.previewer.request(None, now);
+                    state.gone = true;
+                    state.content = Some(PreviewContent::Item {
+                        path,
+                        item,
+                        body: PreviewBody::Unavailable(crate::preview::PreviewProblem::Missing),
+                    });
+                }
+                Some(item) => {
+                    let body = match state.content.take() {
+                        Some(PreviewContent::Item { body, .. }) => body,
+                        _ => PreviewBody::Loading,
+                    };
+                    state.key = Some((path.clone(), item.clone()));
+                    state.content = Some(PreviewContent::Item {
+                        path: path.clone(),
+                        item: item.clone(),
+                        body,
+                    });
+                    state.previewer.request(
+                        Some(PreviewRequest {
+                            path,
+                            item,
+                            show_hidden,
+                            image_side: PREVIEW_IMAGE_SIDE,
+                        }),
+                        now,
+                    );
+                    self.schedule_preview(window);
+                }
+            }
+            self.preview_notes.push(window);
+        }
+    }
+
+    /// 그 창의 미리보기 요청기가 낼 때가 됐으면 내고, 온 결과를 내용에 넣는다.
+    fn deliver_preview(&mut self, window: WindowId, due: bool) {
+        let Some(state) = self.previews.get_mut(&window) else {
+            return;
+        };
+        if due {
+            state.previewer.tick(Instant::now());
+        }
+        for done in state.previewer.poll() {
+            if state.key.as_ref() == Some(&(done.request.path.clone(), done.request.item.clone())) {
+                state.content = Some(PreviewContent::Item {
+                    path: done.request.path,
+                    item: done.request.item,
+                    body: done.body,
+                });
+            }
+        }
     }
 
     /// #341: 그 창 미리보기 영역의 긴 변(물리 픽셀).
@@ -2242,6 +2717,8 @@ impl App {
                     None => ReadOutcome::Stale,
                 };
                 if outcome == ReadOutcome::Committed {
+                    // 목록이 바뀌었다: 그 탭의 요청을 모두 취소한다. 화면이 다시 요청한다.
+                    self.forget_thumbnails(id);
                     self.start_tab_search(id);
                     self.start_instant(id);
                 }
@@ -2273,8 +2750,24 @@ impl App {
                 {
                     self.spawn_read(id, request);
                 }
+                self.follow_preview(id);
                 (id, Update::Changes(outcome))
             }
+            Message::Thumbnail {
+                tab,
+                path,
+                side,
+                result,
+                from_cache,
+            } => (
+                tab,
+                Update::Thumbnail {
+                    path,
+                    side,
+                    result,
+                    from_cache,
+                },
+            ),
             Message::Opened { tab: id, result } => {
                 let opened = result.is_ok();
                 if let Some(tab) = self.tab_mut(id) {
@@ -2336,6 +2829,14 @@ impl App {
                 let latest = self.batch_preview.load(Ordering::SeqCst) == id.0;
                 let preview = preview.filter(|_| latest);
                 (tab, Update::BatchPreview { id, preview })
+            }
+            Message::PreviewDue(window) => {
+                self.deliver_preview(window, true);
+                (self.window_tab_id(window), Update::Preview(window))
+            }
+            Message::PreviewReady(window) => {
+                self.deliver_preview(window, false);
+                (self.window_tab_id(window), Update::Preview(window))
             }
             Message::Subfolders { tab, id, list } => {
                 // 받기 전에 뒤 요청이 왔으면 목록을 버린다: 마지막 요청의 결과만 담는다.
@@ -2621,7 +3122,13 @@ impl App {
             CommandId::OpenRecycleBin => todo!("#352"),
             CommandId::Restore => todo!("#353"),
             CommandId::EmptyRecycleBin => todo!("#354"),
-            CommandId::TogglePreview => todo!("#339"),
+            CommandId::TogglePreview => {
+                let window = self.active_window_mut();
+                let visible = !window.preview.visible;
+                window.set_preview_visible(visible);
+                self.sync_preview();
+                return Execution::Done;
+            }
             CommandId::Back => Navigation::Back,
             CommandId::Forward => Navigation::Forward,
             CommandId::Up => Navigation::Up,
@@ -2733,7 +3240,10 @@ impl App {
                 self.active_tab_mut().set_view(view);
                 return Execution::Done;
             }
-            CommandId::ClearThumbnailCache => todo!("#330"),
+            CommandId::ClearThumbnailCache => {
+                self.clear_thumbnail_cache();
+                return Execution::Done;
+            }
             CommandId::InstantUnderFolder => {
                 let id = self.active_tab_id();
                 let tab = self.active_tab_mut();
