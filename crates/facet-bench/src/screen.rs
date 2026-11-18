@@ -12,7 +12,7 @@ use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use facet_core::measure::{
-    ENV_INSTANT, ENV_MENU, ENV_OPEN, ENV_OUT, ENV_RENAME, ENV_SCROLL_ROWS, ENV_SEARCH,
+    ENV_GRID, ENV_INSTANT, ENV_MENU, ENV_OPEN, ENV_OUT, ENV_RENAME, ENV_SCROLL_ROWS, ENV_SEARCH,
     ENV_START_US, ENV_WINDOWS, ScreenReport,
 };
 
@@ -624,6 +624,7 @@ pub fn run_app(
         .env_remove(ENV_OPEN)
         .env_remove(ENV_RENAME)
         .env_remove(ENV_MENU)
+        .env_remove(ENV_GRID)
         .env_remove(ENV_SEARCH)
         .env_remove(ENV_INSTANT)
         .stdin(Stdio::null());
@@ -657,6 +658,7 @@ pub fn run_app_rename(
         .env_remove(ENV_OPEN)
         .env(ENV_RENAME, format!("{from}|{to}"))
         .env_remove(ENV_MENU)
+        .env_remove(ENV_GRID)
         .env_remove(ENV_SEARCH)
         .env_remove(ENV_INSTANT)
         .stdin(Stdio::null());
@@ -710,6 +712,7 @@ pub fn run_app_search(
         .env_remove(ENV_OPEN)
         .env_remove(ENV_RENAME)
         .env_remove(ENV_MENU)
+        .env_remove(ENV_GRID)
         .env(ENV_SEARCH, query)
         .env_remove(ENV_INSTANT)
         .stdin(Stdio::null());
@@ -838,6 +841,7 @@ pub fn run_app_instant(
         .env_remove(ENV_OPEN)
         .env_remove(ENV_RENAME)
         .env_remove(ENV_MENU)
+        .env_remove(ENV_GRID)
         .env_remove(ENV_SEARCH)
         .env(ENV_INSTANT, query)
         .env(facet_core::indexer_client::ENV_PIPE, pipe)
@@ -890,6 +894,7 @@ pub fn run_app_session(
         .env_remove(ENV_OPEN)
         .env_remove(ENV_RENAME)
         .env_remove(ENV_MENU)
+        .env_remove(ENV_GRID)
         .env_remove(ENV_SEARCH)
         .env_remove(ENV_INSTANT)
         .stdin(Stdio::null());
@@ -897,7 +902,11 @@ pub fn run_app_session(
 }
 
 /// 앱을 띄워 끝나기를 기다리고(`timeout`이 지나면 멈춘다) 앱이 `out`에 쓴 결과를 읽는다.
-fn run_to_report(mut command: Command, out: &Path, timeout: Duration) -> io::Result<ScreenReport> {
+pub(crate) fn run_to_report(
+    mut command: Command,
+    out: &Path,
+    timeout: Duration,
+) -> io::Result<ScreenReport> {
     let mut child = command.spawn()?;
     let deadline = Instant::now() + timeout;
     let status = loop {

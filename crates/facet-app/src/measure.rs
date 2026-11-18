@@ -21,7 +21,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use facet_core::Location;
 use facet_core::measure::{
-    ENV_INSTANT, ENV_MENU, ENV_OPEN, ENV_OUT, ENV_RENAME, ENV_SCROLL_ROWS, ENV_SEARCH,
+    ENV_GRID, ENV_INSTANT, ENV_MENU, ENV_OPEN, ENV_OUT, ENV_RENAME, ENV_SCROLL_ROWS, ENV_SEARCH,
     ENV_START_US, ENV_WINDOWS, ScreenReport,
 };
 use slint::winit_030::winit::event::WindowEvent;
@@ -72,6 +72,13 @@ pub fn mark_loaded(window: u64, rows: usize) {
     }
 }
 
+/// #331: 그리드 측정의 종류.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GridMode {
+    Fill,
+    Scroll,
+}
+
 struct State {
     out: String,
     /// 이 창의 열쇠([`window_key`]).
@@ -94,6 +101,10 @@ struct State {
     search: Option<String>,
     /// 첫 화면 뒤에 즉시 검색에 넘길 질의 글자. 넘긴 때는 `open_started`다.
     instant: Option<String>,
+    /// #331: 첫 화면 뒤에 그리드(보통 크기)로 바꾸고 잴 것: 값 `fill`이면 한 화면 채우기, 그 밖은 스크롤.
+    grid: Option<GridMode>,
+    /// 그리드로 바꾸는 프레임을 지났다(스크롤 측정).
+    grid_started: bool,
     /// 이 횟수보다 많이 목록이 들어온 뒤의 프레임만 센다. 이동한 폴더의 목록을 기다릴 때 쓴다.
     loads_seen: usize,
     report: ScreenReport,
@@ -135,6 +146,11 @@ pub fn instant_enabled() -> bool {
     is_enabled() && std::env::var_os(ENV_INSTANT).is_some_and(|v| !v.is_empty())
 }
 
+/// 그리드 측정인가(측정 모드이고 [`ENV_GRID`]가 있다). 이때만 측정 모드에서도 썸네일을 켠다.
+pub fn grid_enabled() -> bool {
+    is_enabled() && std::env::var_os(ENV_GRID).is_some_and(|v| !v.is_empty())
+}
+
 /// 측정 모드이면 프레임 세기(창의 winit 이벤트마다 부를 것)를 돌려준다. 아니면 `None`이다.
 ///
 /// Slint는 창마다 winit 이벤트 훅을 하나만 두므로 훅은 `main`이 걸고, 키 위치 적기([`crate::keys`])와 이것을
@@ -164,6 +180,17 @@ pub fn frame_counter(ui: &AppWindow, key: u64) -> Option<impl FnMut(&WindowEvent
         menu_selecting: false,
         search: std::env::var(ENV_SEARCH).ok().filter(|v| !v.is_empty()),
         instant: std::env::var(ENV_INSTANT).ok().filter(|v| !v.is_empty()),
+        grid: std::env::var(ENV_GRID)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .map(|v| {
+                if v == "fill" {
+                    GridMode::Fill
+                } else {
+                    GridMode::Scroll
+                }
+            }),
+        grid_started: false,
         loads_seen: 0,
         report: ScreenReport::default(),
         last_frame: None,
@@ -268,6 +295,20 @@ fn presented(weak: &slint::Weak<AppWindow>, state: &Mutex<State>) {
                 });
                 return;
             }
+            if s.grid.is_some() {
+                // 그리드로 바꾼 프레임부터 잰다(바꾸기 전 프레임은 세지 않음, 아래).
+                s.loads_seen = window_loads(s.key);
+                s.open_started = Some(Instant::now());
+                drop(s);
+                crate::with_first_view(|view| {
+                    if !view.measure_grid_start()
+                        && let Ok(mut s) = state.lock()
+                    {
+                        s.finish();
+                    }
+                });
+                return;
+            }
             if s.menu {
                 // 먼저 전체를 선택하고 그 프레임이 나가면 메뉴를 연다(선택을 그리는 비용이 메뉴 시간에 섞이지 않게).
                 s.loads_seen = window_loads(s.key);
@@ -299,6 +340,30 @@ fn presented(weak: &slint::Weak<AppWindow>, state: &Mutex<State>) {
                 }
             });
             return;
+        } else if let Some(mode) = s.grid {
+            let started = s.open_started.unwrap_or(now);
+            if mode == GridMode::Fill {
+                drop(s);
+                let filled = crate::with_first_view_value(|view| view.measure_grid_filled());
+                let Ok(mut s) = state.lock() else { return };
+                if filled {
+                    s.report.grid_fill = Some(now - started);
+                    s.report.rows = ROWS.load(Ordering::Relaxed);
+                    s.finish();
+                } else {
+                    // 아직 덜 찬 프레임: 다음 썸네일이 들어오기를 기다린다.
+                    s.loads_seen = window_loads(s.key);
+                }
+                return;
+            }
+            if s.grid_started {
+                if let Some(last) = s.last_frame {
+                    s.report.frames.push(now - last);
+                }
+            } else {
+                s.grid_started = true;
+                s.report.rows = ROWS.load(Ordering::Relaxed);
+            }
         } else if let Some(started) = s.open_started {
             if s.search.is_some() {
                 let rows = ROWS.load(Ordering::Relaxed);
@@ -352,6 +417,14 @@ fn presented(weak: &slint::Weak<AppWindow>, state: &Mutex<State>) {
 /// 목록을 `scroll_rows`행 내린다. 더 내릴 곳이 없으면 측정을 끝낸다.
 fn step(ui: &AppWindow, state: &Mutex<State>) {
     let Ok(mut s) = state.lock() else { return };
+    if s.grid.is_some() {
+        // #331: 그리드는 한 줄(칸 높이)씩이 아니라 `scroll_rows`행(칸 줄)씩 내린다.
+        match ui_grid_step(ui, s.scroll_rows) {
+            Some(at_end) => s.at_end = at_end,
+            None => s.finish(),
+        }
+        return;
+    }
     // 측정은 패널 하나(왼쪽)로 한다.
     let count = ui.get_left_rows().row_count();
     let row_height = ui.get_row_height();
@@ -365,4 +438,22 @@ fn step(ui: &AppWindow, state: &Mutex<State>) {
     }
     s.at_end = next >= max_offset;
     ui.set_left_content_y(-next);
+}
+
+/// #331: 그리드 목록을 `lines`줄 내린다. 내렸으면 맨 끝에 닿았는지, 더 내릴 곳이 없으면 `None`이다.
+fn ui_grid_step(ui: &AppWindow, lines: usize) -> Option<bool> {
+    let cell = ui.get_left_grid_cell_height();
+    let columns = usize::try_from(ui.get_left_grid_columns())
+        .unwrap_or(1)
+        .max(1);
+    let len = ui.get_left_rows().row_count();
+    let max_offset =
+        (len.div_ceil(columns) as f32 * cell - ui.get_left_grid_view_height()).max(0.0);
+    let current = -ui.get_left_grid_content_y();
+    let next = (current + lines as f32 * cell).min(max_offset);
+    if next <= current {
+        return None;
+    }
+    ui.set_left_grid_content_y(-next);
+    Some(next >= max_offset)
 }
