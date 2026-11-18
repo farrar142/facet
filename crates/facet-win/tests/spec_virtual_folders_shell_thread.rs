@@ -22,7 +22,6 @@ fn thread_id(shell: &ShellThread) -> ThreadId {
 }
 
 #[test]
-#[ignore = "#349"]
 fn jobs_run_on_one_dedicated_thread() {
     let shell = ShellThread::new();
     assert_eq!(shell.call(LONG, || 6 * 7), Ok(42));
@@ -37,14 +36,12 @@ fn jobs_run_on_one_dedicated_thread() {
 }
 
 #[test]
-#[ignore = "#349"]
 fn the_thread_is_a_com_sta() {
     let shell = ShellThread::new();
     assert_eq!(shell.call(LONG, apartment_is_sta), Ok(true));
 }
 
 #[test]
-#[ignore = "#349"]
 fn a_stalled_job_times_out_without_waiting_for_it() {
     let shell = ShellThread::new();
     let stall = Duration::from_secs(3);
@@ -66,7 +63,6 @@ fn a_stalled_job_times_out_without_waiting_for_it() {
 }
 
 #[test]
-#[ignore = "#349"]
 fn after_a_timeout_the_next_call_runs_at_once_on_a_new_thread() {
     let shell = ShellThread::new();
     let before = thread_id(&shell);
@@ -101,7 +97,6 @@ fn after_a_timeout_the_next_call_runs_at_once_on_a_new_thread() {
 }
 
 #[test]
-#[ignore = "#349"]
 fn a_panicking_job_fails_and_the_thread_stays_usable() {
     let shell = ShellThread::new();
     let result: Result<u32, CallError> = shell.call(LONG, || panic!("시험용 패닉"));
@@ -111,7 +106,6 @@ fn a_panicking_job_fails_and_the_thread_stays_usable() {
 }
 
 #[test]
-#[ignore = "#349"]
 fn the_thread_can_be_shared_between_threads() {
     let shell = Arc::new(ShellThread::new());
     let handles: Vec<_> = (0..4)
