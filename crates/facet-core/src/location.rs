@@ -55,7 +55,30 @@ pub enum SearchKind {
     },
 }
 
+/// #350: 가상 폴더 위치의 종류.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VirtualFolder {
+    ThisPc,
+    RecycleBin,
+    Device,
+}
+
 impl Location {
+    /// #350: 「내 PC」 위치.
+    pub fn this_pc() -> Location {
+        todo!("#350")
+    }
+
+    /// #352: 「휴지통」 위치.
+    pub fn recycle_bin() -> Location {
+        todo!("#352")
+    }
+
+    /// #350: 가상 폴더 위치면 그 종류.
+    pub fn virtual_folder(&self) -> Option<VirtualFolder> {
+        todo!("#350")
+    }
+
     /// 실제 폴더 `path`의 위치.
     pub fn file_system(path: impl Into<PathBuf>) -> Self {
         Self::FileSystem(path.into())
@@ -183,6 +206,8 @@ pub enum ListError {
         location: Location,
         source: io::Error,
     },
+    /// #355: 셸 호출이 시간 제한 안에 응답하지 않았다.
+    NotResponding { location: Location },
 }
 
 impl ListError {
@@ -201,6 +226,7 @@ impl ListError {
             Self::NotFound { location }
             | Self::PermissionDenied { location }
             | Self::NotAFolder { location }
+            | Self::NotResponding { location }
             | Self::Io { location, .. } => location,
         }
     }
@@ -217,6 +243,7 @@ impl fmt::Display for ListError {
             Self::Io { location, source } => {
                 write!(f, "위치를 읽지 못했습니다: {location}: {source}")
             }
+            Self::NotResponding { .. } => todo!("#355"),
         }
     }
 }

@@ -542,6 +542,7 @@ fn read_subfolders(
             ListError::PermissionDenied { .. } => SubfoldersError::PermissionDenied,
             ListError::NotAFolder { .. } => SubfoldersError::NotAFolder,
             ListError::Io { source, .. } => SubfoldersError::Io(source.kind()),
+            ListError::NotResponding { .. } => todo!("#355"),
         })?;
     let mut folders: Vec<Candidate> = items
         .into_iter()
@@ -706,6 +707,10 @@ pub enum Execution {
     /// 검색 결과에서 열려던 항목(열기·새 탭에서 열기·「폴더에서 보기」)이 디스크에 없다: 열지 않고 결과에서 뺐다(폴더면 그
     /// 아래 결과까지). 화면은 그 까닭([`Tab::missing_item`]의 경로)을 상태 줄에 보인다.
     ItemMissing,
+    /// #348: 위치의 되는 일이 막아 아무것도 하지 않았다.
+    NotAllowedHere,
+    /// #354: 휴지통 비우기 전에 화면이 확인을 받는다.
+    ConfirmEmptyRecycleBin,
 }
 
 /// 경로의 항목이 디스크에 없는가(없음·경로 없음만. 권한 등 다른 오류는 있는 것으로 보아 여는 쪽에 맡긴다).
@@ -2567,6 +2572,10 @@ impl App {
         let navigation = match command {
             CommandId::Open => return self.open_cursor_item(),
             CommandId::OpenWith | CommandId::Properties => todo!("#321"),
+            CommandId::OpenThisPc => todo!("#350"),
+            CommandId::OpenRecycleBin => todo!("#352"),
+            CommandId::Restore => todo!("#353"),
+            CommandId::EmptyRecycleBin => todo!("#354"),
             CommandId::TogglePreview => todo!("#339"),
             CommandId::Back => Navigation::Back,
             CommandId::Forward => Navigation::Forward,
@@ -3162,7 +3171,8 @@ impl App {
             | JobKind::Redo
             | JobKind::Delete
             | JobKind::Recycle
-            | JobKind::BatchRename => return None,
+            | JobKind::BatchRename
+            | JobKind::Restore => return None,
         };
         if !self.can_execute(command) {
             return None;
@@ -3580,6 +3590,16 @@ impl App {
         } else {
             self.recycle(sources)
         }
+    }
+
+    /// #355: 탭 `tab`의 실패한 읽기를 다시 한다. 다시 할 읽기가 없으면 `false`.
+    pub fn retry(&mut self, _tab: TabId) -> bool {
+        todo!("#355")
+    }
+
+    /// #354: 휴지통을 비우는 작업을 넣는다(화면이 확인한 뒤). 넣은 작업이 없으면 `None`.
+    pub fn empty_recycle_bin(&mut self) -> Option<JobId> {
+        todo!("#354")
     }
 
     /// 삭제(`command`가 [`CommandId::Delete`])·영구 삭제([`CommandId::DeletePermanently`])할 내용: 원본은 활성 탭의

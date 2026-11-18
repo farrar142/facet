@@ -1201,6 +1201,7 @@ fn job_row(entry: &JobEntry) -> JobRow {
             JobKind::Recycle => JobType::Recycle,
             JobKind::Delete => JobType::Delete,
             JobKind::BatchRename => JobType::BatchRename,
+            JobKind::Restore => todo!("#353"),
         },
         target: entry.target.display().to_string().into(),
         status: match entry.state {
@@ -2006,6 +2007,8 @@ impl View {
                     // 위치 열은 검색 결과 목록에만 있다(머리글은 아직 그리지 않는다).
                     Column::Location => 4,
                     Column::Matches => 5,
+                    Column::TotalSize | Column::FreeSpace => todo!("#351"),
+                    Column::OriginalLocation | Column::DateDeleted => todo!("#352"),
                 },
                 sort_descending: sort.direction == Direction::Descending,
                 item_count: count(status.item_count),
@@ -2220,6 +2223,8 @@ impl View {
             Execution::ContentSearch => self.begin_search(true),
             Execution::ConfirmDelete(warning) => self.open_delete(warning),
             Execution::ItemMissing => self.show_missing_item(),
+            Execution::NotAllowedHere => todo!("#348"),
+            Execution::ConfirmEmptyRecycleBin => todo!("#354"),
             Execution::UndoRefused(_) | Execution::Disabled | Execution::WindowClosed => {}
         }
     }
@@ -4633,6 +4638,7 @@ fn list_problem(error: &ListError) -> (Problem, String, String) {
         ListError::PermissionDenied { .. } => (Problem::PermissionDenied, location, String::new()),
         ListError::NotAFolder { .. } => (Problem::NotAFolder, location, String::new()),
         ListError::Io { source, .. } => (Problem::Io, location, source.to_string()),
+        ListError::NotResponding { .. } => todo!("#355"),
     }
 }
 

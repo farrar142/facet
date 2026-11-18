@@ -35,6 +35,14 @@ pub enum Column {
     Location,
     /// 일치: 내용 검색 결과의 일치 수(검색 결과 위치에만 뜻이 있다). 일치가 없는 항목은 0으로 본다.
     Matches,
+    /// #351: 내 PC 드라이브의 전체 크기.
+    TotalSize,
+    /// #351: 내 PC 드라이브의 남은 공간.
+    FreeSpace,
+    /// #352: 휴지통 항목의 원래 위치.
+    OriginalLocation,
+    /// #352: 휴지통 항목의 지운 날짜.
+    DateDeleted,
 }
 
 /// 정렬 방향.
@@ -320,6 +328,8 @@ fn compare_entries(a: &Entry, b: &Entry, sort: Sort) -> Ordering {
         Column::Size => a.item.size.cmp(&b.item.size),
         Column::Location => a.folder_key().cmp(&b.folder_key()),
         Column::Matches => a.match_count().cmp(&b.match_count()),
+        Column::TotalSize | Column::FreeSpace => todo!("#351"),
+        Column::OriginalLocation | Column::DateDeleted => todo!("#352"),
     };
     directed(key).then_with(|| a.compare_names(b))
 }
