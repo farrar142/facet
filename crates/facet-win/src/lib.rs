@@ -38,6 +38,8 @@
 //!   그 스레드를 버리고 다음 요청은 새 스레드에서, 패닉은 그 요청만 실패). Windows가 아니면 COM 없는 보통 스레드다.
 //! - [`shell_folder`]: 셸 폴더 하나(PIDL 바이트로 가리킴)의 표시 이름과 항목 열거(표시 이름·실제 경로·폴더 여부·PIDL).
 //!   COM STA 스레드([`shell_thread`])에서만 부른다. 셸 공급자(내 PC)가 쓴다. Windows가 아니면 「지원하지 않음」이다.
+//! - [`shell_transfer`]: 셸 항목(휴대폰 등 실제 경로가 없는 항목)과 PC 사이의 파일 전송(스트림으로 읽어 파일에 쓰기,
+//!   `IFileOperation`으로 넣기·폴더 만들기·영구 삭제). COM STA 스레드에서만 부른다. Windows가 아니면 「지원하지 않음」이다.
 //! - [`shell_copy`]: **측정 전용** 셸 복사(`IFileOperation`, 전용 스레드의 COM, 대화 없음). 탐색기 비교 측정만 부르고
 //!   앱은 부르지 않는다. Windows가 아니면 「지원하지 않음」이다.
 
@@ -60,6 +62,7 @@ pub mod recycle;
 pub mod shell_copy;
 pub mod shell_folder;
 pub mod shell_thread;
+pub mod shell_transfer;
 pub mod single_instance;
 mod watch;
 #[cfg(windows)]
@@ -90,6 +93,8 @@ mod windows_shell_copy;
 mod windows_shell_folder;
 #[cfg(windows)]
 mod windows_shell_thread;
+#[cfg(windows)]
+mod windows_shell_transfer;
 #[cfg(windows)]
 mod windows_watch;
 

@@ -3194,12 +3194,13 @@ impl App {
                     .selected_items()
                     .next()
                     .is_some_and(|item| item.is_folder),
-            location_is_folder: tab.location().file_system_path().is_some(),
+            // 휴대폰 안 폴더는 PC와 주고받는 폴더로 본다(되는 일이 막는 명령은 [`App::context_menu`]가 끈다).
+            location_is_folder: crate::shell_provider::transfer_folder(tab.location()).is_some(),
             location_is_results: tab.location().is_search_results(),
             panel_count: window.panels().len(),
-            opposite_is_folder: window
-                .opposite_panel()
-                .is_some_and(|other| other.active_tab().location().file_system_path().is_some()),
+            opposite_is_folder: window.opposite_panel().is_some_and(|other| {
+                crate::shell_provider::transfer_folder(other.active_tab().location()).is_some()
+            }),
             clipboard_has_files: self.clipboard_has_files(),
             sort: tab.sort(),
             show_hidden: self.show_hidden,
@@ -3213,10 +3214,14 @@ impl App {
     /// 오른쪽 메뉴를 만든다([`menu::build`]). 순수 구성이라 선택이 많아도 시간이 같다.
     pub fn context_menu(&self, kind: MenuKind) -> Menu {
         let capabilities = self.active_tab().capabilities();
+        let device = crate::shell_provider::is_device_folder(self.active_tab().location());
         let mut menu = menu::build(&self.menu_context(kind));
         for entry in &mut menu.entries {
             if let menu::MenuEntry::Command(command) = entry {
                 if !command.id.is_allowed_by(&capabilities) {
+                    command.enabled = false;
+                } else if device && !self.can_execute(command.id) {
+                    // 휴대폰 안: 실제 폴더로 본 맥락이 켠 것 가운데 명령이 실행할 수 없는 것(경로 복사 등)은 끈다.
                     command.enabled = false;
                 } else if command.id == CommandId::Delete && capabilities.restore {
                     // 휴지통 안: 항목이 있으면 영구 삭제를 고를 수 있다.
@@ -3776,11 +3781,11 @@ impl App {
     /// 붙여넣을 폴더: 활성 탭의 선택이 폴더 하나면 그 안, 아니면 현재 폴더. 위치가 실제 폴더가 아니면 `None`.
     pub fn paste_target(&self) -> Option<PathBuf> {
         let tab = self.active_tab();
-        let folder = tab.location().file_system_path()?;
+        let folder = crate::shell_provider::transfer_folder(tab.location())?;
         let mut selected = tab.selected_items();
         match (selected.next(), selected.next()) {
             (Some(item), None) if item.is_folder => Some(folder.join(&item.name)),
-            _ => Some(folder.to_path_buf()),
+            _ => Some(folder),
         }
     }
 
@@ -3897,13 +3902,13 @@ impl App {
     /// 위치) `None`이다. 확인 줄은 이것을 보이고, 확인하면 [`App::start_transfer`]에 넘긴다.
     pub fn transfer_plan(&self, kind: JobKind) -> Option<TransferPlan> {
         let sources = self.transfer_sources(kind)?;
-        let target = self
-            .active_window()
-            .opposite_panel()?
-            .active_tab()
-            .location()
-            .file_system_path()?
-            .to_path_buf();
+        // 반대편이 휴대폰 안 폴더면 그 항목 경로로 넣는다(휴대폰과 PC 사이의 작업).
+        let target = crate::shell_provider::transfer_folder(
+            self.active_window()
+                .opposite_panel()?
+                .active_tab()
+                .location(),
+        )?;
         Some(TransferPlan {
             kind,
             sources,
@@ -3941,6 +3946,10 @@ impl App {
         if !capabilities.copy_from && !capabilities.move_items {
             return None;
         }
+        // 휴대폰 항목은 실제 파일 경로가 없어 다른 앱으로 끌어 줄 수 없다(반대편 패널로 복사·이동으로 옮긴다).
+        if crate::shell_provider::is_device_folder(self.active_tab().location()) {
+            return None;
+        }
         self.selected_sources()
     }
 
@@ -3954,6 +3963,18 @@ impl App {
                 .map(|item| item.recycled().to_path_buf())
                 .collect();
             return (!paths.is_empty()).then_some(paths);
+        }
+        // 휴대폰 안 항목은 휴대폰 항목 경로다(셸 공급자가 적어 둔 표로 셸 항목을 찾는다).
+        if crate::shell_provider::is_device_folder(tab.location()) {
+            let folder = crate::shell_provider::device_folder_path(tab.location())?;
+            let mut sources: Vec<PathBuf> = tab
+                .selected_items()
+                .map(|item| folder.join(&item.name))
+                .collect();
+            if sources.is_empty() {
+                sources.push(folder.join(&tab.cursor_item()?.name));
+            }
+            return Some(sources);
         }
         // 실제 폴더이거나 검색 결과 위치여야 한다. 결과 항목은 항목마다 제 폴더 경로다.
         if tab.location().file_system_path().is_none() && !tab.location().is_search_results() {
@@ -3969,11 +3990,9 @@ impl App {
     /// 대상 선택 창에 보일 내용. 그 복사·이동을 지금 실행할 수 없으면 `None`이다.
     pub fn transfer_choice(&self, kind: JobKind) -> Option<TransferChoice> {
         let sources = self.transfer_sources(kind)?;
-        let opposite = self
-            .active_window()
-            .opposite_panel()
-            .and_then(|panel| panel.active_tab().location().file_system_path())
-            .map(PathBuf::from);
+        let opposite = self.active_window().opposite_panel().and_then(|panel| {
+            crate::shell_provider::transfer_folder(panel.active_tab().location())
+        });
         Some(TransferChoice {
             kind,
             sources,
@@ -4030,7 +4049,10 @@ impl App {
             OperationKind::Copy
         };
         self.journals.insert(id, (kind, journal));
-        push_recent(&mut self.recent_targets, plan.target.clone());
+        // 휴대폰 폴더는 글자로 다시 고를 수 없어(주소창 해석이 없다) 최근 대상에 넣지 않는다.
+        if !crate::shell_provider::is_device_path(&plan.target) {
+            push_recent(&mut self.recent_targets, plan.target.clone());
+        }
         self.work_area
             .add(id, plan.kind, plan.target.clone(), plan.sources.len());
         // 넣자마자 온 대기 사건을 바로 반영한다.
@@ -4402,7 +4424,9 @@ impl App {
         }
         let sources = self.selected_sources()?;
         let in_bin = self.active_tab().capabilities().restore;
-        let warning = if command == CommandId::DeletePermanently || in_bin {
+        // 휴대폰에는 휴지통이 없다: 지우기는 늘 영구 삭제다.
+        let on_device = crate::shell_provider::is_device_folder(self.active_tab().location());
+        let warning = if command == CommandId::DeletePermanently || in_bin || on_device {
             Some(DeleteWarning::Permanent)
         } else if crate::job::deletes_permanently(&sources) {
             Some(DeleteWarning::NoRecycleBin)
@@ -4479,6 +4503,9 @@ impl App {
                 NotUndoable::PermanentDelete,
             )
             .with_completed(summary.items_deleted)
+        } else if let Some(reason) = journal.not_undoable {
+            // 휴대폰과의 전송: 휴대폰 쪽을 바꿨다(넣음·원본 삭제).
+            Record::not_undoable(kind, journal.steps, reason)
         } else if journal.overwrote {
             Record::not_undoable(kind, journal.steps, NotUndoable::Overwritten)
         } else {

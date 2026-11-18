@@ -77,6 +77,7 @@ use facet_core::menu::MenuEntry;
 use facet_core::placement::{self, Monitor, Rect, WindowState};
 use facet_core::selection::{CursorMove, Pick};
 use facet_core::session::{self, Loaded, SAVE_DELAY, Saver};
+use facet_core::shell_provider;
 use facet_core::tab::{AutoRefresh, Navigation, ReadOutcome, Relocation, Tab};
 use facet_core::view::{GridLayout, GridMove, ViewMode};
 use facet_core::window::{
@@ -1262,7 +1263,7 @@ fn job_row(entry: &JobEntry) -> JobRow {
             JobKind::BatchRename => JobType::BatchRename,
             JobKind::Restore => JobType::Restore,
         },
-        target: entry.target.display().to_string().into(),
+        target: shell_provider::display_path(&entry.target).into(),
         status: match entry.state {
             JobState::Queued => JobStatus::Queued,
             JobState::Running => JobStatus::Running,
@@ -1304,6 +1305,7 @@ fn job_row(entry: &JobEntry) -> JobRow {
         newer: asked.newer,
         larger: asked.larger,
         can_overwrite: asked.can_overwrite,
+        can_overwrite_if_newer: asked.can_overwrite_if_newer,
         overwrite_note: asked.overwrite_note,
         error_path: asked.error_path.into(),
         error_reason: asked.error_reason,
@@ -1340,6 +1342,7 @@ fn transfer_problem(rejection: &CopyRejection, plan: &TransferPlan) -> (Transfer
             TransferProblem::TargetInsideSource,
             source.display().to_string(),
         ),
+        CopyRejection::Unsupported => (TransferProblem::Unsupported, String::new()),
     }
 }
 
@@ -1531,7 +1534,7 @@ impl View {
         self.close_transfer();
         let ui = &self.ui;
         ui.set_confirm_moving(kind == JobKind::Move);
-        ui.set_confirm_target(plan.target.display().to_string().into());
+        ui.set_confirm_target(shell_provider::display_path(&plan.target).into());
         ui.set_confirm_items(count(plan.items()));
         ui.set_confirm_problem(TransferProblem::None);
         ui.set_confirm_problem_path(SharedString::new());
@@ -5614,23 +5617,24 @@ impl View {
                 .and_then(|tab| tab.get(row))
                 .is_some_and(|item| item.is_folder)
         });
+        // 휴대폰 안 폴더도 놓을 곳이다(휴대폰 항목 경로로 넣어 휴대폰과 PC 사이의 복사·이동이 된다).
         let folder = match place {
             Place::FolderRow { panel, row } => tab_of(panel).and_then(|tab| {
                 let item = tab.get(row)?;
-                Some(tab.location().file_system_path()?.join(&item.name))
+                Some(shell_provider::transfer_folder(tab.location())?.join(&item.name))
             }),
             Place::Panel { panel } => {
-                tab_of(panel).and_then(|tab| tab.location().file_system_path().map(PathBuf::from))
+                tab_of(panel).and_then(|tab| shell_provider::transfer_folder(tab.location()))
             }
             Place::Tab { panel, tab } => window
                 .panels()
                 .get(panel)
                 .and_then(|panel| panel.tabs().nth(tab))
-                .and_then(|(_, tab)| tab.location().file_system_path().map(PathBuf::from)),
+                .and_then(|(_, tab)| shell_provider::transfer_folder(tab.location())),
             Place::Crumb { panel, crumb } => tab_of(panel).and_then(|tab| {
                 let segments = provider_for(tab.location()).segments(tab.location());
                 let segment = segments.into_iter().nth(crumb)?;
-                segment.location.file_system_path().map(PathBuf::from)
+                shell_provider::transfer_folder(&segment.location)
             }),
             Place::FileRow | Place::Outside => None,
         };

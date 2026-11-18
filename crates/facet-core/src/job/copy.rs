@@ -960,16 +960,6 @@ impl<'a> Copier<'a> {
         target: &Path,
         can_overwrite: bool,
     ) -> Option<Resolution> {
-        if let Some(preset) = self.preset.take()
-            && (can_overwrite || !preset.overwrites())
-        {
-            return Some(preset);
-        }
-        if let Some(remembered) = self.remembered
-            && (can_overwrite || !remembered.overwrites())
-        {
-            return Some(remembered);
-        }
         let conflict = Conflict {
             source: conflict_item(source),
             target: conflict_item(target),
@@ -977,6 +967,22 @@ impl<'a> Copier<'a> {
             // 휴지통이 있는 위치면 원래 대상을 휴지통으로 보낸 뒤 덮어쓰므로 되살릴 수 있다.
             overwrite_is_permanent: can_overwrite && !recycle::has_recycle_bin(target),
         };
+        self.answer_conflict(conflict)
+    }
+
+    /// 이름 충돌 `conflict`의 답: 미리 받은 답·「나머지에도 적용」한 답이 이 충돌에 쓸 수 있으면
+    /// ([`Conflict::allows`]) 그것, 아니면 묻는다. 취소되면 `None`.
+    pub(super) fn answer_conflict(&mut self, conflict: Conflict) -> Option<Resolution> {
+        if let Some(preset) = self.preset.take()
+            && conflict.allows(preset)
+        {
+            return Some(preset);
+        }
+        if let Some(remembered) = self.remembered
+            && conflict.allows(remembered)
+        {
+            return Some(remembered);
+        }
         let answer = self.context.ask_conflict(conflict)?;
         if answer.apply_to_rest {
             self.remembered = Some(answer.resolution);
@@ -1281,7 +1287,7 @@ impl<'a> Copier<'a> {
     /// - 휴지통이 없는 위치이거나 셸이 휴지통에 넣지 않으려 하면(휴지통보다 큰 파일, 휴지통을 끈 볼륨) S3처럼
     ///   바꿔치기(`file_ops::replace`, 읽기 전용 대상도)로 영구 덮어쓴다([`Replaced::Permanently`]).
     ///   `permanent_overwrite`가 꺼져 있으면(다시 실행) 덮어쓰지 않고 [`FileOutcome::Refused`]다.
-    fn place(&mut self, temp: &Path, target: &Path) -> FileOutcome {
+    pub(super) fn place(&mut self, temp: &Path, target: &Path) -> FileOutcome {
         if recycle::has_recycle_bin(target) {
             let Some(old) = Stamp::read(target) else {
                 // 그 사이 원래 대상이 사라졌다: 덮어쓸 것 없이 놓는다.

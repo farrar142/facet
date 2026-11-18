@@ -33,6 +33,7 @@
 mod batch_rename;
 mod copy;
 mod delete;
+mod device;
 mod moving;
 mod recycle;
 mod restore;
@@ -349,9 +350,20 @@ pub struct Conflict {
 }
 
 impl Conflict {
-    /// #357: 「더 새것만 덮어쓰기」를 고를 수 있는지(덮어쓸 수 있고 두 쪽 모두 수정 시각이 있을 때만).
+    /// 「더 새것만 덮어쓰기」([`Resolution::OverwriteIfNewer`])를 고를 수 있는지: 덮어쓸 수 있고([`Conflict::can_overwrite`])
+    /// 두 쪽 모두 수정 시각이 있을 때만 `true`다. 날짜를 주지 않는 장치(휴대폰)와의 충돌은 어느 쪽이 새것인지 알 수
+    /// 없어 고를 수 없고, 그 답은 거부된다([`AnswerError::OverwriteNotAllowed`]). 화면은 이 값으로 그 단추를 끈다.
     pub fn can_overwrite_if_newer(&self) -> bool {
-        todo!("#357")
+        self.can_overwrite && self.source.modified.is_some() && self.target.modified.is_some()
+    }
+
+    /// 이 충돌에 `resolution`으로 답할 수 있는지.
+    pub fn allows(&self, resolution: Resolution) -> bool {
+        answer_allowed(
+            resolution,
+            self.can_overwrite,
+            self.can_overwrite_if_newer(),
+        )
     }
 }
 
@@ -442,7 +454,8 @@ pub enum AnswerError {
     /// 그 작업은 그 종류의 질문(이름 충돌, 항목별 오류, 휴지통에 들어가지 않는 항목)에 답을 기다리지 않는다(없는·끝난·취소 중인 작업, 다른
     /// 종류의 질문을 기다리는 작업 포함).
     NotAsking,
-    /// 파일과 폴더가 부딪힌 충돌에 덮어쓰기 답을 했다. 작업은 계속 답을 기다린다.
+    /// 파일과 폴더가 부딪힌 충돌에 덮어쓰기 답을 했거나, 수정 시각을 모르는 쪽이 있는 충돌에 더 새것만 덮어쓰기로
+    /// 답했다([`Conflict::can_overwrite_if_newer`]). 작업은 계속 답을 기다린다.
     OverwriteNotAllowed,
 }
 
@@ -459,6 +472,8 @@ pub enum CopyRejection {
     IntoItself(PathBuf),
     /// 대상 위치가 원본 폴더 안에 있다(값은 그 원본).
     TargetInsideSource(PathBuf),
+    /// 이 위치 사이에서는 복사·이동할 수 없다(휴대폰 안·휴대폰끼리: 휴대폰과는 PC와만 주고받는다).
+    Unsupported,
 }
 
 /// 영구 삭제·휴지통 삭제를 시작하기 전에 막은 까닭. 이때는 작업을 만들지 않는다.
@@ -477,6 +492,7 @@ enum Job {
     Recycle(recycle::RecycleJob),
     BatchRename(batch_rename::BatchRenameJob),
     Restore(restore::RestoreJob),
+    Device(device::DeviceJob),
 }
 
 impl Job {
@@ -490,6 +506,7 @@ impl Job {
             Job::Recycle(job) => job.root_count(),
             Job::BatchRename(job) => job.root_count(),
             Job::Restore(job) => job.root_count(),
+            Job::Device(job) => job.root_count(),
         }
     }
 
@@ -503,6 +520,7 @@ impl Job {
             Job::Recycle(job) => job.run(context),
             Job::BatchRename(job) => job.run(context),
             Job::Restore(job) => job.run(context),
+            Job::Device(job) => job.run(context),
         }
     }
 }
@@ -520,6 +538,9 @@ pub(crate) struct Journal {
     /// 이름 충돌에서 대상을 휴지통을 거치지 않고 영구 덮어썼다(그 작업은 되돌릴 수 없다). 휴지통으로 보내고
     /// 덮어쓴 것은 항목별 결과의 [`crate::history::Step::Overwrote`]로 남고 되돌릴 수 있다.
     pub(crate) overwrote: bool,
+    /// 이 작업 전체를 되돌릴 수 없는 까닭(휴대폰과의 전송: 휴대폰에 넣었거나 휴대폰 쪽 원본을 지웠다). 있으면 항목별
+    /// 결과와 상관없이 그 까닭으로 기록한다.
+    pub(crate) not_undoable: Option<crate::history::NotUndoable>,
 }
 
 /// 작업 스레드가 [`Journal`]을 적는 곳.
@@ -566,8 +587,11 @@ struct Flags {
 /// 작업이 묻는 질문의 종류. 답을 기다리는 동안 판에 둔다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Question {
-    /// 이름 충돌. 덮어쓰기 답을 받을 수 있는지.
-    Conflict { can_overwrite: bool },
+    /// 이름 충돌. 덮어쓰기·더 새것만 덮어쓰기 답을 받을 수 있는지.
+    Conflict {
+        can_overwrite: bool,
+        can_overwrite_if_newer: bool,
+    },
     /// 항목별 오류.
     Error,
     /// 휴지통에 들어가지 않는 항목.
@@ -583,6 +607,11 @@ enum Answer {
 }
 
 impl Control {
+    /// 취소됐는가(기다리지 않는다).
+    fn is_cancelled(&self) -> bool {
+        lock(&self.flags).cancelled
+    }
+
     /// 일시정지면 풀리거나 취소될 때까지 기다린다. 계속해도 되면 `true`, 취소됐으면 `false`.
     fn proceed(&self) -> bool {
         let mut flags = lock(&self.flags);
@@ -650,6 +679,7 @@ impl Context<'_> {
     fn ask_conflict(&self, conflict: Conflict) -> Option<ConflictAnswer> {
         let question = Question::Conflict {
             can_overwrite: conflict.can_overwrite,
+            can_overwrite_if_newer: conflict.can_overwrite_if_newer(),
         };
         let event = JobEvent::Conflict {
             job: self.id,
@@ -892,7 +922,15 @@ impl JobQueue {
     ///
     /// 일시정지하면 파일 경계를 기다리지 않고 파일 복사의 진행 콜백(덩어리 사이)에서 멈추고 훑기도 멈춘다. 취소하면
     /// 복사하다 만 파일은 지우고, 이미 다 복사한 항목은 남긴다.
+    ///
+    /// 원본이나 대상이 휴대폰 항목 경로([`crate::shell_provider::DEVICE_PATH_ROOT`] 아래)면 휴대폰과 PC 사이의 복사다:
+    /// 셸로 주고받고, 일시정지는 항목 사이에서 듣고, 휴대폰 쪽 대상을 덮어쓰면 되살릴 수 없다(휴지통 없음). 휴대폰
+    /// 안·휴대폰끼리는 [`CopyRejection::Unsupported`]다.
     pub fn copy(&mut self, sources: Vec<PathBuf>, target: PathBuf) -> Result<JobId, CopyRejection> {
+        if device::involves_device(&sources, Some(&target)) {
+            let job = device::DeviceJob::prepare_transfer(device::DeviceOp::Copy, sources, target)?;
+            return Ok(self.enqueue(Job::Device(job)));
+        }
         let job = copy::CopyJob::prepare(sources, target)?;
         Ok(self.enqueue(Job::Copy(job)))
     }
@@ -920,6 +958,10 @@ impl JobQueue {
         sources: Vec<PathBuf>,
         target: PathBuf,
     ) -> Result<JobId, CopyRejection> {
+        if device::involves_device(&sources, Some(&target)) {
+            let job = device::DeviceJob::prepare_transfer(device::DeviceOp::Move, sources, target)?;
+            return Ok(self.enqueue(Job::Device(job)));
+        }
         let job = moving::MoveJob::prepare(sources, target)?;
         Ok(self.enqueue(Job::Move(job)))
     }
@@ -954,6 +996,16 @@ impl JobQueue {
         target: PathBuf,
     ) -> Result<(JobId, JournalSink), CopyRejection> {
         let journal = JournalSink::default();
+        if device::involves_device(&sources, Some(&target)) {
+            let op = match kind {
+                JobKind::Copy => device::DeviceOp::Copy,
+                JobKind::Move => device::DeviceOp::Move,
+                _ => return Err(CopyRejection::NoSources),
+            };
+            let mut job = device::DeviceJob::prepare_transfer(op, sources, target)?;
+            job.journal = Some(Arc::clone(&journal));
+            return Ok((self.enqueue(Job::Device(job)), journal));
+        }
         let job = match kind {
             JobKind::Copy => {
                 let mut job = copy::CopyJob::prepare(sources, target)?;
@@ -1007,7 +1059,13 @@ impl JobQueue {
     /// - 260자를 넘는 경로도 지운다.
     ///
     /// 지운 항목 수는 [`Summary::items_deleted`]다.
+    ///
+    /// 휴대폰 항목 경로가 섞였으면 휴대폰 항목은 셸로 영구 삭제한다(휴대폰에는 휴지통이 없다, 폴더는 셸 호출 하나로 안까지).
     pub fn delete_permanently(&mut self, sources: Vec<PathBuf>) -> Result<JobId, DeleteRejection> {
+        if device::involves_device(&sources, None) {
+            let job = device::DeviceJob::prepare_delete(sources)?;
+            return Ok(self.start_at_once(Job::Device(job)));
+        }
         let job = delete::DeleteJob::prepare(sources)?;
         Ok(self.start_at_once(Job::Delete(job)))
     }
@@ -1019,6 +1077,11 @@ impl JobQueue {
         sources: Vec<PathBuf>,
     ) -> Result<(JobId, JournalSink), DeleteRejection> {
         let journal = JournalSink::default();
+        if device::involves_device(&sources, None) {
+            let mut job = device::DeviceJob::prepare_delete(sources)?;
+            job.journal = Some(Arc::clone(&journal));
+            return Ok((self.start_at_once(Job::Device(job)), journal));
+        }
         let mut job = delete::DeleteJob::prepare(sources)?;
         job.journal = Some(Arc::clone(&journal));
         Ok((self.start_at_once(Job::Delete(job)), journal))
@@ -1253,13 +1316,17 @@ impl JobQueue {
         let Some(slot) = board.jobs.get_mut(&job) else {
             return Err(AnswerError::NotAsking);
         };
-        let Some(Question::Conflict { can_overwrite }) = slot.question else {
+        let Some(Question::Conflict {
+            can_overwrite,
+            can_overwrite_if_newer,
+        }) = slot.question
+        else {
             return Err(AnswerError::NotAsking);
         };
         if slot.cancelling || slot.state != JobState::AwaitingAnswer {
             return Err(AnswerError::NotAsking);
         }
-        if answer.resolution.overwrites() && !can_overwrite {
+        if !answer_allowed(answer.resolution, can_overwrite, can_overwrite_if_newer) {
             return Err(AnswerError::OverwriteNotAllowed);
         }
         slot.question = None;
@@ -1360,6 +1427,20 @@ impl JobQueue {
             .spawn(move || run_job(id, job, &control, &shared, &outbox))
             .expect("작업 스레드를 띄우지 못했다");
         true
+    }
+}
+
+/// 이름 충돌에 `resolution`으로 답할 수 있는지(덮어쓰기는 `can_overwrite`, 더 새것만 덮어쓰기는
+/// `can_overwrite_if_newer`일 때만).
+fn answer_allowed(
+    resolution: Resolution,
+    can_overwrite: bool,
+    can_overwrite_if_newer: bool,
+) -> bool {
+    match resolution {
+        Resolution::Overwrite => can_overwrite,
+        Resolution::OverwriteIfNewer => can_overwrite_if_newer,
+        Resolution::Skip | Resolution::KeepBoth => true,
     }
 }
 
@@ -1490,6 +1571,71 @@ mod tests {
     fn windows는_대소문자를_가리지_않는다() {
         assert!(is_within(Path::new(r"C:\Foo\Bar"), Path::new(r"c:\foo")));
         assert!(same_path(Path::new(r"C:\Foo"), Path::new(r"c:\FOO")));
+    }
+
+    /// 답을 기다리는 이름 충돌 하나를 판에 둔 대기열.
+    fn asking(can_overwrite: bool, can_overwrite_if_newer: bool) -> (JobQueue, JobId) {
+        let queue = JobQueue::new();
+        let id = JobId::for_test(7);
+        queue.shared.board().jobs.insert(
+            id,
+            Slot {
+                state: JobState::AwaitingAnswer,
+                job: None,
+                control: Arc::default(),
+                cancelling: false,
+                question: Some(Question::Conflict {
+                    can_overwrite,
+                    can_overwrite_if_newer,
+                }),
+            },
+        );
+        (queue, id)
+    }
+
+    #[test]
+    fn 날짜를_모르는_충돌은_더_새것만_덮어쓰기_답을_거부한다() {
+        let (mut queue, id) = asking(true, false);
+        assert_eq!(
+            queue.answer_conflict(id, ConflictAnswer::once(Resolution::OverwriteIfNewer)),
+            Err(AnswerError::OverwriteNotAllowed)
+        );
+        assert_eq!(queue.state(id), Some(JobState::AwaitingAnswer));
+        // 덮어쓰기는 그대로 받는다.
+        assert_eq!(
+            queue.answer_conflict(id, ConflictAnswer::once(Resolution::Overwrite)),
+            Ok(())
+        );
+        assert_eq!(queue.state(id), Some(JobState::Running));
+    }
+
+    #[test]
+    fn 날짜가_있으면_더_새것만_덮어쓰기_답을_받는다() {
+        let (mut queue, id) = asking(true, true);
+        assert_eq!(
+            queue.answer_conflict(id, ConflictAnswer::once(Resolution::OverwriteIfNewer)),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn 충돌이_허락하는_답() {
+        let item = |modified: Option<SystemTime>| ConflictItem {
+            path: PathBuf::from("a"),
+            kind: ItemKind::File,
+            size: Some(1),
+            modified,
+        };
+        let conflict = Conflict {
+            source: item(None),
+            target: item(Some(SystemTime::UNIX_EPOCH)),
+            can_overwrite: true,
+            overwrite_is_permanent: true,
+        };
+        assert!(conflict.allows(Resolution::Overwrite));
+        assert!(!conflict.allows(Resolution::OverwriteIfNewer));
+        assert!(conflict.allows(Resolution::Skip));
+        assert!(conflict.allows(Resolution::KeepBoth));
     }
 
     #[test]

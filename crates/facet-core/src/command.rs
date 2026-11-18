@@ -508,18 +508,18 @@ impl CommandId {
             CommandId::Forward => tab.can_go_forward(),
             CommandId::Up => tab.can_go_up(),
             CommandId::SelectAll => !tab.is_empty(),
+            // 휴대폰 안 항목도 PC와 주고받는다(클립보드에는 올릴 수 없다).
             CommandId::CopyToOtherPanel
             | CommandId::MoveToOtherPanel
             | CommandId::CopyTo
-            | CommandId::MoveTo
-            | CommandId::Copy
-            | CommandId::Cut => has_sources(tab),
-            // 붙여넣을 곳(현재 폴더)이 실제 폴더여야 한다. 클립보드에 파일이 있는지는 앱 상태다. 검색 결과 위치에서는
-            // 붙여넣을 폴더가 없어 꺼진다.
-            CommandId::Paste => tab.location().file_system_path().is_some(),
-            // 휴지통 안에서도 고른 항목(없으면 커서 항목)을 영구 삭제할 수 있다.
+            | CommandId::MoveTo => has_transfer_sources(tab),
+            CommandId::Copy | CommandId::Cut => has_sources(tab),
+            // 붙여넣을 곳(현재 폴더)이 실제 폴더나 휴대폰 안 폴더여야 한다. 클립보드에 파일이 있는지는 앱 상태다. 검색
+            // 결과 위치에서는 붙여넣을 폴더가 없어 꺼진다.
+            CommandId::Paste => crate::shell_provider::transfer_folder(tab.location()).is_some(),
+            // 휴지통 안에서도 고른 항목(없으면 커서 항목)을 영구 삭제할 수 있다. 휴대폰 안 항목은 영구 삭제다.
             CommandId::Delete | CommandId::DeletePermanently => {
-                has_sources(tab)
+                has_transfer_sources(tab)
                     || (in_recycle_bin(tab)
                         && (tab.selected_items().next().is_some() || tab.cursor_item().is_some()))
             }
@@ -618,10 +618,9 @@ impl CommandId {
         match self {
             CommandId::SwitchPanel => window.is_split(),
             CommandId::CopyToOtherPanel | CommandId::MoveToOtherPanel => {
-                window
-                    .opposite_panel()
-                    .is_none_or(|other| other.active_tab().location().file_system_path().is_some())
-                    && self.is_enabled_in(window.active_panel())
+                window.opposite_panel().is_none_or(|other| {
+                    crate::shell_provider::transfer_folder(other.active_tab().location()).is_some()
+                }) && self.is_enabled_in(window.active_panel())
             }
             command => command.is_enabled_in(window.active_panel()),
         }
@@ -658,6 +657,13 @@ impl CommandState for Window {
 /// 검색 결과 위치).
 fn has_sources(tab: &Tab) -> bool {
     has_real_items(tab) && (tab.selected_items().next().is_some() || tab.cursor_item().is_some())
+}
+
+/// 복사·이동·삭제할 원본이 있는가: [`has_sources`]이거나, 휴대폰 안 폴더에서 선택이나 커서 항목이 있다(휴대폰
+/// 항목은 PC와 주고받고 영구 삭제한다).
+fn has_transfer_sources(tab: &Tab) -> bool {
+    (has_real_items(tab) || crate::shell_provider::is_device_folder(tab.location()))
+        && (tab.selected_items().next().is_some() || tab.cursor_item().is_some())
 }
 
 /// 탭 위치가 휴지통인가(항목을 영구 삭제할 수 있다).
