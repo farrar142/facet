@@ -39,7 +39,7 @@ fn failed(error: &windows::core::Error) -> ShellFolderError {
 }
 
 /// 셸이 준 글자(`CoTaskMemAlloc`)를 읽고 푼다.
-fn take_string(text: PWSTR) -> String {
+pub(crate) fn take_string(text: PWSTR) -> String {
     // SAFETY: text는 셸이 돌려준 NUL로 끝나는 UTF-16 글자다. 읽은 뒤 한 번만 푼다.
     let value = unsafe { text.to_string() }.unwrap_or_default();
     // SAFETY: 셸이 CoTaskMemAlloc으로 준 메모리이고 여기서 한 번만 푼다.
@@ -54,10 +54,10 @@ fn name_of(item: &IShellItem, kind: SIGDN) -> Option<String> {
 }
 
 /// 바이트를 정렬된 COM 메모리에 옮긴 PIDL. 버리면 푼다.
-struct OwnedId(*mut ITEMIDLIST);
+pub(crate) struct OwnedId(*mut ITEMIDLIST);
 
 impl OwnedId {
-    fn copy(id: &[u8]) -> Result<OwnedId, ShellFolderError> {
+    pub(crate) fn copy(id: &[u8]) -> Result<OwnedId, ShellFolderError> {
         // SAFETY: id.len()바이트를 할당한다. 실패하면 널이다.
         let memory = unsafe { CoTaskMemAlloc(id.len()) }.cast::<u8>();
         if memory.is_null() {
@@ -68,7 +68,7 @@ impl OwnedId {
         Ok(OwnedId(memory.cast()))
     }
 
-    fn item(&self) -> Result<IShellItem, ShellFolderError> {
+    pub(crate) fn item(&self) -> Result<IShellItem, ShellFolderError> {
         // SAFETY: self.0은 형식을 확인한(is_valid_id) PIDL이고 호출 동안 살아 있다.
         unsafe { SHCreateItemFromIDList::<IShellItem>(self.0) }.map_err(|e| failed(&e))
     }
