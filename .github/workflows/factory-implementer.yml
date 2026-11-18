@@ -100,7 +100,23 @@ jobs:
       REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@v4
+      # `ready-for-agent` needs a parent spec (sub-issue parent or `## Parent` section): without one
+      # the label comes off with a comment and nothing starts. Only a writer's label counts (#389).
+      - name: Require a parent spec
+        id: parent
+        env:
+          ISSUE: ${{ github.event.issue.number }}
+          SENDER: ${{ github.event.sender.login }}
+        run: bash .github/factory/parent-check.sh "$ISSUE" "$SENDER"
+      # A ticket that changes `.github/workflows/` is a local worker's (`ready-for-human` + `local`).
+      - name: Keep workflow tickets out
+        id: local
+        if: steps.parent.outputs.ok == 'true'
+        env:
+          ISSUE: ${{ github.event.issue.number }}
+        run: bash .github/factory/local-ticket.sh "$ISSUE"
       - name: Fill the empty tracks
+        if: steps.parent.outputs.ok == 'true' && steps.local.outputs.local != 'true'
         run: bash .github/factory/dispatch-next.sh --tickets-only --candidates "${{ github.event.issue.number }}"
 
   # Daily after KST midnight: fill the empty tracks (dispatch-next.sh skips busy ones).
@@ -184,6 +200,16 @@ jobs:
               echo "::error::#$N: mode=conflict, but its last send-back is no conflict or its PR is closed"
               go=false
             fi
+          fi
+          # A ticket without a parent spec does not start (parent-check.sh takes the label off), and a
+          # ticket that changes workflow files is left to a local worker (local-ticket.sh, #389).
+          if $go; then
+            ok=$(env -u GITHUB_OUTPUT bash .github/factory/parent-check.sh "$N" | sed -n 's/^ok=//p' | tail -n 1)
+            if [ "$ok" != true ]; then echo "::notice::#$N has no parent spec; not started"; go=false; fi
+          fi
+          if $go; then
+            lc=$(env -u GITHUB_OUTPUT bash .github/factory/local-ticket.sh "$N" | sed -n 's/^local=//p' | tail -n 1)
+            if [ "$lc" = true ]; then echo "::notice::#$N changes workflow files; left to a local worker"; go=false; fi
           fi
           if $go; then
             gh issue edit "$N" --repo "$REPO" --remove-label ready-for-agent --add-label in-progress
@@ -372,6 +398,14 @@ jobs:
             echo "::error::the agent made no commits"; exit 1
           fi
 
+      # Commits that touch `.github/workflows/` cannot be pushed (GITHUB_TOKEN has no `workflows`
+      # permission): hand the ticket to a person now, before the checks. No failure is counted and
+      # nothing is dispatched again (workflow-guard.sh, #389).
+      - name: Workflow file guard
+        id: wfguard
+        if: steps.guard.outputs.go == 'true'
+        run: bash .github/factory/workflow-guard.sh check "$N" origin/main || true
+
       # Deterministic gate: the agent's word is not enough.
       # Processes the agent left running (xtask, the app, test binaries) lock their
       # executables, and cargo then cannot rebuild them ("failed to remove file
@@ -380,7 +414,7 @@ jobs:
       # throwing the whole run away; only the second check decides the run.
       - name: Automated checks (first)
         id: checks_first
-        if: steps.guard.outputs.go == 'true'
+        if: steps.guard.outputs.go == 'true' && steps.wfguard.outputs.blocked != 'true'
         continue-on-error: true
         run: |
           for exe in xtask.exe facet.exe facet-bench.exe facet-indexer.exe facet-query.exe; do
@@ -433,7 +467,7 @@ jobs:
       # still that commit and sits on today's main.
       - name: Push and open PR
         id: pr
-        if: steps.guard.outputs.go == 'true'
+        if: steps.guard.outputs.go == 'true' && steps.wfguard.outputs.blocked != 'true'
         env:
           MODE: ${{ steps.guard.outputs.mode }}
           CONFLICT_PR: ${{ steps.guard.outputs.pr }}
@@ -443,11 +477,19 @@ jobs:
             # Conflict mode merges main on top of the PR branch, so history is not rewritten: a plain
             # push. If someone pushed to the branch meanwhile it is refused instead of dropping their
             # commits (#504).
-            git push origin "$BRANCH"
+            pushargs=(origin "$BRANCH")
           else
             # A fresh implementation starts from main and replaces an earlier attempt's branch.
-            git push --force origin "$BRANCH"
+            pushargs=(--force origin "$BRANCH")
           fi
+          if ! git push "${pushargs[@]}" 2> .factory/push.log; then
+            cat .factory/push.log
+            # A refused workflow file (a fix may have added one) is for a person, not a failure to
+            # count or retry (#389).
+            if bash .github/factory/workflow-guard.sh push-failed "$N" .factory/push.log; then exit 0; fi
+            exit 1
+          fi
+          cat .factory/push.log
           body=.factory/pr-body.md
           run="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           if [ "$MODE" = conflict ]; then
@@ -478,7 +520,9 @@ jobs:
       # right after this run and before any next ticket.
       - name: Hand over to Verify
         id: handover
-        if: steps.guard.outputs.go == 'true'
+        if: >-
+          steps.guard.outputs.go == 'true' && steps.wfguard.outputs.blocked != 'true'
+          && steps.pr.outputs.blocked != 'true'
         run: |
           gh workflow run factory-verify.yml --repo "$REPO" -f issue="$N" -f pr="${{ steps.pr.outputs.number }}"
           bash .github/factory/ledger.sh event impl-end "$N" "track=$TRACK"
