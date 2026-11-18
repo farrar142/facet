@@ -55,6 +55,10 @@ pub const ENV_SCROLL_ROWS: &str = "FACET_MEASURE_SCROLL_ROWS";
 /// 썸네일로 찬 첫 프레임이 화면에 나갈 때까지(`grid_fill`), 그 밖의 값이면 [`ENV_SCROLL_ROWS`]줄씩 끝까지 자동
 /// 스크롤하며 프레임 시간(`frame_us`)을 모은다.
 pub const ENV_GRID: &str = "FACET_MEASURE_GRID";
+/// #344: 미리보기 영역 측정. 값 `arrow-off`·`arrow-on`이면 첫 화면 뒤 영역을 끈 채·켠 채 커서를 프레임마다 한 행씩(화살표를
+/// 누르고 있는 것과 같은 길) 끝까지 옮기며 프레임 시간(`frame_us`)을 모으고, 값 `show:<이름>`이면 영역을 켜고 그 이름의
+/// 항목(그림이면 그림, 텍스트면 글자)을 고른 때부터 내용이 든 첫 프레임이 화면에 나갈 때까지를 `open_frame_us`로 잰다.
+pub const ENV_PREVIEW: &str = "FACET_MEASURE_PREVIEW";
 
 /// 앱이 쓰고 측정 도구가 읽는 측정 결과.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
