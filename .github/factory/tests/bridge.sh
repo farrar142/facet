@@ -319,5 +319,32 @@ eq code 0 "$(code)"
 eq sends 0 "$(sent_count)"
 eq remembered "23 24" "$(remembered)"
 
+# --- bench regression (#366) ---------------------------------------------------------------
+
+setup "a bench regression goes to the coordinator with its label and what to do"
+issue 810 open bench-alert "벤치 한도 알림"
+comment 31 810 "<!-- factory-bench-regression abc123 -->
+전체 벤치가 실패했다.
+필터 상한 초과: 중앙값 200ms > 상한 160ms"
+run
+eq code 0 "$(code)"
+eq sends 1 "$(sent_count)"
+eq to facet/coordinator "$(arg 0 --to)"
+has subject "벤치 한도 초과: #810 벤치 한도 알림" "$(arg 0 --subject)"
+has "failing line" "필터 상한 초과" "$(arg 0 --body)"
+has todo "커밋 구간" "$(arg 0 --body)"
+export BRIDGE_TO_COORD=team/coord
+comment 32 810 "<!-- factory-bench-regression def456 -->"
+run
+eq "coordinator variable" team/coord "$(arg 1 --to)"
+
+setup "a bench regression marker by someone else is not sent"
+issue 810 open bench-alert "벤치 한도 알림"
+comment 31 810 "<!-- factory-bench-regression abc123 -->" stranger
+run
+eq code 0 "$(code)"
+eq sends 0 "$(sent_count)"
+eq remembered 31 "$(remembered)"
+
 echo "bridge.sh: $passes passed, $fails failed"
 [ "$fails" -eq 0 ]

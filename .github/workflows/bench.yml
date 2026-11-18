@@ -1,0 +1,91 @@
+name: bench
+
+# 전체 벤치마크(#366). main push ci는 lint·test만 돌고, 벤치마크는 여기서 1시간마다 돈다. 지난 성공 run 뒤
+# main에 새 커밋이 없으면 비교 job만 돌고 끝난다(.github/factory/bench-gate.sh). 실패하면 `bench-alert` 이슈에
+# 표지 댓글 `<!-- factory-bench-regression <sha> -->`를 달고 알림 다리(bridge.sh)가 조율자에게 보낸다.
+on:
+  schedule:
+    # 매시 17분(:00·:30은 다른 예약 작업이 몰려 늦게 뜬다).
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'main에 새 커밋이 없어도 돈다'
+        type: boolean
+        default: false
+
+permissions: {}
+
+# 겹쳐 돌지 않게 하되, 진행 중인 run은 취소하지 않는다.
+concurrency:
+  group: bench
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FACTORY_REPO: ${{ github.repository }}
+        run: |
+          if [ "${{ inputs.force }}" = true ]; then
+            echo "force: 비교 없이 돈다"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            bash .github/factory/bench-gate.sh check "${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+  bench:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      # 릴리스 빌드 캐시는 이 job이 저장하고 PR의 bench job이 같은 shared-key로 읽는다.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench
+      - shell: bash
+        run: cargo xtask ci --full --only bench 2>&1 | tee bench.log
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-log
+          path: bench.log
+          if-no-files-found: ignore
+
+  alert:
+    needs: [gate, bench]
+    if: failure() && needs.bench.result == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: bench-log
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          FACTORY_REPO: ${{ github.repository }}
+        run: |
+          bash .github/factory/bench-gate.sh alert "${{ github.sha }}" \
+            "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" bench.log

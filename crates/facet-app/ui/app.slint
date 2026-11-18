@@ -3,6 +3,8 @@
 // 사용자에게 보이는 글자는 모두 `@tr()`로 감싼다(ADR-0007).
 
 import { ListView, Button, CheckBox, AboutSlint, Palette } from "std-widgets.slint";
+import { ScrollBar, ScrollBarMetrics } from "scrollbar.slint";
+export { ScrollMath } from "scrollbar.slint";
 
 // 자세히 보기의 한 행. 코어가 만든 값을 그대로 그린다.
 export struct Row {
@@ -1354,7 +1356,12 @@ component PanelView inherits Rectangle {
     in-out property <length> size-width;
     in-out property <length> location-width;
     in-out property <length> matches-width;
+    // 열 너비의 합(있으면 위치·일치 열 포함): 자세히 보기 내용의 폭. 목록보다 넓으면 가로 스크롤 막대가 생긴다.
+    property <length> columns-width: root.name-width + root.modified-width + root.type-width + root.size-width
+        + (root.data.results ? root.location-width : 0px) + (root.data.content-results ? root.matches-width : 0px);
     in-out property <length> content-y <=> list.content-y;
+    // 가로로 넘긴 거리(0 이하, ListView의 `content-x`). 사각형 선택이 목록 내용 기준 자리를 셈한다.
+    out property <length> content-x: list.content-x;
     out property <length> view-height: list.visible-height;
     out property <length> tab-width: clamp(tab-strip.width / max(1, root.tabs.length), 90px, 200px);
     in-out property <length> tab-strip-x <=> tab-flick.content-x;
@@ -1368,10 +1375,10 @@ component PanelView inherits Rectangle {
     in property <int> drop-slot: -1;
     // 다른 앱에서 파일을 끄는 동안 놓일 폴더 행(Rust가 정한다). 없으면 -1.
     in property <int> drop-row: -1;
-    // 목록의 보이는 영역 자리(창 기준)와 너비(스크롤 막대 제외). 사각형 선택에서 Rust가 끄는 점을 행으로 바꾼다.
+    // 목록의 보이는 영역 자리(창 기준)와 너비(세로 스크롤 막대 포함: 막대 위에 놓아도 그 패널이다). 사각형 선택에서 Rust가 끄는 점을 행으로 바꾼다.
     out property <length> list-left: list.absolute-position.x;
     out property <length> list-top: list.absolute-position.y;
-    out property <length> list-width: list.visible-width;
+    out property <length> list-width: list-area.width;
     // 사각형 선택 중 그릴 사각형(목록 내용 기준, Rust가 넣는다).
     in property <MarqueeBox> marquee;
     // 주소창의 자리(창 기준). 창이 자동 완성 후보를 그 아래에 놓는다.
@@ -1813,94 +1820,115 @@ component PanelView inherits Rectangle {
             }
         }
 
-        // 열 머리글
-        HorizontalLayout {
+        // 열 머리글. 목록과 같은 만큼 가로로 넘어간다.
+        Rectangle {
             height: root.row-height;
-            Header {
-                text: @tr("이름");
-                column-width <=> root.name-width;
-                sorted: root.data.sort-column == 0;
-                descending: root.data.sort-descending;
-                sort => {
-                    root.activate();
-                    root.sort-by(0);
-                    root.focus-list();
+            clip: true;
+            HorizontalLayout {
+                x: list.content-x;
+                width: max(root.columns-width, parent.width);
+                height: parent.height;
+                Header {
+                    text: @tr("이름");
+                    column-width <=> root.name-width;
+                    sorted: root.data.sort-column == 0;
+                    descending: root.data.sort-descending;
+                    sort => {
+                        root.activate();
+                        root.sort-by(0);
+                        root.focus-list();
+                    }
                 }
-            }
-            Header {
-                text: @tr("수정한 날짜");
-                column-width <=> root.modified-width;
-                sorted: root.data.sort-column == 1;
-                descending: root.data.sort-descending;
-                sort => {
-                    root.activate();
-                    root.sort-by(1);
-                    root.focus-list();
+                Header {
+                    text: @tr("수정한 날짜");
+                    column-width <=> root.modified-width;
+                    sorted: root.data.sort-column == 1;
+                    descending: root.data.sort-descending;
+                    sort => {
+                        root.activate();
+                        root.sort-by(1);
+                        root.focus-list();
+                    }
                 }
-            }
-            Header {
-                text: @tr("유형");
-                column-width <=> root.type-width;
-                sorted: root.data.sort-column == 2;
-                descending: root.data.sort-descending;
-                sort => {
-                    root.activate();
-                    root.sort-by(2);
-                    root.focus-list();
+                Header {
+                    text: @tr("유형");
+                    column-width <=> root.type-width;
+                    sorted: root.data.sort-column == 2;
+                    descending: root.data.sort-descending;
+                    sort => {
+                        root.activate();
+                        root.sort-by(2);
+                        root.focus-list();
+                    }
                 }
-            }
-            Header {
-                text: @tr("크기");
-                right-aligned: true;
-                column-width <=> root.size-width;
-                sorted: root.data.sort-column == 3;
-                descending: root.data.sort-descending;
-                sort => {
-                    root.activate();
-                    root.sort-by(3);
-                    root.focus-list();
+                Header {
+                    text: @tr("크기");
+                    right-aligned: true;
+                    column-width <=> root.size-width;
+                    sorted: root.data.sort-column == 3;
+                    descending: root.data.sort-descending;
+                    sort => {
+                        root.activate();
+                        root.sort-by(3);
+                        root.focus-list();
+                    }
                 }
-            }
-            if root.data.results: Header {
-                text: @tr("위치");
-                column-width <=> root.location-width;
-                sorted: root.data.sort-column == 4;
-                descending: root.data.sort-descending;
-                sort => {
-                    root.activate();
-                    root.sort-by(4);
-                    root.focus-list();
+                if root.data.results: Header {
+                    text: @tr("위치");
+                    column-width <=> root.location-width;
+                    sorted: root.data.sort-column == 4;
+                    descending: root.data.sort-descending;
+                    sort => {
+                        root.activate();
+                        root.sort-by(4);
+                        root.focus-list();
+                    }
                 }
-            }
-            if root.data.content-results: Header {
-                text: @tr("일치");
-                column-width <=> root.matches-width;
-                sorted: root.data.sort-column == 5;
-                descending: root.data.sort-descending;
-                sort => {
-                    root.activate();
-                    root.sort-by(5);
-                    root.focus-list();
+                if root.data.content-results: Header {
+                    text: @tr("일치");
+                    column-width <=> root.matches-width;
+                    sorted: root.data.sort-column == 5;
+                    descending: root.data.sort-descending;
+                    sort => {
+                        root.activate();
+                        root.sort-by(5);
+                        root.focus-list();
+                    }
                 }
+                Rectangle { }
             }
-            Rectangle { }
         }
 
-        Rectangle {
+        list-area := Rectangle {
             vertical-stretch: 1;
+            // 스크롤 막대(facet의 `ScrollBar`): 목록 위에 덮지 않고 자리를 차지한다. 막대가 서로의 자리를 줄이므로
+            // 바깥 크기만으로 정한다(가로 막대가 있으면 세로로 들어갈 행이 줄고, 세로 막대가 있으면 가로 폭이 준다).
+            property <length> bar: ScrollBarMetrics.thickness;
+            // 내용 높이에 빈 곳 한 행 높이를 더한다: 꽉 찬 목록도 끝까지 넘기면 아래 빈 곳 TouchArea가 닿는다.
+            property <length> content-height: root.rows.length * root.row-height + root.row-height;
+            property <bool> tall: self.content-height > floor(self.height / root.row-height) * root.row-height;
+            property <bool> h-bar: root.columns-width > self.width || (self.tall && root.columns-width > self.width - self.bar);
+            property <bool> v-bar: self.content-height > floor((self.height - (self.h-bar ? self.bar : 0px)) / root.row-height) * root.row-height;
 
             // ListView는 보이는 행만 화면 요소로 만든다.
             // 높이를 행 높이의 정수배로 맞춘다. ListView는 먼 곳으로 뛸 때 스크롤 위치를 행 경계로
             // 내림하므로, 그렇지 않으면 End 뒤 마지막 행이 조금 가려진다.
+            // 기본 스크롤 막대는 끄고 아래 `ScrollBar`를 쓴다. 가로 휠과 Shift+휠은 ListView가 가로로 넘긴다.
             list := ListView {
+                x: 0;
                 y: 0;
-                height: floor(parent.height / root.row-height) * root.row-height;
+                width: parent.width - (parent.v-bar ? parent.bar : 0px);
+                height: floor((parent.height - (parent.h-bar ? parent.bar : 0px)) / root.row-height) * root.row-height;
+                vertical-scrollbar-policy: always-off;
+                horizontal-scrollbar-policy: always-off;
                 changed viewport-y => {
                     root.scrolled();
                 }
-                // 내용 높이에 빈 곳 한 행 높이를 더한다: 꽉 찬 목록도 끝까지 넘기면 아래 빈 곳 TouchArea가 닿는다.
-                content-height: root.rows.length * root.row-height + root.row-height;
+                content-height: parent.content-height;
+                // 내용 폭: 열 너비의 합(보이는 폭보다 좁으면 보이는 폭).
+                content-width: max(root.columns-width, self.visible-width);
                 for row[i] in root.rows: Rectangle {
+                    width: max(root.columns-width, list.visible-width);
                     height: root.row-height;
                     background: row.selected ? Palette.selection-background : transparent;
                     // 커서: 선택과 구분되게 테두리로 보인다.
@@ -2097,6 +2125,40 @@ component PanelView inherits Rectangle {
                 }
             }
 
+            if list-area.v-bar: ScrollBar {
+                x: list.width;
+                y: 0;
+                width: list-area.bar;
+                height: list-area.height - (list-area.h-bar ? list-area.bar : 0px);
+                total: list.content-height;
+                visible-length: list.visible-height;
+                offset: -list.content-y;
+                moved(offset) => {
+                    list.content-y = -offset;
+                }
+            }
+            if list-area.h-bar: ScrollBar {
+                horizontal: true;
+                x: 0;
+                y: list-area.height - list-area.bar;
+                width: list.width;
+                height: list-area.bar;
+                total: list.content-width;
+                visible-length: list.visible-width;
+                offset: -list.content-x;
+                moved(offset) => {
+                    list.content-x = -offset;
+                }
+            }
+            // 두 막대가 만나는 구석.
+            if list-area.v-bar && list-area.h-bar: Rectangle {
+                x: list.width;
+                y: list-area.height - list-area.bar;
+                width: list-area.bar;
+                height: list-area.bar;
+                background: Palette.alternate-background;
+            }
+
             // 목록 아래 빈 곳: 눌러 끌면 사각형 선택이다. 누르기만 하면 전처럼 아무것도 고르지 않는다.
             TouchArea {
                 y: clamp(root.rows.length * root.row-height + root.content-y, 0px, list.height);
@@ -2128,7 +2190,7 @@ component PanelView inherits Rectangle {
                 height: list.height;
                 clip: true;
                 if root.marquee.shown: Rectangle {
-                    x: root.marquee.x;
+                    x: root.marquee.x + list.content-x;
                     y: root.marquee.y + root.content-y;
                     width: root.marquee.width;
                     height: root.marquee.height;
@@ -2142,8 +2204,9 @@ component PanelView inherits Rectangle {
             // 눌러도 키보드는 입력란에 남는다.
             if root.editing >= 0 && (root.edit-problem != "" || root.edit-asking-extension): Rectangle {
                 property <length> row-top: root.editing * root.row-height + root.content-y;
-                x: 28px;
-                width: min(parent.width - 36px, 480px);
+                // 이름 칸 기준이라 가로로 넘긴 만큼 함께 옮긴다(보이는 영역 밖으로는 나가지 않는다).
+                x: clamp(28px + list.content-x, 0px, max(0px, list.visible-width - self.width));
+                width: min(list.visible-width - 36px, 480px);
                 height: balloon-layout.preferred-height;
                 y: row-top + root.row-height + self.height <= parent.height ? row-top + root.row-height : max(0px, row-top - self.height);
                 background: Palette.background;
@@ -2408,6 +2471,9 @@ export component AppWindow inherits Window {
     out property <length> left-view-height: left.view-height;
     in-out property <length> right-content-y <=> right.content-y;
     out property <length> right-view-height: right.view-height;
+    // 패널마다 가로로 넘긴 거리(0 이하).
+    out property <length> left-content-x: left.content-x;
+    out property <length> right-content-x: right.content-x;
     // 패널마다 탭 줄: 탭 너비, 넘긴 자리(Rust가 활성 탭을 보이게 맞춘다), 줄 너비.
     out property <length> left-tab-width: left.tab-width;
     in-out property <length> left-tab-strip-x <=> left.tab-strip-x;

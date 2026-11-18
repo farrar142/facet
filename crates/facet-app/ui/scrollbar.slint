@@ -1,0 +1,120 @@
+// facet이 그리는 스크롤 막대(세로·가로 겸용). std-widgets의 fluent 막대는 평소 2px 테두리색 선이라 보이지 않고
+// 트랙 누르기도 없어 쓰지 않는다. 늘 보이는 트랙과 썸을 그리고, 썸 끌기·트랙 누르기(누르고 있으면 되풀이)·휠을 받는다.
+// 썸 길이·자리와 끌기·트랙 누르기의 새 자리는 Rust(`src/scrollbar.rs`)가 정한다: 아래 전역의 콜백을 창마다 Rust가 잇는다.
+
+import { Palette } from "std-widgets.slint";
+
+// 스크롤 막대 식. 인자는 트랙 길이, 보이는 길이, 전체 길이, 넘긴 거리(0 이상) 차례다.
+export global ScrollMath {
+    pure callback thumb-length(length, length, length) -> length;
+    pure callback thumb-start(length, length, length, length) -> length;
+    // 누를 때 넘긴 거리, 그 뒤 포인터가 트랙을 따라 움직인 거리.
+    pure callback dragged(length, length, length, length, length) -> length;
+    // 트랙을 누른 자리(트랙 기준)가 썸 앞이면 -1, 뒤면 1, 썸 위면 0.
+    pure callback page-direction(length, length, length, length, length) -> int;
+    // 넘긴 거리, 포인터 자리, 누를 때 정한 쪽 → 한 쪽 넘긴 거리(썸이 포인터에 닿았으면 그대로).
+    pure callback paged(length, length, length, length, length, int) -> length;
+}
+
+// 막대 두께. 탐색기 정도다. 목록 위에 덮지 않고 이만큼 자리를 차지한다.
+export global ScrollBarMetrics {
+    out property <length> thickness: 12px;
+}
+
+export component ScrollBar inherits Rectangle {
+    in property <bool> horizontal;
+    // 내용 전체 길이, 보이는 길이(한 쪽), 넘긴 거리(0 이상).
+    in property <length> total;
+    in property <length> visible-length;
+    in property <length> offset;
+    // 넘긴 거리를 바꾸라(0 이상, 넘길 수 있는 거리 안).
+    callback moved(length);
+
+    property <length> track: root.horizontal ? root.width : root.height;
+    property <length> max-offset: max(0px, root.total - root.visible-length);
+    property <length> thumb-length: ScrollMath.thumb-length(root.track, root.visible-length, root.total);
+    property <length> thumb-start: ScrollMath.thumb-start(root.track, root.visible-length, root.total, root.offset);
+    // 썸 끌기: 누를 때 넘긴 거리와 포인터 자리(트랙 기준).
+    property <length> press-offset;
+    property <length> press-pointer;
+    // 트랙 누르기: 포인터 자리(트랙 기준), 정한 쪽, 누르고 있는가, 되풀이 중인가(첫 넘김 뒤 잠깐 기다린다).
+    property <length> pointer;
+    property <int> direction;
+    property <bool> paging;
+    property <bool> repeating;
+
+    background: Palette.alternate-background;
+
+    function page() {
+        let next = ScrollMath.paged(root.track, root.visible-length, root.total, root.offset, root.pointer, root.direction);
+        if (next != root.offset) {
+            root.moved(next);
+        }
+    }
+
+    function wheel(delta: length) {
+        root.moved(clamp(root.offset - delta, 0px, root.max-offset));
+    }
+
+    TouchArea {
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                root.pointer = root.horizontal ? self.mouse-x : self.mouse-y;
+                root.direction = ScrollMath.page-direction(root.track, root.visible-length, root.total, root.offset, root.pointer);
+                root.page();
+                root.repeating = false;
+                root.paging = true;
+            } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                root.paging = false;
+                root.repeating = false;
+            }
+        }
+        moved => {
+            if (self.pressed) {
+                root.pointer = root.horizontal ? self.mouse-x : self.mouse-y;
+            }
+        }
+        scroll-event(event) => {
+            root.wheel(root.horizontal && event.delta-x != 0 ? event.delta-x : event.delta-y);
+            accept
+        }
+    }
+
+    Timer {
+        interval: root.repeating ? 50ms : 400ms;
+        running: root.paging;
+        triggered => {
+            root.repeating = true;
+            root.page();
+        }
+    }
+
+    if root.total > root.visible-length: Rectangle {
+        x: root.horizontal ? root.thumb-start : 2px;
+        y: root.horizontal ? 2px : root.thumb-start;
+        width: root.horizontal ? root.thumb-length : root.width - 4px;
+        height: root.horizontal ? root.height - 4px : root.thumb-length;
+        border-radius: 4px;
+        background: thumb-touch.pressed ? Palette.foreground.transparentize(30%)
+            : thumb-touch.has-hover ? Palette.foreground.transparentize(45%)
+            : Palette.foreground.transparentize(60%);
+        thumb-touch := TouchArea {
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                    root.press-offset = root.offset;
+                    root.press-pointer = root.horizontal ? parent.x + self.mouse-x : parent.y + self.mouse-y;
+                }
+            }
+            moved => {
+                if (self.pressed) {
+                    let at = root.horizontal ? parent.x + self.mouse-x : parent.y + self.mouse-y;
+                    root.moved(ScrollMath.dragged(root.track, root.visible-length, root.total, root.press-offset, at - root.press-pointer));
+                }
+            }
+            scroll-event(event) => {
+                root.wheel(root.horizontal && event.delta-x != 0 ? event.delta-x : event.delta-y);
+                accept
+            }
+        }
+    }
+}

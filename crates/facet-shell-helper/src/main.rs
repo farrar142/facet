@@ -1,9 +1,17 @@
 //! 셸 확장 도우미 실행 파일(spec #24, ADR-0006): 셸 확장을 UI 프로세스 대신 싣는다.
 //!
-//! 명령 줄: `facet-shell-helper --pipe <파이프 이름> [--parent <프로세스 번호>] [--fake] [--fake-version <n>]
-//! [--crash-state <파일>]`. UI 프로세스(`facet_core::shell_helper`)가 만든 사적인 파이프에 붙어 버전 인사에 답한 뒤,
-//! 요청을 받은 차례대로 하나씩 처리한다(셸의 STA 스레드처럼 한 번에 하나). 파이프가 끊기면(UI가 끝나거나 도우미를
-//! 버림) 끝난다.
+//! 명령 줄: `facet-shell-helper --pipe <파이프 이름> [--parent <프로세스 번호>] [--idle-timeout-ms <ms>] [--fake]
+//! [--fake-version <n>] [--crash-state <파일>]`. UI 프로세스(`facet_core::shell_helper`)가 만든 사적인 파이프에 붙어 버전
+//! 인사에 답한 뒤, 요청을 받은 차례대로 하나씩 처리한다(셸의 STA 스레드처럼 한 번에 하나). 파이프가 끊기면(UI가
+//! 끝나거나 도우미를 버림) 끝난다.
+//!
+//! # 수명(#320)
+//!
+//! - **부모 감시**: `--parent`의 프로세스(UI)가 끝나면 곧바로 끝난다(감시 스레드).
+//! - **쉬면 끝내기**: 요청을 처리하고 있지 않은 채 `--idle-timeout-ms` 동안 요청이 없으면 스스로 끝난다(종료 코드 0,
+//!   관리 쪽은 이것을 죽음으로 세지 않는다). 없으면 쉬어도 끝나지 않는다.
+//! - **마지막으로 부른 확장**: `--crash-state <파일>`은 관리 쪽과 함께 보는 공유 상태다. 확장을 부르기 직전에 그
+//!   확장의 CLSID·DLL 경로·이름을 한 줄씩 적어 두면, 도우미가 죽었을 때 관리 쪽이 읽어 기록한다.
 //!
 //! 실제 셸 메뉴는 아직 부르지 않는다(뒤 티켓): 시험용 모드(`--fake`)가 아니면 메뉴·실행 요청에 오류로 답한다.
 //!
@@ -33,8 +41,10 @@ mod helper {
     use std::fs;
     use std::io::Write;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use facet_shell_protocol::{
         ErrorKind, Icon, MenuItem, MenuTarget, Request, Response, ShellCommand, ShellSubmenu,
@@ -54,8 +64,17 @@ mod helper {
     /// 항목 실행이 만드는 표지 파일.
     const INVOKED_FILE: &str = "facet-fake-invoked.txt";
 
+    /// 쉬면 끝내기로 스스로 끝날 때의 종료 코드(관리 쪽은 깨끗한 끝으로 본다).
+    const IDLE_EXIT_CODE: i32 = 0;
+    /// 부모가 끝나 따라 끝날 때의 종료 코드.
+    const PARENT_EXIT_CODE: i32 = 0;
+    /// 쉬는 시간을 확인하는 가장 긴 간격.
+    const IDLE_POLL_MAX: Duration = Duration::from_millis(500);
+
     struct Args {
         pipe: OsString,
+        parent: Option<u32>,
+        idle_timeout: Option<Duration>,
         fake: bool,
         fake_version: Option<u16>,
         crash_state: Option<PathBuf>,
@@ -63,6 +82,8 @@ mod helper {
 
     fn parse(args: Vec<OsString>) -> Option<Args> {
         let mut pipe = None;
+        let mut parent = None;
+        let mut idle_timeout = None;
         let mut fake = false;
         let mut fake_version = None;
         let mut crash_state = None;
@@ -70,9 +91,10 @@ mod helper {
         while let Some(arg) = it.next() {
             match arg.to_str() {
                 Some("--pipe") => pipe = Some(it.next()?),
-                // 부모 감시는 「도우미 수명」 티켓(#320)이 한다. 지금은 파이프가 끊기면 끝난다.
-                Some("--parent") => {
-                    it.next()?;
+                Some("--parent") => parent = Some(it.next()?.to_str()?.parse().ok()?),
+                Some("--idle-timeout-ms") => {
+                    let ms: u64 = it.next()?.to_str()?.parse().ok()?;
+                    idle_timeout = Some(Duration::from_millis(ms));
                 }
                 Some("--fake") => fake = true,
                 Some("--fake-version") => {
@@ -85,6 +107,8 @@ mod helper {
         }
         Some(Args {
             pipe: pipe?,
+            parent,
+            idle_timeout,
             fake,
             fake_version,
             crash_state,
@@ -99,6 +123,13 @@ mod helper {
         let Some(pipe) = args.pipe.to_str() else {
             return 2;
         };
+        if let Some(parent) = args.parent {
+            watch_parent(parent);
+        }
+        let activity = Activity::new();
+        if let Some(idle) = args.idle_timeout {
+            watch_idle(Arc::clone(&activity), idle);
+        }
         let Ok(client) = pipe_client::connect(pipe, PIPE_ACCESS, CONNECT_WAIT) else {
             return 3;
         };
@@ -109,13 +140,89 @@ mod helper {
             let Ok(request) = read_message::<Request>(&mut reader) else {
                 return 0; // 끊김: UI가 끝났거나 도우미를 버렸다.
             };
-            let Some(response) = handle(&args, request) else {
-                continue;
-            };
-            if write_message(&mut writer, &response).is_err() {
+            activity.begin();
+            let response = handle(&args, request);
+            let written = response
+                .as_ref()
+                .is_none_or(|response| write_message(&mut writer, response).is_ok());
+            activity.end();
+            if !written {
                 return 0;
             }
         }
+    }
+
+    /// 부모 프로세스가 끝나면 이 프로세스를 끝내는 감시 스레드를 띄운다. 부모가 이미 없으면 곧바로 끝난다.
+    fn watch_parent(parent: u32) {
+        let spawned = thread::Builder::new()
+            .name("facet-shell-helper-parent".into())
+            .spawn(move || {
+                // 열지 못한 것(이미 끝남)도 끝난 것으로 본다.
+                let _ = facet_win::process::wait_for_exit(parent);
+                std::process::exit(PARENT_EXIT_CODE);
+            });
+        if spawned.is_err() {
+            // 감시하지 못하면 부모 없이 남을 수 있으므로 돌지 않는다.
+            std::process::exit(PARENT_EXIT_CODE);
+        }
+    }
+
+    /// 요청 처리 중인지와 마지막으로 처리를 마친 때.
+    struct Activity {
+        started: Instant,
+        busy: AtomicBool,
+        /// `started`부터 마지막 활동까지의 밀리초.
+        last_ms: AtomicU64,
+    }
+
+    impl Activity {
+        fn new() -> Arc<Activity> {
+            Arc::new(Activity {
+                started: Instant::now(),
+                busy: AtomicBool::new(false),
+                last_ms: AtomicU64::new(0),
+            })
+        }
+
+        fn now_ms(&self) -> u64 {
+            u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
+        }
+
+        fn begin(&self) {
+            self.busy.store(true, Ordering::SeqCst);
+            self.last_ms.store(self.now_ms(), Ordering::SeqCst);
+        }
+
+        fn end(&self) {
+            self.last_ms.store(self.now_ms(), Ordering::SeqCst);
+            self.busy.store(false, Ordering::SeqCst);
+        }
+
+        /// 처리 중이 아니고 마지막 활동 뒤 `idle`이 지났는가.
+        fn idle_for(&self, idle: Duration) -> bool {
+            if self.busy.load(Ordering::SeqCst) {
+                return false;
+            }
+            let since = self
+                .now_ms()
+                .saturating_sub(self.last_ms.load(Ordering::SeqCst));
+            Duration::from_millis(since) >= idle
+        }
+    }
+
+    /// 쉬면 끝내기 감시 스레드를 띄운다.
+    fn watch_idle(activity: Arc<Activity>, idle: Duration) {
+        let poll = (idle / 4).clamp(Duration::from_millis(10), IDLE_POLL_MAX);
+        let _ = thread::Builder::new()
+            .name("facet-shell-helper-idle".into())
+            .spawn(move || {
+                loop {
+                    thread::sleep(poll);
+                    if activity.idle_for(idle) {
+                        std::process::exit(IDLE_EXIT_CODE);
+                    }
+                }
+            });
     }
 
     fn hello(args: &Args, version: u16) -> Response {

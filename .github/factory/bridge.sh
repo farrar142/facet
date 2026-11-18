@@ -14,6 +14,7 @@
 #   <!-- factory-human -->               a ticket handed to a person
 #   <!-- factory-queue-empty S -->       the last spec S of FACTORY_SPEC_QUEUE was started (ledger issue)
 #   <!-- factory-idle Q -->              every spec of the queue is labelled; the factory is idle (ledger)
+#   <!-- factory-bench-regression SHA -->  the hourly benchmark failed at SHA (`bench-alert` issue, #366)
 #
 # Anyone can write those markers on a public repository, so only comments by `github-actions[bot]` or by
 # someone with write access (collaborator permission admin, maintain or write) are sent. A comment by
@@ -27,7 +28,8 @@
 #
 # The recipient depends on the kind (owner's decision 2026-11-18): a question goes to the boss
 # (BRIDGE_TO_BOSS), because only the owner decides it; every other kind (budget-spec, budget-daily, human,
-# queue-empty, idle) goes straight to the repository's coordinator (BRIDGE_TO_COORD), who acts on it.
+# queue-empty, idle, bench-regression) goes straight to the repository's coordinator (BRIDGE_TO_COORD), who
+# acts on it.
 #
 # The body has the kind, the issue link, its title, the comment as written and what to do. The comment
 # id is remembered in the state file only after a successful send, so a failed send is tried again on the
@@ -94,6 +96,7 @@ matches=$(printf '%s' "$comments" | j -s -r '
      elif ($b | contains("<!-- factory-human -->")) then "human"
      elif ($b | contains("<!-- factory-queue-empty ")) then "queue-empty"
      elif ($b | contains("<!-- factory-idle ")) then "idle"
+     elif ($b | contains("<!-- factory-bench-regression ")) then "bench-regression"
      else empty end) as $k
   | [(.id | tostring), $k, (.issue_url | sub(".*/"; "")), (.user.login // "")] | @tsv')
 
@@ -163,6 +166,9 @@ while IFS=$'\t' read -r id kind n author; do
     idle)
       label="공장 idle"
       todo="FACTORY_SPEC_QUEUE에 spec을 넣고 dispatch-next를 다시 돌린다(조율자 몫)." ;;
+    bench-regression)
+      label="벤치 한도 초과"
+      todo="위 커밋 구간에서 한도를 넘긴 커밋을 찾아 고칠 티켓을 낸다(조율자 몫)." ;;
   esac
   text="종류: $label
 이슈: $url
