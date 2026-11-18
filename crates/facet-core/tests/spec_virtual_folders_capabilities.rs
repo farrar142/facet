@@ -94,7 +94,6 @@ fn bound_commands() -> Vec<CommandId> {
 }
 
 #[test]
-#[ignore = "#348"]
 fn all_and_default_capabilities() {
     let all = Capabilities::ALL;
     assert!(
@@ -133,7 +132,6 @@ fn all_and_default_capabilities() {
 }
 
 #[test]
-#[ignore = "#348"]
 fn a_real_folder_can_do_everything_but_restore_and_empty() {
     let dir = TempDir::new().unwrap();
     let location = Location::file_system(dir.path());
@@ -149,7 +147,6 @@ fn a_real_folder_can_do_everything_but_restore_and_empty() {
 }
 
 #[test]
-#[ignore = "#348"]
 fn every_command_is_allowed_when_everything_can_be_done() {
     for command in bound_commands().into_iter().chain(UNBOUND) {
         assert!(
@@ -160,7 +157,6 @@ fn every_command_is_allowed_when_everything_can_be_done() {
 }
 
 #[test]
-#[ignore = "#348"]
 fn clearing_one_capability_blocks_only_its_commands() {
     let all = bound_commands();
     for (name, clear, blocked) in BINDINGS {
@@ -183,7 +179,6 @@ fn clearing_one_capability_blocks_only_its_commands() {
 }
 
 #[test]
-#[ignore = "#348"]
 fn delete_needs_recycle_or_permanent_delete() {
     let only_recycle = Capabilities {
         recycle: true,
@@ -209,7 +204,6 @@ fn delete_needs_recycle_or_permanent_delete() {
 }
 
 #[test]
-#[ignore = "#348"]
 fn unbound_commands_are_allowed_with_no_capabilities() {
     let none = Capabilities::default();
     for command in UNBOUND {

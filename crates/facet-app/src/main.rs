@@ -2290,7 +2290,7 @@ impl View {
             Execution::ContentSearch => self.begin_search(true),
             Execution::ConfirmDelete(warning) => self.open_delete(warning),
             Execution::ItemMissing => self.show_missing_item(),
-            Execution::NotAllowedHere => todo!("#348"),
+            Execution::NotAllowedHere => self.ui.set_notice(text::NOT_ALLOWED_HERE.into()),
             Execution::ConfirmEmptyRecycleBin => todo!("#354"),
             Execution::UndoRefused(_) | Execution::Disabled | Execution::WindowClosed => {}
         }

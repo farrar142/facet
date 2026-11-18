@@ -67,7 +67,6 @@ fn files(dir: &Path) -> Vec<PathBuf> {
 }
 
 #[test]
-#[ignore = "#328"]
 fn 넣은_썸네일을_같은_키로_꺼낸다() {
     let root = TempDir::new().unwrap();
     let cache = open(&root.path().join("thumbs"), CacheLimits::default());
@@ -79,7 +78,6 @@ fn 넣은_썸네일을_같은_키로_꺼낸다() {
 }
 
 #[test]
-#[ignore = "#328"]
 fn 새로_연_캐시도_디스크에서_꺼낸다() {
     let root = TempDir::new().unwrap();
     let dir = root.path().join("thumbs");
@@ -96,7 +94,6 @@ fn 새로_연_캐시도_디스크에서_꺼낸다() {
 }
 
 #[test]
-#[ignore = "#328"]
 fn 키의_한_부분이라도_다르면_꺼내지_못한다() {
     let root = TempDir::new().unwrap();
     let cache = open(&root.path().join("thumbs"), no_memory());
@@ -122,7 +119,6 @@ fn 키의_한_부분이라도_다르면_꺼내지_못한다() {
 }
 
 #[test]
-#[ignore = "#328"]
 fn 그림은_압축해_저장한다() {
     let root = TempDir::new().unwrap();
     let cache = open(&root.path().join("thumbs"), CacheLimits::default());
@@ -136,7 +132,6 @@ fn 그림은_압축해_저장한다() {
 }
 
 #[test]
-#[ignore = "#328"]
 fn 정리는_상한_아래가_될_때까지_가장_오래_쓰지_않은_것부터_지운다() {
     let root = TempDir::new().unwrap();
     let picture = solid(96, 96, [10, 20, 30, 255]);
@@ -179,7 +174,6 @@ fn 정리는_상한_아래가_될_때까지_가장_오래_쓰지_않은_것부�
 }
 
 #[test]
-#[ignore = "#328"]
 fn 상한_아래면_정리가_아무것도_지우지_않는다() {
     let root = TempDir::new().unwrap();
     let cache = open(&root.path().join("thumbs"), no_memory());
@@ -196,7 +190,6 @@ fn 상한_아래면_정리가_아무것도_지우지_않는다() {
 }
 
 #[test]
-#[ignore = "#328"]
 fn 메모리에_둔_그림은_메모리_상한을_넘지_않고_밀려난_것도_디스크에서_꺼낸다() {
     let root = TempDir::new().unwrap();
     let one = 64 * 64 * 4;
@@ -230,7 +223,6 @@ fn 메모리에_둔_그림은_메모리_상한을_넘지_않고_밀려난_것도
 }
 
 #[test]
-#[ignore = "#328"]
 fn 깨진_캐시_파일은_없는_것으로_보고_지우며_다시_넣으면_꺼낸다() {
     let garbage = b"this is not a thumbnail, just garbage bytes".repeat(4);
     for (what, damage) in [("쓰레기로 덮음", true), ("반으로 잘림", false)] {
@@ -276,7 +268,6 @@ fn 깨진_캐시_파일은_없는_것으로_보고_지우며_다시_넣으면_�
 }
 
 #[test]
-#[ignore = "#328"]
 fn 비우면_아무것도_꺼내지_못하고_디스크_크기가_0이다() {
     let root = TempDir::new().unwrap();
     let dir = root.path().join("thumbs");
@@ -299,7 +290,6 @@ fn 비우면_아무것도_꺼내지_못하고_디스크_크기가_0이다() {
 }
 
 #[test]
-#[ignore = "#328"]
 fn 여러_스레드가_함께_넣고_꺼낸다() {
     let root = TempDir::new().unwrap();
     let cache = Arc::new(open(&root.path().join("thumbs"), CacheLimits::default()));
@@ -327,7 +317,6 @@ fn 여러_스레드가_함께_넣고_꺼낸다() {
 }
 
 #[test]
-#[ignore = "#328"]
 fn 기본_상한은_디스크_1gb_메모리_256mb다() {
     assert_eq!(
         CacheLimits::default(),
@@ -348,7 +337,6 @@ fn 기본_상한은_디스크_1gb_메모리_256mb다() {
 
 #[cfg(windows)]
 #[test]
-#[ignore = "#328"]
 fn 기본_위치는_localappdata_아래_facet_thumbs다() {
     use facet_core::thumbnail_cache::default_cache_dir;
 

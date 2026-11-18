@@ -73,7 +73,11 @@ const USAGE: &str = "\
       (10MB/s)보다 낮거나 작은 파일 복사 시간 중앙값이 상한(20000ms)을 넘으면 실패한다. Windows가 아니면 건너뛴다.
   facet-bench delete [--count N] [--runs N]
   facet-bench thumbnail-decode [--runs N] [--limit-ms N]
+  facet-bench thumbnail-cache [--count N] [--runs N] [--limit-ms N]
       4000×3000 JPEG 하나를 썸네일 크기(256)로 축소 디코딩하는 시간을 N회(기본 5) 재어 중앙값이 상한(기본 500ms)을
+      넘으면 실패한다.
+  facet-bench text-preview [--runs N] [--limit-ms N]
+      메모리의 256KB CP949 텍스트를 인코딩 추정과 디코딩하는 시간을 N회(기본 5) 재어 중앙값이 상한(기본 50ms)을
       넘으면 실패한다.
   facet-bench batch-rename-run [--count N] [--runs N]
       임시 폴더에 4KiB 파일 N개(기본 10000)가 든 폴더를 만들고 작업 대기열의 영구 삭제 작업으로 지우는 시간을
@@ -228,6 +232,8 @@ fn main() -> ExitCode {
         "batch-rename-run" => batch_rename_run(&args),
         "shell-helper" => shell_helper_bench(&args),
         "thumbnail-decode" => thumbnail_decode(&args),
+        "thumbnail-cache" => thumbnail_cache(&args),
+        "text-preview" => text_preview(&args),
         "compare-recycle" => compare_recycle(&args),
         "compare-copy" => compare_copy(&args),
         "screen" => make_folder(&args).and_then(|()| screen(&args)),
@@ -941,6 +947,73 @@ fn thumbnail_decode(args: &Args) -> Result<(), String> {
         limit.as_millis()
     );
     check_thumbnail_decode_limit(&m, limit)?;
+    println!("  상한 안: 통과");
+    Ok(())
+}
+
+fn thumbnail_cache(args: &Args) -> Result<(), String> {
+    use facet_bench::{
+        THUMBNAIL_CACHE_READ_COUNT, THUMBNAIL_CACHE_READ_LIMIT, THUMBNAIL_CACHE_READ_TARGET,
+        check_thumbnail_cache_read_limit, measure_thumbnail_cache_read,
+    };
+    if args.path.is_some() {
+        return Err(format!(
+            "thumbnail-cache 명령은 경로를 받지 않습니다
+
+{USAGE}"
+        ));
+    }
+    warn_debug();
+    let limit = args.limit.unwrap_or(THUMBNAIL_CACHE_READ_LIMIT);
+    let count = args.count.unwrap_or(THUMBNAIL_CACHE_READ_COUNT);
+    let root = std::env::temp_dir().join(format!("facet-bench-thumbcache-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).map_err(|e| format!("{}: {e}", root.display()))?;
+    let result = measure_thumbnail_cache_read(&root, count, args.runs());
+    let _ = std::fs::remove_dir_all(&root);
+    let m = result?;
+    println!(
+        "썸네일 캐시 읽기 ({}건, {}회):",
+        m.item_count,
+        m.times.len()
+    );
+    print_times(&m);
+    println!(
+        "  중앙값 {:.1}ms, 최악 {:.1}ms / 로컬 기준 {}ms, CI 상한 {}ms",
+        ms(m.median()),
+        ms(m.max()),
+        THUMBNAIL_CACHE_READ_TARGET.as_millis(),
+        limit.as_millis()
+    );
+    check_thumbnail_cache_read_limit(&m, limit)?;
+    println!("  상한 안: 통과");
+    Ok(())
+}
+
+fn text_preview(args: &Args) -> Result<(), String> {
+    use facet_bench::{
+        TEXT_PREVIEW_LIMIT, TEXT_PREVIEW_TARGET, check_text_preview_limit, measure_text_preview,
+    };
+    if args.path.is_some() {
+        return Err(format!(
+            "text-preview 명령은 경로를 받지 않습니다
+
+{USAGE}"
+        ));
+    }
+    warn_debug();
+    let limit = args.limit.unwrap_or(TEXT_PREVIEW_LIMIT);
+    let m = measure_text_preview(args.runs())?;
+    println!("텍스트 미리보기 (256KB CP949, {}회):", m.times.len());
+    print_times(&m);
+    println!(
+        "  중앙값 {:.3}ms, 최악 {:.3}ms / 로컬 기준 {}ms, CI 상한 {}ms",
+        ms(m.median()),
+        ms(m.max()),
+        TEXT_PREVIEW_TARGET.as_millis(),
+        limit.as_millis()
+    );
+    check_text_preview_limit(&m, limit)?;
     println!("  상한 안: 통과");
     Ok(())
 }

@@ -49,13 +49,11 @@ const KOREAN: &str =
     "첫 줄: 로그 시작 2026-11-18\r\n둘째 줄: 한글 텍스트 파일입니다\r\nthird line: ok\r\n";
 
 #[test]
-#[ignore = "#336"]
 fn the_head_limit_is_256_kilobytes() {
     assert_eq!(TEXT_HEAD_LIMIT, 256 * 1024);
 }
 
 #[test]
-#[ignore = "#336"]
 fn utf8_with_a_bom_reads_without_the_bom() {
     let text = "BOM 있는 UTF-8 🎉\n두 줄";
     let mut bytes = vec![0xEF, 0xBB, 0xBF];
@@ -64,7 +62,6 @@ fn utf8_with_a_bom_reads_without_the_bom() {
 }
 
 #[test]
-#[ignore = "#336"]
 fn utf16_with_a_bom_reads_in_both_byte_orders() {
     let text = "UTF-16 한글 텍스트 😀\r\n둘째 줄";
     let mut le = vec![0xFF, 0xFE];
@@ -77,13 +74,11 @@ fn utf16_with_a_bom_reads_in_both_byte_orders() {
 }
 
 #[test]
-#[ignore = "#336"]
 fn utf8_korean_without_a_bom_is_utf8() {
     assert_reads(KOREAN.as_bytes(), TextEncoding::Utf8, KOREAN);
 }
 
 #[test]
-#[ignore = "#336"]
 fn utf16_without_a_bom_is_found_from_the_nul_pattern() {
     let text = "line 1: 로그 시작\r\nline 2: ok\r\n".repeat(20);
     assert_reads(&utf16le(&text), TextEncoding::Utf16Le, &text);
@@ -91,7 +86,6 @@ fn utf16_without_a_bom_is_found_from_the_nul_pattern() {
 }
 
 #[test]
-#[ignore = "#336"]
 fn ascii_only_utf16_without_a_bom_is_utf16_not_utf8_with_nuls() {
     // ASCII만 담은 UTF-16은 NUL이 섞인 올바른 UTF-8 바이트이기도 하다. NUL 모양이 UTF-8 검사보다 먼저다.
     let text = "plain ascii text\r\nsecond line\r\n".repeat(20);
@@ -101,7 +95,6 @@ fn ascii_only_utf16_without_a_bom_is_utf16_not_utf8_with_nuls() {
 }
 
 #[test]
-#[ignore = "#336"]
 fn cp949_korean_is_cp949() {
     let bytes = cp949(KOREAN);
     assert!(
@@ -112,7 +105,6 @@ fn cp949_korean_is_cp949() {
 }
 
 #[test]
-#[ignore = "#336"]
 fn windows_1252_is_the_last_resort() {
     let text = "Café crème brûlée, naïve façade\r\n¿Qué? Olá!\r\n";
     let (bytes, _, unmappable) = encoding_rs::WINDOWS_1252.encode(text);
@@ -127,14 +119,12 @@ fn windows_1252_is_the_last_resort() {
 }
 
 #[test]
-#[ignore = "#336"]
 fn an_empty_file_is_empty_utf8_text() {
     assert_eq!(detect_encoding(b""), Some(TextEncoding::Utf8));
     assert_reads(b"", TextEncoding::Utf8, "");
 }
 
 #[test]
-#[ignore = "#336"]
 fn binary_with_scattered_nul_bytes_is_not_text() {
     let mut bytes = b"\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00".to_vec();
     for i in 0..4096u32 {
@@ -151,7 +141,6 @@ fn binary_with_scattered_nul_bytes_is_not_text() {
 }
 
 #[test]
-#[ignore = "#336"]
 fn a_three_byte_character_cut_at_the_limit_is_dropped() {
     let dir = TempDir::new().unwrap();
     let path = write(dir.path(), "big.txt", "가".repeat(100_000).as_bytes());
@@ -167,7 +156,6 @@ fn a_three_byte_character_cut_at_the_limit_is_dropped() {
 }
 
 #[test]
-#[ignore = "#336"]
 fn a_surrogate_pair_cut_at_the_limit_is_dropped() {
     let mut bytes = vec![0xFF, 0xFE];
     bytes.extend(utf16le(&"😀".repeat(80_000)));
@@ -182,7 +170,6 @@ fn a_surrogate_pair_cut_at_the_limit_is_dropped() {
 }
 
 #[test]
-#[ignore = "#336"]
 fn a_cp949_character_cut_at_the_limit_is_dropped() {
     // 앞에 한 바이트를 두어 두 바이트 글자가 한도에서 반으로 잘린다.
     let text = format!("a{}", "한".repeat(200_000));
@@ -197,7 +184,6 @@ fn a_cp949_character_cut_at_the_limit_is_dropped() {
 }
 
 #[test]
-#[ignore = "#336"]
 fn a_file_exactly_at_the_limit_is_not_truncated() {
     let dir = TempDir::new().unwrap();
     let path = write(dir.path(), "exact.txt", &vec![b'a'; TEXT_HEAD_LIMIT]);
@@ -207,7 +193,6 @@ fn a_file_exactly_at_the_limit_is_not_truncated() {
 }
 
 #[test]
-#[ignore = "#336"]
 fn the_limit_parameter_bounds_the_text() {
     let dir = TempDir::new().unwrap();
     let path = write(dir.path(), "short.txt", b"0123456789abcdef");
@@ -217,7 +202,6 @@ fn the_limit_parameter_bounds_the_text() {
 }
 
 #[test]
-#[ignore = "#336"]
 fn a_large_file_is_read_only_up_to_the_limit() {
     let line = "2026-11-18 12:00:00 INFO 서비스가 응답했다 id=12345\n";
     let dir = TempDir::new().unwrap();
@@ -230,7 +214,6 @@ fn a_large_file_is_read_only_up_to_the_limit() {
 }
 
 #[test]
-#[ignore = "#336"]
 fn a_missing_file_is_missing() {
     let dir = TempDir::new().unwrap();
     assert_eq!(
@@ -241,7 +224,6 @@ fn a_missing_file_is_missing() {
 
 #[cfg(windows)]
 #[test]
-#[ignore = "#336"]
 fn a_file_locked_without_sharing_is_locked() {
     use std::os::windows::fs::OpenOptionsExt;
 
@@ -260,7 +242,6 @@ fn a_file_locked_without_sharing_is_locked() {
 
 #[cfg(windows)]
 #[test]
-#[ignore = "#336"]
 fn renaming_and_deleting_work_while_the_head_is_being_read() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};

@@ -83,13 +83,11 @@ fn fire(previewer: &mut Previewer, name: &str, now: Instant) -> PreviewId {
 }
 
 #[test]
-#[ignore = "#338"]
 fn the_delay_is_fifty_milliseconds() {
     assert_eq!(PREVIEW_DELAY, ms(50));
 }
 
 #[test]
-#[ignore = "#338"]
 fn a_request_waits_for_the_delay_before_it_is_made() {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut previewer = {
@@ -118,7 +116,6 @@ fn a_request_waits_for_the_delay_before_it_is_made() {
 }
 
 #[test]
-#[ignore = "#338"]
 fn a_new_selection_restarts_the_wait_and_only_the_last_is_made() {
     let made = Arc::new(Mutex::new(Vec::<String>::new()));
     let mut previewer = {
@@ -145,7 +142,6 @@ fn a_new_selection_restarts_the_wait_and_only_the_last_is_made() {
 }
 
 #[test]
-#[ignore = "#338"]
 fn clearing_the_selection_drops_the_waiting_request() {
     let mut previewer = Previewer::new(echo);
     let t0 = Instant::now();
@@ -177,7 +173,6 @@ fn gated(
 }
 
 #[test]
-#[ignore = "#338"]
 fn only_the_last_of_rapid_requests_comes_back_and_earlier_ones_are_cancelled() {
     let release = Arc::new(AtomicBool::new(false));
     let seen = Arc::new(Mutex::new(HashMap::new()));
@@ -204,7 +199,6 @@ fn only_the_last_of_rapid_requests_comes_back_and_earlier_ones_are_cancelled() {
 }
 
 #[test]
-#[ignore = "#338"]
 fn a_stuck_earlier_request_does_not_hold_up_the_next_one() {
     let release_a = Arc::new(AtomicBool::new(false));
     let mut previewer = {
@@ -233,7 +227,6 @@ fn a_stuck_earlier_request_does_not_hold_up_the_next_one() {
 }
 
 #[test]
-#[ignore = "#338"]
 fn requesting_and_ticking_return_at_once_even_when_making_is_slow() {
     let mut previewer = Previewer::new(|r, c| {
         std::thread::sleep(ms(1500));
@@ -256,7 +249,6 @@ fn requesting_and_ticking_return_at_once_even_when_making_is_slow() {
 }
 
 #[test]
-#[ignore = "#338"]
 fn the_waker_is_called_when_a_result_is_ready() {
     let mut previewer = Previewer::new(echo);
     let woken = Arc::new(AtomicUsize::new(0));
@@ -278,7 +270,6 @@ fn the_waker_is_called_when_a_result_is_ready() {
 }
 
 #[test]
-#[ignore = "#338"]
 fn a_panicking_maker_gives_a_failure_and_the_previewer_keeps_working() {
     let mut previewer = Previewer::new(|r, c| {
         if name_of(r) == "boom" {
@@ -298,7 +289,6 @@ fn a_panicking_maker_gives_a_failure_and_the_previewer_keeps_working() {
 }
 
 #[test]
-#[ignore = "#338"]
 fn requesting_the_same_item_again_makes_it_again() {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut previewer = {
