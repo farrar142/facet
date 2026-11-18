@@ -38,6 +38,14 @@
 //! 실행은 첫 대상이 든 폴더(폴더 배경이면 그 폴더)에 `facet-fake-invoked.txt`를 만든다. `--fake-version <n>`이면 버전
 //! 인사에서 자기 버전을 `n`으로 말한다(`n`만 받는다).
 //!
+//! 미리보기 요청(#342)은 파일 이름의 줄기(마지막 점 앞)로 고른다: `hang`이면 답하지 않고 붙잡혀 있고, `crash`면
+//! 곧바로 죽고, `late-<ms>`로 시작하면 그 밀리초 뒤에 「보이기 시작함」, `nohandler`면 「처리기 없음」, `lock-`으로
+//! 시작하면 그 파일을 공유 없이 열어 둔 채 「보이기 시작함」으로 답하고 미리보기를 내리거나 다음 미리보기 요청이 올 때
+//! 닫는다. 그 밖에는 곧바로 「보이기 시작함」. 자리 바꾸기·내리기는 완료로 답한다.
+//!
+//! 시험용 모드가 아니면 실제 처리기는 아직 싣지 않고(뒤 티켓) 미리보기 요청에 「처리기 없음」으로 답한다(앱은 정보만
+//! 보인다).
+//!
 //! 속성 요청은 첫 경로가 든 폴더에 `facet-fake-properties.txt`를 만들어 줄마다 경로들의 이름을 쓰고 완료로 답하며,
 //! 「대화상자」가 1.5초 동안 떠 있는 것으로 친다(그동안 쉬면 끝내기를 미룸). 연결 프로그램 요청은 그 파일이 든 폴더에
 //! `facet-fake-open-with.txt`를 만들어 파일 이름을 쓰고 완료로 답한다.
@@ -173,12 +181,13 @@ mod helper {
         let Ok((mut reader, mut writer, _closer)) = client.split() else {
             return 3;
         };
+        let mut preview = Preview::default();
         loop {
             let Ok(request) = read_message::<Request>(&mut reader) else {
                 return 0; // 끊김: UI가 끝났거나 도우미를 버렸다.
             };
             activity.begin();
-            let response = handle(&args, &shell, &activity, request);
+            let response = handle(&args, &shell, &activity, &mut preview, request);
             let written = response
                 .as_ref()
                 .is_none_or(|response| write_message(&mut writer, response).is_ok());
@@ -292,14 +301,35 @@ mod helper {
         }
     }
 
+    /// 떠 있는 미리보기(#342). 시험용 모드에서는 `lock-` 파일을 공유 없이 열어 둔 것이다.
+    #[derive(Default)]
+    struct Preview {
+        held: Option<fs::File>,
+    }
+
     /// 요청 하나에 답한다. `None`이면 답하지 않는다.
     fn handle(
         args: &Args,
         shell: &Shell,
         activity: &Arc<Activity>,
+        preview: &mut Preview,
         request: Request,
     ) -> Option<Response> {
         match request {
+            Request::Preview { id, path, .. } => {
+                // 앞선 미리보기를 내린다.
+                preview.held = None;
+                if args.fake {
+                    fake_preview(args, preview, id, &path)
+                } else {
+                    Some(Response::NoPreviewHandler { id })
+                }
+            }
+            Request::MovePreview { id, .. } => Some(Response::Done { id }),
+            Request::UnloadPreview { id } => {
+                preview.held = None;
+                Some(Response::Done { id })
+            }
             Request::Properties { id, paths } if args.fake => {
                 Some(fake_properties(activity, id, &paths))
             }
@@ -501,6 +531,45 @@ mod helper {
         path.file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.to_string_lossy().into_owned())
+    }
+
+    /// 시험용 미리보기: 파일 이름의 줄기로 동작을 고른다(#342의 약속).
+    fn fake_preview(args: &Args, preview: &mut Preview, id: u64, path: &Path) -> Option<Response> {
+        let name = file_name(path);
+        let stem = name
+            .rsplit_once('.')
+            .map_or(name.as_str(), |(stem, _)| stem);
+        if stem == "hang" {
+            loop {
+                thread::sleep(Duration::from_secs(3600));
+            }
+        }
+        if stem == "crash" {
+            crash(args);
+        }
+        if stem == "nohandler" {
+            return Some(Response::NoPreviewHandler { id });
+        }
+        if let Some(ms) = stem
+            .strip_prefix("late-")
+            .and_then(|ms| ms.parse::<u64>().ok())
+        {
+            thread::sleep(Duration::from_millis(ms));
+        }
+        if stem.starts_with("lock-") {
+            use std::os::windows::fs::OpenOptionsExt;
+            match fs::OpenOptions::new().read(true).share_mode(0).open(path) {
+                Ok(file) => preview.held = Some(file),
+                Err(e) => {
+                    return Some(Response::Error {
+                        id,
+                        kind: ErrorKind::Failed,
+                        message: e.to_string(),
+                    });
+                }
+            }
+        }
+        Some(Response::PreviewShowing { id })
     }
 
     fn fake_menu(args: &Args, id: u64, target: &MenuTarget) -> Option<Response> {

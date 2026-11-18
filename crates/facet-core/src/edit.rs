@@ -87,7 +87,9 @@ pub fn rename(folder: &Path, original: &OsStr, new_name: &str) -> Result<Edited,
     }
     let from = folder.join(original);
     let to = folder.join(new_name);
-    file_ops::rename(&from, &to).map_err(|error| file_error(error.kind()))?;
+    // 도우미의 미리보기 처리기가 잡고 있으면 내리고 한 번 다시 시도한다(#342).
+    crate::shell_helper::retry_held(&from, || file_ops::rename(&from, &to))
+        .map_err(|error| file_error(error.kind()))?;
     let item = read_item(folder, OsStr::new(new_name));
     Ok(edited(EditKind::Rename, Some(from), to, item))
 }

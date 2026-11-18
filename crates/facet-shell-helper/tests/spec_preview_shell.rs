@@ -113,13 +113,11 @@ fn helper_pid(app: &App) -> Option<u32> {
 }
 
 #[test]
-#[ignore = "#342"]
 fn the_shell_preview_timeout_is_three_seconds() {
     assert_eq!(SHELL_PREVIEW_TIMEOUT, Duration::from_secs(3));
 }
 
 #[test]
-#[ignore = "#342"]
 fn a_shell_kind_item_is_shown_by_the_helper() {
     let dir = folder_with(&["doc.fakeprev"]);
     let mut app = app_at(dir.path(), true);
@@ -130,7 +128,6 @@ fn a_shell_kind_item_is_shown_by_the_helper() {
 }
 
 #[test]
-#[ignore = "#342"]
 fn no_handler_shows_info_only() {
     let dir = folder_with(&["nohandler.fakeprev"]);
     let mut app = app_at(dir.path(), true);
@@ -139,7 +136,6 @@ fn no_handler_shows_info_only() {
 }
 
 #[test]
-#[ignore = "#342"]
 fn without_the_helper_shell_kind_items_show_info_only() {
     let dir = folder_with(&["doc.fakeprev"]);
     let mut app = app_at(dir.path(), false);
@@ -149,7 +145,6 @@ fn without_the_helper_shell_kind_items_show_info_only() {
 }
 
 #[test]
-#[ignore = "#342"]
 fn a_helper_that_does_not_start_in_time_fails_and_the_app_stays_responsive() {
     let dir = folder_with(&["hang.fakeprev", "other.fakeprev"]);
     let mut app = app_at(dir.path(), true);
@@ -179,7 +174,6 @@ fn a_helper_that_does_not_start_in_time_fails_and_the_app_stays_responsive() {
 }
 
 #[test]
-#[ignore = "#342"]
 fn a_crashed_helper_fails_the_preview_and_comes_back_on_the_next_selection() {
     let dir = folder_with(&["crash.fakeprev", "doc.fakeprev"]);
     let mut app = app_at(dir.path(), true);
@@ -194,7 +188,6 @@ fn a_crashed_helper_fails_the_preview_and_comes_back_on_the_next_selection() {
 }
 
 #[test]
-#[ignore = "#342"]
 fn a_late_reply_for_an_earlier_item_does_not_change_the_current_one() {
     let dir = folder_with(&["late-1500.fakeprev", "doc.fakeprev"]);
     let mut app = app_at(dir.path(), true);
@@ -228,7 +221,6 @@ fn wait_edited(app: &mut App) -> Result<Edited, EditError> {
 }
 
 #[test]
-#[ignore = "#342"]
 fn renaming_a_file_the_helper_holds_releases_the_preview_and_retries() {
     let dir = folder_with(&["lock-a.fakeprev"]);
     let held = dir.path().join("lock-a.fakeprev");
@@ -249,7 +241,6 @@ fn renaming_a_file_the_helper_holds_releases_the_preview_and_retries() {
 }
 
 #[test]
-#[ignore = "#342"]
 fn deleting_a_file_the_helper_holds_releases_the_preview_and_retries() {
     let dir = folder_with(&["lock-b.fakeprev"]);
     let held = dir.path().join("lock-b.fakeprev");

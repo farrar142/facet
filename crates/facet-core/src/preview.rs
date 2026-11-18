@@ -613,7 +613,10 @@ pub enum PreviewContent {
 }
 
 /// #342: 도우미 미리보기의 대기 시간(3초).
-pub const SHELL_PREVIEW_TIMEOUT: Duration = Duration::ZERO; // #342
+///
+/// 근거: 미리보기 처리기는 보통 수십~수백 ms 안에 그리기 시작한다(Office 문서처럼 무거운 처리기도 1~2초). 그보다
+/// 넉넉하되 사람이 영역이 멈췄다고 느끼기 전에 「불러오지 못함」으로 바꾸는 값이다(spec #26이 정한 값).
+pub const SHELL_PREVIEW_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// #342: 처리기 창을 붙일 자리(창 핸들 값, 화면 물리 픽셀).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
