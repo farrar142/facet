@@ -622,7 +622,7 @@ impl Run<'_, '_> {
                 Err(refusal) => return refusal.into(),
             }
         } else {
-            match recycle::recycle(&[path.to_path_buf()]).pop() {
+            match crate::shell_provider::recycle(&[path.to_path_buf()]).pop() {
                 Some(RecycleOutcome::Recycled(item)) => Cleared::Recycled(item),
                 Some(RecycleOutcome::NotRecyclable) => {
                     return Attempt::Skip(RevertSkip::NotRecyclable);
@@ -830,7 +830,7 @@ impl Run<'_, '_> {
                 .map(|&i| steps[i].path().to_path_buf())
                 .collect();
             self.copier.reporter.current = paths.first().cloned();
-            let results = recycle::recycle(&paths);
+            let results = crate::shell_provider::recycle(&paths);
             let mut again = Vec::new();
             let mut settled = false;
             for (position, &root) in chunk.iter().enumerate() {
@@ -1031,7 +1031,7 @@ fn recycle_again(path: &Path, stamp: &Stamp) -> Attempt {
     if !stamp.matches(&now) {
         return Attempt::Skip(RevertSkip::Changed);
     }
-    match recycle::recycle(&[path.to_path_buf()]).pop() {
+    match crate::shell_provider::recycle(&[path.to_path_buf()]).pop() {
         Some(RecycleOutcome::Recycled(item)) => Attempt::Done(Step::Recycled {
             path: path.to_path_buf(),
             item,

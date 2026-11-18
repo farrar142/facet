@@ -822,9 +822,15 @@ fn connect(ui: &AppWindow, w: WindowId) {
             3 => Column::Size,
             4 => Column::Location,
             5 => Column::Matches,
+            6 => Column::OriginalLocation,
+            7 => Column::DateDeleted,
             _ => Column::Name,
         };
-        with_view(w, |view| view.execute(CommandId::sort_by(column)));
+        with_view(w, |view| match CommandId::sort_by(column) {
+            Some(command) => view.execute(command),
+            // 휴지통의 원래 위치·지운 날짜는 정렬 명령 없이 머리글로만 정렬한다.
+            None => view.sort_by_header(column),
+        });
     });
     ui.on_mouse_history(move |forward| {
         let command = if forward {
@@ -2134,12 +2140,15 @@ impl View {
                     Column::Location => 4,
                     Column::Matches => 5,
                     Column::TotalSize | Column::FreeSpace => todo!("#351"),
-                    Column::OriginalLocation | Column::DateDeleted => todo!("#352"),
+                    Column::OriginalLocation => 6,
+                    Column::DateDeleted => 7,
                 },
                 sort_descending: sort.direction == Direction::Descending,
                 item_count: count(status.item_count),
                 total_count: status.total_count.map_or(-1, count),
                 results: tab.location().is_search_results(),
+                recycle_bin: tab.location().virtual_folder()
+                    == Some(facet_core::VirtualFolder::RecycleBin),
                 content_results: tab.location().search_scope().is_some_and(|scope| {
                     matches!(scope.kind, facet_core::SearchKind::Content { .. })
                 }),
@@ -2426,6 +2435,18 @@ impl View {
     }
 
     /// 명령을 활성 탭에서 실행한다.
+    /// 정렬 명령이 없는 열(휴지통의 원래 위치·지운 날짜)의 머리글을 눌렀다: 같은 열이면 방향을 뒤집고 다른 열이면 그
+    /// 열 오름차순으로 정렬한다.
+    fn sort_by_header(&self, column: Column) {
+        self.remember_scroll();
+        {
+            let mut app = self.app.borrow_mut();
+            let sort = command::sort_toggled(app.active_tab().sort(), column);
+            app.set_sort(sort);
+        }
+        self.render();
+    }
+
     fn execute(&self, command: CommandId) {
         self.remember_scroll();
         let before = self.app.borrow().active_tab_id();
@@ -5331,6 +5352,16 @@ impl Model for TabRows {
             matches: tab
                 .hit(row)
                 .map_or_else(SharedString::new, |hit| text::match_text(hit).into()),
+            // 휴지통 항목의 원래 위치(지우기 전에 든 폴더)와 지운 날짜.
+            original_location: tab
+                .recycled(row)
+                .and_then(|entry| entry.original.parent())
+                .map_or_else(SharedString::new, |folder| {
+                    folder.display().to_string().into()
+                }),
+            deleted: tab.recycled(row).map_or_else(SharedString::new, |entry| {
+                file_list::format_modified_local(entry.deleted).into()
+            }),
             selected: tab.is_selected(row),
             cursor: tab.cursor() == Some(row),
             cut: !marks.is_empty()
@@ -5658,6 +5689,7 @@ impl View {
             button,
             deferred,
             pressed: at,
+            refused: false,
         });
     }
 
@@ -5667,7 +5699,7 @@ impl View {
         let press = {
             let mut guard = self.item_press.borrow_mut();
             match guard.as_ref() {
-                Some(press) if press.crossed(at) => guard.take(),
+                Some(press) if !press.refused && press.crossed(at) => guard.take(),
                 _ => None,
             }
         };
@@ -5677,7 +5709,17 @@ impl View {
         if self.shown_tab_id(press.panel) != Some(press.tab) {
             return;
         }
-        let Some(sources) = self.app.borrow().drag_sources() else {
+        let sources = self.app.borrow().drag_sources();
+        let Some(sources) = sources else {
+            // 위치가 끌기 원본을 막으면(휴지통: 복사해 오기도 이동도 안 됨) 놓을 때까지 금지 커서를 보인다.
+            let capabilities = self.app.borrow().active_tab().capabilities();
+            if !capabilities.copy_from && !capabilities.move_items {
+                self.ui.set_drag_refused(true);
+                *self.item_press.borrow_mut() = Some(ItemPress {
+                    refused: true,
+                    ..press
+                });
+            }
             return;
         };
         let window = self.window;
@@ -5700,6 +5742,10 @@ impl View {
         let Some(press) = press else {
             return;
         };
+        if press.refused {
+            self.ui.set_drag_refused(false);
+            return;
+        }
         if self.shown_tab_id(press.panel) != Some(press.tab) {
             return;
         }
@@ -5720,6 +5766,7 @@ impl View {
     /// 창이 포커스를 잃었다: 누르기를 버린다.
     fn item_cancel(&self) {
         self.item_press.borrow_mut().take();
+        self.ui.set_drag_refused(false);
     }
 }
 

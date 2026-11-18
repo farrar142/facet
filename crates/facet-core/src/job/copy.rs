@@ -1292,7 +1292,7 @@ impl<'a> Copier<'a> {
                     Err(error) => FileOutcome::Failed(error.kind()),
                 };
             };
-            match recycle::recycle(&[target.to_path_buf()]).pop() {
+            match crate::shell_provider::recycle(&[target.to_path_buf()]).pop() {
                 Some(RecycleOutcome::Recycled(item)) => {
                     return match file_ops::rename(temp, target) {
                         Ok(()) => {

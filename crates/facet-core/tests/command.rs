@@ -162,8 +162,14 @@ fn s1_명령과_기본_단축키가_모두_명령_목록에_있다() {
     }
     // 열마다 정렬 명령이 있다.
     for column in [Column::Name, Column::Modified, Column::Type, Column::Size] {
-        assert_eq!(CommandId::sort_by(column).sort_column(), Some(column));
+        assert_eq!(
+            CommandId::sort_by(column).and_then(CommandId::sort_column),
+            Some(column)
+        );
     }
+    // 휴지통의 원래 위치·지운 날짜는 정렬 명령 없이 머리글로만 정렬한다.
+    assert_eq!(CommandId::sort_by(Column::OriginalLocation), None);
+    assert_eq!(CommandId::sort_by(Column::DateDeleted), None);
 }
 
 #[test]
@@ -200,7 +206,7 @@ fn s2_탭_명령과_기본_단축키() {
     // tests/edit.rs), 실행취소·다시 실행·작업 기록 보기(자세한 확인은 tests/history.rs), 삭제·영구 삭제가 전부다.
     assert_eq!(
         CommandId::ALL.len(),
-        14 + expected.len() + 2 + 2 + 3 + 2 + 3 + 1 + 1 + 3 + 1 + 2 + 1 + 1 + 5 + 1 + 1 + 1 // 일괄 이름 바꾸기, 잘라내기, 필터, 검색 결과 위치, 검색, 내용 검색, 일치로 정렬, 현재 폴더 아래만, 보기 명령 다섯, 미리보기 영역, 썸네일 캐시 비우기, 내 PC 열기
+        14 + expected.len() + 2 + 2 + 3 + 2 + 3 + 1 + 1 + 3 + 1 + 2 + 1 + 1 + 5 + 1 + 1 + 1 + 1 // 일괄 이름 바꾸기, 잘라내기, 필터, 검색 결과 위치, 검색, 내용 검색, 일치로 정렬, 현재 폴더 아래만, 보기 명령 다섯, 미리보기 영역, 썸네일 캐시 비우기, 내 PC 열기, 휴지통 열기
     );
     assert_eq!(GoToTab(3).as_str(), "go-to-tab-3");
     assert_eq!(CommandId::from_id("go-to-tab-8"), Some(GoToTab(8)));

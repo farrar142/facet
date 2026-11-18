@@ -87,7 +87,7 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::ClearThumbnailCache => "썸네일 캐시 비우기",
         CommandId::OpenWith | CommandId::Properties => todo!("#321"),
         CommandId::OpenThisPc => "내 PC 열기",
-        CommandId::OpenRecycleBin => todo!("#352"),
+        CommandId::OpenRecycleBin => "휴지통 열기",
         CommandId::Restore => todo!("#353"),
         CommandId::EmptyRecycleBin => todo!("#354"),
         CommandId::TogglePreview => "미리보기 영역",

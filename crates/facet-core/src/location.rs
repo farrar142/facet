@@ -107,9 +107,12 @@ impl Location {
         })
     }
 
-    /// #352: 「휴지통」 위치.
+    /// 「휴지통」 위치. 셸을 부르지 않고 만든다(식별자는 정해진 값이다). 여러 드라이브의 휴지통을 하나로 보인다.
     pub fn recycle_bin() -> Location {
-        todo!("#352")
+        Location::shell(
+            VirtualFolder::RecycleBin,
+            crate::shell_provider::RECYCLE_BIN_ID.to_vec(),
+        )
     }
 
     /// 가상 폴더 위치면 그 종류(휴대폰 장치 안의 폴더도 [`VirtualFolder::Device`]), 아니면 `None`.

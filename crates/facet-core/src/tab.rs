@@ -167,16 +167,18 @@ impl ReadRequest {
                 .as_ref()
                 .filter(|_| !location.is_search_results() && location.virtual_folder().is_none())
                 .map(|sink| watch::start(location, self.id, Arc::clone(sink)));
-            let items = if location.virtual_folder().is_some() {
+            let list = if location.virtual_folder().is_some() {
                 crate::shell_provider::list_streaming(
                     location,
                     progress.clone(),
                     Arc::clone(&self.cancel.0),
                 )
+                .map(|listed| DetailsList::with_recycled(listed.items, listed.recycled, self.sort))
             } else {
-                provider_for(location).list(location)
+                provider_for(location)
+                    .list(location)
+                    .map(|items| DetailsList::new(items, self.sort))
             };
-            let list = items.map(|items| DetailsList::new(items, self.sort));
             (list, watch)
         };
         let result = |location: Location, (list, watch), relocation| ReadResult {
@@ -2545,9 +2547,10 @@ impl Tab {
         todo!("#351")
     }
 
-    /// #352: 보이는 항목 `index`가 휴지통 항목이면 그 정보.
-    pub fn recycled(&self, _index: usize) -> Option<&crate::shell_provider::RecycledEntry> {
-        todo!("#352")
+    /// 보이는 항목 `index`가 휴지통 항목이면 그 정보(원래 전체 경로·지운 시각). 휴지통 항목이 아니거나 정보 파일을
+    /// 읽지 못한 항목은 `None`이다.
+    pub fn recycled(&self, index: usize) -> Option<&crate::shell_provider::RecycledEntry> {
+        self.list.recycled(self.list_index(index)?)
     }
 
     /// 커서 항목의 번호.
