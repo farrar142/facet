@@ -424,6 +424,13 @@ enum Message {
     PreviewDue(WindowId),
     /// #339: 그 창의 미리보기 요청기에 결과가 왔다.
     PreviewReady(WindowId),
+    /// #341: 썸네일 캐시에서 꺼낸 흐린 자리 그림.
+    PreviewPlaceholder {
+        window: WindowId,
+        path: PathBuf,
+        item: crate::Item,
+        image: Arc<Thumbnail>,
+    },
     /// 하위 폴더 목록 일꾼의 결과(#303).
     Subfolders {
         tab: TabId,
@@ -1005,6 +1012,8 @@ pub struct App {
     previews: HashMap<WindowId, PreviewState>,
     /// #339: 다음 [`App::poll`]이 [`Update::Preview`]로 알릴 창(변경 따라가기가 내용을 바꿨다).
     preview_notes: Vec<WindowId>,
+    /// #341: 창마다 미리보기 영역의 긴 변(물리 픽셀). 없으면 기본값.
+    preview_sides: HashMap<WindowId, u32>,
     /// 썸네일([`App::enable_thumbnails`]). 켜지 않았으면 `None`.
     thumbnails: Option<Thumbs>,
     outbox: Outbox,
@@ -1235,6 +1244,7 @@ impl App {
             subfolders: Arc::default(),
             previews: HashMap::new(),
             preview_notes: Vec::new(),
+            preview_sides: HashMap::new(),
             thumbnails: None,
             outbox: Outbox {
                 sender,
@@ -1347,6 +1357,7 @@ impl App {
     fn remove_window(&mut self, w: usize) -> Window {
         let window = self.windows.remove(w);
         self.previews.remove(&window.id);
+        self.preview_sides.remove(&window.id);
         if self.active > w || (self.active == w && self.active > 0) {
             self.active -= 1;
         }
@@ -2060,7 +2071,15 @@ impl App {
             0
         };
         let show_hidden = tab.show_hidden();
+        let tab_grid_side = tab.view().grid_size.thumbnail_side();
         let now = Instant::now();
+        let side = self.preview_side(id);
+        let grid_side = tab_grid_side;
+        let placeholder_source = self
+            .thumbnails
+            .as_ref()
+            .map(|thumbs| Arc::clone(&thumbs.shared));
+        let outbox = self.outbox.clone();
         let state = self.preview_state(id);
         match (count, single) {
             (0, _) => {
@@ -2078,6 +2097,7 @@ impl App {
                     return;
                 }
                 state.key = Some((path.clone(), item.clone()));
+                let (path_for_key, item_for_key) = (path.clone(), item.clone());
                 state.content = Some(PreviewContent::Item {
                     path: path.clone(),
                     item: item.clone(),
@@ -2088,11 +2108,35 @@ impl App {
                         path,
                         item,
                         show_hidden,
-                        image_side: PREVIEW_IMAGE_SIDE,
+                        image_side: side,
                     }),
                     now,
                 );
                 self.schedule_preview(id);
+                if let Some(shared) = placeholder_source
+                    && crate::thumbnail::is_decodable(&item_for_key.name)
+                {
+                    let window = id;
+                    // 캐시 읽기와 PNG 해독은 뒤 스레드에서 한다.
+                    let _ = thread::Builder::new()
+                        .name("facet-preview-placeholder".into())
+                        .spawn(move || {
+                            let key = ThumbnailKey {
+                                path: path_for_key.clone(),
+                                side: grid_side,
+                                modified: item_for_key.modified,
+                                file_size: item_for_key.size,
+                            };
+                            if let Some(image) = shared.cache().and_then(|c| c.get(&key)) {
+                                outbox.send(Message::PreviewPlaceholder {
+                                    window,
+                                    path: path_for_key,
+                                    item: item_for_key,
+                                    image,
+                                });
+                            }
+                        });
+                }
             }
             _ => {
                 state.gone = false;
@@ -2155,6 +2199,7 @@ impl App {
             }
         }
         for (window, path, found, show_hidden) in changes {
+            let side = self.preview_side(window);
             let state = self.preview_state(window);
             match found {
                 None => {
@@ -2185,7 +2230,7 @@ impl App {
                             path,
                             item,
                             show_hidden,
-                            image_side: PREVIEW_IMAGE_SIDE,
+                            image_side: side,
                         }),
                         now,
                     );
@@ -2216,8 +2261,48 @@ impl App {
     }
 
     /// #341: 그 창 미리보기 영역의 긴 변(물리 픽셀).
-    pub fn set_preview_side(&mut self, _window: WindowId, _side: u32) {
-        todo!("#341")
+    /// 미리 보는 항목이 이미지이고 크기가 바뀌면 그 크기로 다시 요청한다.
+    pub fn set_preview_side(&mut self, window: WindowId, side: u32) {
+        let side = side.max(1);
+        if self.preview_side(window) == side {
+            return;
+        }
+        self.preview_sides.insert(window, side);
+        let show_hidden = self
+            .windows
+            .iter()
+            .find(|w| w.id == window)
+            .map(|w| w.active_panel().active_tab().show_hidden());
+        let Some(show_hidden) = show_hidden else {
+            return;
+        };
+        let Some(state) = self.previews.get_mut(&window) else {
+            return;
+        };
+        let Some((path, item)) = state.key.clone() else {
+            return;
+        };
+        if !crate::thumbnail::is_decodable(&item.name) {
+            return;
+        }
+        // 앞 그림은 새 그림이 올 때까지 그대로 보인다.
+        state.previewer.request(
+            Some(PreviewRequest {
+                path,
+                item,
+                show_hidden,
+                image_side: side,
+            }),
+            Instant::now(),
+        );
+        self.schedule_preview(window);
+    }
+
+    fn preview_side(&self, window: WindowId) -> u32 {
+        self.preview_sides
+            .get(&window)
+            .copied()
+            .unwrap_or(PREVIEW_IMAGE_SIDE)
     }
 
     /// #342: 그 창 미리보기 영역의 자리(처리기 창을 붙일 곳).
@@ -2836,6 +2921,33 @@ impl App {
             }
             Message::PreviewReady(window) => {
                 self.deliver_preview(window, false);
+                (self.window_tab_id(window), Update::Preview(window))
+            }
+            Message::PreviewPlaceholder {
+                window,
+                path,
+                item,
+                image,
+            } => {
+                if let Some(state) = self.previews.get_mut(&window)
+                    && state.key == Some((path.clone(), item.clone()))
+                    && matches!(
+                        state.content,
+                        Some(PreviewContent::Item {
+                            body: PreviewBody::Loading,
+                            ..
+                        })
+                    )
+                {
+                    state.content = Some(PreviewContent::Item {
+                        path,
+                        item,
+                        body: PreviewBody::Image {
+                            image,
+                            placeholder: true,
+                        },
+                    });
+                }
                 (self.window_tab_id(window), Update::Preview(window))
             }
             Message::Subfolders { tab, id, list } => {
