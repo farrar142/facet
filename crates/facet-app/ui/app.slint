@@ -2819,6 +2819,144 @@ component CrumbMenuView inherits Rectangle {
     }
 }
 
+// 미리보기 영역 정보 줄 하나(이름표와 값). 글자는 Rust(`src/text.rs`)가 만든다.
+export struct PreviewRow {
+    label: string,
+    value: string,
+}
+
+// 미리보기 영역(#340): 코어 `App::preview`가 준 내용을 그리기만 한다(파일을 읽지 않음).
+// kind 0: 안내·이유 문구만, 1: 정보(아이콘·이름·정보 줄·문구), 2: 텍스트(고정폭, 보이는 줄만), 3: 그림.
+// 영역을 누르면 키보드는 목록에 남는다. 글자 줄을 누를 때만 그 줄이 포커스를 받고 Esc가 목록으로 돌린다.
+component PreviewView inherits Rectangle {
+    in property <int> kind;
+    in property <string> message;
+    in property <string> name;
+    in property <[PreviewRow]> rows;
+    in property <bool> folder;
+    in property <bool> has-icon;
+    in property <image> icon;
+    in property <[string]> lines;
+    in property <string> note;
+    in property <image> picture;
+    callback focus-list();
+    background: Palette.background;
+    border-width: 1px;
+    border-color: Palette.border;
+    clip: true;
+    // 빈 곳을 누르면 키보드를 목록에 둔다(글자 줄은 위에서 제 클릭을 받는다).
+    TouchArea {
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.focus-list();
+            }
+        }
+    }
+    if root.kind == 0: Text {
+        x: 12px;
+        y: 12px;
+        width: parent.width - 24px;
+        text: root.message;
+        wrap: word-wrap;
+        color: Palette.foreground.transparentize(30%);
+    }
+    if root.kind == 1: VerticalLayout {
+        x: 12px;
+        y: 12px;
+        width: parent.width - 24px;
+        height: parent.height - 24px;
+        spacing: 6px;
+        alignment: start;
+        HorizontalLayout {
+            spacing: 8px;
+            ItemIcon {
+                folder: root.folder;
+                has-icon: root.has-icon;
+                icon: root.icon;
+                y: 2px;
+            }
+            Text {
+                text: root.name;
+                wrap: word-wrap;
+                font-weight: 700;
+                color: Palette.foreground;
+            }
+        }
+        for row in root.rows: HorizontalLayout {
+            spacing: 8px;
+            Text {
+                text: row.label;
+                width: 90px;
+                color: Palette.foreground.transparentize(30%);
+            }
+            Text {
+                text: row.value;
+                wrap: word-wrap;
+                color: Palette.foreground;
+            }
+        }
+        if root.message != "": Text {
+            text: root.message;
+            wrap: word-wrap;
+            color: Palette.foreground.transparentize(30%);
+        }
+    }
+    if root.kind == 2: Rectangle {
+        Text {
+            x: 8px;
+            y: 4px;
+            width: parent.width - 16px;
+            height: root.note == "" ? 0px : 18px;
+            visible: root.note != "";
+            text: root.note;
+            overflow: elide;
+            color: Palette.foreground.transparentize(30%);
+        }
+        text-list := ListView {
+            x: 0px;
+            y: root.note == "" ? 4px : 24px;
+            width: parent.width - (self.content-height > self.height ? ScrollBarMetrics.thickness : 0px);
+            height: parent.height - self.y - 4px;
+            vertical-scrollbar-policy: always-off;
+            for line in root.lines: TextInput {
+                height: 18px;
+                read-only: true;
+                font-family: "Consolas";
+                font-size: 12px;
+                color: Palette.foreground;
+                text: line;
+                key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.focus-list();
+                        return accept;
+                    }
+                    reject
+                }
+            }
+        }
+        if text-list.content-height > text-list.height: ScrollBar {
+            x: text-list.x + text-list.width;
+            y: text-list.y;
+            width: ScrollBarMetrics.thickness;
+            height: text-list.height;
+            total: text-list.content-height;
+            visible-length: text-list.height;
+            offset: -text-list.content-y;
+            moved(offset) => {
+                text-list.content-y = -offset;
+            }
+        }
+    }
+    if root.kind == 3: Image {
+        x: 12px;
+        y: 12px;
+        width: parent.width - 24px;
+        height: parent.height - 24px;
+        source: root.picture;
+        image-fit: contain;
+    }
+}
+
 export component AppWindow inherits Window {
     // 활성 탭의 폴더 이름. 창 제목에 붙여 지금 어디에 있는지 보이게 한다.
     in property <string> folder-title;
@@ -3019,6 +3157,22 @@ export component AppWindow inherits Window {
     in-out property <length> size-width: 90px;
     in-out property <length> location-width: 240px;
     in-out property <length> matches-width: 320px;
+
+    // 미리보기 영역(#340): 켜짐, 폭, 내용(코어 `App::preview`를 Rust가 옮긴 값).
+    in property <bool> preview-visible;
+    in property <length> preview-width: 320px;
+    in property <int> preview-kind;
+    in property <string> preview-message;
+    in property <string> preview-name;
+    in property <[PreviewRow]> preview-rows;
+    in property <bool> preview-folder;
+    in property <bool> preview-has-icon;
+    in property <image> preview-icon;
+    in property <[string]> preview-lines;
+    in property <string> preview-note;
+    in property <image> preview-picture;
+    // 영역 경계를 끌었다: 바라는 폭. Rust가 코어(`Window::set_preview_width`)로 한도 안으로 자른다.
+    callback preview-width-dragged(length);
 
     // 키 입력 하나: 키의 글자와 수식 키. Rust가 명령이나 커서 이동으로 처리했으면 참을 돌려준다.
     // 거짓이면 글자 입력으로 보고 `typed`로 넘어온다(한글은 IME가 조합을 끝낸 뒤).
@@ -3328,7 +3482,7 @@ export component AppWindow inherits Window {
     panels := Rectangle {
         x: 8px;
         y: 8px + root.banner-height;
-        width: parent.width - 16px;
+        width: parent.width - 16px - (root.preview-visible ? root.preview-width + 6px : 0px);
         height: parent.height - 16px - root.banner-height - root.confirm-height - root.work-height;
         property <length> gap: root.split ? 6px : 0px;
         property <length> left-width: root.split ? round((self.width - self.gap) * root.split-ratio / 1px) * 1px : self.width;
@@ -3685,6 +3839,46 @@ export component AppWindow inherits Window {
             grid-zoom(steps) => {
                 root.grid-zoom(1, steps);
             }
+        }
+    }
+
+    // 미리보기 영역: 창 오른쪽 끝. 왼쪽 경계를 끌어 폭을 바꾼다.
+    if root.preview-visible: Rectangle {
+        x: panels.x + panels.width;
+        y: panels.y;
+        width: 6px;
+        height: panels.height;
+        preview-splitter := TouchArea {
+            mouse-cursor: col-resize;
+            moved => {
+                if (self.pressed) {
+                    root.preview-width-dragged(root.preview-width - (self.mouse-x - self.pressed-x));
+                }
+            }
+        }
+        Rectangle {
+            x: (parent.width - 2px) / 2;
+            width: 2px;
+            background: preview-splitter.has-hover || preview-splitter.pressed ? Palette.accent-background : transparent;
+        }
+    }
+    if root.preview-visible: PreviewView {
+        x: panels.x + panels.width + 6px;
+        y: panels.y;
+        width: root.preview-width;
+        height: panels.height;
+        kind: root.preview-kind;
+        message: root.preview-message;
+        name: root.preview-name;
+        rows: root.preview-rows;
+        folder: root.preview-folder;
+        has-icon: root.preview-has-icon;
+        icon: root.preview-icon;
+        lines: root.preview-lines;
+        note: root.preview-note;
+        picture: root.preview-picture;
+        focus-list => {
+            keys.focus();
         }
     }
 
