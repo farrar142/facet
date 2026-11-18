@@ -273,7 +273,7 @@ mod windows {
             "{what}: RGBA 길이"
         );
         assert!(
-            icon.rgba.chunks_exact(4).any(|p| p[3] > 0),
+            icon.rgba.as_chunks::<4>().0.iter().any(|p| p[3] > 0),
             "{what}: 보이는 화소가 있다"
         );
     }

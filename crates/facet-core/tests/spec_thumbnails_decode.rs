@@ -89,7 +89,7 @@ fn around(t: &Thumbnail, x: u32, y: u32) -> Rgba {
 fn average(t: &Thumbnail) -> Rgba {
     let mut sum = [0u64; 4];
     let mut n = 0u64;
-    for p in t.rgba.chunks_exact(4).filter(|p| p[3] > 0) {
+    for p in t.rgba.as_chunks::<4>().0.iter().filter(|p| p[3] > 0) {
         for (c, s) in sum.iter_mut().enumerate() {
             *s += u64::from(p[c]);
         }

@@ -63,13 +63,11 @@ fn png_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
 }
 
 fn png(width: u32, height: u32, color: [u8; 4]) -> Vec<u8> {
-    let mut raw = Vec::new();
-    for _ in 0..height {
-        raw.push(0);
-        for _ in 0..width {
-            raw.extend_from_slice(&color);
-        }
-    }
+    // 행마다 필터 바이트 0 뒤에 화소들.
+    let row: Vec<u8> = std::iter::once(0)
+        .chain(color.repeat(width as usize))
+        .collect();
+    let raw = row.repeat(height as usize);
     let mut zlib = vec![0x78, 0x01];
     let chunks: Vec<&[u8]> = raw.chunks(65_535).collect();
     for (i, chunk) in chunks.iter().enumerate() {
@@ -223,7 +221,7 @@ fn picture(g: &Got) -> &Thumbnail {
 /// 불투명한 화소의 평균에서 가장 센 채널.
 fn dominant(t: &Thumbnail) -> char {
     let mut sum = [0u64; 3];
-    for p in t.rgba.chunks_exact(4) {
+    for p in t.rgba.as_chunks::<4>().0.iter() {
         for (c, s) in sum.iter_mut().enumerate() {
             *s += u64::from(p[c]);
         }

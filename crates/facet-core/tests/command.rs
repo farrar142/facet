@@ -86,6 +86,9 @@ fn name(command: CommandId) -> &'static str {
         CommandId::SortByMatches => "일치로 정렬",
         // 즉시 검색의 범위 전환(자세한 확인은 tests/instant_search.rs).
         CommandId::InstantUnderFolder => "현재 폴더 아래만",
+        CommandId::DetailsView => "자세히 보기",
+        CommandId::GridView(_) => "그리드 보기",
+        CommandId::ClearThumbnailCache => "썸네일 캐시 비우기",
     }
 }
 

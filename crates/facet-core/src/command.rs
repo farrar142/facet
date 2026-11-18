@@ -15,6 +15,7 @@
 use crate::details::{Column, Direction, Sort};
 use crate::job::JobKind;
 use crate::tab::Tab;
+use crate::view::GridSize;
 use crate::window::{Panel, Window};
 
 /// 명령의 ID. 이 이름과 [`CommandId::as_str`]의 글자는 바뀌지 않는다(설정·단축키 바꾸기가 이것으로 명령을 가리킨다).
@@ -148,6 +149,12 @@ pub enum CommandId {
     /// [`CommandId::is_checked`]). 범위는 탭에 남고, 즉시 검색 결과 위치에서 바꾸면 같은 질의를 새 범위로 다시 보낸다. 검색을
     /// 시작한 위치가 실제 폴더가 아니면(이름·내용 검색 결과 위치) 꺼지고 모든 볼륨으로 찾는다. 기본 단축키는 없다.
     InstantUnderFolder,
+    /// #327: 자세히 보기로 바꾼다.
+    DetailsView,
+    /// #327: 그 칸 크기의 그리드 보기로 바꾼다.
+    GridView(GridSize),
+    /// #330: 썸네일 캐시를 비운다.
+    ClearThumbnailCache,
 }
 
 impl CommandId {
@@ -272,6 +279,12 @@ impl CommandId {
             CommandId::ShowInFolder => "show-in-folder",
             CommandId::StopSearch => "stop-search",
             CommandId::InstantUnderFolder => "instant-under-folder",
+            CommandId::DetailsView => "details-view",
+            CommandId::GridView(GridSize::Small) => "grid-view-small",
+            CommandId::GridView(GridSize::Medium) => "grid-view-medium",
+            CommandId::GridView(GridSize::Large) => "grid-view-large",
+            CommandId::GridView(GridSize::ExtraLarge) => "grid-view-extra-large",
+            CommandId::ClearThumbnailCache => "clear-thumbnail-cache",
         }
     }
 
@@ -351,7 +364,15 @@ impl CommandId {
             | CommandId::ShowInFolder
             | CommandId::StopSearch
             | CommandId::InstantUnderFolder
+            | CommandId::ClearThumbnailCache
             | CommandId::OpenInNewTab => &[],
+            CommandId::DetailsView => const { &[key(Key::Digit(6)).ctrl().shift()] },
+            CommandId::GridView(GridSize::ExtraLarge) => {
+                const { &[key(Key::Digit(1)).ctrl().shift()] }
+            }
+            CommandId::GridView(GridSize::Large) => const { &[key(Key::Digit(2)).ctrl().shift()] },
+            CommandId::GridView(GridSize::Medium) => const { &[key(Key::Digit(3)).ctrl().shift()] },
+            CommandId::GridView(GridSize::Small) => const { &[key(Key::Digit(4)).ctrl().shift()] },
             CommandId::NewTab => const { &[key(letter('T')).ctrl()] },
             CommandId::CloseTab => const { &[key(letter('W')).ctrl()] },
             CommandId::NextTab => const { &[key(Key::Tab).ctrl()] },
@@ -440,6 +461,8 @@ impl CommandId {
             }
             CommandId::StopSearch => tab.search().is_some_and(|status| status.running),
             CommandId::InstantUnderFolder => tab.instant_base().is_some(),
+            CommandId::DetailsView | CommandId::GridView(_) => todo!("#327"),
+            CommandId::ClearThumbnailCache => todo!("#330"),
             CommandId::Refresh
             | CommandId::EditAddress
             | CommandId::ToggleHidden
