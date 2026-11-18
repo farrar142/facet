@@ -1,8 +1,9 @@
 //! #336: 미리보기(텍스트 읽기·종류 고르기·내용 만들기·요청기·미리보기 영역).
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::Item;
@@ -376,7 +377,10 @@ fn is_hidden(_entry: &std::fs::DirEntry) -> bool {
 }
 
 /// #338: 선택이 바뀐 뒤 요청을 내기까지 기다리는 시간(50ms).
-pub const PREVIEW_DELAY: Duration = Duration::ZERO; // #338
+///
+/// 화살표 키를 누르고 있으면 선택이 30ms 안팎마다 바뀐다(키 반복). 그보다 길어야 지나가는 항목마다 파일을 읽지
+/// 않고, 사람이 멈춘 뒤 미리보기가 늦다고 느끼지 않을 만큼(100ms 아래) 짧다.
+pub const PREVIEW_DELAY: Duration = Duration::from_millis(50);
 
 /// #338: 미리보기 요청 번호.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -390,47 +394,183 @@ pub struct PreviewDone {
     pub body: PreviewBody,
 }
 
+type Loader = dyn Fn(&PreviewRequest, &AtomicBool) -> PreviewBody + Send + Sync;
+type Waker = Arc<dyn Fn() + Send + Sync>;
+
+/// 일꾼들과 나누는 상태.
+struct Shared {
+    /// 마지막으로 낸 요청 번호(0은 없음). 일꾼은 제 번호가 아니면 결과를 버린다.
+    latest: AtomicU64,
+    state: Mutex<SharedState>,
+    event: Condvar,
+}
+
+#[derive(Default)]
+struct SharedState {
+    results: VecDeque<PreviewDone>,
+    waker: Option<Waker>,
+}
+
+impl Shared {
+    fn lock(&self) -> std::sync::MutexGuard<'_, SharedState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 /// #338: 미리보기 요청기(기다림·취소·늦은 결과 버림).
+///
+/// 선택이 바뀌면(`request`) 앞선 요청에 취소 표지를 세우고 `PREVIEW_DELAY`만큼 기다렸다가(`tick`, 시각은 부르는 쪽이
+/// 넘김) 낸다. 낸 요청마다 일꾼 스레드 하나에서 만든다: 앞선 요청이 표지를 무시하고 붙잡혀 있어도(멈춘 디코더·처리기)
+/// 다음 요청이 그 뒤에 줄 서지 않게 하려는 것이다. 내기는 기다림 덕에 사람이 멈춘 뒤 한 번꼴이라 스레드 비용은 작다.
+/// 결과는 마지막으로 낸 요청의 것만 받고(`poll`·`wait_event`), 그 밖의 결과는 일꾼이 보내지 않고 받는 쪽도 버린다.
 pub struct Previewer {
-    _private: (),
+    loader: Arc<Loader>,
+    shared: Arc<Shared>,
+    /// 기다리는 요청과 낼 시각.
+    waiting: Option<(PreviewRequest, Instant)>,
+    /// 진행 중일 수 있는 마지막으로 낸 요청의 취소 표지.
+    running: Option<Arc<AtomicBool>>,
+    next_id: u64,
 }
 
 impl Previewer {
     /// #338: 만드는 함수로 요청기를 만든다.
     pub fn new(
-        _loader: impl Fn(&PreviewRequest, &AtomicBool) -> PreviewBody + Send + Sync + 'static,
+        loader: impl Fn(&PreviewRequest, &AtomicBool) -> PreviewBody + Send + Sync + 'static,
     ) -> Previewer {
-        todo!("#338")
+        Previewer {
+            loader: Arc::new(loader),
+            shared: Arc::new(Shared {
+                latest: AtomicU64::new(0),
+                state: Mutex::new(SharedState::default()),
+                event: Condvar::new(),
+            }),
+            waiting: None,
+            running: None,
+            next_id: 1,
+        }
     }
 
     /// #338: 결과가 올 때마다 부를 깨우기.
-    pub fn set_waker(&self, _waker: impl Fn() + Send + Sync + 'static) {
-        todo!("#338")
+    pub fn set_waker(&self, waker: impl Fn() + Send + Sync + 'static) {
+        self.shared.lock().waker = Some(Arc::new(waker));
     }
 
     /// #338: 선택이 바뀌었다(`None`은 선택 없음).
-    pub fn request(&mut self, _request: Option<PreviewRequest>, _now: Instant) {
-        todo!("#338")
+    ///
+    /// 앞선 요청에 취소 표지를 세우고 그 결과를 버리며, 새 요청은 `now`부터 다시 기다린다.
+    pub fn request(&mut self, request: Option<PreviewRequest>, now: Instant) {
+        self.cancel_running();
+        self.waiting = request.map(|r| (r, now + PREVIEW_DELAY));
     }
 
     /// #338: 기다리는 요청을 낼 시각.
     pub fn due(&self) -> Option<Instant> {
-        todo!("#338")
+        self.waiting.as_ref().map(|(_, due)| *due)
     }
 
     /// #338: 기다림이 끝났으면 일꾼에 내고 그 번호.
-    pub fn tick(&mut self, _now: Instant) -> Option<PreviewId> {
-        todo!("#338")
+    pub fn tick(&mut self, now: Instant) -> Option<PreviewId> {
+        if self.due().is_none_or(|due| now < due) {
+            return None;
+        }
+        let (request, _) = self.waiting.take()?;
+        self.cancel_running();
+        let id = self.next_id;
+        self.next_id += 1;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.running = Some(Arc::clone(&cancel));
+        self.shared.latest.store(id, Ordering::SeqCst);
+
+        let loader = Arc::clone(&self.loader);
+        let shared = Arc::clone(&self.shared);
+        let spawned = std::thread::Builder::new()
+            .name("facet-preview".into())
+            .spawn(move || {
+                let body = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    loader(&request, &cancel)
+                }))
+                .unwrap_or(PreviewBody::Unavailable(PreviewProblem::Failed));
+                deliver(
+                    &shared,
+                    PreviewDone {
+                        id: PreviewId(id),
+                        request,
+                        body,
+                    },
+                );
+            });
+        if spawned.is_err() {
+            // 스레드를 띄우지 못했다: 만들지 못한 것으로 알린다(요청은 스레드로 옮겨 갔으므로 받지 못함).
+            self.shared.latest.store(0, Ordering::SeqCst);
+            self.running = None;
+            return None;
+        }
+        Some(PreviewId(id))
     }
 
     /// #338: 마지막으로 낸 요청의 결과.
     pub fn poll(&mut self) -> Vec<PreviewDone> {
-        todo!("#338")
+        let latest = self.shared.latest.load(Ordering::SeqCst);
+        let mut state = self.shared.lock();
+        state
+            .results
+            .drain(..)
+            .filter(|d| d.id.0 == latest)
+            .collect()
     }
 
     /// #338: 결과 하나를 기다린다.
-    pub fn wait_event(&mut self, _timeout: Duration) -> Option<PreviewDone> {
-        todo!("#338")
+    pub fn wait_event(&mut self, timeout: Duration) -> Option<PreviewDone> {
+        let deadline = Instant::now() + timeout;
+        let mut state = self.shared.lock();
+        loop {
+            while let Some(done) = state.results.pop_front() {
+                if done.id.0 == self.shared.latest.load(Ordering::SeqCst) {
+                    return Some(done);
+                }
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            state = self
+                .shared
+                .event
+                .wait_timeout(state, left)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+
+    /// 진행 중인 요청에 취소 표지를 세우고 그 결과를 버리게 한다.
+    fn cancel_running(&mut self) {
+        if let Some(cancel) = self.running.take() {
+            cancel.store(true, Ordering::SeqCst);
+        }
+        self.shared.latest.store(0, Ordering::SeqCst);
+    }
+}
+
+impl Drop for Previewer {
+    fn drop(&mut self) {
+        self.cancel_running();
+    }
+}
+
+/// 일꾼이 끝낸 결과를 넣고 깨운다(그 사이 더 뒤 요청이 났으면 버림).
+fn deliver(shared: &Shared, done: PreviewDone) {
+    let waker = {
+        let mut state = shared.lock();
+        if shared.latest.load(Ordering::SeqCst) != done.id.0 {
+            return;
+        }
+        state.results.push_back(done);
+        state.waker.clone()
+    };
+    shared.event.notify_all();
+    if let Some(waker) = waker {
+        waker();
     }
 }
 
