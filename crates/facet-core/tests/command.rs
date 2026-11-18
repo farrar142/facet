@@ -200,7 +200,7 @@ fn s2_탭_명령과_기본_단축키() {
     // tests/edit.rs), 실행취소·다시 실행·작업 기록 보기(자세한 확인은 tests/history.rs), 삭제·영구 삭제가 전부다.
     assert_eq!(
         CommandId::ALL.len(),
-        14 + expected.len() + 2 + 2 + 3 + 2 + 3 + 1 + 1 + 3 + 1 + 2 + 1 + 1 + 5 + 1 + 1 // 일괄 이름 바꾸기, 잘라내기, 필터, 검색 결과 위치, 검색, 내용 검색, 일치로 정렬, 현재 폴더 아래만, 보기 명령 다섯, 미리보기 영역, 썸네일 캐시 비우기
+        14 + expected.len() + 2 + 2 + 3 + 2 + 3 + 1 + 1 + 3 + 1 + 2 + 1 + 1 + 5 + 1 + 1 + 1 // 일괄 이름 바꾸기, 잘라내기, 필터, 검색 결과 위치, 검색, 내용 검색, 일치로 정렬, 현재 폴더 아래만, 보기 명령 다섯, 미리보기 영역, 썸네일 캐시 비우기, 내 PC 열기
     );
     assert_eq!(GoToTab(3).as_str(), "go-to-tab-3");
     assert_eq!(CommandId::from_id("go-to-tab-8"), Some(GoToTab(8)));
@@ -355,11 +355,14 @@ fn 뒤로_앞으로_위로의_실행_가능_여부는_탭_상태를_따른다() 
     assert!(!CommandId::Back.is_enabled(&tab));
     assert!(CommandId::Forward.is_enabled(&tab));
 
-    // 드라이브 루트에서 위로는 꺼진다.
+    // 맨 위 루트: Windows의 드라이브 루트에서 위로는 켜져 내 PC로 가고(#350), 내 PC에서 꺼진다. 다른 환경의 `/`에는
+    // 상위가 없다.
     let root = dir.path().ancestors().last().unwrap();
     let tab = Tab::new(Location::file_system(root), Sort::default(), false);
-    assert!(!CommandId::Up.is_enabled(&tab));
+    assert_eq!(CommandId::Up.is_enabled(&tab), cfg!(windows));
     assert!(CommandId::Refresh.is_enabled(&tab));
+    let this_pc = Tab::new(Location::this_pc(), Sort::default(), false);
+    assert!(!CommandId::Up.is_enabled(&this_pc));
 }
 
 #[test]

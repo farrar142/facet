@@ -80,6 +80,9 @@ const USAGE: &str = "\
   facet-bench text-preview [--runs N] [--limit-ms N]
       메모리의 256KB CP949 텍스트를 인코딩 추정과 디코딩하는 시간을 N회(기본 5) 재어 중앙값이 상한(기본 50ms)을
       넘으면 실패한다.
+  facet-bench shell-list [--count N] [--runs N] [--limit-ms N]
+      가짜 셸 공급자 폴더(항목 N개, 기본 100000)를 새 탭이 흘려 읽어 확정하기까지(공급자 추상화를 지나는 목록 전달)의
+      시간을 N회(기본 5) 재어(한 번 데운 뒤) 중앙값이 상한(기본 1500ms)을 넘으면 실패한다.
   facet-bench batch-rename-run [--count N] [--runs N]
       임시 폴더에 4KiB 파일 N개(기본 10000)가 든 폴더를 만들고 작업 대기열의 영구 삭제 작업으로 지우는 시간을
       N회(기본 5) 재어(한 번 데운 뒤, 회차마다 폴더를 새로 만듦) 중앙값이 상한(10000ms)을 넘으면 실패한다.
@@ -240,6 +243,7 @@ fn main() -> ExitCode {
         "thumbnail-decode" => thumbnail_decode(&args),
         "thumbnail-cache" => thumbnail_cache(&args),
         "text-preview" => text_preview(&args),
+        "shell-list" => shell_list(&args),
         "compare-recycle" => compare_recycle(&args),
         "compare-copy" => compare_copy(&args),
         "grid" => grid(&args),
@@ -1054,6 +1058,39 @@ fn text_preview(args: &Args) -> Result<(), String> {
         limit.as_millis()
     );
     check_text_preview_limit(&m, limit)?;
+    println!("  상한 안: 통과");
+    Ok(())
+}
+
+fn shell_list(args: &Args) -> Result<(), String> {
+    use facet_bench::{
+        SHELL_LIST_COUNT, SHELL_LIST_LIMIT, SHELL_LIST_TARGET, check_shell_list_limit,
+        measure_shell_list,
+    };
+    if args.path.is_some() {
+        return Err(format!(
+            "shell-list 명령은 경로를 받지 않습니다
+
+{USAGE}"
+        ));
+    }
+    warn_debug();
+    let count = args.count.unwrap_or(SHELL_LIST_COUNT);
+    let limit = args.limit.unwrap_or(SHELL_LIST_LIMIT);
+    let m = measure_shell_list(count, args.runs())?;
+    println!(
+        "셸 공급자 목록 전달 (가짜 셸 폴더 {count}항목, {}회):",
+        m.times.len()
+    );
+    print_times(&m);
+    println!(
+        "  중앙값 {:.3}ms, 최악 {:.3}ms / 로컬 기준 {}ms, CI 상한 {}ms",
+        ms(m.median()),
+        ms(m.max()),
+        SHELL_LIST_TARGET.as_millis(),
+        limit.as_millis()
+    );
+    check_shell_list_limit(&m, limit)?;
     println!("  상한 안: 통과");
     Ok(())
 }

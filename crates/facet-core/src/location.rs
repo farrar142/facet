@@ -6,6 +6,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 /// 탐색해 들어갈 수 있는 곳.
@@ -21,6 +22,29 @@ pub enum Location {
     /// **검색 결과 위치**: 검색한 폴더 아래에서 이름 조건에 맞는 항목들을 탭 안의 위치처럼 보이는 것. 실제 폴더가
     /// 아니다([`Location::file_system_path`]가 `None`). 목록은 읽지 않고 검색이 채운다([`crate::search_results`]).
     SearchResults(SearchScope),
+    /// 셸 공급자가 읽는 가상 폴더(내 PC·휴지통·휴대폰 장치, [`crate::shell_provider`]). 실제 폴더가 아니다
+    /// ([`Location::file_system_path`]가 `None`). 어느 가상 폴더인지는 [`Location::virtual_folder`]로 묻는다.
+    Shell(ShellLocation),
+}
+
+/// 가상 폴더 위치: 셸 항목 식별자(PIDL)를 바이트로 직렬화한 값과 그 종류. 표시 이름은 위치에 담지 않고 셸 공급자가
+/// 열거할 때 알아 둔다([`crate::shell_provider`]): 같은 폴더는 표시 이름과 상관없이 같은 위치다.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ShellLocation {
+    folder: VirtualFolder,
+    id: Arc<[u8]>,
+}
+
+impl ShellLocation {
+    /// 어느 가상 폴더인가.
+    pub fn folder(&self) -> VirtualFolder {
+        self.folder
+    }
+
+    /// 셸 항목 식별자(PIDL) 바이트(끝의 0 두 바이트 포함).
+    pub fn id(&self) -> &[u8] {
+        &self.id
+    }
 }
 
 /// 검색 결과 위치가 무엇을 찾았는가: 검색한 폴더와 검색어(이름 조건).
@@ -55,18 +79,32 @@ pub enum SearchKind {
     },
 }
 
-/// #350: 가상 폴더 위치의 종류.
+/// 가상 폴더 위치의 종류([`Location::virtual_folder`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VirtualFolder {
+    /// 내 PC: 드라이브와 연결된 휴대폰.
     ThisPc,
+    /// 휴지통.
     RecycleBin,
+    /// 휴대폰 같은 장치와 그 안의 폴더.
     Device,
 }
 
 impl Location {
-    /// #350: 「내 PC」 위치.
+    /// 「내 PC」 위치. 셸을 부르지 않고 만든다(식별자는 정해진 값이다).
     pub fn this_pc() -> Location {
-        todo!("#350")
+        Location::shell(
+            VirtualFolder::ThisPc,
+            crate::shell_provider::THIS_PC_ID.to_vec(),
+        )
+    }
+
+    /// 셸 항목 식별자 `id`의 가상 폴더 위치.
+    pub(crate) fn shell(folder: VirtualFolder, id: Vec<u8>) -> Location {
+        Location::Shell(ShellLocation {
+            folder,
+            id: id.into(),
+        })
     }
 
     /// #352: 「휴지통」 위치.
@@ -74,9 +112,17 @@ impl Location {
         todo!("#352")
     }
 
-    /// #350: 가상 폴더 위치면 그 종류.
+    /// 가상 폴더 위치면 그 종류(휴대폰 장치 안의 폴더도 [`VirtualFolder::Device`]), 아니면 `None`.
     pub fn virtual_folder(&self) -> Option<VirtualFolder> {
-        todo!("#350")
+        self.shell_location().map(ShellLocation::folder)
+    }
+
+    /// 가상 폴더 위치면 그 식별자와 종류.
+    pub fn shell_location(&self) -> Option<&ShellLocation> {
+        match self {
+            Self::Shell(shell) => Some(shell),
+            Self::FileSystem(_) | Self::SearchResults(_) => None,
+        }
     }
 
     /// 실제 폴더 `path`의 위치.
@@ -127,7 +173,7 @@ impl Location {
     pub fn file_system_path(&self) -> Option<&Path> {
         match self {
             Self::FileSystem(path) => Some(path),
-            Self::SearchResults(_) => None,
+            Self::SearchResults(_) | Self::Shell(_) => None,
         }
     }
 
@@ -135,7 +181,7 @@ impl Location {
     pub fn search_scope(&self) -> Option<&SearchScope> {
         match self {
             Self::SearchResults(scope) => Some(scope),
-            Self::FileSystem(_) => None,
+            Self::FileSystem(_) | Self::Shell(_) => None,
         }
     }
 
@@ -160,6 +206,7 @@ impl fmt::Display for Location {
             Self::SearchResults(scope) => {
                 write!(f, "{} ? {}", scope.folder.display(), scope.query)
             }
+            Self::Shell(shell) => f.write_str(&crate::shell_provider::display_name(shell)),
         }
     }
 }
