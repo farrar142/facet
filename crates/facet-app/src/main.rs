@@ -74,10 +74,10 @@ use facet_core::job::{
 };
 use facet_core::launch::{LaunchTarget, resolve_launch};
 use facet_core::menu::MenuEntry;
-use facet_core::shell_provider;
 use facet_core::placement::{self, Monitor, Rect, WindowState};
 use facet_core::selection::{CursorMove, Pick};
 use facet_core::session::{self, Loaded, SAVE_DELAY, Saver};
+use facet_core::shell_provider;
 use facet_core::tab::{AutoRefresh, Navigation, ReadOutcome, Relocation, Tab};
 use facet_core::view::{GridLayout, GridMove, ViewMode};
 use facet_core::window::{

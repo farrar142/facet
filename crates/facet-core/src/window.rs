@@ -3904,7 +3904,10 @@ impl App {
         let sources = self.transfer_sources(kind)?;
         // 반대편이 휴대폰 안 폴더면 그 항목 경로로 넣는다(휴대폰과 PC 사이의 작업).
         let target = crate::shell_provider::transfer_folder(
-            self.active_window().opposite_panel()?.active_tab().location(),
+            self.active_window()
+                .opposite_panel()?
+                .active_tab()
+                .location(),
         )?;
         Some(TransferPlan {
             kind,
@@ -3987,10 +3990,9 @@ impl App {
     /// 대상 선택 창에 보일 내용. 그 복사·이동을 지금 실행할 수 없으면 `None`이다.
     pub fn transfer_choice(&self, kind: JobKind) -> Option<TransferChoice> {
         let sources = self.transfer_sources(kind)?;
-        let opposite = self
-            .active_window()
-            .opposite_panel()
-            .and_then(|panel| crate::shell_provider::transfer_folder(panel.active_tab().location()));
+        let opposite = self.active_window().opposite_panel().and_then(|panel| {
+            crate::shell_provider::transfer_folder(panel.active_tab().location())
+        });
         Some(TransferChoice {
             kind,
             sources,

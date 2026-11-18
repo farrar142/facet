@@ -85,7 +85,9 @@ pub(super) struct DeviceJob {
 
 /// 이 원본·대상이 휴대폰 작업인가(휴대폰 항목 경로가 하나라도 있다).
 pub(super) fn involves_device(sources: &[PathBuf], target: Option<&Path>) -> bool {
-    sources.iter().any(|path| shell_provider::is_device_path(path))
+    sources
+        .iter()
+        .any(|path| shell_provider::is_device_path(path))
         || target.is_some_and(shell_provider::is_device_path)
 }
 
@@ -208,7 +210,10 @@ type Shell<T> = Result<T, FileOpErrorKind>;
 /// 한 파일을 해 본 결과.
 enum Done {
     /// 했다: 실제 이름(PC면 경로)과 덮어썼는지.
-    Copied { at: PathBuf, replaced: Replaced },
+    Copied {
+        at: PathBuf,
+        replaced: Replaced,
+    },
     Skipped,
     Cancelled,
     Failed(FileOpErrorKind),
@@ -319,9 +324,7 @@ impl<'a> Runner<'a> {
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     self.engine.reporter.bytes_done = base + bytes.load(Ordering::Relaxed);
-                    self.engine
-                        .reporter
-                        .maybe_emit(self.engine.context.control);
+                    self.engine.reporter.maybe_emit(self.engine.context.control);
                     if self.engine.context.control.is_cancelled() {
                         cancel.store(true, Ordering::Relaxed);
                         let at = *cancelled_at.get_or_insert_with(Instant::now);
@@ -383,9 +386,7 @@ impl<'a> Runner<'a> {
 
     fn item_done(&mut self) {
         self.engine.reporter.items_done += 1;
-        self.engine
-            .reporter
-            .maybe_emit(self.engine.context.control);
+        self.engine.reporter.maybe_emit(self.engine.context.control);
     }
 
     // --- 삭제 ---
@@ -786,7 +787,10 @@ impl<'a> Runner<'a> {
     fn push_all(&mut self, sources: Vec<Source>, label: PathBuf, id: Vec<u8>) {
         // 휴대폰 공급자는 「실행취소 가능」을 알리지 않는다(되돌리려면 휴대폰 쪽을 영구 삭제해야 한다).
         let location = crate::Location::shell(crate::VirtualFolder::Device, id.clone());
-        if !crate::provider_for(&location).capabilities(&location).undoable {
+        if !crate::provider_for(&location)
+            .capabilities(&location)
+            .undoable
+        {
             self.mark_not_undoable(NotUndoable::NotUndoableThere);
         }
         let mut folder = DeviceFolder::new(label, id);
@@ -936,13 +940,9 @@ impl<'a> Runner<'a> {
                 self.copy_to_device(source, folder, &existing_name, Some(&existing_name), true)
             }
             Resolution::OverwriteIfNewer => match (source_modified, target_modified) {
-                (Some(a), Some(b)) if a > b => self.copy_to_device(
-                    source,
-                    folder,
-                    &existing_name,
-                    Some(&existing_name),
-                    true,
-                ),
+                (Some(a), Some(b)) if a > b => {
+                    self.copy_to_device(source, folder, &existing_name, Some(&existing_name), true)
+                }
                 _ => Done::Skipped,
             },
         }
@@ -962,8 +962,7 @@ impl<'a> Runner<'a> {
             new_name.map(str::to_owned),
         );
         match self.call(move |_, _| {
-            shell_transfer::copy_into(&source_path, &id, new_name.as_deref())
-                .map_err(|e| e.kind())
+            shell_transfer::copy_into(&source_path, &id, new_name.as_deref()).map_err(|e| e.kind())
         }) {
             Ok(()) => Done::Copied {
                 at: folder.label.join(name),
@@ -1023,7 +1022,10 @@ impl<'a> Runner<'a> {
             }
             match metadata {
                 // 폴더 링크·정션은 따라 들어가지 않는다(순환을 피함): 묻는다.
-                Some(m) if m.file_type().is_symlink() && fs::metadata(&path).is_ok_and(|t| t.is_dir()) => {
+                Some(m)
+                    if m.file_type().is_symlink()
+                        && fs::metadata(&path).is_ok_and(|t| t.is_dir()) =>
+                {
                     match self.on_error(&path, FileOpErrorKind::Unsupported) {
                         ErrorStep::Cancel => return,
                         _ => self.item_done(),
@@ -1192,7 +1194,8 @@ fn pc_name(name: &str) -> String {
     let mapped: String = name
         .chars()
         .map(|c| {
-            if matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || (c as u32) < 0x20
+            if matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+                || (c as u32) < 0x20
             {
                 '_'
             } else {
