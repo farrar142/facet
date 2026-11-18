@@ -9,14 +9,12 @@ use std::time::Duration;
 use facet_bench::{Measurement, SHELL_HELPER_LIMIT, SHELL_HELPER_TARGET, check_shell_helper_limit};
 
 #[test]
-#[ignore = "#324"]
 fn the_limit_is_ten_times_the_five_millisecond_target() {
     assert_eq!(SHELL_HELPER_TARGET, Duration::from_millis(5));
     assert_eq!(SHELL_HELPER_LIMIT, SHELL_HELPER_TARGET * 10);
 }
 
 #[test]
-#[ignore = "#324"]
 fn a_median_over_the_limit_fails_with_the_numbers() {
     let ms = Duration::from_millis;
     let m = Measurement {
@@ -34,7 +32,6 @@ fn a_median_over_the_limit_fails_with_the_numbers() {
 
 #[cfg(windows)]
 #[test]
-#[ignore = "#324"]
 fn a_small_run_measures_each_round_trip_and_leaves_no_helper() {
     let exe = std::env::current_exe().unwrap();
     // target/<프로필>/deps/이 테스트.exe → target/<프로필>/facet-shell-helper.exe

@@ -17,6 +17,8 @@ facet-index.workspace = true
 # 권한 거르기를 거친 질의 벤치마크(인덱서 서비스의 `Volumes::search_as`).
 facet-indexer = { path = "../facet-indexer" }
 facet-protocol.workspace = true
+# 셸 확장 도우미 요청 왕복 벤치마크의 메뉴 대상(`MenuTarget`).
+facet-shell-protocol.workspace = true
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 # 탐색기 비교 측정의 셸 복사(`facet_win::shell_copy`, 측정 전용).
 facet-win.workspace = true

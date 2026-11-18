@@ -1602,17 +1602,80 @@ pub fn check_batch_rename_job_limit(m: &Measurement, limit: Duration) -> Result<
     check_median("일괄 이름 바꾸기 실행", m, limit)
 }
 
-/// #324: 셸 확장 도우미 요청 왕복의 로컬 기준(5ms).
-pub const SHELL_HELPER_TARGET: Duration = Duration::ZERO; // #324
-/// #324: 셸 확장 도우미 요청 왕복의 CI 상한(기준의 10배).
-pub const SHELL_HELPER_LIMIT: Duration = Duration::ZERO; // #324
+/// 셸 확장 도우미 요청 왕복의 로컬 기준(5ms). 셸 호출 시간을 뺀 오버헤드다.
+pub const SHELL_HELPER_TARGET: Duration = Duration::from_millis(5);
+/// 셸 확장 도우미 요청 왕복의 CI 상한(기준의 10배).
+pub const SHELL_HELPER_LIMIT: Duration = Duration::from_millis(50);
 
-/// #324: 시험용 모드 도우미에 셸 메뉴 요청을 `runs`회 보내 왕복 시간을 잰다.
-pub fn measure_shell_helper(_helper: &Path, _runs: usize) -> Result<Measurement, String> {
-    todo!("#324")
+/// 시험용 모드(`--fake`) 도우미에 셸 메뉴 요청을 `runs`회 보내 왕복 시간을 잰다.
+///
+/// 첫 요청(도우미 띄우기)은 데우기로 재지 않는다. `item_count`는 응답 트리의 맨 위 줄 수다.
+pub fn measure_shell_helper(helper: &Path, runs: usize) -> Result<Measurement, String> {
+    use facet_core::shell_helper::{HelperEvent, HelperOptions, Reply, ShellHelper};
+    use facet_shell_protocol::MenuTarget;
+
+    const WAIT: Duration = Duration::from_secs(30);
+    let mut options = HelperOptions::new(helper);
+    options.args = vec!["--fake".into()];
+    options.crash_log = None;
+    let shell = ShellHelper::start(options);
+    let target = MenuTarget::Items(vec![PathBuf::from(r"C:acet-bench\시험.txt")]);
+    let round_trip = || -> Result<(Duration, usize), String> {
+        let start = Instant::now();
+        let id = shell.menu(target.clone());
+        let deadline = start + WAIT;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match shell.wait_event(left) {
+                Some(HelperEvent::Reply { id: got, result }) if got == id => {
+                    let elapsed = start.elapsed();
+                    return match result {
+                        Ok(Reply::Menu(items)) => Ok((elapsed, items.len())),
+                        other => Err(format!("메뉴 요청에 뜻밖의 답이 왔습니다: {other:?}")),
+                    };
+                }
+                Some(_) => {}
+                None => return Err("메뉴 요청에 제때 답이 오지 않았습니다".into()),
+            }
+        }
+    };
+    round_trip()?;
+    let mut times = Vec::with_capacity(runs);
+    let mut item_count = 0;
+    for _ in 0..runs {
+        let (time, count) = round_trip()?;
+        times.push(time);
+        item_count = count;
+    }
+    // 도우미가 끝나길 기다린다: 관리를 버리면 일꾼이 도우미를 끝낸다.
+    let pid = shell.process_id();
+    drop(shell);
+    if let Some(pid) = pid {
+        wait_process_gone(pid);
+    }
+    Ok(Measurement { item_count, times })
 }
 
-/// #324: 왕복 중앙값이 상한을 넘으면 수치를 담아 실패한다.
-pub fn check_shell_helper_limit(_m: &Measurement, _limit: Duration) -> Result<(), String> {
-    todo!("#324")
+/// 프로세스 `pid`가 사라질 때까지 20초 안에서 기다린다(Windows가 아니면 곧바로 돌아온다).
+fn wait_process_gone(pid: u32) {
+    if !cfg!(windows) {
+        return;
+    }
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        let out = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+            .output();
+        match out {
+            Ok(o) if String::from_utf8_lossy(&o.stdout).contains(&format!("\"{pid}\"")) => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            _ => return,
+        }
+    }
+}
+
+/// 왕복 중앙값이 상한을 넘으면 중앙값·상한(ms)을 담은 메시지.
+pub fn check_shell_helper_limit(m: &Measurement, limit: Duration) -> Result<(), String> {
+    check_median("셸 확장 도우미 요청 왕복", m, limit)
 }
