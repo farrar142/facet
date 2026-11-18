@@ -31,3 +31,5 @@ regex = "1"
 # 규칙 묶음 파일(사람이 읽을 수 있는 TOML, `rename_presets.rs`).
 toml = "1"
 encoding_rs = "0.8"
+jpeg-decoder = "0.3"
+image = { version = "0.25", default-features = false, features = ["png", "gif", "webp", "bmp"] }

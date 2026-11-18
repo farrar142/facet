@@ -46,7 +46,7 @@ const USAGE: &str = "\
                                  (Cargo.lock·xtask/·crates/facet-bench/ 등 공통 파일이면 모두, Rust 코드가 안 바뀌었으면 없음).
                                  --full: 공장 스크립트 시험과 벤치마크를 모두 돌린다
                                  --bench 이름,…: 그 벤치마크를 더 돌린다(list, index, mft, session, clipboard, menu, batch-rename,
-                                 filter, query-syntax, search, content, copy, delete, batch-rename-run)
+                                 filter, query-syntax, search, content, copy, delete, batch-rename-run, thumbnail-decode)
                                  --base 기준: 바뀐 파일을 잴 기준(git 리비전)
                                  --only 부분,…: lint(형식 검사·lint), test(빌드·테스트·실제 볼륨 테스트), factory, bench 가운데 일부만
   test-folder [경로] [--count N]  N개(기본 100000) 항목이 든 시험 폴더를 만든다.
@@ -479,6 +479,7 @@ fn bench_steps_named(names: &[&str]) -> Vec<Step> {
             "copy" => copy_bench_step(),
             "delete" => delete_bench_step(),
             "batch-rename-run" => batch_rename_run_bench_step(),
+            "thumbnail-decode" => thumbnail_decode_bench_step(),
             other => unreachable!("ci_select::BENCHES에 없는 벤치마크: {other}"),
         })
         .collect()
@@ -639,6 +640,15 @@ fn batch_rename_run_bench_step() -> Step {
     Step {
         name: "일괄 이름 바꾸기 실행 벤치마크",
         args: facet_bench("batch-rename-run"),
+        env: Vec::new(),
+    }
+}
+
+/// 4000×3000 JPEG 하나의 썸네일 축소 디코딩 시간을 잰다. 상한은 `facet-bench`의 기본값이다.
+fn thumbnail_decode_bench_step() -> Step {
+    Step {
+        name: "썸네일 디코딩 벤치마크",
+        args: facet_bench("thumbnail-decode"),
         env: Vec::new(),
     }
 }
