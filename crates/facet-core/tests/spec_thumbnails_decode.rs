@@ -570,7 +570,6 @@ fn exif(orientation: u16, thumbnail: Option<&[u8]>) -> Vec<u8> {
 // ---- 크기·위아래·색
 
 #[test]
-#[ignore = "#326"]
 fn png는_긴_변을_요청_크기로_줄이고_위아래_색이_맞다() {
     let dir = TempDir::new().unwrap();
     let bytes = png(300, 200, |_, y| opaque(if y < 100 { RED } else { BLUE }));
@@ -581,7 +580,6 @@ fn png는_긴_변을_요청_크기로_줄이고_위아래_색이_맞다() {
 }
 
 #[test]
-#[ignore = "#326"]
 fn 요청보다_작은_그림은_키우지_않는다() {
     let dir = TempDir::new().unwrap();
     let t = decode(&dir, "작은.png", &png(40, 30, |_, _| opaque(GREEN)), 256);
@@ -590,7 +588,6 @@ fn 요청보다_작은_그림은_키우지_않는다() {
 }
 
 #[test]
-#[ignore = "#326"]
 fn bmp는_아래_행부터_저장해도_위아래가_맞고_줄일_수_있다() {
     let dir = TempDir::new().unwrap();
     let bytes = bmp(48, 32, |_, y| if y < 16 { RED } else { BLUE });
@@ -604,7 +601,6 @@ fn bmp는_아래_행부터_저장해도_위아래가_맞고_줄일_수_있다() 
 }
 
 #[test]
-#[ignore = "#326"]
 fn gif는_색과_크기가_맞다() {
     let dir = TempDir::new().unwrap();
     let t = decode(&dir, "파랑.gif", &gif(40, 30, &[2]), 256);
@@ -616,7 +612,6 @@ fn gif는_색과_크기가_맞다() {
 }
 
 #[test]
-#[ignore = "#326"]
 fn webp는_위아래_색과_크기가_맞다() {
     let dir = TempDir::new().unwrap();
     let bytes = webp(40, 30, |_, y| opaque(if y < 15 { RED } else { BLUE }));
@@ -630,7 +625,6 @@ fn webp는_위아래_색과_크기가_맞다() {
 }
 
 #[test]
-#[ignore = "#326"]
 fn jpeg는_긴_변을_요청_크기로_줄이고_색이_맞다() {
     let dir = TempDir::new().unwrap();
     let bytes = jpeg(640, 480, None, |_, by| if by < 30 { RED } else { BLUE });
@@ -659,7 +653,6 @@ const ORIENTATIONS: [(u16, (u32, u32)); 8] = [
 ];
 
 #[test]
-#[ignore = "#326"]
 fn jpeg_exif_회전_여덟_가지가_모두_바로_선다() {
     let dir = TempDir::new().unwrap();
     for (orientation, red_at) in ORIENTATIONS {
@@ -694,7 +687,6 @@ fn photo_with_embedded_thumbnail() -> Vec<u8> {
 }
 
 #[test]
-#[ignore = "#326"]
 fn 내장_썸네일이_요청_크기_이상이면_그것을_쓴다() {
     let dir = TempDir::new().unwrap();
     let bytes = photo_with_embedded_thumbnail();
@@ -712,7 +704,6 @@ fn 내장_썸네일이_요청_크기_이상이면_그것을_쓴다() {
 }
 
 #[test]
-#[ignore = "#326"]
 fn 내장_썸네일이_요청보다_작거나_없으면_본_그림을_쓴다() {
     let dir = TempDir::new().unwrap();
     let t = decode(&dir, "내장.jpg", &photo_with_embedded_thumbnail(), 400);
@@ -741,7 +732,6 @@ fn assert_half_transparent(t: &Thumbnail) {
 }
 
 #[test]
-#[ignore = "#326"]
 fn png의_투명_부분은_알파로_남는다() {
     let dir = TempDir::new().unwrap();
     let t = decode(&dir, "투명.png", &png(32, 32, half_transparent), 256);
@@ -749,7 +739,6 @@ fn png의_투명_부분은_알파로_남는다() {
 }
 
 #[test]
-#[ignore = "#326"]
 fn webp의_투명_부분은_알파로_남는다() {
     let dir = TempDir::new().unwrap();
     let t = decode(&dir, "투명.webp", &webp(32, 32, half_transparent), 256);
@@ -757,7 +746,6 @@ fn webp의_투명_부분은_알파로_남는다() {
 }
 
 #[test]
-#[ignore = "#326"]
 fn 움직이는_gif는_첫_장면이다() {
     let dir = TempDir::new().unwrap();
     let t = decode(&dir, "움직임.gif", &gif(40, 30, &[0, 1]), 256);
@@ -766,7 +754,6 @@ fn 움직이는_gif는_첫_장면이다() {
 }
 
 #[test]
-#[ignore = "#326"]
 fn 움직이는_webp는_첫_장면이다() {
     let dir = TempDir::new().unwrap();
     let t = decode(
@@ -821,7 +808,6 @@ fn bmp_bomb() -> Vec<u8> {
 }
 
 #[test]
-#[ignore = "#326"]
 fn 화소_수가_상한을_넘는_머리는_디코딩하지_않고_too_large다() {
     assert_eq!(DEFAULT_MAX_PIXELS, 100_000_000);
     let dir = TempDir::new().unwrap();
@@ -841,7 +827,6 @@ fn 화소_수가_상한을_넘는_머리는_디코딩하지_않고_too_large다(
 }
 
 #[test]
-#[ignore = "#326"]
 fn 상한은_바꿔_넘길_수_있고_파일_크기_상한도_있다() {
     assert_eq!(
         DecodeLimits::default(),
@@ -882,7 +867,6 @@ fn 상한은_바꿔_넘길_수_있고_파일_크기_상한도_있다() {
 // ---- 실패
 
 #[test]
-#[ignore = "#326"]
 fn 잘린_파일은_패닉_없이_실패한다() {
     let dir = TempDir::new().unwrap();
     let jpg = jpeg(64, 32, None, |_, _| RED);
@@ -903,7 +887,6 @@ fn 잘린_파일은_패닉_없이_실패한다() {
 }
 
 #[test]
-#[ignore = "#326"]
 fn 머리만_맞는_가짜_파일과_빈_파일은_패닉_없이_실패한다() {
     let dir = TempDir::new().unwrap();
     let garbage = [0x5Au8; 1000];
@@ -927,7 +910,6 @@ fn 머리만_맞는_가짜_파일과_빈_파일은_패닉_없이_실패한다() 
 }
 
 #[test]
-#[ignore = "#326"]
 fn 없는_파일은_not_found다() {
     let dir = TempDir::new().unwrap();
     assert_eq!(
@@ -937,7 +919,6 @@ fn 없는_파일은_not_found다() {
 }
 
 #[test]
-#[ignore = "#326"]
 fn 이미지가_아닌_확장자는_unsupported다() {
     let dir = TempDir::new().unwrap();
     assert_eq!(
@@ -952,7 +933,6 @@ fn 이미지가_아닌_확장자는_unsupported다() {
 }
 
 #[test]
-#[ignore = "#326"]
 fn 미리_취소한_요청은_읽지_않고_cancelled다() {
     let dir = TempDir::new().unwrap();
     let path = write(&dir, "그림.png", &png(40, 30, |_, _| opaque(GREEN)));
@@ -964,7 +944,6 @@ fn 미리_취소한_요청은_읽지_않고_cancelled다() {
 }
 
 #[test]
-#[ignore = "#326"]
 fn 자체_디코더_형식은_확장자로_가린다() {
     for name in [
         "a.jpg",
@@ -996,7 +975,6 @@ fn 자체_디코더_형식은_확장자로_가린다() {
 }
 
 #[test]
-#[ignore = "#326"]
 fn 썸네일_키는_파일의_수정_시각과_크기를_읽는다() {
     let dir = TempDir::new().unwrap();
     let path = write(&dir, "그림.png", b"12345");
