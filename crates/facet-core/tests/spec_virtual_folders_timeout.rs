@@ -108,13 +108,11 @@ fn assert_not_responding(app: &App) {
 }
 
 #[test]
-#[ignore = "#355"]
 fn the_default_timeout_is_ten_seconds() {
     assert_eq!(CALL_TIMEOUT, Duration::from_secs(10));
 }
 
 #[test]
-#[ignore = "#355"]
 fn a_stalled_listing_times_out_and_its_late_result_is_ignored() {
     let _timeout = ShortTimeout::set();
     let dir = TempDir::new().unwrap();
@@ -150,7 +148,6 @@ fn a_stalled_listing_times_out_and_its_late_result_is_ignored() {
 }
 
 #[test]
-#[ignore = "#355"]
 fn retry_reads_again_at_once_on_a_new_thread() {
     let _timeout = ShortTimeout::set();
     let dir = TempDir::new().unwrap();
@@ -177,7 +174,6 @@ fn retry_reads_again_at_once_on_a_new_thread() {
 }
 
 #[test]
-#[ignore = "#355"]
 fn other_tabs_keep_reading_real_folders_while_the_shell_is_stalled() {
     // 기본 시간 제한(10초) 그대로: 멈춘 셸 호출이 도는 동안을 본다.
     let _serial = serial();

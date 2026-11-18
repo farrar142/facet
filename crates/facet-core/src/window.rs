@@ -707,7 +707,7 @@ fn read_subfolders(
             ListError::PermissionDenied { .. } => SubfoldersError::PermissionDenied,
             ListError::NotAFolder { .. } => SubfoldersError::NotAFolder,
             ListError::Io { source, .. } => SubfoldersError::Io(source.kind()),
-            ListError::NotResponding { .. } => todo!("#355"),
+            ListError::NotResponding { .. } => SubfoldersError::Io(std::io::ErrorKind::TimedOut),
         })?;
     let mut folders: Vec<Candidate> = items
         .into_iter()
@@ -4299,9 +4299,15 @@ impl App {
         }
     }
 
-    /// #355: 탭 `tab`의 실패한 읽기를 다시 한다. 다시 할 읽기가 없으면 `false`.
-    pub fn retry(&mut self, _tab: TabId) -> bool {
-        todo!("#355")
+    /// 「다시 시도」: 탭 `tab`의 실패한 읽기([`Tab::retry`], 「응답 없음」 등)를 같은 위치로 새 일꾼 스레드에서 다시
+    /// 읽는다. 셸 호출이 멈췄던 읽기면 멈춘 셸 스레드는 이미 버렸으므로 새 셸 스레드에서 읽는다. 없는 탭이거나 다시 할
+    /// 읽기가 없으면(마지막 읽기가 성공했거나 다른 읽기를 기다리는 중) `false`다. 막지 않는다.
+    pub fn retry(&mut self, tab: TabId) -> bool {
+        let Some(request) = self.tab_mut(tab).and_then(Tab::retry) else {
+            return false;
+        };
+        self.spawn_read(tab, request);
+        true
     }
 
     /// #354: 휴지통을 비우는 작업을 넣는다(화면이 확인한 뒤). 넣은 작업이 없으면 `None`.

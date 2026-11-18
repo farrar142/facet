@@ -4,7 +4,9 @@
 //!   식별자([`THIS_PC_ID`])라 셸을 부르지 않고 만든다([`Location::this_pc`]).
 //! - 셸 호출은 모두 프로세스에 하나인 전용 COM STA 스레드([`facet_win::shell_thread::ShellThread`])에서 한다. 스레드는
 //!   처음 가상 폴더를 읽을 때 만든다(콜드 스타트에 들지 않음). 목록 읽기는 탭의 읽기 일꾼 스레드가 그 스레드에 맡기고
-//!   기다린다. UI 스레드는 셸을 부르지 않는다.
+//!   기다린다. UI 스레드는 셸을 부르지 않는다. 호출마다 시간 제한([`CALL_TIMEOUT`])이 있어 넘으면 그 스레드를 버리고
+//!   읽기는 「응답 없음」([`ListError::NotResponding`])으로 실패한다. 다음 호출은 새 스레드에서 하고 버린 스레드의 늦은
+//!   결과는 버려진다. 탭은 [`crate::tab::Tab::retry`]로 같은 읽기를 다시 한다.
 //! - 목록은 [`LIST_BATCH`]개씩 묶음으로 열거하고, 묶음마다 지금까지 읽은 항목 수를 알린다(탭의 [`crate::tab::Tab::loading`]).
 //!   탭이 다른 곳으로 가면 열거를 그만둔다.
 //! - 열거하며 알게 된 폴더 자신의 표시 이름과 항목의 위치(실제 경로가 있으면 파일 시스템 위치, 없으면 그 항목의
@@ -24,7 +26,7 @@
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime};
 
@@ -40,8 +42,17 @@ use crate::{
     VirtualFolder,
 };
 
-/// #355: 셸 호출의 기본 시간 제한.
-pub const CALL_TIMEOUT: Duration = Duration::ZERO; // #355
+/// 셸 호출(목록 읽기 하나)의 기본 시간 제한(spec #27의 「모든 셸 호출에 시간 제한」). 넘으면 그 셸 스레드를 버리고
+/// (다음 호출은 새 스레드) 읽기는 [`ListError::NotResponding`]으로 실패한다. 응답하지 않는 휴대폰·네트워크 셸 폴더가
+/// 그 탭을 오래 붙잡지 않으면서, 느리지만 살아 있는 장치(수천 항목의 휴대폰 폴더 첫 열거)는 끝낼 수 있는 길이다.
+pub const CALL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 지금 셸 호출 시간 제한(마이크로초). [`set_call_timeout`]이 바꾼다.
+static CALL_TIMEOUT_MICROS: AtomicU64 = AtomicU64::new(CALL_TIMEOUT.as_micros() as u64);
+
+fn call_timeout() -> Duration {
+    Duration::from_micros(CALL_TIMEOUT_MICROS.load(Ordering::Relaxed))
+}
 
 /// 내 PC(`::{20D04FE0-3AEA-1069-A2D8-08002B30309D}`)의 셸 항목 식별자: 바탕 화면 아래 CLSID 조각 하나(길이 20,
 /// 종류 0x1F, 정렬 0x50, CLSID 16바이트)와 끝(0 두 바이트).
@@ -61,10 +72,6 @@ pub const RECYCLE_BIN_ID: [u8; 22] = [
 /// 느린 장치에서도 묶음 하나가 금방 차고, 1만 항목 휴지통에서도 알림이 40번 남짓이라 깨우기가 넘치지 않는다.
 pub const LIST_BATCH: usize = 256;
 
-/// 목록 읽기 하나를 기다리는 시간. 넘으면 그 셸 스레드를 버리고(다음 요청은 새 스레드) 읽기는 실패한다. spec #27의 셸
-/// 호출 시간 제한(10초)과 같다. 「응답 없음」·「다시 시도」 화면과 시험용 시간 바꾸기는 #355가 한다.
-const LIST_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// #351: 내 PC의 드라이브 용량(바이트, 모르면 `None`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DriveSpace {
@@ -79,29 +86,59 @@ pub struct RecycledEntry {
     pub deleted: SystemTime,
 }
 
-/// #355: 프로세스 전체의 셸 호출 시간 제한을 바꾼다(시험용).
+/// 프로세스 전체의 셸 호출 시간 제한을 바꾼다(시험용, 앱은 부르지 않는다). 이미 기다리는 호출에는 듣지 않는다.
 #[doc(hidden)]
-pub fn set_call_timeout(_timeout: Duration) {
-    todo!("#355")
+pub fn set_call_timeout(timeout: Duration) {
+    let micros = u64::try_from(timeout.as_micros()).unwrap_or(u64::MAX);
+    CALL_TIMEOUT_MICROS.store(micros, Ordering::Relaxed);
 }
 
-/// #355: 시험용 셸 호출 오류 주입.
+/// 시험용 셸 호출 오류 주입. 앱은 부르지 않는다.
 #[doc(hidden)]
 pub mod fault {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{LazyLock, Mutex, MutexGuard};
     use std::time::Duration;
 
     use crate::Location;
 
-    /// #355: 살아 있는 동안 주입이 걸려 있다.
-    pub struct Injected {}
+    /// 걸린 멈춤: 주입 번호, 위치, 멈출 시간.
+    type Stalls = Vec<(u64, Location, Duration)>;
 
-    impl Drop for Injected {
-        fn drop(&mut self) {} // #355
+    fn stalls() -> MutexGuard<'static, Stalls> {
+        static STALLS: LazyLock<Mutex<Stalls>> = LazyLock::new(Mutex::default);
+        STALLS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// #355: `location`의 열거가 `stall`만큼 응답하지 않게 한다.
-    pub fn stall_listing(_location: &Location, _stall: Duration) -> Injected {
-        todo!("#355")
+    /// 살아 있는 동안 주입이 걸려 있다. 버리면 풀린다.
+    pub struct Injected {
+        id: u64,
+    }
+
+    impl Drop for Injected {
+        fn drop(&mut self) {
+            stalls().retain(|(id, _, _)| *id != self.id);
+        }
+    }
+
+    /// 돌려준 값이 살아 있는 동안 `location`의 열거가 셸 스레드에서 `stall`만큼 응답하지 않는다(그 뒤 원래대로
+    /// 열거한다). 버리면 풀리고, 이미 멈춘 열거는 그대로 `stall`을 채운다.
+    pub fn stall_listing(location: &Location, stall: Duration) -> Injected {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        stalls().push((id, location.clone(), stall));
+        Injected { id }
+    }
+
+    /// `location`의 열거에 걸린 멈춤(가장 나중에 건 것).
+    pub(super) fn stall_for(location: &Location) -> Option<Duration> {
+        stalls()
+            .iter()
+            .rev()
+            .find(|(_, at, _)| at == location)
+            .map(|(_, _, stall)| *stall)
     }
 }
 
@@ -262,7 +299,11 @@ pub(crate) fn list_streaming(
         None => {
             let id = shell.id().to_vec();
             let folder = shell.folder();
-            let outcome = shell_thread().call(LIST_TIMEOUT, move || {
+            let stall = fault::stall_for(location);
+            let outcome = shell_thread().call(call_timeout(), move || {
+                if let Some(stall) = stall {
+                    std::thread::sleep(stall);
+                }
                 let name = shell_folder::display_name(&id).ok();
                 let mut collector = Collector::new(folder);
                 shell_folder::enumerate(&id, LIST_BATCH, &mut |batch| {
@@ -556,14 +597,16 @@ fn list_error(location: &Location, error: ShellFolderError) -> ListError {
     }
 }
 
+/// 셸 스레드 호출의 실패: 시간 제한을 넘었으면 「응답 없음」(그 스레드는 버렸고 늦은 결과는 버려진다), 아니면 읽기 오류.
 fn call_error(location: &Location, error: CallError) -> ListError {
-    let kind = match error {
-        CallError::TimedOut => std::io::ErrorKind::TimedOut,
-        _ => std::io::ErrorKind::Other,
-    };
-    ListError::Io {
-        location: location.clone(),
-        source: std::io::Error::new(kind, format!("{error:?}")),
+    match error {
+        CallError::TimedOut => ListError::NotResponding {
+            location: location.clone(),
+        },
+        CallError::Failed => ListError::Io {
+            location: location.clone(),
+            source: std::io::Error::other(format!("{error:?}")),
+        },
     }
 }
 

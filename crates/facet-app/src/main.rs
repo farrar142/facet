@@ -905,6 +905,7 @@ fn connect(ui: &AppWindow, w: WindowId) {
     });
     ui.on_cancel_search(move || with_view(w, View::escape_search));
     ui.on_stop_search(move || with_view(w, |view| view.execute(CommandId::StopSearch)));
+    ui.on_retry_read(move || with_view(w, View::retry_read));
     ui.on_search_mode_changed(move || {
         with_view(w, |view| view.ui.set_search_problem(SharedString::new()))
     });
@@ -2190,6 +2191,7 @@ impl View {
                 list_problem,
                 list_problem_location: list_problem_location.into(),
                 list_problem_detail: list_problem_detail.into(),
+                can_retry: tab.can_retry(),
                 open_problem,
                 open_problem_detail: open_problem_detail.into(),
                 auto_refresh_off: matches!(tab.auto_refresh(), AutoRefresh::Off(_)),
@@ -3884,6 +3886,16 @@ impl View {
         self.render();
     }
 
+    /// 「다시 시도」 단추: 활성 탭의 실패한 읽기(「응답 없음」 등)를 다시 한다(결과는 `App::poll`이 받는다).
+    fn retry_read(&self) {
+        {
+            let mut app = self.app.borrow_mut();
+            let tab = app.active_tab_id();
+            app.retry(tab);
+        }
+        self.render();
+    }
+
     /// 목록을 넘기다 끝 가까이 닿았다: 즉시 검색 결과를 더 받는다(응답은 `App::poll`이 붙인다).
     fn load_more_if_near_end(&self, panel: usize) {
         let Some(id) = self.shown_tab_id(panel) else {
@@ -5284,7 +5296,7 @@ fn list_problem(error: &ListError) -> (Problem, String, String) {
         ListError::PermissionDenied { .. } => (Problem::PermissionDenied, location, String::new()),
         ListError::NotAFolder { .. } => (Problem::NotAFolder, location, String::new()),
         ListError::Io { source, .. } => (Problem::Io, location, source.to_string()),
-        ListError::NotResponding { .. } => todo!("#355"),
+        ListError::NotResponding { .. } => (Problem::NotResponding, location, String::new()),
     }
 }
 

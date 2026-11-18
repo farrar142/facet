@@ -488,6 +488,15 @@ struct Pending {
     _cancel: CancelOnDrop,
 }
 
+/// 실패한 읽기: [`Tab::retry`]가 같은 위치·종류로 다시 한다.
+#[derive(Debug, Clone)]
+struct Failed {
+    location: Location,
+    kind: Kind,
+    reselect: Option<OsString>,
+    reselect_path: Option<PathBuf>,
+}
+
 /// 닫은 탭에서 되살릴 것: 위치, 뒤로·앞으로 기록, 정렬, 닫을 때의 선택·커서·스크롤. 목록은 담지 않는다
 /// (되살리면 위치를 다시 읽는다). [`Tab::close`]가 만들고 [`Tab::reopen`]이 탭으로 되돌린다.
 #[derive(Debug)]
@@ -551,6 +560,8 @@ pub struct Tab {
     pending: Option<Pending>,
     next_id: u64,
     error: Option<ListError>,
+    /// 마지막 읽기가 실패했으면 그 읽기(위치·종류·고를 항목). [`Tab::retry`]가 같은 읽기를 다시 한다.
+    failed: Option<Failed>,
     /// 마지막 주소창 글자 해석이 실패한 까닭.
     address_error: Option<ResolveError>,
     /// 마지막 자동 완성 요청 번호. 이보다 앞선 요청의 결과는 버린다.
@@ -613,6 +624,7 @@ impl Tab {
             pending: None,
             next_id: 0,
             error: None,
+            failed: None,
             address_error: None,
             next_completion: 0,
             selection: HashSet::new(),
@@ -921,6 +933,7 @@ impl Tab {
         let id = RequestId(self.next_id);
         self.next_id += 1;
         self.error = None;
+        self.failed = None;
         let cancel = CancelFlag::default();
         // 앞서 기다리던 요청은 여기서 버려져 그 읽기의 그만두기 표지가 선다.
         self.pending = Some(Pending {
@@ -940,6 +953,25 @@ impl Tab {
             climb: kind == Kind::Reload,
             cancel,
         }
+    }
+
+    /// 「다시 시도」: 마지막으로 실패한 읽기를 같은 위치·종류로 다시 한다. 실패한 읽기가 없거나(성공했거나 그 뒤
+    /// 다른 이동을 시작함) 다른 읽기를 기다리는 중이면 `None`이다.
+    pub fn retry(&mut self) -> Option<ReadRequest> {
+        if self.pending.is_some() {
+            return None;
+        }
+        let failed = self.failed.take()?;
+        let request = self.request(failed.location, failed.kind, failed.reselect);
+        if let Some(pending) = &mut self.pending {
+            pending.reselect_path = failed.reselect_path;
+        }
+        Some(request)
+    }
+
+    /// 다시 시도할 실패한 읽기가 있는가.
+    pub fn can_retry(&self) -> bool {
+        self.pending.is_none() && self.failed.is_some()
     }
 
     /// 자동 다시 읽기: 지금 위치를 다시 읽되, 위치가 사라졌으면 가장 가까운 남은 상위 위치로, 상위가 하나도
@@ -1090,6 +1122,12 @@ impl Tab {
             Ok(list) => list,
             Err(error) => {
                 self.error = Some(error);
+                self.failed = Some(Failed {
+                    location: pending.location,
+                    kind: pending.kind,
+                    reselect: pending.reselect,
+                    reselect_path: pending.reselect_path,
+                });
                 return ReadOutcome::Failed;
             }
         };
