@@ -2891,6 +2891,8 @@ component PreviewView inherits Rectangle {
     in property <[string]> lines;
     in property <string> note;
     in property <image> picture;
+    // 흐린 자리(썸네일 캐시의 작은 그림)면 흐리게 그린다(#341).
+    in property <bool> placeholder;
     callback focus-list();
     background: Palette.background;
     border-width: 1px;
@@ -2999,6 +3001,14 @@ component PreviewView inherits Rectangle {
             }
         }
     }
+    // 투명한 부분이 바탕과 구분되게 회색 바탕을 깐다.
+    if root.kind == 3: Rectangle {
+        x: 12px;
+        y: 12px;
+        width: parent.width - 24px;
+        height: parent.height - 24px;
+        background: #80808040;
+    }
     if root.kind == 3: Image {
         x: 12px;
         y: 12px;
@@ -3006,6 +3016,7 @@ component PreviewView inherits Rectangle {
         height: parent.height - 24px;
         source: root.picture;
         image-fit: contain;
+        opacity: root.placeholder ? 0.45 : 1.0;
     }
 }
 
@@ -3227,6 +3238,7 @@ export component AppWindow inherits Window {
     in property <[string]> preview-lines;
     in property <string> preview-note;
     in property <image> preview-picture;
+    in property <bool> preview-placeholder;
     // 영역 경계를 끌었다: 바라는 폭. Rust가 코어(`Window::set_preview_width`)로 한도 안으로 자른다.
     callback preview-width-dragged(length);
 
@@ -3939,6 +3951,7 @@ export component AppWindow inherits Window {
         lines: root.preview-lines;
         note: root.preview-note;
         picture: root.preview-picture;
+        placeholder: root.preview-placeholder;
         focus-list => {
             keys.focus();
         }
