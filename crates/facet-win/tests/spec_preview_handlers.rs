@@ -6,7 +6,6 @@
 use facet_win::preview::has_preview_handler;
 
 #[test]
-#[ignore = "#342"]
 fn an_unregistered_extension_has_no_preview_handler() {
     assert!(!has_preview_handler("facet-no-such-extension-7f3a"));
     assert!(!has_preview_handler(""));
