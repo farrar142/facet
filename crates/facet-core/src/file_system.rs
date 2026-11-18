@@ -331,7 +331,8 @@ fn attributes(_name: &std::ffi::OsStr, metadata: &Metadata) -> Attributes {
         hidden: bits & FILE_ATTRIBUTE_HIDDEN != 0,
         system: bits & FILE_ATTRIBUTE_SYSTEM != 0,
         read_only: bits & FILE_ATTRIBUTE_READONLY != 0,
-        online_only: false, // #325
+        // 열거 결과의 속성 값만 본다(파일을 열면 내려받기가 일어난다).
+        online_only: crate::content_search::is_online_only(bits),
     }
 }
 
@@ -342,6 +343,6 @@ fn attributes(name: &std::ffi::OsStr, metadata: &Metadata) -> Attributes {
         hidden: name.as_encoded_bytes().starts_with(b"."),
         system: false,
         read_only: metadata.permissions().readonly(),
-        online_only: false, // #325
+        online_only: false,
     }
 }

@@ -100,7 +100,6 @@ fn wait_loaded(cache: &IconCache, key: &IconKey, size: u32) {
 }
 
 #[test]
-#[ignore = "#325"]
 fn 아이콘_키는_폴더_파일별_확장자_확장자_없음으로_나뉜다() {
     assert_eq!(PER_FILE_EXTENSIONS, ["exe", "ico", "lnk", "url"]);
     let folder = Path::new(r"C:\폴더");
@@ -136,7 +135,6 @@ fn 아이콘_키는_폴더_파일별_확장자_확장자_없음으로_나뉜다(
 }
 
 #[test]
-#[ignore = "#325"]
 fn 온라인_전용_항목은_파일을_읽지_않게_확장자_키다() {
     let folder = Path::new(r"C:\OneDrive");
     assert_eq!(
@@ -152,7 +150,6 @@ fn 온라인_전용_항목은_파일을_읽지_않게_확장자_키다() {
 }
 
 #[test]
-#[ignore = "#325"]
 fn 같은_키와_크기는_한_번만_얻는다() {
     let (cache, calls) = make_cache(Duration::from_millis(30));
     let folder = Path::new(r"C:\폴더");
@@ -193,7 +190,6 @@ fn 같은_키와_크기는_한_번만_얻는다() {
 }
 
 #[test]
-#[ignore = "#325"]
 fn 얻지_못한_키는_알리고_다시_얻지_않는다() {
     let (cache, calls) = make_cache(Duration::ZERO);
     let bad = ext("bad");
@@ -210,7 +206,6 @@ fn 얻지_못한_키는_알리고_다시_얻지_않는다() {
 }
 
 #[test]
-#[ignore = "#325"]
 fn 조회는_기다리지_않고_얻기는_다른_스레드에서_하며_끝나면_깨운다() {
     let (cache, calls) = make_cache(Duration::from_millis(500));
     let woken = Arc::new(AtomicUsize::new(0));
@@ -243,7 +238,6 @@ fn 조회는_기다리지_않고_얻기는_다른_스레드에서_하며_끝나�
 }
 
 #[test]
-#[ignore = "#325"]
 fn 실제_폴더의_보통_파일은_온라인_전용이_아니다() {
     assert!(!Attributes::default().online_only);
     let dir = TempDir::new().unwrap();
@@ -291,7 +285,6 @@ mod windows {
     }
 
     #[test]
-    #[ignore = "#325"]
     fn 확장자와_폴더_아이콘을_요청_크기로_얻는다() {
         for size in [16, 32] {
             let txt = extension_icon("txt", size).expect("txt 아이콘");
@@ -303,7 +296,6 @@ mod windows {
     }
 
     #[test]
-    #[ignore = "#325"]
     fn 실행_파일은_일반_exe_아이콘과_다른_고유_아이콘이다() {
         let Some(program) = system_program() else {
             println!("건너뜀: 시스템 실행 파일을 찾지 못했다");
@@ -321,7 +313,6 @@ mod windows {
     }
 
     #[test]
-    #[ignore = "#325"]
     fn 실제_캐시는_ui_밖에서_시스템_아이콘을_얻는다() {
         let cache = IconCache::new();
         let key = IconKey::Extension("txt".into());

@@ -4,7 +4,7 @@
 //! 바뀐 파일은 부르는 쪽이 git으로 모아 넘긴다(기준과의 merge-base 대비, 작업 공간 루트 기준 `/` 구분 경로).
 
 /// 벤치마크 이름. `cargo xtask bench`·`ci`가 이 차례로 돌린다(`facet-bench`의 하위 명령 이름과 같다).
-pub const BENCHES: [&str; 17] = [
+pub const BENCHES: [&str; 18] = [
     "list",
     "index",
     "mft",
@@ -21,6 +21,7 @@ pub const BENCHES: [&str; 17] = [
     "batch-rename-run",
     "thumbnail-decode",
     "thumbnail-cache",
+    "text-preview",
     "shell-helper",
 ];
 
@@ -104,6 +105,8 @@ const TABLE: &[(&str, &[&str])] = &[
         "crates/facet-core/src/thumbnail_cache.rs",
         &["thumbnail-cache"],
     ),
+    ("crates/facet-core/src/preview.rs", &["text-preview"]),
+    ("crates/facet-core/src/thumbnail_queue.rs", &[]),
     ("crates/facet-core/src/query_syntax.rs", &["query-syntax"]),
     ("crates/facet-core/src/live_search.rs", &["search"]),
     ("crates/facet-core/src/condition_match.rs", &["search"]),
@@ -127,6 +130,7 @@ const TABLE: &[(&str, &[&str])] = &[
     ("crates/facet-core/src/dragdrop.rs", &[]),
     ("crates/facet-core/src/edit.rs", &[]),
     ("crates/facet-core/src/file_list.rs", &[]),
+    ("crates/facet-core/src/icons.rs", &[]),
     ("crates/facet-core/src/indexer_client.rs", &[]),
     ("crates/facet-core/src/instant_search.rs", &[]),
     ("crates/facet-core/src/launch.rs", &[]),
@@ -151,6 +155,8 @@ const TABLE: &[(&str, &[&str])] = &[
     ("crates/facet-win/src/windows_drag_source.rs", &[]),
     ("crates/facet-win/src/drop_target.rs", &[]),
     ("crates/facet-win/src/windows_drop_target.rs", &[]),
+    ("crates/facet-win/src/icon.rs", &[]),
+    ("crates/facet-win/src/windows_icon.rs", &[]),
     ("crates/facet-win/src/pipe_client.rs", &[]),
     ("crates/facet-win/src/windows_pipe_client.rs", &[]),
     ("crates/facet-win/src/recycle.rs", &[]),
