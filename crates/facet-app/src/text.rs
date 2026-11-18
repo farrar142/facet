@@ -508,6 +508,17 @@ pub fn submenu_name(id: facet_core::menu::SubmenuId) -> &'static str {
     }
 }
 
+/// 오른쪽 메뉴 셸 항목 자리의 안내 줄 글자(#322).
+pub fn shell_notice_text(notice: &crate::context_menu::Notice) -> String {
+    use crate::context_menu::Notice;
+    match notice {
+        Notice::Loading => "셸 항목 불러오는 중…".to_owned(),
+        Notice::Failed => "셸 항목 불러오지 못함".to_owned(),
+        Notice::Resting => "셸 확장 도우미가 연달아 멈춰 잠시 쉬는 중".to_owned(),
+        Notice::Crashing(name) => format!("셸 확장 「{name}」이(가) 도우미를 자꾸 멈추게 함"),
+    }
+}
+
 /// 오른쪽 메뉴 줄의 표시 글자: 켜진 상태는 「✓」, 지금 정렬은 방향 화살표다. 글자가 아니라 기호라 번역하지 않는다.
 pub fn menu_mark_text(mark: facet_core::menu::Mark) -> &'static str {
     use facet_core::details::Direction;

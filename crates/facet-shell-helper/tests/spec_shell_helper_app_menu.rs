@@ -138,7 +138,6 @@ fn crash_once(app: &mut App) {
 }
 
 #[test]
-#[ignore = "#322"]
 fn own_items_show_at_once_and_shell_items_follow_below() {
     let dir = folder_with(&["a.txt"]);
     let mut app = app_at(dir.path(), Some(fake_options()));
@@ -168,7 +167,6 @@ fn own_items_show_at_once_and_shell_items_follow_below() {
 }
 
 #[test]
-#[ignore = "#322"]
 fn the_shell_menu_covers_the_whole_selection() {
     let dir = folder_with(&["a.txt", "b.txt", "c.txt"]);
     let mut app = app_at(dir.path(), Some(fake_options()));
@@ -184,7 +182,6 @@ fn the_shell_menu_covers_the_whole_selection() {
 }
 
 #[test]
-#[ignore = "#322"]
 fn the_background_menu_is_for_the_current_folder() {
     let dir = TempDir::new().unwrap();
     let folder = dir.path().join("f");
@@ -200,7 +197,6 @@ fn the_background_menu_is_for_the_current_folder() {
 }
 
 #[test]
-#[ignore = "#322"]
 fn search_result_items_use_their_own_folders() {
     let dir = TempDir::new().unwrap();
     let deep = dir.path().join("f");
@@ -236,7 +232,6 @@ fn search_result_items_use_their_own_folders() {
 }
 
 #[test]
-#[ignore = "#322"]
 fn a_slow_helper_fails_the_shell_section_and_its_late_reply_is_dropped() {
     let dir = folder_with(&["late-2000"]);
     let mut options = fake_options();
@@ -259,7 +254,6 @@ fn a_slow_helper_fails_the_shell_section_and_its_late_reply_is_dropped() {
 }
 
 #[test]
-#[ignore = "#322"]
 fn closing_the_menu_drops_its_pending_request() {
     let dir = folder_with(&["late-800"]);
     let mut app = app_at(dir.path(), Some(fake_options()));
@@ -275,7 +269,6 @@ fn closing_the_menu_drops_its_pending_request() {
 }
 
 #[test]
-#[ignore = "#322"]
 fn a_crashing_helper_fails_the_open_menu_and_the_next_menu_is_fine() {
     let dir = folder_with(&["a.txt", "crash"]);
     let mut app = app_at(dir.path(), Some(fake_options()));
@@ -292,7 +285,6 @@ fn a_crashing_helper_fails_the_open_menu_and_the_next_menu_is_fine() {
 }
 
 #[test]
-#[ignore = "#322"]
 fn a_resting_helper_shows_that_it_is_resting() {
     let dir = folder_with(&["a.txt", "crash"]);
     let mut options = fake_options();
@@ -308,7 +300,6 @@ fn a_resting_helper_shows_that_it_is_resting() {
 }
 
 #[test]
-#[ignore = "#322"]
 fn three_crashes_of_one_extension_show_its_name() {
     let dir = folder_with(&["a.txt", "crash"]);
     let mut options = fake_options();
@@ -330,7 +321,6 @@ fn three_crashes_of_one_extension_show_its_name() {
 }
 
 #[test]
-#[ignore = "#322"]
 fn invoking_a_shell_item_runs_it_closes_the_menu_and_records_nothing() {
     let dir = folder_with(&["a.txt"]);
     let mut app = app_at(dir.path(), Some(fake_options()));
@@ -352,7 +342,6 @@ fn invoking_a_shell_item_runs_it_closes_the_menu_and_records_nothing() {
 }
 
 #[test]
-#[ignore = "#322"]
 fn disabled_or_not_yet_loaded_items_are_not_invoked() {
     let dir = folder_with(&["late-1500"]);
     let mut options = fake_options();
@@ -375,7 +364,6 @@ fn disabled_or_not_yet_loaded_items_are_not_invoked() {
 }
 
 #[test]
-#[ignore = "#322"]
 fn without_the_helper_no_shell_menu_opens() {
     let dir = folder_with(&["a.txt"]);
     let mut app = app_at(dir.path(), None);

@@ -225,11 +225,14 @@ fn main() -> Result<(), slint::PlatformError> {
         app.borrow_mut()
             .enable_indexer(facet_core::indexer_client::ClientOptions::default());
     }
-    // 셸 확장 도우미 관리(「속성」·「연결 프로그램」 대화상자, ADR-0006). 켜도 도우미는 뜨지 않고 첫 요청 때 뜬다.
-    app.borrow_mut()
-        .enable_shell_helper(facet_core::shell_helper::HelperOptions::new(
-            facet_core::shell_helper::default_program(),
-        ));
+    // 셸 확장 도우미 관리(오른쪽 메뉴의 셸 항목 #322, 「속성」·「연결 프로그램」 대화상자, ADR-0006). 켜도 도우미는
+    // 뜨지 않고 첫 메뉴 때 뜬다. 측정 모드는 켜지 않는다(오른쪽 메뉴 측정에 도우미 띄우기가 섞이지 않게).
+    if !measure::is_enabled() {
+        app.borrow_mut()
+            .enable_shell_helper(facet_core::shell_helper::HelperOptions::new(
+                facet_core::shell_helper::default_program(),
+            ));
+    }
     drop(view);
 
     // 수신기는 이벤트 루프가 생긴 뒤(첫 창을 만든 뒤) 연다. 받은 인자는 수신기 스레드에서 해석하고 UI 스레드에는
@@ -1238,9 +1241,93 @@ fn menu_row(command: &facet_core::menu::MenuCommand) -> MenuRow {
             .into(),
         enabled: command.enabled,
         mark: text::menu_mark_text(command.mark).into(),
-        separator: false,
-        submenu: false,
+        ..MenuRow::default()
     }
+}
+
+/// 셸 항목 아이콘을 Slint 그림으로 바꾼다. 크기와 바이트 수가 맞지 않으면 그리지 않는다.
+fn shell_icon(icon: Option<&facet_shell_protocol::Icon>) -> Option<slint::Image> {
+    let icon = icon?;
+    let expected = usize::try_from(u64::from(icon.width) * u64::from(icon.height) * 4).ok()?;
+    if icon.width == 0 || icon.height == 0 || icon.rgba.len() != expected {
+        return None;
+    }
+    let buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+        &icon.rgba,
+        icon.width,
+        icon.height,
+    );
+    Some(slint::Image::from_rgba8(buffer))
+}
+
+/// 셸 명령 줄(#322).
+fn shell_command_row(command: &facet_shell_protocol::ShellCommand) -> MenuRow {
+    let icon = shell_icon(command.icon.as_ref());
+    MenuRow {
+        name: context_menu::shell_text(&command.text).into(),
+        enabled: command.enabled,
+        has_icon: icon.is_some(),
+        icon: icon.unwrap_or_default(),
+        ..MenuRow::default()
+    }
+}
+
+fn separator_row() -> MenuRow {
+    MenuRow {
+        separator: true,
+        ..MenuRow::default()
+    }
+}
+
+/// 오른쪽 메뉴의 줄들(자체 항목, 구분선 뒤 셸 항목 자리).
+fn menu_rows_of(menu: &ContextMenu) -> Vec<MenuRow> {
+    use context_menu::Line;
+    use facet_shell_protocol::MenuItem;
+    menu.lines()
+        .iter()
+        .map(|line| match line {
+            Line::Own(MenuEntry::Command(command)) => menu_row(command),
+            Line::Own(MenuEntry::Submenu(sub)) => MenuRow {
+                name: text::submenu_name(sub.id).into(),
+                enabled: sub.enabled,
+                submenu: true,
+                ..MenuRow::default()
+            },
+            Line::Own(MenuEntry::Separator)
+            | Line::ShellSeparator
+            | Line::Shell(MenuItem::Separator) => separator_row(),
+            Line::Notice(notice) => MenuRow {
+                name: text::shell_notice_text(notice).into(),
+                notice: true,
+                ..MenuRow::default()
+            },
+            Line::Shell(MenuItem::Command(command)) => shell_command_row(command),
+            Line::Shell(MenuItem::Submenu(sub)) => {
+                let icon = shell_icon(sub.icon.as_ref());
+                MenuRow {
+                    name: context_menu::shell_text(&sub.text).into(),
+                    enabled: sub.enabled,
+                    submenu: true,
+                    has_icon: icon.is_some(),
+                    icon: icon.unwrap_or_default(),
+                    ..MenuRow::default()
+                }
+            }
+        })
+        .collect()
+}
+
+/// 하위 메뉴의 줄들.
+fn sub_rows_of(lines: &[context_menu::SubLine]) -> Vec<MenuRow> {
+    use context_menu::SubLine;
+    lines
+        .iter()
+        .map(|line| match line {
+            SubLine::Own(command) => menu_row(command),
+            SubLine::Shell(command) => shell_command_row(command),
+            SubLine::Separator => separator_row(),
+        })
+        .collect()
 }
 
 fn count64(n: u64) -> i32 {
@@ -1904,6 +1991,11 @@ impl View {
                     // #344 측정: 영역 내용이 바뀐 프레임을 세게 한다.
                     self.mark_loaded();
                 }
+                continue;
+            }
+            if let Update::ShellMenu(id) = update {
+                // 셸 메뉴 번호로 이 창의 오른쪽 메뉴가 기다리던 것인지 가른다(탭과 상관없음).
+                self.receive_shell_menu(*id);
                 continue;
             }
             if let Update::Subfolders { id, list } = update {
@@ -2691,7 +2783,14 @@ impl View {
         self.close_rename();
         self.close_address_edit();
         self.render();
-        let menu = ContextMenu::new(self.app.borrow().context_menu(kind));
+        let mut menu = ContextMenu::new(self.app.borrow().context_menu(kind));
+        // #322: 자체 항목을 곧바로 그리고, 같은 순간 도우미에 셸 메뉴를 요청해 그 자리에 「불러오는 중」을 둔다.
+        {
+            let mut app = self.app.borrow_mut();
+            if app.open_shell_menu(kind).is_some() {
+                menu.set_shell(app.shell_menu());
+            }
+        }
         let (x, y) = context_menu::place(
             at,
             (context_menu::WIDTH, menu.height()),
@@ -2701,34 +2800,30 @@ impl View {
         self.ui.set_menu_y(y);
         self.ui.set_menu_width(context_menu::WIDTH);
         self.ui.set_menu_height(menu.height());
-        let rows: Vec<MenuRow> = menu
-            .menu()
-            .entries
-            .iter()
-            .map(|entry| match entry {
-                MenuEntry::Command(command) => menu_row(command),
-                MenuEntry::Submenu(sub) => MenuRow {
-                    name: text::submenu_name(sub.id).into(),
-                    shortcut: SharedString::new(),
-                    enabled: sub.enabled,
-                    mark: SharedString::new(),
-                    separator: false,
-                    submenu: true,
-                },
-                MenuEntry::Separator => MenuRow {
-                    name: SharedString::new(),
-                    shortcut: SharedString::new(),
-                    enabled: false,
-                    mark: SharedString::new(),
-                    separator: true,
-                    submenu: false,
-                },
-            })
-            .collect();
-        self.menu_rows.set_vec(rows);
+        self.menu_rows.set_vec(menu_rows_of(&menu));
         *self.context_menu.borrow_mut() = Some(menu);
         self.sync_menu();
         self.ui.set_menu_open(true);
+    }
+
+    /// 코어가 열린 셸 메뉴의 셸 자리를 바꿨다(#322): 이 창의 메뉴가 그 셸 메뉴면 셸 자리만 다시 그린다. 자체 항목과
+    /// 메뉴의 자리는 그대로다(아래로 넘치면 창 끝에서 잘린다).
+    fn receive_shell_menu(&self, id: facet_core::shell_helper::ShellMenuId) {
+        let rows = {
+            let mut guard = self.context_menu.borrow_mut();
+            let Some(menu) = guard.as_mut().filter(|menu| menu.shell_id() == Some(id)) else {
+                return;
+            };
+            let app = self.app.borrow();
+            let Some(shell) = app.shell_menu().filter(|shell| shell.id == id) else {
+                return;
+            };
+            menu.set_shell(Some(shell));
+            self.ui.set_menu_height(menu.height());
+            menu_rows_of(menu)
+        };
+        self.menu_rows.set_vec(rows);
+        self.sync_menu();
     }
 
     /// 창 안쪽 크기(논리 픽셀).
@@ -2779,26 +2874,28 @@ impl View {
         ui.set_menu_selected(menu.selected().map_or(-1, count));
         match menu.open_submenu() {
             Some(row) => {
-                if let Some(MenuEntry::Submenu(sub)) = menu.menu().entries.get(row) {
-                    let height = menu.sub_height();
-                    let (x, y) = context_menu::place_sub(
-                        ui.get_menu_x(),
-                        context_menu::WIDTH,
-                        ui.get_menu_y() + menu.row_top(row),
-                        (context_menu::SUB_WIDTH, height),
-                        self.logical_size(),
-                    );
-                    ui.set_menu_sub_x(x);
-                    ui.set_menu_sub_y(y);
-                    ui.set_menu_sub_width(context_menu::SUB_WIDTH);
-                    ui.set_menu_sub_height(height);
-                    ui.set_menu_sub_selected(menu.sub_selected().map_or(-1, count));
-                    if !ui.get_menu_sub_open() {
-                        self.menu_sub_rows
-                            .set_vec(sub.entries.iter().map(menu_row).collect::<Vec<_>>());
-                    }
-                    ui.set_menu_sub_open(true);
+                let width = if menu.sub_is_shell() {
+                    context_menu::SHELL_SUB_WIDTH
+                } else {
+                    context_menu::SUB_WIDTH
+                };
+                let height = menu.sub_height();
+                let (x, y) = context_menu::place_sub(
+                    ui.get_menu_x(),
+                    context_menu::WIDTH,
+                    ui.get_menu_y() + menu.row_top(row),
+                    (width, height),
+                    self.logical_size(),
+                );
+                ui.set_menu_sub_x(x);
+                ui.set_menu_sub_y(y);
+                ui.set_menu_sub_width(width);
+                ui.set_menu_sub_height(height);
+                ui.set_menu_sub_selected(menu.sub_selected().map_or(-1, count));
+                if !ui.get_menu_sub_open() {
+                    self.menu_sub_rows.set_vec(sub_rows_of(&menu.sub_lines()));
                 }
+                ui.set_menu_sub_open(true);
             }
             None => ui.set_menu_sub_open(false),
         }
@@ -2812,6 +2909,8 @@ impl View {
         if self.context_menu.borrow_mut().take().is_some() {
             self.ui.set_menu_open(false);
             self.ui.set_menu_sub_open(false);
+            // #322: 진행 중인 셸 메뉴 요청을 취소하고 메뉴 객체를 놓는다.
+            self.app.borrow_mut().close_shell_menu();
         }
     }
 
@@ -2907,6 +3006,11 @@ impl View {
             MenuOutcome::Run(command) => {
                 self.close_context_menu();
                 self.execute(command);
+            }
+            MenuOutcome::Shell(item) => {
+                // #322: 도우미가 실행한다(코어가 전경 창 권한을 넘기고 셸 메뉴를 닫는다). 작업 기록에는 들지 않는다.
+                self.app.borrow_mut().invoke_shell_item(item);
+                self.close_context_menu();
             }
             MenuOutcome::None => self.sync_menu(),
         }
@@ -5750,7 +5854,7 @@ impl View {
                 enabled: pending.menu.enabled(i),
                 mark: SharedString::new(),
                 separator: *entry == drop_menu::Entry::Separator,
-                submenu: false,
+                ..MenuRow::default()
             })
             .collect();
         self.menu_rows.set_vec(rows);
