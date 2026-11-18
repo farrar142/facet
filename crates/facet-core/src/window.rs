@@ -1016,6 +1016,10 @@ pub struct App {
     /// 셸 확장 도우미 관리([`App::enable_shell_helper`], #321). 켜지 않았는데 「속성」·「연결 프로그램」을 실행하면 기본
     /// 설정(실행 파일 옆의 도우미)으로 켠다. 켜도 도우미는 첫 요청 때 뜬다.
     shell_helper: Option<ShellHelper>,
+    /// 열린 오른쪽 메뉴의 셸 항목 자리(#322). 하나뿐이다.
+    shell_menu: Option<OpenShellMenu>,
+    /// 셸 메뉴 번호를 매기는 수.
+    shell_menu_serial: u64,
     /// 즉시 검색 결과의 인덱스 변경 확인([`App::poll`])을 깨우도록 잡아 둔 시각. 잡지 않았으면 `None`이다.
     follow_wake: Option<Instant>,
     /// 마지막 일괄 이름 바꾸기 미리 보기 요청의 번호([`App::request_batch_rename_preview`]). 일꾼이 보고 앞선 요청의
@@ -1255,6 +1259,8 @@ impl App {
             changed_results: Vec::new(),
             indexer: None,
             shell_helper: None,
+            shell_menu: None,
+            shell_menu_serial: 0,
             follow_wake: None,
             batch_preview: Arc::default(),
             subfolders: Arc::default(),
@@ -1893,6 +1899,7 @@ impl App {
         updates.extend(self.pump_searches());
         updates.extend(self.pump_indexer());
         updates.extend(self.pump_demoted());
+        updates.extend(self.pump_shell_menu());
         self.pump_follow();
         for window in std::mem::take(&mut self.preview_notes) {
             updates.push((self.window_tab_id(window), Update::Preview(window)));
@@ -2043,7 +2050,11 @@ impl App {
     /// 셸 확장 도우미 관리를 켠다(#321). 곧바로 돌아오고 도우미는 띄우지 않는다(첫 요청 때 뜬다). 이미 켰으면 새
     /// 설정으로 바꾼다(앞선 관리는 버려 그 도우미가 끝난다).
     pub fn enable_shell_helper(&mut self, options: HelperOptions) {
-        self.shell_helper = Some(ShellHelper::start(options));
+        self.close_shell_menu();
+        let helper = ShellHelper::start(options);
+        let outbox = self.outbox.clone();
+        helper.set_waker(move || outbox.wake());
+        self.shell_helper = Some(helper);
     }
 
     /// 켠 셸 확장 도우미 관리. 켜지 않았으면 `None`.
@@ -2053,8 +2064,12 @@ impl App {
 
     /// 셸 확장 도우미 관리. 켜지 않았으면 기본 설정으로 켠다.
     fn shell_helper_or_default(&mut self) -> &ShellHelper {
+        let outbox = self.outbox.clone();
         self.shell_helper.get_or_insert_with(|| {
-            ShellHelper::start(HelperOptions::new(crate::shell_helper::default_program()))
+            let helper =
+                ShellHelper::start(HelperOptions::new(crate::shell_helper::default_program()));
+            helper.set_waker(move || outbox.wake());
+            helper
         })
     }
 
@@ -2390,24 +2405,125 @@ impl App {
         todo!("#342")
     }
 
-    /// #322: 오른쪽 메뉴의 셸 항목 자리를 연다(도우미에 셸 메뉴를 요청한다).
-    pub fn open_shell_menu(&mut self, _kind: MenuKind) -> Option<crate::shell_helper::ShellMenuId> {
-        todo!("#322")
+    /// #322: 오른쪽 메뉴의 셸 항목 자리를 연다(도우미에 셸 메뉴를 요청한다). 도우미 관리가 켜져 있지 않거나 대상이
+    /// 없으면(실제 파일 시스템 항목이 아님) `None`. 열린 셸 메뉴는 하나라 앞 것은 닫는다.
+    pub fn open_shell_menu(&mut self, kind: MenuKind) -> Option<crate::shell_helper::ShellMenuId> {
+        use crate::shell_helper::{ShellMenu, ShellMenuId, ShellSection};
+        self.close_shell_menu();
+        self.shell_helper.as_ref()?;
+        let tab = self.active_tab();
+        let target = match kind {
+            MenuKind::Item => {
+                let mut paths = tab.selected_paths();
+                if paths.is_empty() {
+                    paths.extend(tab.cursor_path());
+                }
+                if paths.is_empty() {
+                    return None;
+                }
+                facet_shell_protocol::MenuTarget::Items(paths)
+            }
+            MenuKind::Background => facet_shell_protocol::MenuTarget::Background(
+                tab.location().file_system_path()?.to_path_buf(),
+            ),
+        };
+        let helper = self.shell_helper.as_ref()?;
+        self.shell_menu_serial += 1;
+        let id = ShellMenuId(self.shell_menu_serial);
+        let resting = helper.is_resting();
+        let request = (!resting).then(|| helper.menu(target));
+        self.shell_menu = Some(OpenShellMenu {
+            menu: ShellMenu {
+                id,
+                kind,
+                section: if resting {
+                    ShellSection::Resting
+                } else {
+                    ShellSection::Loading
+                },
+                crashing_extension: helper.crashing_extension(),
+            },
+            request,
+        });
+        Some(id)
     }
 
     /// #322: 열린 셸 메뉴.
     pub fn shell_menu(&self) -> Option<&crate::shell_helper::ShellMenu> {
-        todo!("#322")
+        self.shell_menu.as_ref().map(|open| &open.menu)
     }
 
-    /// #322: 열린 셸 메뉴를 닫는다.
+    /// #322: 열린 셸 메뉴를 닫는다(진행 중인 요청을 취소하고 메뉴 객체를 놓는다).
     pub fn close_shell_menu(&mut self) {
-        todo!("#322")
+        if let Some(open) = self.shell_menu.take()
+            && let (Some(request), Some(helper)) = (open.request, self.shell_helper.as_ref())
+        {
+            helper.release(request);
+        }
     }
 
-    /// #322: 열린 셸 메뉴의 셸 항목을 실행한다.
-    pub fn invoke_shell_item(&mut self, _item: u32) -> bool {
-        todo!("#322")
+    /// #322: 열린 셸 메뉴의 셸 항목을 실행한다. 켜진 명령 항목이면 도우미에 실행을 보내고 메뉴를 닫고 `true`. 아직 오지
+    /// 않은 메뉴·꺼진 항목·없는 항목이면 아무것도 하지 않고 `false`.
+    pub fn invoke_shell_item(&mut self, item: u32) -> bool {
+        use crate::shell_helper::ShellSection;
+        fn enabled(items: &[facet_shell_protocol::MenuItem], id: u32) -> bool {
+            use facet_shell_protocol::MenuItem;
+            items.iter().any(|line| match line {
+                MenuItem::Command(c) => c.id == id && c.enabled,
+                MenuItem::Submenu(s) => s.enabled && enabled(&s.items, id),
+                MenuItem::Separator => false,
+            })
+        }
+        let Some(open) = self.shell_menu.as_ref() else {
+            return false;
+        };
+        let (ShellSection::Items(items), Some(request)) = (&open.menu.section, open.request) else {
+            return false;
+        };
+        if !enabled(items, item) {
+            return false;
+        }
+        let Some(helper) = self.shell_helper.as_ref() else {
+            return false;
+        };
+        if let Some(pid) = helper.process_id() {
+            // 실행이 띄우는 창이 facet 창 앞에 나오게 포그라운드 권한을 넘긴다.
+            facet_win::shell_dialog::allow_foreground(pid);
+        }
+        helper.invoke(request, item);
+        self.close_shell_menu();
+        true
+    }
+
+    /// 도우미 사건을 받아 열린 셸 메뉴의 자리를 바꾼다.
+    fn pump_shell_menu(&mut self) -> Vec<(TabId, Update)> {
+        use crate::shell_helper::{HelperEvent, Reply, RequestError, ShellSection};
+        let Some(helper) = self.shell_helper.as_ref() else {
+            return Vec::new();
+        };
+        let events = helper.poll();
+        let crashing = helper.crashing_extension();
+        let mut changed = None;
+        for HelperEvent::Reply { id, result } in events {
+            let Some(open) = self.shell_menu.as_mut() else {
+                continue;
+            };
+            if open.request != Some(id) {
+                continue;
+            }
+            open.menu.section = match result {
+                Ok(Reply::Menu(items)) => ShellSection::Items(items),
+                Ok(Reply::Done) => continue,
+                Err(RequestError::Resting) => ShellSection::Resting,
+                Err(_) => ShellSection::Failed,
+            };
+            open.menu.crashing_extension = crashing.clone();
+            changed = Some(open.menu.id);
+        }
+        match changed {
+            Some(id) => vec![(self.active_tab_id(), Update::ShellMenu(id))],
+            None => Vec::new(),
+        }
     }
 
     /// 인덱서 서비스 연결을 띄운다([`IndexerClient::start`], 곧바로 돌아오고 파이프는 뒤에서 연다). 앱(화면)이 시작한 뒤 한 번
@@ -4774,4 +4890,10 @@ fn filetime_of(time: std::time::SystemTime) -> Option<u64> {
         Err(e) => -i128::try_from(e.duration().as_nanos() / 100).ok()?,
     };
     u64::try_from(unix + EPOCH_GAP_100NS).ok()
+}
+
+/// 열린 셸 메뉴와 그 메뉴를 만든 요청(쉬는 중이라 요청하지 않았으면 `None`).
+struct OpenShellMenu {
+    menu: crate::shell_helper::ShellMenu,
+    request: Option<crate::shell_helper::RequestId>,
 }
