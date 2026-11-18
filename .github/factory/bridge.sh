@@ -174,7 +174,7 @@ $body
 할 일: $todo"
   to=$TO_COORD
   [ "$kind" = question ] && to=$TO_BOSS
-  if agent-mail send --to "$to"--task facet-factory --idempotency-key "facet-factory-$id" \
+  if agent-mail send --to "$to" --task facet-factory --idempotency-key "facet-factory-$id" \
     --subject "[facet 공장] $label: #$n $title" --body "$text" > /dev/null; then
     remember "$id"
     echo "bridge: sent $kind #$n to $to (comment $id)"
