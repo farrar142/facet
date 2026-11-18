@@ -15,6 +15,7 @@
 //! search_frame_us 40000 # [`ENV_SEARCH`]의 실시간 탐색을 시작한 때부터 첫 결과가 든 프레임이 나올 때까지
 //! instant_frame_us 30000 # [`ENV_INSTANT`]의 즉시 검색 글자를 넘긴 때부터 첫 결과가 든 프레임이 나올 때까지
 //! instant_demoted 1  # 즉시 검색이 실시간 탐색으로 강등됐다(있으면 측정 실패)
+//! grid_fill_us 42000 # [`ENV_GRID`]의 그리드로 바꾼 때부터 보이는 칸이 썸네일로 다 찬 첫 프레임이 나올 때까지
 //! frame_us 16700     # 스크롤 중 프레임 하나의 시간(마이크로초). 프레임마다 한 줄
 //! ```
 
@@ -50,8 +51,10 @@ pub const ENV_INSTANT: &str = "FACET_MEASURE_INSTANT";
 pub const ENV_WINDOWS: &str = "FACET_MEASURE_WINDOWS";
 /// 0보다 크면 첫 화면 뒤에 프레임마다 이만큼의 행씩 목록 끝까지 자동으로 스크롤한다.
 pub const ENV_SCROLL_ROWS: &str = "FACET_MEASURE_SCROLL_ROWS";
-/// #331: 그리드 한 화면 채우기 측정.
-pub const ENV_GRID: &str = "FACET_MEASURE_GRID"; // #331
+/// 설정하면 첫 화면 뒤에 활성 탭을 그리드(보통 크기)로 바꾸고 잰다. 값이 `fill`이면 바꾼 때부터 보이는 칸이 모두
+/// 썸네일로 찬 첫 프레임이 화면에 나갈 때까지(`grid_fill`), 그 밖의 값이면 [`ENV_SCROLL_ROWS`]줄씩 끝까지 자동
+/// 스크롤하며 프레임 시간(`frame_us`)을 모은다.
+pub const ENV_GRID: &str = "FACET_MEASURE_GRID";
 
 /// 앱이 쓰고 측정 도구가 읽는 측정 결과.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -128,6 +131,9 @@ impl ScreenReport {
         if self.instant_demoted {
             out.push_str("instant_demoted 1\n");
         }
+        if let Some(d) = self.grid_fill {
+            out.push_str(&format!("grid_fill_us {}\n", d.as_micros()));
+        }
         for f in &self.frames {
             out.push_str(&format!("frame_us {}\n", f.as_micros()));
         }
@@ -155,6 +161,7 @@ impl ScreenReport {
                 "search_frame_us" => report.search_frame = Some(Duration::from_micros(number)),
                 "instant_frame_us" => report.instant_frame = Some(Duration::from_micros(number)),
                 "instant_demoted" => report.instant_demoted = number != 0,
+                "grid_fill_us" => report.grid_fill = Some(Duration::from_micros(number)),
                 "frame_us" => report.frames.push(Duration::from_micros(number)),
                 _ => return Err(format!("모르는 항목: {line}")),
             }
@@ -179,7 +186,7 @@ mod tests {
             search_frame: Some(Duration::from_micros(40_000)),
             instant_frame: Some(Duration::from_micros(30_000)),
             instant_demoted: true,
-            grid_fill: None,
+            grid_fill: Some(Duration::from_micros(42_000)),
             frames: vec![Duration::from_micros(16_700), Duration::from_micros(33_000)],
         };
         assert_eq!(ScreenReport::parse(&report.to_text()), Ok(report));
