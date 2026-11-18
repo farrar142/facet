@@ -44,6 +44,7 @@ pub mod drop_target;
 pub mod file_ops;
 pub mod icon;
 pub mod pipe_client;
+pub mod preview;
 pub mod recycle;
 pub mod shell_copy;
 pub mod shell_thread;

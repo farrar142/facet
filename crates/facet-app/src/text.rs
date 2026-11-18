@@ -85,6 +85,7 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::OpenRecycleBin => todo!("#352"),
         CommandId::Restore => todo!("#353"),
         CommandId::EmptyRecycleBin => todo!("#354"),
+        CommandId::TogglePreview => todo!("#339"),
     }
 }
 

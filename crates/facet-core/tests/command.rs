@@ -97,6 +97,8 @@ fn name(command: CommandId) -> &'static str {
         CommandId::OpenRecycleBin => "휴지통 열기",
         CommandId::Restore => "복원",
         CommandId::EmptyRecycleBin => "휴지통 비우기",
+        // 미리보기 영역(자세한 확인은 tests/spec_preview_app.rs).
+        CommandId::TogglePreview => "미리보기 영역",
     }
 }
 

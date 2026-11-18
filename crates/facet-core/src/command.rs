@@ -167,6 +167,8 @@ pub enum CommandId {
     Restore,
     /// #354: 휴지통 비우기(`empty-recycle-bin`).
     EmptyRecycleBin,
+    /// #339: 미리보기 영역 켜고 끄기(`toggle-preview`, Alt+P).
+    TogglePreview,
 }
 
 impl CommandId {
@@ -303,6 +305,7 @@ impl CommandId {
             CommandId::OpenRecycleBin => "open-recycle-bin",
             CommandId::Restore => "restore",
             CommandId::EmptyRecycleBin => "empty-recycle-bin",
+            CommandId::TogglePreview => "toggle-preview",
         }
     }
 
@@ -433,6 +436,7 @@ impl CommandId {
             CommandId::OpenRecycleBin => &[],                   // #352
             CommandId::Restore => &[],                          // #353
             CommandId::EmptyRecycleBin => &[],                  // #354
+            CommandId::TogglePreview => &[],                    // #339
         }
     }
 
@@ -498,6 +502,7 @@ impl CommandId {
             CommandId::OpenRecycleBin => todo!("#352"),
             CommandId::Restore => todo!("#353"),
             CommandId::EmptyRecycleBin => todo!("#354"),
+            CommandId::TogglePreview => todo!("#339"),
             CommandId::Refresh
             | CommandId::EditAddress
             | CommandId::ToggleHidden

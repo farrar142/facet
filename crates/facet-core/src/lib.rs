@@ -26,6 +26,7 @@ pub mod menu;
 pub mod name_input;
 pub mod name_match;
 pub mod placement;
+pub mod preview;
 mod provider;
 pub mod query_syntax;
 pub mod rename_presets;

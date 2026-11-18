@@ -242,6 +242,83 @@ pub fn close(closer: &Closer) {
     let _ = unsafe { SetEvent(closer.0.0) };
 }
 
+/// 연결 하나를 `timeout`까지 기다린다. 오지 않으면 연결 기다리기를 취소하고 `false`(같은 인스턴스로 다시 기다릴 수 있다).
+fn wait_connect(pipe: &OwnedHandle, timeout: Duration) -> io::Result<bool> {
+    use windows::Win32::Foundation::ERROR_PIPE_CONNECTED;
+    use windows::Win32::System::Pipes::ConnectNamedPipe;
+    use windows::Win32::System::Threading::WaitForSingleObject;
+
+    let raw = HANDLE(pipe.as_raw_handle());
+    let done = event()?;
+    let mut ov = OVERLAPPED {
+        hEvent: done.0,
+        ..Default::default()
+    };
+    // SAFETY: pipe는 겹친 입출력으로 만든 서버 인스턴스이고 ov는 완료(또는 취소 완료)를 기다릴 때까지 산다.
+    match unsafe { ConnectNamedPipe(raw, Some(&mut ov)) } {
+        Ok(()) => Ok(true),
+        Err(error) => match WIN32_ERROR::from_error(&error) {
+            Some(ERROR_PIPE_CONNECTED) => Ok(true),
+            Some(ERROR_IO_PENDING) => {
+                let millis = timeout.as_millis().min(u128::from(u32::MAX - 1)) as u32;
+                // SAFETY: done은 열린 이벤트 핸들이다.
+                let woke = unsafe { WaitForSingleObject(done.0, millis) };
+                let mut ignored = 0u32;
+                if woke == WAIT_OBJECT_0 {
+                    // SAFETY: 이벤트가 켜졌으므로 연결 기다리기는 끝났다.
+                    unsafe { GetOverlappedResult(raw, &ov, &mut ignored, false) }
+                        .map_err(|e| to_io_error(&e))?;
+                    Ok(true)
+                } else {
+                    // SAFETY: ov로 건 연결 기다리기를 취소하고 끝나기를 기다린다.
+                    unsafe {
+                        let _ = CancelIoEx(raw, Some(&ov));
+                        let _ = GetOverlappedResult(raw, &ov, &mut ignored, true);
+                    }
+                    Ok(false)
+                }
+            }
+            _ => Err(to_io_error(&error)),
+        },
+    }
+}
+
+/// 사적인 파이프의 Windows 부분([`crate::pipe_client::private`]).
+pub mod private {
+    use std::io;
+    use std::os::windows::io::OwnedHandle;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use super::{Client, wait_connect};
+
+    pub struct PrivatePipe(Mutex<Option<OwnedHandle>>);
+
+    pub fn create(name: &str) -> io::Result<PrivatePipe> {
+        let pipe = crate::windows_instance::create_private_pipe(name)?;
+        Ok(PrivatePipe(Mutex::new(Some(pipe))))
+    }
+
+    pub fn accept(pipe: &PrivatePipe, timeout: Duration) -> io::Result<Option<Client>> {
+        let mut slot = pipe
+            .0
+            .lock()
+            .map_err(|_| io::Error::other("잠금이 깨졌습니다"))?;
+        let Some(handle) = slot.take() else {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "이미 연결을 받았습니다",
+            ));
+        };
+        if wait_connect(&handle, timeout)? {
+            Ok(Some(Client(handle)))
+        } else {
+            *slot = Some(handle);
+            Ok(None)
+        }
+    }
+}
+
 /// 시험 도우미의 Windows 부분([`crate::pipe_client::testing`]).
 pub mod testing {
     use std::io;

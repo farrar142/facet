@@ -102,6 +102,58 @@ impl PipeCloser {
     }
 }
 
+/// 이 프로세스가 띄운 자식 하나만 붙게 하는 사적인 파이프의 서버 쪽(셸 확장 도우미 연결이 쓴다).
+///
+/// 인스턴스는 하나뿐이고 첫 인스턴스로 만든다(같은 이름이 이미 있으면 [`io::ErrorKind::AddrInUse`]). 보안 설명자는
+/// 소유자·유일한 허용 항목이 현재 사용자 SID이고 NETWORK를 거부하며 무결성 수준 강제 레이블(위로 쓰기 금지)을 건다.
+/// 원격 클라이언트는 거부한다. 받은 연결의 서버 쪽 끝은 [`PipeClient`]라 [`PipeClient::split`]으로 나눠 쓴다.
+/// Windows가 아니면 만들 수 없다([`io::ErrorKind::Unsupported`]).
+pub mod private {
+    use std::io;
+    use std::time::Duration;
+
+    use super::PipeClient;
+
+    /// 연결 하나를 받을 파이프. 버리면(받기 전이면) 그 이름의 파이프가 사라진다.
+    pub struct PrivatePipe(imp::PrivatePipe);
+
+    impl PrivatePipe {
+        /// `name`(예: `\\.\pipe\...`)의 파이프를 만든다.
+        pub fn create(name: &str) -> io::Result<Self> {
+            imp::create(name).map(PrivatePipe)
+        }
+
+        /// 연결 하나를 `timeout`까지 기다린다. 오지 않으면 `None`(다시 기다릴 수 있다). 받은 뒤 다시 부르면 오류다.
+        pub fn accept(&self, timeout: Duration) -> io::Result<Option<PipeClient>> {
+            Ok(imp::accept(&self.0, timeout)?.map(PipeClient))
+        }
+    }
+
+    #[cfg(windows)]
+    use crate::windows_pipe_client::private as imp;
+
+    #[cfg(not(windows))]
+    mod imp {
+        use std::io;
+        use std::time::Duration;
+
+        pub enum PrivatePipe {}
+
+        pub fn create(_: &str) -> io::Result<PrivatePipe> {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "이름 있는 파이프는 Windows에서만 쓸 수 있습니다",
+            ))
+        }
+        pub fn accept(
+            p: &PrivatePipe,
+            _: Duration,
+        ) -> io::Result<Option<super::super::imp::Client>> {
+            match *p {}
+        }
+    }
+}
+
 /// 시험 도우미: 같은 프로세스에 가짜 파이프 서버를 띄운다. 앱은 부르지 않는다.
 ///
 /// 받은 연결의 서버 쪽 끝도 [`PipeClient`]라 [`PipeClient::split`]으로 나눠 읽고 쓰며, 그 읽는 쪽·쓰는 쪽을 모두
