@@ -15,8 +15,9 @@ setup() {
   current=$1
   tmp=$(mktemp -d "$root/t.XXXXXX")
   export FAKE_GH="$tmp/gh" FAKE_MAIL="$tmp/mail" XDG_STATE_HOME="$tmp/state"
-  export FACTORY_REPO=owner/repo BRIDGE_SINCE=2026-11-01T00:00:00Z
-  unset BRIDGE_TO BRIDGE_TO_BOSS BRIDGE_TO_COORD AGENT_MAIL_PROFILE
+  export BRIDGE_SINCE=2026-11-01T00:00:00Z
+  # FACTORY_REPO unset: the facet defaults, which must not change (#380).
+  unset FACTORY_REPO BRIDGE_STATE_DIR BRIDGE_TO BRIDGE_TO_BOSS BRIDGE_TO_COORD AGENT_MAIL_PROFILE
   mkdir -p "$FAKE_GH" "$FAKE_MAIL"
   echo '[]' > "$FAKE_GH/repo-comments.json"
 }
@@ -345,6 +346,57 @@ run
 eq code 0 "$(code)"
 eq sends 0 "$(sent_count)"
 eq remembered 31 "$(remembered)"
+
+# --- repository name (#380) ----------------------------------------------------------------
+
+setup "without FACTORY_REPO the task, key, subject and state file are exactly facet's"
+markers
+run
+eq code 0 "$(code)"
+eq task facet-factory "$(arg 0 --task)"
+eq key facet-factory-11 "$(arg 0 --idempotency-key)"
+eq subject "[facet 공장] 질문: #249 공장 개선" "$(arg 0 --subject)"
+eq "subject 2" "[facet 공장] spec 상한 멈춤: #250 검색" "$(arg 1 --subject)"
+eq "state file" "11
+12
+13
+14" "$(tr -d '\r' < "$XDG_STATE_HOME/facet-factory-bridge/sent")"
+eq "only that state folder" "facet-factory-bridge" "$(ls "$XDG_STATE_HOME" | tr -d '\r')"
+has "gh reads facet" "repos/farrar142/facet/issues/comments" "$(cat "$FAKE_GH/calls.log")"
+
+setup "FACTORY_REPO=owner/other names the task, key, subject and state folder after other"
+markers
+export FACTORY_REPO=owner/other
+run
+eq code 0 "$(code)"
+eq sends 4 "$(sent_count)"
+eq task other-factory "$(arg 0 --task)"
+eq key other-factory-11 "$(arg 0 --idempotency-key)"
+eq key4 other-factory-14 "$(arg 3 --idempotency-key)"
+eq subject "[other 공장] 질문: #249 공장 개선" "$(arg 0 --subject)"
+eq "state file" "11 12 13 14" "$(tr '\n' ' ' < "$XDG_STATE_HOME/other-factory-bridge/sent" | sed 's/ $//')"
+eq "no facet state" no "$([ -e "$XDG_STATE_HOME/facet-factory-bridge" ] && echo yes || echo no)"
+has "gh reads other" "repos/owner/other/issues/comments" "$(cat "$FAKE_GH/calls.log")"
+run
+eq "not again" 4 "$(sent_count)"
+
+setup "a facet marker already sent is not sent again by another repository's bridge, nor the reverse"
+markers
+run
+export FACTORY_REPO=owner/other
+run
+eq "each repository its own state" 8 "$(sent_count)"
+eq "other key" other-factory-11 "$(arg 4 --idempotency-key)"
+
+setup "BRIDGE_STATE_DIR is the state folder"
+markers
+export FACTORY_REPO=owner/other BRIDGE_STATE_DIR="$tmp/custom state"
+run
+eq code 0 "$(code)"
+eq "state file" "11 12 13 14" "$(tr '\n' ' ' < "$tmp/custom state/sent" | sed 's/ $//')"
+eq "nothing under XDG_STATE_HOME" no "$([ -e "$XDG_STATE_HOME" ] && echo yes || echo no)"
+run
+eq "not again" 4 "$(sent_count)"
 
 echo "bridge.sh: $passes passed, $fails failed"
 [ "$fails" -eq 0 ]
