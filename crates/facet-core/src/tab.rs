@@ -31,7 +31,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::details::{DetailsList, Sort};
+use crate::details::{Column, DetailsList, Sort};
 use crate::selection::{CursorMove, Pick, StatusSummary, TypeAhead, ViewState, starts_with_folded};
 use crate::view::{GridLayout, GridMove, View};
 use crate::watch::{self, ChangeBatch, ChangeSink, Watch, WatchError};
@@ -57,7 +57,7 @@ use crate::query_syntax::{self, ParseError, Parsed, Today};
 use crate::search_results::{
     ContentStatus, PathChange, SearchFeed, SearchStatus, is_within, rebase,
 };
-use crate::{Candidate, Item, ListError, Location, ResolveError, provider_for};
+use crate::{Candidate, Item, ListError, Location, ResolveError, VirtualFolder, provider_for};
 
 /// 읽기가 이만큼 넘게 걸리면 탭이 「읽는 중」을 드러낸다([`Tab::is_reading`]).
 pub const READING_DELAY: Duration = Duration::from_millis(100);
@@ -162,10 +162,14 @@ impl ReadRequest {
     ) -> ReadResult {
         // 감시를 먼저 건다: 읽는 사이의 변경도 놓치지 않는다.
         let attempt = |location: &Location| {
-            // 검색 결과 위치는 탐색 시점의 것이라 감시하지 않는다. 가상 폴더는 아직 감시하지 않는다.
+            // 검색 결과 위치는 탐색 시점의 것이라 감시하지 않는다. 가상 폴더는 내 PC만 감시한다(장치 붙임·뗌).
+            let watched = match location.virtual_folder() {
+                Some(folder) => folder == VirtualFolder::ThisPc,
+                None => !location.is_search_results(),
+            };
             let watch = sink
                 .as_ref()
-                .filter(|_| !location.is_search_results() && location.virtual_folder().is_none())
+                .filter(|_| watched)
                 .map(|sink| watch::start(location, self.id, Arc::clone(sink)));
             let list = if location.virtual_folder().is_some() {
                 crate::shell_provider::list_streaming(
@@ -179,6 +183,20 @@ impl ReadRequest {
                     .list(location)
                     .map(|items| DetailsList::new(items, self.sort))
             };
+            let list = list.map(|mut list| {
+                // 내 PC의 드라이브는 용량을 모르는 채로 먼저 보이고, 탭이 받은 뒤 채운다([`Tab::drive_roots`]).
+                if location.virtual_folder() == Some(VirtualFolder::ThisPc) {
+                    let drives: HashSet<OsString> = crate::shell_provider::drive_roots(
+                        location,
+                        list.iter().map(|item| item.name.clone()),
+                    )
+                    .into_iter()
+                    .map(|(name, _)| name)
+                    .collect();
+                    list.mark_drives(|name| drives.contains(name));
+                }
+                list
+            });
             (list, watch)
         };
         let result = |location: Location, (list, watch), relocation| ReadResult {
@@ -1200,6 +1218,10 @@ impl Tab {
         // 읽는 사이에 정렬을 바꿨으면 지금 정렬로 맞춘다.
         if list.sort() != self.sort {
             list.set_sort(self.sort);
+        }
+        // 같은 내 PC를 다시 읽었으면(장치 붙임·뗌, 새로 고침) 알던 드라이브 용량을 새 값이 올 때까지 둔다.
+        if !moved && self.location.virtual_folder() == Some(VirtualFolder::ThisPc) {
+            list.carry_drives(&self.list);
         }
         self.list = list;
         self.list_gen += 1;
@@ -2580,15 +2602,51 @@ impl Tab {
         }
     }
 
-    /// #351: 보이는 항목 `index`가 내 PC의 드라이브면 그 용량.
-    pub fn drive(&self, _index: usize) -> Option<&crate::shell_provider::DriveSpace> {
-        todo!("#351")
+    /// 보이는 항목 `index`가 내 PC의 드라이브면 그 용량(모르거나 아직 채우지 않은 값은 `None`). 드라이브가 아니면
+    /// (장치·다른 위치) `None`이다.
+    pub fn drive(&self, index: usize) -> Option<&crate::shell_provider::DriveSpace> {
+        self.list.drive(self.list_index(index)?)
+    }
+
+    /// 지금 목록의 내 PC 드라이브 항목(이름과 루트 경로). 앱이 목록을 받은 뒤 그 용량을 UI 스레드 밖에서 얻는다.
+    pub(crate) fn drive_roots(&self) -> Vec<(OsString, PathBuf)> {
+        crate::shell_provider::drive_roots(
+            &self.location,
+            (0..self.list.len())
+                .filter(|&i| self.list.drive(i).is_some())
+                .filter_map(|i| self.list.get(i).map(|item| item.name.clone())),
+        )
+    }
+
+    /// 드라이브 항목 `name`의 용량을 받는다. 지금 내 PC를 보고 있고 그 드라이브가 목록에 있고 값이 바뀌었으면 `true`다.
+    pub(crate) fn set_drive_space(
+        &mut self,
+        name: &OsStr,
+        space: crate::shell_provider::DriveSpace,
+    ) -> bool {
+        if self.location.virtual_folder() != Some(VirtualFolder::ThisPc)
+            || !self.list.set_drive(name, space)
+        {
+            return false;
+        }
+        if matches!(self.sort.column, Column::TotalSize | Column::FreeSpace) {
+            // 그 열로 정렬 중이면 순서가 바뀌었을 수 있다.
+            self.list_gen += 1;
+            self.update_visible();
+            self.reindex();
+        }
+        true
     }
 
     /// 보이는 항목 `index`가 휴지통 항목이면 그 정보(원래 전체 경로·지운 시각). 휴지통 항목이 아니거나 정보 파일을
     /// 읽지 못한 항목은 `None`이다.
     pub fn recycled(&self, index: usize) -> Option<&crate::shell_provider::RecycledEntry> {
         self.list.recycled(self.list_index(index)?)
+    }
+
+    /// #358: 보이는 항목 `index`의 아이콘 캐시 키, 목록 밖이면 `None`.
+    pub fn icon_key(&self, _index: usize) -> Option<crate::icons::IconKey> {
+        todo!("#358")
     }
 
     /// 복원할 휴지통 항목: 선택(정렬된 순서), 없으면 커서 항목. 휴지통 위치가 아니거나 정보를 모르는 항목은 뺀다.
@@ -2607,6 +2665,13 @@ impl Tab {
                     path.to_path_buf(),
                 ))
             })
+            .collect()
+    }
+
+    /// 휴지통 위치의 모든 항목의 휴지통 안 경로(`$R...`, 필터로 가려진 것도 포함). 휴지통 비우기가 쓴다.
+    pub fn all_recycled_paths(&self) -> Vec<PathBuf> {
+        (0..self.list.len())
+            .filter_map(|i| self.list.recycled_path(i).map(Path::to_path_buf))
             .collect()
     }
 

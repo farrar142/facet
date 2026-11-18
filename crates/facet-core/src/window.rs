@@ -391,6 +391,12 @@ enum Message {
         tab: TabId,
         batch: ChangeBatch,
     },
+    /// 내 PC 드라이브 `name`의 용량을 얻었다.
+    DriveSpace {
+        tab: TabId,
+        name: OsString,
+        space: crate::shell_provider::DriveSpace,
+    },
     Opened {
         tab: TabId,
         result: OpenResult,
@@ -488,6 +494,8 @@ pub enum Update {
     Loading(usize),
     /// 묶은 변경. [`ChangeOutcome::Reload`]였으면 앱이 이미 다시 읽기를 시작했다.
     Changes(ChangeOutcome),
+    /// 내 PC 드라이브의 용량이 채워졌다([`Tab::drive`]). 그 열로 정렬 중이면 순서도 바뀌었을 수 있다.
+    DriveSpace,
     /// 기본 프로그램으로 열기의 결과: 열었는가. 열지 못했으면 그 탭의 [`Tab::open_error`]에 까닭이 있다.
     Opened(bool),
     /// 자동 완성 후보([`App::complete_address`]). 그 탭의 마지막 요청 결과면 후보를, 늦게 온 앞선 요청의
@@ -1825,6 +1833,24 @@ impl App {
         }
     }
 
+    /// 탭 `id`가 내 PC를 받았으면 드라이브마다 용량을 UI 스레드 밖(드라이브마다 따로 띄운 스레드)에서 얻기 시작한다.
+    /// 결과는 [`Update::DriveSpace`]로 온다. 하나가 막혀도(끊긴 네트워크 드라이브) 다른 드라이브는 기다리지 않는다.
+    fn query_drive_spaces(&self, id: TabId) {
+        let Some(tab) = self.tab(id) else {
+            return;
+        };
+        for (name, root) in tab.drive_roots() {
+            let outbox = self.outbox.clone();
+            crate::shell_provider::query_space(root, move |space| {
+                outbox.send(Message::DriveSpace {
+                    tab: id,
+                    name,
+                    space,
+                });
+            });
+        }
+    }
+
     /// 요청 하나를 새 일꾼 스레드에서 읽는다. 느린 위치(네트워크 등) 하나가 다른 이동을 막지 않도록
     /// 요청마다 스레드를 따로 둔다. 읽기 전에 위치의 변경 감시를 건다.
     fn spawn_read(&self, tab: TabId, request: ReadRequest) {
@@ -2802,6 +2828,7 @@ impl App {
                     None => ReadOutcome::Stale,
                 };
                 if outcome == ReadOutcome::Committed {
+                    self.query_drive_spaces(id);
                     // 목록이 바뀌었다: 그 탭의 요청을 모두 취소한다. 화면이 다시 요청한다.
                     self.forget_thumbnails(id);
                     self.start_tab_search(id);
@@ -2821,6 +2848,22 @@ impl App {
                 let update = if noted {
                     Update::Loading(count)
                 } else {
+                    Update::Read(ReadOutcome::Stale)
+                };
+                (id, update)
+            }
+            Message::DriveSpace {
+                tab: id,
+                name,
+                space,
+            } => {
+                let changed = self
+                    .tab_mut(id)
+                    .is_some_and(|tab| tab.set_drive_space(&name, space));
+                let update = if changed {
+                    Update::DriveSpace
+                } else {
+                    // 탭이 이미 다른 곳으로 갔거나 같은 값이다.
                     Update::Read(ReadOutcome::Stale)
                 };
                 (id, update)
@@ -3169,10 +3212,13 @@ impl App {
         let capabilities = self.active_tab().capabilities();
         let mut menu = menu::build(&self.menu_context(kind));
         for entry in &mut menu.entries {
-            if let menu::MenuEntry::Command(command) = entry
-                && !command.id.is_allowed_by(&capabilities)
-            {
-                command.enabled = false;
+            if let menu::MenuEntry::Command(command) = entry {
+                if !command.id.is_allowed_by(&capabilities) {
+                    command.enabled = false;
+                } else if command.id == CommandId::Delete && capabilities.restore {
+                    // 휴지통 안: 항목이 있으면 영구 삭제를 고를 수 있다.
+                    command.enabled = self.can_execute(CommandId::Delete);
+                }
             }
         }
         menu
@@ -3249,7 +3295,7 @@ impl App {
                     Err(_) => Execution::Disabled,
                 };
             }
-            CommandId::EmptyRecycleBin => todo!("#354"),
+            CommandId::EmptyRecycleBin => return Execution::ConfirmEmptyRecycleBin,
             CommandId::TogglePreview => {
                 let window = self.active_window_mut();
                 let visible = !window.preview.visible;
@@ -3280,7 +3326,9 @@ impl App {
             | CommandId::SortByType
             | CommandId::SortBySize
             | CommandId::SortByLocation
-            | CommandId::SortByMatches => {
+            | CommandId::SortByMatches
+            | CommandId::SortByTotalSize
+            | CommandId::SortByFreeSpace => {
                 if let Some(column) = command.sort_column() {
                     let sort = command::sort_toggled(self.active_tab().sort(), column);
                     self.set_sort(sort);
@@ -3896,6 +3944,14 @@ impl App {
     /// 활성 탭의 선택(목록 순서), 없으면 커서 항목 하나의 경로. 위치가 실제 폴더가 아니거나 둘 다 없으면 `None`.
     fn selected_sources(&self) -> Option<Vec<PathBuf>> {
         let tab = self.active_window().active_panel().active_tab();
+        if tab.location().virtual_folder() == Some(crate::location::VirtualFolder::RecycleBin) {
+            let paths: Vec<PathBuf> = tab
+                .restore_items()
+                .iter()
+                .map(|item| item.recycled().to_path_buf())
+                .collect();
+            return (!paths.is_empty()).then_some(paths);
+        }
         // 실제 폴더이거나 검색 결과 위치여야 한다. 결과 항목은 항목마다 제 폴더 경로다.
         if tab.location().file_system_path().is_none() && !tab.location().is_search_results() {
             return None;
@@ -4312,7 +4368,23 @@ impl App {
 
     /// #354: 휴지통을 비우는 작업을 넣는다(화면이 확인한 뒤). 넣은 작업이 없으면 `None`.
     pub fn empty_recycle_bin(&mut self) -> Option<JobId> {
-        todo!("#354")
+        let tab = self.active_tab();
+        if !tab.capabilities().empty {
+            return None;
+        }
+        let sources = tab.all_recycled_paths();
+        self.delete_recycled(sources).ok()
+    }
+
+    /// 휴지통 항목(`$R...`)들을 정보 파일(`$I...`)과 함께 영구 삭제한다.
+    fn delete_recycled(&mut self, mut sources: Vec<PathBuf>) -> Result<JobId, DeleteRejection> {
+        let infos: Vec<PathBuf> = sources
+            .iter()
+            .filter_map(|path| info_file_of(path))
+            .filter(|info| info.exists())
+            .collect();
+        sources.extend(infos);
+        self.delete_permanently(sources)
     }
 
     /// 삭제(`command`가 [`CommandId::Delete`])·영구 삭제([`CommandId::DeletePermanently`])할 내용: 원본은 활성 탭의
@@ -4326,7 +4398,8 @@ impl App {
             return None;
         }
         let sources = self.selected_sources()?;
-        let warning = if command == CommandId::DeletePermanently {
+        let in_bin = self.active_tab().capabilities().restore;
+        let warning = if command == CommandId::DeletePermanently || in_bin {
             Some(DeleteWarning::Permanent)
         } else if crate::job::deletes_permanently(&sources) {
             Some(DeleteWarning::NoRecycleBin)
@@ -4339,7 +4412,11 @@ impl App {
     /// 삭제할 내용([`App::delete_plan`])대로 작업을 넣는다: 확인받을 까닭이 있으면 영구 삭제 작업
     /// ([`App::delete_permanently`]), 없으면 휴지통 삭제 작업([`App::recycle`]). 화면은 확인을 마친 뒤 부른다.
     pub fn start_delete(&mut self, plan: &DeletePlan) -> Result<JobId, DeleteRejection> {
-        if plan.is_permanent() {
+        if self.active_tab().location().virtual_folder()
+            == Some(crate::location::VirtualFolder::RecycleBin)
+        {
+            self.delete_recycled(plan.sources.clone())
+        } else if plan.is_permanent() {
             self.delete_permanently(plan.sources.clone())
         } else {
             self.recycle(plan.sources.clone())
@@ -4570,6 +4647,13 @@ impl CommandState for App {
 }
 
 /// 삭제 작업의 작업 영역 대상 자리: 첫 원본이 든 폴더.
+/// 휴지통 안 경로 `$R...`의 정보 파일 경로(`$I...`). 이름이 `$R`로 시작하지 않으면 `None`.
+fn info_file_of(recycled: &Path) -> Option<PathBuf> {
+    let name = recycled.file_name()?.to_str()?;
+    let rest = name.strip_prefix("$R")?;
+    Some(recycled.with_file_name(format!("$I{rest}")))
+}
+
 fn first_parent(sources: &[PathBuf]) -> PathBuf {
     sources
         .first()

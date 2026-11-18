@@ -164,7 +164,6 @@ fn two_recycled(dir: &TempDir, bin: &mut Bin, test: &str) -> Option<(App, PathBu
 }
 
 #[test]
-#[ignore = "#354"]
 fn delete_in_the_recycle_bin_asks_for_permanent_delete_first() {
     let dir = TempDir::new().unwrap();
     let mut bin = Bin::default();
@@ -207,7 +206,6 @@ fn delete_in_the_recycle_bin_asks_for_permanent_delete_first() {
 }
 
 #[test]
-#[ignore = "#354"]
 fn confirming_deletes_only_that_item_for_good() {
     let dir = TempDir::new().unwrap();
     let mut bin = Bin::default();
@@ -246,7 +244,6 @@ fn confirming_deletes_only_that_item_for_good() {
 }
 
 #[test]
-#[ignore = "#354"]
 fn empty_recycle_bin_asks_first_and_deletes_nothing() {
     let dir = TempDir::new().unwrap();
     let mut bin = Bin::default();
@@ -275,7 +272,6 @@ fn empty_recycle_bin_asks_first_and_deletes_nothing() {
 }
 
 #[test]
-#[ignore = "#354"]
 fn empty_recycle_bin_is_not_allowed_outside_the_recycle_bin() {
     let dir = TempDir::new().unwrap();
     let mut app = app_at(dir.path());

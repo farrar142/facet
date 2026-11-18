@@ -824,6 +824,8 @@ fn connect(ui: &AppWindow, w: WindowId) {
             5 => Column::Matches,
             6 => Column::OriginalLocation,
             7 => Column::DateDeleted,
+            8 => Column::TotalSize,
+            9 => Column::FreeSpace,
             _ => Column::Name,
         };
         with_view(w, |view| match CommandId::sort_by(column) {
@@ -1567,9 +1569,39 @@ impl View {
         *self.delete.borrow_mut() = Some(plan);
     }
 
+    /// 휴지통 비우기 확인 줄을 연다: 모든 드라이브의 휴지통을 비우며 실행취소할 수 없다는 경고. 아직 아무것도 지우지
+    /// 않는다.
+    fn open_empty_recycle_bin(&self) {
+        self.close_rename();
+        self.close_address_edit();
+        self.close_transfer();
+        let ui = &self.ui;
+        ui.set_confirm_delete(DeleteConfirm::EmptyBin);
+        ui.set_confirm_name(SharedString::new());
+        ui.set_confirm_items(0);
+        ui.set_confirm_problem(TransferProblem::None);
+        ui.set_confirm_problem_path(SharedString::new());
+        ui.set_confirm_open(true);
+    }
+
     /// 확인 줄의 Enter: 작업을 대기열에 넣고 확인 줄을 닫는다. 시작 전에 막히면 작업을 만들지 않고 까닭을 보인다(다음
     /// Enter·Esc로 닫는다).
     fn accept_transfer(&self) {
+        if self.ui.get_confirm_delete() == DeleteConfirm::EmptyBin {
+            if self.ui.get_confirm_problem() != TransferProblem::None {
+                self.close_transfer();
+                return;
+            }
+            let started = self.app.borrow_mut().empty_recycle_bin();
+            if started.is_some() {
+                self.close_transfer();
+                refresh_jobs();
+            } else {
+                self.ui
+                    .set_confirm_problem(TransferProblem::NothingToDelete);
+            }
+            return;
+        }
         let delete = self.delete.borrow().clone();
         if let Some(plan) = delete {
             if self.ui.get_confirm_problem() != TransferProblem::None {
@@ -2205,14 +2237,16 @@ impl View {
                     // 위치 열은 검색 결과 목록에만 있다(머리글은 아직 그리지 않는다).
                     Column::Location => 4,
                     Column::Matches => 5,
-                    Column::TotalSize | Column::FreeSpace => todo!("#351"),
                     Column::OriginalLocation => 6,
                     Column::DateDeleted => 7,
+                    Column::TotalSize => 8,
+                    Column::FreeSpace => 9,
                 },
                 sort_descending: sort.direction == Direction::Descending,
                 item_count: count(status.item_count),
                 total_count: status.total_count.map_or(-1, count),
                 results: tab.location().is_search_results(),
+                this_pc: tab.location().virtual_folder() == Some(facet_core::VirtualFolder::ThisPc),
                 recycle_bin: tab.location().virtual_folder()
                     == Some(facet_core::VirtualFolder::RecycleBin),
                 content_results: tab.location().search_scope().is_some_and(|scope| {
@@ -2605,7 +2639,7 @@ impl View {
             Execution::ConfirmDelete(warning) => self.open_delete(warning),
             Execution::ItemMissing => self.show_missing_item(),
             Execution::NotAllowedHere => self.ui.set_notice(text::NOT_ALLOWED_HERE.into()),
-            Execution::ConfirmEmptyRecycleBin => todo!("#354"),
+            Execution::ConfirmEmptyRecycleBin => self.open_empty_recycle_bin(),
             Execution::UndoRefused(_) | Execution::Disabled | Execution::WindowClosed => {}
         }
     }
@@ -5451,6 +5485,16 @@ impl Model for TabRows {
             matches: tab
                 .hit(row)
                 .map_or_else(SharedString::new, |hit| text::match_text(hit).into()),
+            total: tab.drive(row).map_or_else(SharedString::new, |space| {
+                text::drive_space_text(space.total).into()
+            }),
+            free: tab.drive(row).map_or_else(SharedString::new, |space| {
+                text::drive_space_text(space.free).into()
+            }),
+            usage: tab
+                .drive(row)
+                .and_then(facet_core::shell_provider::DriveSpace::used_fraction)
+                .unwrap_or(-1.0),
             // 휴지통 항목의 원래 위치(지우기 전에 든 폴더)와 지운 날짜.
             original_location: tab
                 .recycled(row)

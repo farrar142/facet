@@ -76,6 +76,8 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::CopyPath => "경로 복사",
         CommandId::SortByLocation => "위치로 정렬",
         CommandId::SortByMatches => "일치로 정렬",
+        CommandId::SortByTotalSize => "전체 크기로 정렬",
+        CommandId::SortByFreeSpace => "남은 공간으로 정렬",
         CommandId::ShowInFolder => "폴더에서 보기",
         CommandId::StopSearch => "검색 중지",
         CommandId::InstantUnderFolder => "현재 폴더 아래만",
@@ -89,7 +91,7 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::OpenThisPc => "내 PC 열기",
         CommandId::OpenRecycleBin => "휴지통 열기",
         CommandId::Restore => "복원",
-        CommandId::EmptyRecycleBin => todo!("#354"),
+        CommandId::EmptyRecycleBin => "휴지통 비우기",
         CommandId::TogglePreview => "미리보기 영역",
     }
 }
@@ -644,6 +646,12 @@ pub fn match_text(hit: &facet_core::details::Hit) -> String {
     format!("{}회 · {}", hit.matches, hit.first_line)
 }
 
+/// 내 PC 드라이브의 「전체 크기」「남은 공간」 열 글자: 크기(`465.1 GB`), 모르면(끊긴 네트워크 드라이브·빈 카드 리더·
+/// 아직 얻는 중) 「—」.
+pub fn drive_space_text(bytes: Option<u64>) -> String {
+    bytes.map_or_else(|| "—".to_owned(), facet_core::file_list::format_size)
+}
+
 /// 내용 검색을 시작하지 못한 까닭(검색창 곁에 보인다).
 pub fn content_search_error_text(error: &facet_core::window::ContentSearchError) -> String {
     use facet_core::window::ContentSearchError;
@@ -843,6 +851,12 @@ pub fn preview_problem_text(problem: facet_core::preview::PreviewProblem) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 드라이브_용량_글자는_크기이고_모르면_줄표다() {
+        assert_eq!(drive_space_text(None), "—");
+        assert_eq!(drive_space_text(Some(500 * 1024 * 1024 * 1024)), "500.0 GB");
+    }
 
     #[test]
     fn 즉시_검색_상태_글자() {

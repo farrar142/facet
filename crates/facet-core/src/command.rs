@@ -53,6 +53,10 @@ pub enum CommandId {
     SortByLocation,
     /// 일치 수로 정렬(내용 검색 결과 위치에서만 켜짐).
     SortByMatches,
+    /// 전체 크기로 정렬(내 PC에서만 켜짐). 열 머리글이 부르고 명령 팔레트에는 없다([`CommandId::ALL`]에 들지 않음).
+    SortByTotalSize,
+    /// 남은 공간으로 정렬(내 PC에서만 켜짐). 열 머리글이 부르고 명령 팔레트에는 없다.
+    SortByFreeSpace,
     /// 새 탭: 지금 위치의 탭을 활성 탭 바로 뒤에 열고 활성으로 한다.
     NewTab,
     /// 탭 닫기: 활성 탭을 닫는다. 패널의 마지막 탭이면 패널이, 창의 마지막 패널이면 창이 닫힌다.
@@ -299,6 +303,8 @@ impl CommandId {
             CommandId::CopyPath => "copy-path",
             CommandId::SortByLocation => "sort-by-location",
             CommandId::SortByMatches => "sort-by-matches",
+            CommandId::SortByTotalSize => "sort-by-total-size",
+            CommandId::SortByFreeSpace => "sort-by-free-space",
             CommandId::ShowInFolder => "show-in-folder",
             CommandId::StopSearch => "stop-search",
             CommandId::InstantUnderFolder => "instant-under-folder",
@@ -332,7 +338,8 @@ impl CommandId {
             Column::Size => CommandId::SortBySize,
             Column::Location => CommandId::SortByLocation,
             Column::Matches => CommandId::SortByMatches,
-            Column::TotalSize | Column::FreeSpace => todo!("#351"),
+            Column::TotalSize => CommandId::SortByTotalSize,
+            Column::FreeSpace => CommandId::SortByFreeSpace,
             Column::OriginalLocation | Column::DateDeleted => return None,
         })
     }
@@ -346,6 +353,8 @@ impl CommandId {
             CommandId::SortBySize => Some(Column::Size),
             CommandId::SortByLocation => Some(Column::Location),
             CommandId::SortByMatches => Some(Column::Matches),
+            CommandId::SortByTotalSize => Some(Column::TotalSize),
+            CommandId::SortByFreeSpace => Some(Column::FreeSpace),
             _ => None,
         }
     }
@@ -392,6 +401,8 @@ impl CommandId {
             | CommandId::SortBySize
             | CommandId::SortByLocation
             | CommandId::SortByMatches
+            | CommandId::SortByTotalSize
+            | CommandId::SortByFreeSpace
             | CommandId::ContentSearch
             | CommandId::ShowInFolder
             | CommandId::StopSearch
@@ -466,6 +477,7 @@ impl CommandId {
             CommandId::Delete => capabilities.recycle || capabilities.delete_permanently,
             CommandId::Properties => capabilities.properties,
             CommandId::Restore => capabilities.restore,
+            CommandId::EmptyRecycleBin => capabilities.empty,
             _ => true,
         }
     }
@@ -500,13 +512,17 @@ impl CommandId {
             | CommandId::MoveToOtherPanel
             | CommandId::CopyTo
             | CommandId::MoveTo
-            | CommandId::Delete
-            | CommandId::DeletePermanently
             | CommandId::Copy
             | CommandId::Cut => has_sources(tab),
             // 붙여넣을 곳(현재 폴더)이 실제 폴더여야 한다. 클립보드에 파일이 있는지는 앱 상태다. 검색 결과 위치에서는
             // 붙여넣을 폴더가 없어 꺼진다.
             CommandId::Paste => tab.location().file_system_path().is_some(),
+            // 휴지통 안에서도 고른 항목(없으면 커서 항목)을 영구 삭제할 수 있다.
+            CommandId::Delete | CommandId::DeletePermanently => {
+                has_sources(tab)
+                    || (in_recycle_bin(tab)
+                        && (tab.selected_items().next().is_some() || tab.cursor_item().is_some()))
+            }
             CommandId::CopyPath => has_real_items(tab),
             CommandId::Rename => has_real_items(tab) && tab.cursor_item().is_some(),
             CommandId::BatchRename => has_real_items(tab) && tab.selected_count() >= 2,
@@ -516,6 +532,9 @@ impl CommandId {
             CommandId::SortByMatches => tab.location().search_scope().is_some_and(|scope| {
                 matches!(scope.kind, crate::location::SearchKind::Content { .. })
             }),
+            CommandId::SortByTotalSize | CommandId::SortByFreeSpace => {
+                tab.location().virtual_folder() == Some(crate::VirtualFolder::ThisPc)
+            }
             CommandId::ShowInFolder => {
                 tab.location().is_search_results() && tab.cursor_item().is_some()
             }
@@ -529,7 +548,8 @@ impl CommandId {
             CommandId::Restore => {
                 tab.selected_items().next().is_some() || tab.cursor_item().is_some()
             }
-            CommandId::EmptyRecycleBin => todo!("#354"),
+            // 휴지통 위치인지는 되는 일([`CommandId::is_allowed_by`])이 본다.
+            CommandId::EmptyRecycleBin => true,
             CommandId::TogglePreview => true,
             CommandId::Refresh
             | CommandId::EditAddress
@@ -638,6 +658,11 @@ impl CommandState for Window {
 /// 검색 결과 위치).
 fn has_sources(tab: &Tab) -> bool {
     has_real_items(tab) && (tab.selected_items().next().is_some() || tab.cursor_item().is_some())
+}
+
+/// 탭 위치가 휴지통인가(항목을 영구 삭제할 수 있다).
+fn in_recycle_bin(tab: &Tab) -> bool {
+    tab.location().virtual_folder() == Some(crate::location::VirtualFolder::RecycleBin)
 }
 
 /// 탭의 항목이 실제 파일 시스템 항목인가: 위치가 실제 폴더이거나 검색 결과 위치다(결과 항목은 제 폴더 경로가 있다).
