@@ -171,6 +171,19 @@ if [ -n "$merge_line" ] && [ -n "$label_line" ] && [ "$merge_line" -lt "$label_l
   bad "merge ($merge_line) before ready-for-agent ($label_line)"
 fi
 
+setup pass-local
+# A ticket that changes workflow files is not approved but left to a local worker (#389).
+issue 62 "model:sonnet" 0 "## Parent
+
+#50
+
+\`.github/workflows/ci.yml\` 에 단계를 더한다"
+bash "$odin" pass 50 70 > "$tmp/log" 2>&1
+eq "exit" 0 "$?"
+eq "the others approved" "61 63" "$(approved)"
+eq "#62 is local" "local,model:sonnet,ready-for-human" "$(labels_of 62)"
+eq "first dispatch skips it" 63 "$(dispatched)"
+
 setup pass-search-lags
 # The label search does not see the labels just added (#267): the approved tickets are named.
 touch "$FAKE_GH/list-empty"
