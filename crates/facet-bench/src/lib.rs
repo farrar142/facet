@@ -1714,3 +1714,91 @@ fn wait_process_gone(pid: u32) {
 pub fn check_shell_helper_limit(m: &Measurement, limit: Duration) -> Result<(), String> {
     check_median("셸 확장 도우미 요청 왕복", m, limit)
 }
+
+/// 셸 공급자 목록 전달 벤치마크의 가짜 셸 폴더 항목 수.
+pub const SHELL_LIST_COUNT: usize = 100_000;
+
+/// 가짜 셸 공급자 10만 항목의 목록 전달(공급자 추상화를 지나 탭에 들어가기까지) 로컬 기준(릴리스 빌드): 150ms.
+///
+/// 잰 구간은 셸 열거가 묶음([`facet_core::shell_provider::LIST_BATCH`]개)으로 낸 항목을 목록 항목으로 바꾸고 이름 →
+/// 위치 표를 만들며 묶음마다 읽은 수를 알리고, 이름순으로 정렬해([`DetailsList::new`]) 탭이 받아 확정하기까지다(셸
+/// 호출 자체는 들지 않는다). 파일 시스템 공급자의 「10만 항목 읽기+정렬」 기준([`LIST_SORT_TARGET`], 폴더 열기 첫
+/// 화면 150ms의 코어 몫)과 같게 둔다: 셸 공급자가 더하는 전달 비용이 실제 폴더 목록보다 한 단계 무거워지면 안 된다.
+/// 2026-11-18 GitHub 호스트 Windows 러너에서 잰 릴리스 빌드 중앙값은 약 118ms(최악 124ms)다.
+pub const SHELL_LIST_TARGET: Duration = Duration::from_millis(150);
+
+/// CI가 실패시키는 상한: 로컬 기준 [`SHELL_LIST_TARGET`]의 10배([`LIST_LIMIT`]과 같은 까닭: 공유 러너의 편차를
+/// 견디면서 항목마다 할당·복사가 한 단계 늘거나 정렬이 제곱으로 느려지는 실수만 잡는다).
+pub const SHELL_LIST_LIMIT: Duration = Duration::from_millis(1500);
+
+/// 중앙값이 상한을 넘으면 중앙값과 상한을 담은 `Err`.
+pub fn check_shell_list_limit(m: &Measurement, limit: Duration) -> Result<(), String> {
+    if m.median() > limit {
+        return Err(format!(
+            "셸 공급자 목록 전달 상한 초과: 중앙값 {:.2}ms > 상한 {}ms (최악 {:.2}ms)",
+            m.median().as_secs_f64() * 1000.0,
+            limit.as_millis(),
+            m.max().as_secs_f64() * 1000.0
+        ));
+    }
+    Ok(())
+}
+
+/// 가짜 셸 폴더(항목 `count`개, 다섯에 하나가 폴더)를 걸고, 새 탭이 그 위치로 가는 읽기 요청을 흘려 읽어
+/// ([`facet_core::tab::ReadRequest::run_streaming`]) 확정하기까지를 한 번 데운 뒤 `runs`회 잰다. 탭에 든 항목 수가
+/// `count`와 다르거나 읽은 수 알림이 오지 않으면 실패한다.
+pub fn measure_shell_list(count: usize, runs: usize) -> Result<Measurement, String> {
+    use facet_core::shell_provider::{ShellEntry, fake};
+    use facet_core::tab::{Navigation, ReadOutcome, Tab};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let entries = (0..count)
+        .map(|i| {
+            let [a, b, c, d] = (i as u32).to_le_bytes();
+            ShellEntry {
+                name: format!("가짜 항목 {i:06} 사진.jpg"),
+                path: None,
+                parsing_name: format!(r"\?\fake#{i}"),
+                is_folder: i % 5 == 0,
+                id: vec![8, 0, a, b, c, d, 0, 0, 0, 0],
+            }
+        })
+        .collect();
+    let folder = fake::serve(entries);
+    let run = || -> Result<Duration, String> {
+        let home = Location::file_system(std::env::temp_dir());
+        let mut tab = Tab::new(home, Sort::default(), true);
+        let reported = Arc::new(AtomicUsize::new(0));
+        let start = Instant::now();
+        let request = tab
+            .navigate(Navigation::Go(folder.location().clone()))
+            .ok_or("가짜 셸 폴더로 갈 수 없습니다")?;
+        let seen = Arc::clone(&reported);
+        let result = request.run_streaming(
+            |_| {},
+            move |n| {
+                seen.store(n, Ordering::Relaxed);
+            },
+        );
+        let outcome = tab.finish(result);
+        let elapsed = start.elapsed();
+        if outcome != ReadOutcome::Committed {
+            return Err(format!("가짜 셸 폴더를 읽지 못했습니다: {:?}", tab.error()));
+        }
+        if tab.len() != count || reported.load(Ordering::Relaxed) != count {
+            return Err(format!(
+                "항목 수가 다릅니다: 탭 {}, 알린 수 {}, 기대 {count}",
+                tab.len(),
+                reported.load(Ordering::Relaxed)
+            ));
+        }
+        Ok(elapsed)
+    };
+    run()?;
+    let times = (0..runs).map(|_| run()).collect::<Result<Vec<_>, _>>()?;
+    Ok(Measurement {
+        item_count: count,
+        times,
+    })
+}
