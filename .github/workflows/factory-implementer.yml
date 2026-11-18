@@ -326,6 +326,7 @@ jobs:
         run: |
           if [ "$MODE" = conflict ]; then
             git fetch origin main
+            echo "main=$(git rev-parse origin/main)" >> "$GITHUB_OUTPUT"
             if git merge --no-edit origin/main; then
               echo "::notice::main merges into the PR's branch cleanly now"
               echo "conflict=false" >> "$GITHUB_OUTPUT"
@@ -356,6 +357,7 @@ jobs:
             fi
           fi
           git fetch origin main
+          echo "main=$(git rev-parse origin/main)" >> "$GITHUB_OUTPUT"
           if git rebase origin/main; then
             echo "conflict=false" >> "$GITHUB_OUTPUT"
           else
@@ -398,6 +400,16 @@ jobs:
           if [ "$(git rev-list --count origin/main..HEAD)" -eq 0 ]; then
             echo "::error::the agent made no commits"; exit 1
           fi
+
+      # The branch must carry the main the rebase step fetched, with no merge or rebase left
+      # half-done (#434): a conflict-mode run whose agent ended without merging passed "Require
+      # commits" on the ticket's old commits, pushed nothing new, and went to Verify, which sent it
+      # back for the same conflict until the limit ran out (#342, runs 44389000388 and 44393130003).
+      # Counted as a code failure with the reason in the comment, without the checks, push or Verify.
+      - name: Require main merged
+        id: merged
+        if: steps.guard.outputs.go == 'true'
+        run: bash .github/factory/merge-check.sh "${{ steps.rebase.outputs.main }}"
 
       # Commits that touch `.github/workflows/` cannot be pushed (GITHUB_TOKEN has no `workflows`
       # permission): hand the ticket to a person now, before the checks. No failure is counted and
@@ -546,8 +558,14 @@ jobs:
       # the last `<!-- factory-reset -->` comment count; record-failure.sh does it all (#410).
       - name: Record failure
         if: failure() && steps.guard.outputs.go == 'true'
+        env:
+          FAILURE_REASON: ${{ steps.merged.outputs.reason }}
         run: |
-          if [ "${{ steps.checks.outcome }}" = failure ]; then what=code; else what=infra; fi
+          if [ "${{ steps.checks.outcome }}" = failure ] || [ "${{ steps.merged.outcome }}" = failure ]; then
+            what=code
+          else
+            what=infra
+          fi
           # No commits (#414): a comment the agent left on the ticket since this run started is its
           # reason for stopping; record-failure.sh then hands the ticket to a person without counting.
           started=
