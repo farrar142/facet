@@ -391,6 +391,12 @@ enum Message {
         tab: TabId,
         batch: ChangeBatch,
     },
+    /// 내 PC 드라이브 `name`의 용량을 얻었다.
+    DriveSpace {
+        tab: TabId,
+        name: OsString,
+        space: crate::shell_provider::DriveSpace,
+    },
     Opened {
         tab: TabId,
         result: OpenResult,
@@ -481,6 +487,8 @@ pub enum Update {
     Loading(usize),
     /// 묶은 변경. [`ChangeOutcome::Reload`]였으면 앱이 이미 다시 읽기를 시작했다.
     Changes(ChangeOutcome),
+    /// 내 PC 드라이브의 용량이 채워졌다([`Tab::drive`]). 그 열로 정렬 중이면 순서도 바뀌었을 수 있다.
+    DriveSpace,
     /// 기본 프로그램으로 열기의 결과: 열었는가. 열지 못했으면 그 탭의 [`Tab::open_error`]에 까닭이 있다.
     Opened(bool),
     /// 자동 완성 후보([`App::complete_address`]). 그 탭의 마지막 요청 결과면 후보를, 늦게 온 앞선 요청의
@@ -1814,6 +1822,24 @@ impl App {
         }
     }
 
+    /// 탭 `id`가 내 PC를 받았으면 드라이브마다 용량을 UI 스레드 밖(드라이브마다 따로 띄운 스레드)에서 얻기 시작한다.
+    /// 결과는 [`Update::DriveSpace`]로 온다. 하나가 막혀도(끊긴 네트워크 드라이브) 다른 드라이브는 기다리지 않는다.
+    fn query_drive_spaces(&self, id: TabId) {
+        let Some(tab) = self.tab(id) else {
+            return;
+        };
+        for (name, root) in tab.drive_roots() {
+            let outbox = self.outbox.clone();
+            crate::shell_provider::query_space(root, move |space| {
+                outbox.send(Message::DriveSpace {
+                    tab: id,
+                    name,
+                    space,
+                });
+            });
+        }
+    }
+
     /// 요청 하나를 새 일꾼 스레드에서 읽는다. 느린 위치(네트워크 등) 하나가 다른 이동을 막지 않도록
     /// 요청마다 스레드를 따로 둔다. 읽기 전에 위치의 변경 감시를 건다.
     fn spawn_read(&self, tab: TabId, request: ReadRequest) {
@@ -2717,6 +2743,7 @@ impl App {
                     None => ReadOutcome::Stale,
                 };
                 if outcome == ReadOutcome::Committed {
+                    self.query_drive_spaces(id);
                     // 목록이 바뀌었다: 그 탭의 요청을 모두 취소한다. 화면이 다시 요청한다.
                     self.forget_thumbnails(id);
                     self.start_tab_search(id);
@@ -2736,6 +2763,22 @@ impl App {
                 let update = if noted {
                     Update::Loading(count)
                 } else {
+                    Update::Read(ReadOutcome::Stale)
+                };
+                (id, update)
+            }
+            Message::DriveSpace {
+                tab: id,
+                name,
+                space,
+            } => {
+                let changed = self
+                    .tab_mut(id)
+                    .is_some_and(|tab| tab.set_drive_space(&name, space));
+                let update = if changed {
+                    Update::DriveSpace
+                } else {
+                    // 탭이 이미 다른 곳으로 갔거나 같은 값이다.
                     Update::Read(ReadOutcome::Stale)
                 };
                 (id, update)
@@ -3152,7 +3195,9 @@ impl App {
             | CommandId::SortByType
             | CommandId::SortBySize
             | CommandId::SortByLocation
-            | CommandId::SortByMatches => {
+            | CommandId::SortByMatches
+            | CommandId::SortByTotalSize
+            | CommandId::SortByFreeSpace => {
                 if let Some(column) = command.sort_column() {
                     let sort = command::sort_toggled(self.active_tab().sort(), column);
                     self.set_sort(sort);

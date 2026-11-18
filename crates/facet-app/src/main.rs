@@ -822,6 +822,8 @@ fn connect(ui: &AppWindow, w: WindowId) {
             3 => Column::Size,
             4 => Column::Location,
             5 => Column::Matches,
+            6 => Column::TotalSize,
+            7 => Column::FreeSpace,
             _ => Column::Name,
         };
         with_view(w, |view| view.execute(CommandId::sort_by(column)));
@@ -2133,13 +2135,15 @@ impl View {
                     // 위치 열은 검색 결과 목록에만 있다(머리글은 아직 그리지 않는다).
                     Column::Location => 4,
                     Column::Matches => 5,
-                    Column::TotalSize | Column::FreeSpace => todo!("#351"),
+                    Column::TotalSize => 6,
+                    Column::FreeSpace => 7,
                     Column::OriginalLocation | Column::DateDeleted => todo!("#352"),
                 },
                 sort_descending: sort.direction == Direction::Descending,
                 item_count: count(status.item_count),
                 total_count: status.total_count.map_or(-1, count),
                 results: tab.location().is_search_results(),
+                this_pc: tab.location().virtual_folder() == Some(facet_core::VirtualFolder::ThisPc),
                 content_results: tab.location().search_scope().is_some_and(|scope| {
                     matches!(scope.kind, facet_core::SearchKind::Content { .. })
                 }),
@@ -5331,6 +5335,16 @@ impl Model for TabRows {
             matches: tab
                 .hit(row)
                 .map_or_else(SharedString::new, |hit| text::match_text(hit).into()),
+            total: tab.drive(row).map_or_else(SharedString::new, |space| {
+                text::drive_space_text(space.total).into()
+            }),
+            free: tab.drive(row).map_or_else(SharedString::new, |space| {
+                text::drive_space_text(space.free).into()
+            }),
+            usage: tab
+                .drive(row)
+                .and_then(facet_core::shell_provider::DriveSpace::used_fraction)
+                .unwrap_or(-1.0),
             selected: tab.is_selected(row),
             cursor: tab.cursor() == Some(row),
             cut: !marks.is_empty()

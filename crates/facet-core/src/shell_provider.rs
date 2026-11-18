@@ -14,11 +14,17 @@
 //!   (실제 경로가 없고 `\\?\` 장치 경로를 품은 폴더: 연결된 휴대폰)만 둔다. 그 밖의 셸 항목(사용자 폴더 바로 가기,
 //!   제3자 네임스페이스 확장)은 spec #27의 범위 밖이라 뺀다.
 //! - 되는 일: 내 PC는 열기만 된다(드라이브 안의 작업은 파일 시스템 공급자로 넘어간 뒤의 일이다).
+//! - 드라이브 용량([`DriveSpace`]): 내 PC의 드라이브 항목은 목록을 읽을 때 드라이브로 적혀 용량을 모르는 채로 먼저
+//!   보이고, 탭이 목록을 받은 뒤 드라이브마다 따로 띄운 스레드가 파일 시스템 API([`facet_win::devices::disk_space`])로
+//!   얻어 채운다([`query_space`]). 끊긴 네트워크 드라이브·빈 카드 리더는 다른 드라이브를 기다리게 하지 않고 모름으로 남는다.
+//! - 변경 감시: 내 PC는 볼륨·휴대용 장치가 붙거나 떨어지면([`facet_win::devices::watch_devices`]) 그리고 드라이브 문자
+//!   목록이 바뀌면([`DRIVE_POLL`]마다 확인) 목록을 다시 읽으라고 알린다. 다른 가상 폴더는 아직 감시하지 않는다.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime};
 
@@ -51,12 +57,41 @@ pub const LIST_BATCH: usize = 256;
 /// 호출 시간 제한(10초)과 같다. 「응답 없음」·「다시 시도」 화면과 시험용 시간 바꾸기는 #355가 한다.
 const LIST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// #351: 내 PC의 드라이브 용량(바이트, 모르면 `None`).
+/// 내 PC의 드라이브 용량(바이트). 모르거나 아직 채우지 않았으면 `None`이다(화면은 「—」).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DriveSpace {
+    /// 전체 크기.
     pub total: Option<u64>,
+    /// 이 사용자가 쓸 수 있는 남은 공간(탐색기와 같은 값).
     pub free: Option<u64>,
 }
+
+impl DriveSpace {
+    /// 아직 모르는 용량.
+    pub const UNKNOWN: DriveSpace = DriveSpace {
+        total: None,
+        free: None,
+    };
+
+    /// 쓴 몫(0..=1, 남은 공간이 적을수록 큼): 이름 열의 사용량 막대. 둘 중 하나라도 모르거나 전체 크기가 0이면 `None`.
+    pub fn used_fraction(&self) -> Option<f32> {
+        let (total, free) = (self.total?, self.free?);
+        if total == 0 {
+            return None;
+        }
+        let used = total.saturating_sub(free);
+        Some((used as f64 / total as f64) as f32)
+    }
+}
+
+/// 내 PC 감시가 드라이브 문자 목록을 다시 보는 간격. 장치 알림은 볼륨이 붙은 때 오지만 드라이브 문자는 조금 뒤에
+/// 붙고, 네트워크 드라이브 연결은 장치 알림이 없다. 문자 목록 읽기(`GetLogicalDrives`)는 값 하나라 1초마다 봐도
+/// 공짜에 가깝고, 꽂은 USB가 1초 안에 보이면 「새로 고침 없이」로 충분하다.
+pub const DRIVE_POLL: Duration = Duration::from_secs(1);
+
+/// 장치 알림을 받은 뒤 다시 읽기 전에 기다리는 시간. 장치 하나를 꽂으면 인터페이스 알림이 여럿 몰려 오고 셸이 새
+/// 드라이브를 알기까지 조금 걸린다: 몰린 알림을 한 번의 다시 읽기로 묶는다.
+const DEVICE_SETTLE: Duration = Duration::from_millis(300);
 
 /// #352: 휴지통 항목의 원래 전체 경로와 지운 시각.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,14 +170,21 @@ impl Provider for ShellProvider {
         FileSystemProvider.complete(text)
     }
 
-    /// 가상 폴더는 아직 감시하지 않는다(탭은 감시를 걸지 않고 읽는다).
+    /// 내 PC는 장치 붙임·뗌과 드라이브 문자 목록의 변화를 [`WatchEvent::Overflow`](다시 읽기)로 알린다. 다른 가상
+    /// 폴더는 아직 감시하지 않는다.
     fn watch(
         &self,
         location: &Location,
-        _on_event: Box<dyn FnMut(WatchEvent) + Send>,
+        on_event: Box<dyn FnMut(WatchEvent) + Send>,
     ) -> Result<Watch, WatchError> {
-        Err(WatchError::Unsupported {
+        if location.virtual_folder() != Some(VirtualFolder::ThisPc) {
+            return Err(WatchError::Unsupported {
+                location: location.clone(),
+            });
+        }
+        watch_this_pc(on_event).map_err(|source| WatchError::Io {
             location: location.clone(),
+            source,
         })
     }
 
@@ -156,6 +198,106 @@ impl Provider for ShellProvider {
             open: true,
             ..Capabilities::default()
         }
+    }
+}
+
+/// 내 PC 감시 스레드가 받는 것.
+enum Signal {
+    /// 장치가 붙거나 떨어졌다.
+    Device,
+}
+
+/// 내 PC 감시: 장치 알림을 받고 드라이브 문자 목록을 [`DRIVE_POLL`]마다 보는 스레드. 감시(돌려준 값)를 버리면 알림이
+/// 풀리고 통로가 끊겨 스레드가 끝난다.
+fn watch_this_pc(mut on_event: Box<dyn FnMut(WatchEvent) + Send>) -> std::io::Result<Watch> {
+    let (sender, receiver) = mpsc::channel::<Signal>();
+    let device_sender = Mutex::new(sender.clone());
+    // 장치 알림을 걸지 못해도(Windows가 아님 등) 드라이브 문자 확인은 한다.
+    let devices = facet_win::devices::watch_devices(move || {
+        let sender = device_sender
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ = sender.send(Signal::Device);
+    })
+    .ok();
+    std::thread::Builder::new()
+        .name("facet-this-pc-watch".into())
+        .spawn(move || {
+            let mut letters = facet_win::drive_letters();
+            loop {
+                match receiver.recv_timeout(DRIVE_POLL) {
+                    Ok(Signal::Device) => {
+                        std::thread::sleep(DEVICE_SETTLE);
+                        while receiver.try_recv().is_ok() {}
+                        letters = facet_win::drive_letters();
+                        on_event(WatchEvent::Overflow);
+                    }
+                    Err(RecvTimeoutError::Timeout) => {
+                        let now = facet_win::drive_letters();
+                        if now != letters {
+                            letters = now;
+                            on_event(WatchEvent::Overflow);
+                        }
+                    }
+                    Err(RecvTimeoutError::Disconnected) => return,
+                }
+            }
+        })?;
+    Ok(Watch::new((devices, sender)))
+}
+
+/// 가상 폴더 `location`의 목록 `list`에서 드라이브 항목(이름과 루트 경로). 내 PC가 아니면 빈 목록이다.
+pub(crate) fn drive_roots(
+    location: &Location,
+    names: impl Iterator<Item = OsString>,
+) -> Vec<(OsString, PathBuf)> {
+    if location.virtual_folder() != Some(VirtualFolder::ThisPc) {
+        return Vec::new();
+    }
+    names
+        .filter_map(|name| {
+            let path = child_path(location, &name).filter(|path| is_drive_root(path))?;
+            Some((name, path))
+        })
+        .collect()
+}
+
+/// 드라이브 `root`의 용량을 따로 띄운 스레드에서 얻어 `done`에 넘긴다. 곧바로 돌아온다. 같은 드라이브를 이미 얻는
+/// 중이면(다른 탭, 막혀 있는 끊긴 네트워크 드라이브 등) 스레드를 더 띄우지 않고 그 결과를 함께 받는다.
+pub(crate) fn query_space(root: PathBuf, done: impl FnOnce(DriveSpace) + Send + 'static) {
+    type Waiters = HashMap<PathBuf, Vec<Box<dyn FnOnce(DriveSpace) + Send>>>;
+    static IN_FLIGHT: LazyLock<Mutex<Waiters>> = LazyLock::new(Mutex::default);
+    let in_flight = || {
+        IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    };
+    {
+        let mut waiters = in_flight();
+        if let Some(waiting) = waiters.get_mut(&root) {
+            waiting.push(Box::new(done));
+            return;
+        }
+        waiters.insert(root.clone(), vec![Box::new(done)]);
+    }
+    let spawned = std::thread::Builder::new()
+        .name("facet-drive-space".into())
+        .spawn({
+            let root = root.clone();
+            move || {
+                let space = facet_win::devices::disk_space(&root);
+                let space = DriveSpace {
+                    total: space.map(|space| space.total),
+                    free: space.map(|space| space.free),
+                };
+                let waiting = in_flight().remove(&root).unwrap_or_default();
+                for done in waiting {
+                    done(space);
+                }
+            }
+        });
+    if spawned.is_err() {
+        in_flight().remove(&root);
     }
 }
 

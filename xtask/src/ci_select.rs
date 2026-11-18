@@ -165,6 +165,8 @@ const TABLE: &[(&str, &[&str])] = &[
     ("crates/facet-win/src/windows_drag_source.rs", &[]),
     ("crates/facet-win/src/drop_target.rs", &[]),
     ("crates/facet-win/src/windows_drop_target.rs", &[]),
+    ("crates/facet-win/src/devices.rs", &[]),
+    ("crates/facet-win/src/windows_devices.rs", &[]),
     ("crates/facet-win/src/icon.rs", &[]),
     ("crates/facet-win/src/windows_icon.rs", &[]),
     ("crates/facet-win/src/pipe_client.rs", &[]),

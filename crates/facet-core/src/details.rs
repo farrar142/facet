@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use crate::Item;
 use crate::file_list::format_modified_local;
+use crate::shell_provider::DriveSpace;
 
 /// 자세히 보기의 열.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -35,9 +36,9 @@ pub enum Column {
     Location,
     /// 일치: 내용 검색 결과의 일치 수(검색 결과 위치에만 뜻이 있다). 일치가 없는 항목은 0으로 본다.
     Matches,
-    /// #351: 내 PC 드라이브의 전체 크기.
+    /// 전체 크기: 내 PC 드라이브의 용량([`DriveSpace::total`]). 모르는 값은 방향과 상관없이 아는 값 뒤다.
     TotalSize,
-    /// #351: 내 PC 드라이브의 남은 공간.
+    /// 남은 공간: 내 PC 드라이브에서 이 사용자가 쓸 수 있는 공간([`DriveSpace::free`]). 모르는 값은 아는 값 뒤다.
     FreeSpace,
     /// #352: 휴지통 항목의 원래 위치.
     OriginalLocation,
@@ -241,6 +242,8 @@ struct Entry {
     folder: Option<Folder>,
     /// 내용 검색 결과 항목이면 첫 일치 줄과 일치 수.
     hit: Option<Hit>,
+    /// 내 PC의 드라이브 항목이면 그 용량(아직 모르면 값이 `None`).
+    drive: Option<DriveSpace>,
 }
 
 /// 내용 검색 결과 항목의 일치: 첫 일치 줄과 일치 수.
@@ -266,6 +269,16 @@ impl Entry {
             extension,
             folder,
             hit: None,
+            drive: None,
+        }
+    }
+
+    /// 전체 크기·남은 공간 열의 값. 드라이브가 아니거나 모르면 `None`.
+    fn space(&self, column: Column) -> Option<u64> {
+        let drive = self.drive?;
+        match column {
+            Column::TotalSize => drive.total,
+            _ => drive.free,
         }
     }
 
@@ -328,7 +341,15 @@ fn compare_entries(a: &Entry, b: &Entry, sort: Sort) -> Ordering {
         Column::Size => a.item.size.cmp(&b.item.size),
         Column::Location => a.folder_key().cmp(&b.folder_key()),
         Column::Matches => a.match_count().cmp(&b.match_count()),
-        Column::TotalSize | Column::FreeSpace => todo!("#351"),
+        // 모르는 값(드라이브가 아님·아직 채우지 않음·얻지 못함)은 방향과 상관없이 아는 값 뒤다.
+        Column::TotalSize | Column::FreeSpace => {
+            match (a.space(sort.column), b.space(sort.column)) {
+                (Some(x), Some(y)) => x.cmp(&y),
+                (Some(_), None) => return Ordering::Less,
+                (None, Some(_)) => return Ordering::Greater,
+                (None, None) => return a.compare_names(b),
+            }
+        }
         Column::OriginalLocation | Column::DateDeleted => todo!("#352"),
     };
     directed(key).then_with(|| a.compare_names(b))
@@ -440,6 +461,63 @@ impl DetailsList {
         self.entries.get(index).and_then(|e| e.hit.as_ref())
     }
 
+    /// `index`번째 항목의 드라이브 용량. 내 PC의 드라이브가 아니면 `None`이다.
+    pub fn drive(&self, index: usize) -> Option<&DriveSpace> {
+        self.entries.get(index).and_then(|e| e.drive.as_ref())
+    }
+
+    /// `is_drive`가 참인 이름의 항목을 드라이브로 적는다(용량은 아직 모름).
+    pub(crate) fn mark_drives(&mut self, is_drive: impl Fn(&OsStr) -> bool) {
+        for entry in &mut self.entries {
+            if is_drive(&entry.item.name) {
+                entry.drive = Some(DriveSpace::UNKNOWN);
+            }
+        }
+    }
+
+    /// 같은 위치를 다시 읽은 목록에 앞 목록 `old`가 알던 용량을 이름으로 옮겨 둔다(새 값이 올 때까지 「—」로 깜빡이지
+    /// 않게). 드라이브로 적힌 항목만 받는다.
+    pub(crate) fn carry_drives(&mut self, old: &DetailsList) {
+        let known: HashMap<&OsStr, DriveSpace> = old
+            .entries
+            .iter()
+            .filter_map(|e| Some((e.item.name.as_os_str(), e.drive?)))
+            .filter(|(_, space)| *space != DriveSpace::UNKNOWN)
+            .collect();
+        if known.is_empty() {
+            return;
+        }
+        for entry in &mut self.entries {
+            if entry.drive.is_some()
+                && let Some(space) = known.get(entry.item.name.as_os_str())
+            {
+                entry.drive = Some(*space);
+            }
+        }
+        if matches!(self.sort.column, Column::TotalSize | Column::FreeSpace) {
+            self.resort();
+        }
+    }
+
+    /// 드라이브 항목 `name`의 용량을 `space`로 둔다. 값이 바뀌었으면 `true`이고, 그 열로 정렬 중이면 다시 정렬한다.
+    pub(crate) fn set_drive(&mut self, name: &OsStr, space: DriveSpace) -> bool {
+        let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|e| e.drive.is_some() && e.item.name == name)
+        else {
+            return false;
+        };
+        if entry.drive == Some(space) {
+            return false;
+        }
+        entry.drive = Some(space);
+        if matches!(self.sort.column, Column::TotalSize | Column::FreeSpace) {
+            self.resort();
+        }
+        true
+    }
+
     /// `index`번째 항목이 든 폴더(검색 결과 항목). 폴더 목록의 항목은 `None`이다.
     pub fn folder(&self, index: usize) -> Option<&Arc<Path>> {
         self.entries
@@ -545,6 +623,71 @@ mod tests {
         for name in ["README", "끝에 점.", "12"] {
             assert_eq!(natural_key_and_extension(name).1, None, "{name}");
         }
+    }
+
+    #[test]
+    fn 용량_열은_모르는_값을_방향과_상관없이_뒤에_둔다() {
+        let item = |name: &str| Item {
+            name: name.into(),
+            is_folder: true,
+            size: 0,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+            attributes: crate::Attributes::default(),
+        };
+        let items = ["C:", "D:", "E:", "휴대폰"].map(item).to_vec();
+        let mut list = DetailsList::new(items, Sort::default());
+        list.mark_drives(|name| name != "휴대폰");
+        let space = |total, free| DriveSpace {
+            total: Some(total),
+            free: Some(free),
+        };
+        assert!(list.set_drive(OsStr::new("C:"), space(500, 100)));
+        assert!(list.set_drive(OsStr::new("E:"), space(100, 50)));
+        // 같은 값은 바뀌지 않았다. 드라이브가 아닌 항목은 받지 않는다.
+        assert!(!list.set_drive(OsStr::new("E:"), space(100, 50)));
+        assert!(!list.set_drive(OsStr::new("휴대폰"), space(1, 1)));
+        let names = |list: &DetailsList| -> Vec<String> {
+            list.iter()
+                .map(|item| item.name.to_string_lossy().into_owned())
+                .collect()
+        };
+        for (column, direction, expected) in [
+            (
+                Column::TotalSize,
+                Direction::Ascending,
+                ["E:", "C:", "D:", "휴대폰"],
+            ),
+            (
+                Column::TotalSize,
+                Direction::Descending,
+                ["C:", "E:", "D:", "휴대폰"],
+            ),
+            (
+                Column::FreeSpace,
+                Direction::Ascending,
+                ["E:", "C:", "D:", "휴대폰"],
+            ),
+            (
+                Column::FreeSpace,
+                Direction::Descending,
+                ["C:", "E:", "D:", "휴대폰"],
+            ),
+        ] {
+            list.set_sort(Sort { column, direction });
+            assert_eq!(names(&list), expected, "{column:?} {direction:?}");
+        }
+        // 다시 읽은 목록은 알던 값을 이름으로 받는다.
+        let mut again = DetailsList::new(
+            ["C:", "D:"].map(item).to_vec(),
+            Sort {
+                column: Column::FreeSpace,
+                direction: Direction::Descending,
+            },
+        );
+        again.mark_drives(|_| true);
+        again.carry_drives(&list);
+        assert_eq!(again.drive(0), Some(&space(500, 100)));
+        assert_eq!(again.drive(1), Some(&DriveSpace::UNKNOWN));
     }
 
     #[test]

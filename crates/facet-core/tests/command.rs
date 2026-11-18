@@ -84,6 +84,9 @@ fn name(command: CommandId) -> &'static str {
         CommandId::StopSearch => "검색 중지",
         CommandId::ContentSearch => "내용 검색",
         CommandId::SortByMatches => "일치로 정렬",
+        // 내 PC의 용량 열 머리글(명령 팔레트에는 없음, 자세한 확인은 tests/this_pc_drives.rs).
+        CommandId::SortByTotalSize => "전체 크기로 정렬",
+        CommandId::SortByFreeSpace => "남은 공간으로 정렬",
         // 즉시 검색의 범위 전환(자세한 확인은 tests/instant_search.rs).
         CommandId::InstantUnderFolder => "현재 폴더 아래만",
         CommandId::DetailsView => "자세히 보기",

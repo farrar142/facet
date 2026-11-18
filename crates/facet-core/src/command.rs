@@ -53,6 +53,10 @@ pub enum CommandId {
     SortByLocation,
     /// 일치 수로 정렬(내용 검색 결과 위치에서만 켜짐).
     SortByMatches,
+    /// 전체 크기로 정렬(내 PC에서만 켜짐). 열 머리글이 부르고 명령 팔레트에는 없다([`CommandId::ALL`]에 들지 않음).
+    SortByTotalSize,
+    /// 남은 공간으로 정렬(내 PC에서만 켜짐). 열 머리글이 부르고 명령 팔레트에는 없다.
+    SortByFreeSpace,
     /// 새 탭: 지금 위치의 탭을 활성 탭 바로 뒤에 열고 활성으로 한다.
     NewTab,
     /// 탭 닫기: 활성 탭을 닫는다. 패널의 마지막 탭이면 패널이, 창의 마지막 패널이면 창이 닫힌다.
@@ -298,6 +302,8 @@ impl CommandId {
             CommandId::CopyPath => "copy-path",
             CommandId::SortByLocation => "sort-by-location",
             CommandId::SortByMatches => "sort-by-matches",
+            CommandId::SortByTotalSize => "sort-by-total-size",
+            CommandId::SortByFreeSpace => "sort-by-free-space",
             CommandId::ShowInFolder => "show-in-folder",
             CommandId::StopSearch => "stop-search",
             CommandId::InstantUnderFolder => "instant-under-folder",
@@ -331,7 +337,8 @@ impl CommandId {
             Column::Size => CommandId::SortBySize,
             Column::Location => CommandId::SortByLocation,
             Column::Matches => CommandId::SortByMatches,
-            Column::TotalSize | Column::FreeSpace => todo!("#351"),
+            Column::TotalSize => CommandId::SortByTotalSize,
+            Column::FreeSpace => CommandId::SortByFreeSpace,
             Column::OriginalLocation | Column::DateDeleted => todo!("#352"),
         }
     }
@@ -345,6 +352,8 @@ impl CommandId {
             CommandId::SortBySize => Some(Column::Size),
             CommandId::SortByLocation => Some(Column::Location),
             CommandId::SortByMatches => Some(Column::Matches),
+            CommandId::SortByTotalSize => Some(Column::TotalSize),
+            CommandId::SortByFreeSpace => Some(Column::FreeSpace),
             _ => None,
         }
     }
@@ -391,6 +400,8 @@ impl CommandId {
             | CommandId::SortBySize
             | CommandId::SortByLocation
             | CommandId::SortByMatches
+            | CommandId::SortByTotalSize
+            | CommandId::SortByFreeSpace
             | CommandId::ContentSearch
             | CommandId::ShowInFolder
             | CommandId::StopSearch
@@ -514,6 +525,9 @@ impl CommandId {
             CommandId::SortByMatches => tab.location().search_scope().is_some_and(|scope| {
                 matches!(scope.kind, crate::location::SearchKind::Content { .. })
             }),
+            CommandId::SortByTotalSize | CommandId::SortByFreeSpace => {
+                tab.location().virtual_folder() == Some(crate::VirtualFolder::ThisPc)
+            }
             CommandId::ShowInFolder => {
                 tab.location().is_search_results() && tab.cursor_item().is_some()
             }

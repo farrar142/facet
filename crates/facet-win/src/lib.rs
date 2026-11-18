@@ -12,6 +12,8 @@
 //!   곳으로 고칠 때 쓴다. Windows가 아니면 빈 목록이다.
 //! - [`drive_letters`]: 지금 있는 드라이브 문자들(`GetLogicalDrives`, 문자 순서). 주소창 맨 앞 › 목록이 쓴다.
 //!   Windows가 아니면 빈 목록이다.
+//! - [`devices`]: 드라이브 용량([`devices::disk_space`], 이 사용자가 쓸 수 있는 남은 공간)과 볼륨·휴대용 장치의
+//!   붙임·뗌 알림([`devices::watch_devices`]). 내 PC가 쓴다. Windows가 아니면 용량은 `None`, 알림은 「지원하지 않음」이다.
 //! - [`single_instance`]: 단일 실행. 주인 되기([`single_instance::claim`], 사용자 로그온 세션 범위 뮤텍스),
 //!   받기([`single_instance::Owner::listen`], 같은 사용자만 여는 파이프의 수신기 스레드),
 //!   넘기기([`single_instance::forward`], 인자와 작업 폴더). Windows가 아니면 늘 주인이 된다.
@@ -46,6 +48,7 @@ use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 
 pub mod clipboard;
+pub mod devices;
 pub mod drag_source;
 pub mod drop_target;
 pub mod file_ops;
@@ -61,6 +64,8 @@ pub mod single_instance;
 mod watch;
 #[cfg(windows)]
 mod windows_clipboard;
+#[cfg(windows)]
+mod windows_devices;
 #[cfg(windows)]
 mod windows_drag_source;
 #[cfg(windows)]
