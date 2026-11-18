@@ -47,6 +47,46 @@ pub trait Provider: Send + Sync {
     /// `location` 안의 이름이 `name`인 항목 하나를 읽는다. 없으면 `Ok(None)`이다. 변경 알림을 받은 항목만
     /// 다시 읽는 데 쓴다.
     fn item(&self, location: &Location, name: &OsStr) -> Result<Option<Item>, ListError>;
+
+    /// #348: `location`의 되는 일.
+    fn capabilities(&self, _location: &Location) -> Capabilities {
+        todo!("#348")
+    }
+}
+
+/// #348: 공급자가 위치마다 알리는 되는 일.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Capabilities {
+    pub open: bool,
+    pub copy_from: bool,
+    pub copy_into: bool,
+    pub move_items: bool,
+    pub recycle: bool,
+    pub delete_permanently: bool,
+    pub rename: bool,
+    pub new_folder: bool,
+    pub restore: bool,
+    pub empty: bool,
+    pub properties: bool,
+    pub undoable: bool,
+}
+
+impl Capabilities {
+    /// #348: 모든 되는 일이 켜진 값.
+    pub const ALL: Capabilities = Capabilities {
+        open: true,
+        copy_from: true,
+        copy_into: true,
+        move_items: true,
+        recycle: true,
+        delete_permanently: true,
+        rename: true,
+        new_folder: true,
+        restore: true,
+        empty: true,
+        properties: true,
+        undoable: true,
+    };
 }
 
 /// 주소창 글자를 해석한 결과.

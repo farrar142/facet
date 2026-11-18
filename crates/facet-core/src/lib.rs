@@ -34,6 +34,7 @@ pub mod search_results;
 pub mod selection;
 pub mod session;
 pub mod shell_helper;
+pub mod shell_provider;
 pub mod tab;
 pub mod thumbnail;
 pub mod thumbnail_cache;
@@ -45,8 +46,10 @@ pub mod work_area;
 
 pub use facet_win::OpenError;
 pub use file_system::FileSystemProvider;
-pub use location::{Attributes, Item, ListError, Location, SearchKind, SearchScope};
-pub use provider::{Candidate, PathSegment, Provider, ResolveError, Resolved, provider_for};
+pub use location::{Attributes, Item, ListError, Location, SearchKind, SearchScope, VirtualFolder};
+pub use provider::{
+    Candidate, Capabilities, PathSegment, Provider, ResolveError, Resolved, provider_for,
+};
 
 /// 코어 크레이트의 버전.
 pub fn version() -> &'static str {

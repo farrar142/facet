@@ -543,6 +543,8 @@ impl TabV1 {
                     // 위치 열은 검색 결과에만 뜻이 있고, 검색 결과 위치는 검색한 폴더로 남으므로 이름으로 남긴다(형식
                     // 버전을 올리지 않으려고 열을 더하지 않는다).
                     Column::Location | Column::Matches => ColumnV1::Name,
+                    Column::TotalSize | Column::FreeSpace => todo!("#351"),
+                    Column::OriginalLocation | Column::DateDeleted => todo!("#352"),
                 },
                 direction: match tab.sort.direction {
                     Direction::Ascending => DirectionV1::Ascending,
