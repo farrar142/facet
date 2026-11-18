@@ -120,7 +120,6 @@ fn assert_sorted(values: &[Option<u64>], direction: Direction) {
 }
 
 #[test]
-#[ignore = "#351"]
 fn system_drive_space_matches_the_file_system_api() {
     let (app, _dir) = open_this_pc_with_space();
     let space = system_space(&app).unwrap();
@@ -136,7 +135,6 @@ fn system_drive_space_matches_the_file_system_api() {
 }
 
 #[test]
-#[ignore = "#351"]
 fn sorting_by_total_size_and_free_space() {
     let (mut app, _dir) = open_this_pc_with_space();
     for column in [Column::TotalSize, Column::FreeSpace] {
