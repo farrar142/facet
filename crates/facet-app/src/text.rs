@@ -81,6 +81,7 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::DetailsView | CommandId::GridView(_) => todo!("#327"),
         CommandId::ClearThumbnailCache => todo!("#330"),
         CommandId::OpenWith | CommandId::Properties => todo!("#321"),
+        CommandId::TogglePreview => todo!("#339"),
     }
 }
 

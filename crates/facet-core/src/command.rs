@@ -159,6 +159,8 @@ pub enum CommandId {
     OpenWith,
     /// #321: 속성(`properties`, Alt+Enter).
     Properties,
+    /// #339: 미리보기 영역 켜고 끄기(`toggle-preview`, Alt+P).
+    TogglePreview,
 }
 
 impl CommandId {
@@ -291,6 +293,7 @@ impl CommandId {
             CommandId::ClearThumbnailCache => "clear-thumbnail-cache",
             CommandId::OpenWith => "open-with",
             CommandId::Properties => "properties",
+            CommandId::TogglePreview => "toggle-preview",
         }
     }
 
@@ -415,6 +418,7 @@ impl CommandId {
             CommandId::Paste => const { &[key(letter('V')).ctrl()] },
             CommandId::CopyPath => const { &[key(letter('C')).ctrl().shift()] },
             CommandId::OpenWith | CommandId::Properties => &[], // #321
+            CommandId::TogglePreview => &[],                    // #339
         }
     }
 
@@ -471,6 +475,7 @@ impl CommandId {
             CommandId::DetailsView | CommandId::GridView(_) => todo!("#327"),
             CommandId::ClearThumbnailCache => todo!("#330"),
             CommandId::OpenWith | CommandId::Properties => todo!("#321"),
+            CommandId::TogglePreview => todo!("#339"),
             CommandId::Refresh
             | CommandId::EditAddress
             | CommandId::ToggleHidden

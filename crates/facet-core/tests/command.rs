@@ -92,6 +92,8 @@ fn name(command: CommandId) -> &'static str {
         // 오른쪽 메뉴의 자체 항목(자세한 확인은 tests/spec_shell_helper_menu_layout.rs).
         CommandId::OpenWith => "연결 프로그램",
         CommandId::Properties => "속성",
+        // 미리보기 영역(자세한 확인은 tests/spec_preview_app.rs).
+        CommandId::TogglePreview => "미리보기 영역",
     }
 }
 

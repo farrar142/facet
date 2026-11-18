@@ -33,6 +33,7 @@ pub mod content;
 pub mod copy;
 pub mod delete;
 pub mod grid_screen;
+pub mod preview_screen;
 pub mod screen;
 
 use std::collections::BTreeMap;
@@ -690,6 +691,7 @@ pub fn session_fixture(
                 .collect(),
             active_panel: 1,
             split_ratio: 0.5,
+            preview: Default::default(),
             placement: None,
         })
         .collect();
@@ -1068,6 +1070,21 @@ pub const FILTER_TARGET: Duration = Duration::from_millis(16);
 /// CI가 실패시키는 필터 시간 상한: 로컬 기준 [`FILTER_TARGET`]의 10배([`LIST_LIMIT`]과 같은 까닭: 공유 러너의
 /// 편차를 견디면서 알고리즘이 한 단계 나빠지는 실수만 잡는다).
 pub const FILTER_LIMIT: Duration = Duration::from_millis(160);
+
+/// #336: 미리보기 텍스트(256KB 추정+디코딩) 로컬 기준(5ms).
+pub const TEXT_PREVIEW_TARGET: Duration = Duration::ZERO; // #336
+/// #336: 미리보기 텍스트 CI 상한(기준 × 10).
+pub const TEXT_PREVIEW_LIMIT: Duration = Duration::ZERO; // #336
+
+/// #336: 중앙값이 상한을 넘으면 중앙값과 상한을 담은 `Err`.
+pub fn check_text_preview_limit(_m: &Measurement, _limit: Duration) -> Result<(), String> {
+    todo!("#336")
+}
+
+/// #336: 메모리의 256KB CP949 텍스트를 한 번 데우고 `runs`회 추정+디코딩한다.
+pub fn measure_text_preview(_runs: usize) -> Result<Measurement, String> {
+    todo!("#336")
+}
 
 /// 필터 측정 글자: 빈 필터에서 한 글자, 그 한 글자에서 두 글자.
 pub const FILTER_STEPS: [&str; 2] = ["r", "re"];
