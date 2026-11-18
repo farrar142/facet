@@ -53,6 +53,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -108,6 +109,7 @@ mod crumb_menu;
 mod drop_menu;
 mod file_drop;
 mod history_view;
+mod icons;
 mod ime;
 mod instance;
 mod item_drag;
@@ -180,6 +182,10 @@ fn main() -> Result<(), slint::PlatformError> {
     app.borrow_mut().set_waker(|| {
         // 이벤트 루프가 이미 끝났으면(창을 모두 닫았으면) 버린다.
         let _ = slint::invoke_from_event_loop(poll_all);
+    });
+    // 파일 종류별 아이콘: 얻기는 캐시의 일꾼 스레드가 하고, 끝나면 이벤트 루프에서 기다리던 행을 다시 그린다.
+    icons::start(|| {
+        let _ = slint::invoke_from_event_loop(icons_loaded);
     });
     // 되살린 세션의 나머지 창도 만든다(사용자 입력을 기다리지 않는다). 결과를 받기 전에 만들어야 그 창의 탭이 읽은
     // 목록도 그 창에 들어간다.
@@ -328,6 +334,11 @@ fn monitors() -> Vec<Monitor> {
 /// 두고, 최소화한 창의 자리는 남기지 않는다([`placement::Placement::observe`]).
 fn note_placement(window: WindowId) {
     let Some(view) = view_of(window) else { return };
+    // 다른 배율의 모니터로 옮겼으면 아이콘을 그 배율의 크기로 다시 얻는다.
+    let scale = view.ui.window().scale_factor();
+    for panel in &view.panels {
+        panel.rows.set_scale(scale);
+    }
     let Some((rect, state)) = view
         .ui
         .window()
@@ -660,6 +671,18 @@ fn show_tab_drag(drag: Option<&TabDrag<WindowId>>) {
                 .and_then(|drag| drag.slot_in(view.window, panel))
                 .map_or(-1, count);
             PanelUi::of(&view.ui, panel).set_tab_drag(dragged, slot);
+        }
+    }
+}
+
+/// 아이콘을 얻었으면 모든 창에서 그 아이콘을 기다리던 행을 다시 그린다.
+fn icons_loaded() {
+    if !icons::take_loaded() {
+        return;
+    }
+    for view in &views() {
+        for panel in &view.panels {
+            panel.rows.refresh_icons();
         }
     }
 }
@@ -1383,6 +1406,8 @@ impl View {
                 window,
                 panel,
                 notify: ModelNotify::default(),
+                icon_size: Cell::new(icons::pixel_size(ui.window().scale_factor())),
+                waiting_icons: RefCell::new(HashSet::new()),
             }),
             tabs: Rc::new(VecModel::default()),
             segments: Rc::new(VecModel::default()),
@@ -4685,9 +4710,31 @@ struct TabRows {
     window: WindowId,
     panel: usize,
     notify: ModelNotify,
+    /// 행 아이콘을 얻을 화소 크기(창 배율을 따른다).
+    icon_size: Cell<u32>,
+    /// 아이콘이 아직 없어 내장 아이콘으로 그린 행들. 아이콘을 얻으면 이 행만 다시 그린다.
+    waiting_icons: RefCell<HashSet<usize>>,
 }
 
 impl TabRows {
+    /// 아이콘을 기다리던 행을 다시 그리게 한다(아이콘을 얻은 뒤).
+    fn refresh_icons(&self) {
+        let waiting = std::mem::take(&mut *self.waiting_icons.borrow_mut());
+        let count = self.row_count();
+        for row in waiting.into_iter().filter(|&row| row < count) {
+            self.notify.row_changed(row);
+        }
+    }
+
+    /// 창 배율이 바뀌었으면 아이콘 크기를 바꾸고 모든 행을 다시 그린다.
+    fn set_scale(&self, scale: f32) {
+        let size = icons::pixel_size(scale);
+        if self.icon_size.replace(size) != size {
+            self.waiting_icons.borrow_mut().clear();
+            self.notify.reset();
+        }
+    }
+
     /// 이 패널의 보이는 탭.
     fn tab<'a>(&self, app: &'a App) -> Option<&'a Tab> {
         let panel = app.window(self.window)?.panels().get(self.panel)?;
@@ -4709,9 +4756,18 @@ impl Model for TabRows {
         let tab = self.tab(&app)?;
         let item = tab.get(row)?;
         let marks = app.cut_marks();
+        // 아이콘은 캐시에 있을 때만 그린다(UI 스레드는 아이콘을 얻지 않는다). 없으면 내장 아이콘이고 얻으면 다시 그린다.
+        let icon = tab
+            .folder_of(row)
+            .and_then(|folder| icons::icon(folder, item, self.icon_size.get()));
+        if icon.is_none() {
+            self.waiting_icons.borrow_mut().insert(row);
+        }
         Some(Row {
             name: item.name.to_string_lossy().as_ref().into(),
             folder: item.is_folder,
+            has_icon: icon.is_some(),
+            icon: icon.unwrap_or_default(),
             modified: details::modified_text(item).into(),
             kind: text::file_type_text(&details::file_type(item)).into(),
             size: details::size_text(item).into(),
