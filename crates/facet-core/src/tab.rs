@@ -444,6 +444,7 @@ pub struct ClosedTab {
     forward_views: Vec<ViewState>,
     sort: Sort,
     view: ViewState,
+    view_mode: View,
 }
 
 impl ClosedTab {
@@ -485,6 +486,8 @@ pub struct Tab {
     /// `forward`와 짝을 이루는 보기 상태.
     forward_views: Vec<ViewState>,
     sort: Sort,
+    /// #327: 보기 방식과 칸 크기.
+    view_mode: View,
     show_hidden: bool,
     /// 숨김 항목까지 모두 담은 목록.
     list: DetailsList,
@@ -548,6 +551,7 @@ impl Tab {
             forward: Vec::new(),
             forward_views: Vec::new(),
             sort,
+            view_mode: View::default(),
             show_hidden,
             list: DetailsList::new(Vec::new(), sort),
             visible: None,
@@ -590,6 +594,7 @@ impl Tab {
             forward_views: self.forward_views,
             sort: self.sort,
             view,
+            view_mode: self.view_mode,
         }
     }
 
@@ -604,8 +609,10 @@ impl Tab {
             forward_views,
             sort,
             view,
+            view_mode,
         } = closed;
         let mut tab = Tab::new(location, sort, show_hidden);
+        tab.view_mode = view_mode;
         tab.back = back;
         tab.back_views = back_views;
         tab.forward = forward;
@@ -2456,27 +2463,54 @@ impl Tab {
 
     /// #327: 탭의 보기 방식과 칸 크기.
     pub fn view(&self) -> View {
-        todo!("#327")
+        self.view_mode
     }
 
     /// #327: 보기 방식과 칸 크기를 바꾼다.
-    pub fn set_view(&mut self, _view: View) {
-        todo!("#327")
+    pub fn set_view(&mut self, view: View) {
+        self.view_mode = view;
     }
 
     /// #327: 칸 크기를 `steps` 단계 바꾼다(양수가 크게). 바뀌었는가.
-    pub fn zoom_grid(&mut self, _steps: i32) -> bool {
-        todo!("#327")
+    pub fn zoom_grid(&mut self, steps: i32) -> bool {
+        let mut size = self.view_mode.grid_size;
+        for _ in 0..steps.unsigned_abs() {
+            let next = if steps > 0 {
+                size.larger()
+            } else {
+                size.smaller()
+            };
+            match next {
+                Some(next) => size = next,
+                None => break,
+            }
+        }
+        let changed = size != self.view_mode.grid_size;
+        self.view_mode.grid_size = size;
+        changed
     }
 
     /// #327: 그리드에서 커서를 2차원으로 옮기고 `pick` 규칙으로 선택을 바꾼다.
     pub fn move_grid_cursor(
         &mut self,
-        _movement: GridMove,
-        _layout: GridLayout,
-        _pick: Pick,
+        movement: GridMove,
+        layout: GridLayout,
+        pick: Pick,
     ) -> Option<usize> {
-        todo!("#327")
+        let len = self.len();
+        if len == 0 {
+            return None;
+        }
+        if pick == Pick::Range && self.anchor.is_none() {
+            self.anchor = self.cursor().and_then(|index| self.key(index));
+        }
+        let target = match self.cursor() {
+            Some(from) => layout.step(from, movement, len),
+            None => 0,
+        };
+        let index = self.set_cursor(target)?;
+        self.pick(index, pick);
+        Some(index)
     }
 
     /// 커서를 옮긴다. 선택은 바꾸지 않는다. 옮긴 뒤의 번호를 돌려주고, 항목이 없으면 `None`이다.
