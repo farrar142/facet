@@ -237,7 +237,6 @@ fn dominant(t: &Thumbnail) -> char {
 }
 
 #[test]
-#[ignore = "#330"]
 fn 항목마다_아이콘만_캐시만_만들기를_정한다() {
     assert_eq!(plan(&item("사진", true, false)), ThumbnailPlan::IconOnly);
     assert_eq!(
@@ -273,7 +272,6 @@ fn 항목마다_아이콘만_캐시만_만들기를_정한다() {
 }
 
 #[test]
-#[ignore = "#330"]
 fn 그리드_요청을_넘기면_이미지_칸마다_칸_크기의_썸네일이_온다() {
     let dir = photos();
     let cache = TempDir::new().unwrap();
@@ -312,7 +310,6 @@ fn 그리드_요청을_넘기면_이미지_칸마다_칸_크기의_썸네일이_
 }
 
 #[test]
-#[ignore = "#330"]
 fn 다시_열면_캐시에서_오고_파일을_고치면_새로_만든다() {
     let dir = photos();
     let cache = TempDir::new().unwrap();
@@ -350,7 +347,6 @@ fn 다시_열면_캐시에서_오고_파일을_고치면_새로_만든다() {
 }
 
 #[test]
-#[ignore = "#330"]
 fn 깨진_이미지는_실패로_오고_나머지_칸은_채워진다() {
     let dir = TempDir::new().unwrap();
     let mut broken = b"\x89PNG\r\n\x1a\n".to_vec();
@@ -368,7 +364,6 @@ fn 깨진_이미지는_실패로_오고_나머지_칸은_채워진다() {
 }
 
 #[test]
-#[ignore = "#330"]
 fn 요청은_곧바로_돌아온다() {
     let dir = TempDir::new().unwrap();
     let count = 300;
@@ -389,7 +384,6 @@ fn 요청은_곧바로_돌아온다() {
 }
 
 #[test]
-#[ignore = "#330"]
 fn 썸네일_캐시_비우기_명령이_있고_비운_뒤에는_캐시가_아니다() {
     let command = CommandId::ClearThumbnailCache;
     assert_eq!(command.as_str(), "clear-thumbnail-cache");
