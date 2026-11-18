@@ -64,6 +64,10 @@ export enum Problem {
     io,
     // 셸 호출이 시간 제한 안에 응답하지 않음
     not-responding,
+    // 휴대폰이 빠짐(「연결 끊김」)
+    disconnected,
+    // 휴대폰이 잠겼거나 「파일 전송」이 아님
+    device-not-ready,
     // 기본 프로그램으로 열기
     no-association,
     path-too-long,
@@ -1829,6 +1833,8 @@ component PanelView inherits Rectangle {
                     : root.data.list-problem == Problem.permission-denied ? @tr("위치를 읽을 권한이 없습니다: {}", root.data.list-problem-location)
                     : root.data.list-problem == Problem.not-a-folder ? @tr("폴더가 아닙니다: {}", root.data.list-problem-location)
                     : root.data.list-problem == Problem.not-responding ? @tr("응답 없음: {}", root.data.list-problem-location)
+                    : root.data.list-problem == Problem.disconnected ? @tr("연결 끊김: {}. 휴대폰을 다시 꽂고 「다시 시도」를 누르세요", root.data.list-problem-location)
+                    : root.data.list-problem == Problem.device-not-ready ? @tr("휴대폰이 저장소를 보여 주지 않습니다: {}. 휴대폰 잠금을 풀고 USB 사용을 「파일 전송」으로 바꾼 뒤 「다시 시도」를 누르세요", root.data.list-problem-location)
                     : @tr("위치를 읽지 못했습니다: {}: {}", root.data.list-problem-location, root.data.list-problem-detail);
                 wrap: word-wrap;
                 color: #c42b1c;

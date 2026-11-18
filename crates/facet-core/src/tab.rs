@@ -162,9 +162,10 @@ impl ReadRequest {
     ) -> ReadResult {
         // 감시를 먼저 건다: 읽는 사이의 변경도 놓치지 않는다.
         let attempt = |location: &Location| {
-            // 검색 결과 위치는 탐색 시점의 것이라 감시하지 않는다. 가상 폴더는 내 PC만 감시한다(장치 붙임·뗌).
+            // 검색 결과 위치는 탐색 시점의 것이라 감시하지 않는다. 가상 폴더는 내 PC(장치 붙임·뗌)와 휴대폰(그 장치가
+            // 빠지거나 다시 꽂힘)만 감시한다.
             let watched = match location.virtual_folder() {
-                Some(folder) => folder == VirtualFolder::ThisPc,
+                Some(folder) => crate::shell_provider::is_watched(location, folder),
                 None => !location.is_search_results(),
             };
             let watch = sink
@@ -207,9 +208,18 @@ impl ReadRequest {
             relocation,
         };
         let first = attempt(&self.location);
-        // 권한이 없을 뿐이면 위치는 남아 있다.
-        let vanished =
-            matches!(&first.0, Err(e) if !matches!(e, ListError::PermissionDenied { .. }));
+        // 권한이 없거나, 셸이 응답하지 않거나, 휴대폰이 빠졌거나 잠겼을 뿐이면 위치는 남아 있다(탭은 그 자리에서
+        // 까닭과 「다시 시도」를 보인다).
+        let vanished = matches!(
+            &first.0,
+            Err(e) if !matches!(
+                e,
+                ListError::PermissionDenied { .. }
+                    | ListError::NotResponding { .. }
+                    | ListError::Disconnected { .. }
+                    | ListError::DeviceNotReady { .. }
+            )
+        );
         if !(self.climb && vanished) {
             return result(self.location.clone(), first, None);
         }

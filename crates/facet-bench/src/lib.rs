@@ -1830,6 +1830,8 @@ pub fn measure_shell_list(count: usize, runs: usize) -> Result<Measurement, Stri
                 parsing_name: format!(r"\?\fake#{i}"),
                 is_folder: i % 5 == 0,
                 id: vec![8, 0, a, b, c, d, 0, 0, 0, 0],
+                size: None,
+                modified: None,
             }
         })
         .collect();
