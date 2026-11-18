@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Tests of .github/factory/bridge.sh (marker comments → switchboard mailbox) against the fake gh and switchboard.
+# Tests of .github/factory/bridge.sh (labels and marker comments → switchboard mailbox, #410) against the
+# fake gh and switchboard. Recipients are made-up names (test/…).
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 script="$here/../bridge.sh"
@@ -16,8 +17,8 @@ setup() {
   tmp=$(mktemp -d "$root/t.XXXXXX")
   export FAKE_GH="$tmp/gh" FAKE_MAIL="$tmp/mail" XDG_STATE_HOME="$tmp/state"
   export BRIDGE_SINCE=2026-11-01T00:00:00Z
-  # FACTORY_REPO unset: the facet defaults, which must not change (#380).
-  unset FACTORY_REPO BRIDGE_STATE_DIR BRIDGE_TO BRIDGE_TO_BOSS BRIDGE_TO_COORD SWITCHBOARD_PROFILE
+  unset FACTORY_REPO BRIDGE_STATE_DIR BRIDGE_TO BRIDGE_CC SWITCHBOARD_PROFILE FACTORY_SPEC_QUEUE
+  export BRIDGE_TO_BOSS=test/boss BRIDGE_TO_COORD=test/coord
   mkdir -p "$FAKE_GH" "$FAKE_MAIL"
   echo '[]' > "$FAKE_GH/repo-comments.json"
 }
@@ -31,15 +32,43 @@ has() { # has <what> <needle> <haystack>
   case "$3" in *"$2"*) ok ;; *) bad "$1: [$2] not in [$3]" ;; esac
 }
 
-# issue <n> <state> <labels comma-separated> <title>
+# issue <n> <state> <labels comma-separated> <title> [body]
 issue() {
-  jq -n --argjson n "$1" --arg s "$2" --arg l "$3" --arg t "$4" \
-    '{number: $n, state: $s, title: $t, html_url: "https://github.com/owner/repo/issues/\($n)",
+  jq -n --argjson n "$1" --arg s "$2" --arg l "$3" --arg t "$4" --arg b "${5:-}" \
+    '{number: $n, state: $s, title: $t, body: $b, html_url: "https://github.com/owner/repo/issues/\($n)",
       labels: ($l | split(",") | map(select(. != "") | {name: .}))}' \
     | tr -d '\r' > "$FAKE_GH/issue-$1.json"
 }
 
-# comment <id> <issue> <body> [author login, default github-actions[bot]]
+# labeled <n> <label> <time>: a `labeled` event in the issue's timeline
+labeled() {
+  local f="$FAKE_GH/timeline-$1.json"
+  [ -f "$f" ] || echo '[]' > "$f"
+  jq --arg l "$2" --arg t "$3" '. + [{event: "labeled", created_at: $t, label: {name: $l}}]' "$f" \
+    | tr -d '\r' > "$f.new" && mv "$f.new" "$f"
+}
+
+# unlabel <n> <label>: takes the label off the issue
+unlabel() {
+  jq --arg l "$2" '.labels |= map(select(.name != $l))' "$FAKE_GH/issue-$1.json" | tr -d '\r' \
+    > "$FAKE_GH/issue-$1.json.new" && mv "$FAKE_GH/issue-$1.json.new" "$FAKE_GH/issue-$1.json"
+}
+
+# relabel <n> <label>: puts the label on (again)
+relabel() {
+  jq --arg l "$2" '.labels += [{name: $l}]' "$FAKE_GH/issue-$1.json" | tr -d '\r' \
+    > "$FAKE_GH/issue-$1.json.new" && mv "$FAKE_GH/issue-$1.json.new" "$FAKE_GH/issue-$1.json"
+}
+
+# icomment <issue> <id> <body> [author] [created_at]: a comment on that issue (read for the reason)
+icomment() {
+  local f="$FAKE_GH/comments-$1.json"
+  [ -f "$f" ] || echo '[]' > "$f"
+  jq --argjson id "$2" --arg b "$3" --arg u "${4:-github-actions[bot]}" --arg t "${5:-2026-11-17T03:00:00Z}" \
+    '. + [{id: $id, body: $b, user: {login: $u}, created_at: $t}]' "$f" | tr -d '\r' > "$f.new" && mv "$f.new" "$f"
+}
+
+# comment <id> <issue> <body> [author login, default github-actions[bot]]: a repository comment (markers)
 comment() {
   local f="$FAKE_GH/repo-comments.json"
   jq --argjson id "$1" --arg n "$2" --arg b "$3" --arg u "${4:-github-actions[bot]}" \
@@ -57,346 +86,346 @@ arg() {
   jq -s -r --argjson i "$1" --arg o "$2" '.[$i].args as $a | ($a | index($o)) as $k | $a[$k + 1]' \
     "$FAKE_MAIL/sent.jsonl" | tr -d '\r'
 }
-remembered() { tr '\n' ' ' < "$XDG_STATE_HOME/facet-factory-bridge/sent" | sed 's/ $//'; }
+# tos: every send's recipient, space-separated
+tos() { jq -s -r '[.[].args as $a | $a[($a | index("--to")) + 1]] | join(" ")' "$FAKE_MAIL/sent.jsonl" 2> /dev/null | tr -d '\r'; }
+state() { tr -d '\r' < "$XDG_STATE_HOME/facet-factory-bridge/sent"; }
 
-# A repository with one of each marker, plus noise.
-markers() {
-  issue 249 open spec,needs-decision "공장 개선"
-  issue 250 open spec,factory-paused "검색"
-  issue 900 open factory-ledger "장부"
-  issue 301 open ready-for-human "티켓 하나"
-  comment 11 249 "<!-- factory-question -->
-무엇이 갈리는가: A냐 B냐. 권장안: A"
-  comment 12 250 "<!-- factory-budget-spec -->
-spec 상한: \$61 / \$60"
-  comment 13 900 "<!-- factory-budget-daily 2026-11-17 -->
-하루 상한"
-  comment 14 301 "<!-- factory-human -->
-되돌림 두 번"
-  comment 15 249 "그냥 댓글"
-}
+# --- labels (#410 더함 2, 14번) ----------------------------------------------------------------------
 
-# --- sending -------------------------------------------------------------------------------
-
-setup "each marker is mailed once with its link, body and what to do"
-markers
+setup "ready-for-human without any marker comment is sent once, saying there is no reason comment"
+issue 301 open ready-for-human "티켓 하나"
+labeled 301 ready-for-human 2026-11-18T01:00:00Z
 run
 eq code 0 "$(code)"
-eq sends 4 "$(sent_count)"
-eq to "sandcorp/boss" "$(arg 0 --to)"
+eq sends 1 "$(sent_count)"
+eq to test/coord "$(arg 0 --to)"
 eq task facet-factory "$(arg 0 --task)"
-eq key facet-factory-11 "$(arg 0 --idempotency-key)"
-eq key4 facet-factory-14 "$(arg 3 --idempotency-key)"
+eq key "facet-factory-label-301-ready-for-human-2026-11-18T01-00-00Z-test-coord" "$(arg 0 --idempotency-key)"
+eq subject "[facet 공장] 사람 넘김: #301 티켓 하나" "$(arg 0 --subject)"
+has body "까닭 댓글 없음" "$(arg 0 --body)"
+has "body link" "https://github.com/owner/repo/issues/301" "$(arg 0 --body)"
 eq profile automation "$(jq -s -r '.[0].profile' "$FAKE_MAIL/sent.jsonl" | tr -d '\r')"
-has subject "질문: #249 공장 개선" "$(arg 0 --subject)"
-body=$(arg 0 --body)
-has "issue link" "https://github.com/owner/repo/issues/249" "$body"
-has "comment link" "#issuecomment-11" "$body"
-has "comment body" "A냐 B냐. 권장안: A" "$body"
-has "question todo" "needs-decision 라벨을 떼면" "$body"
-has "spec budget todo" "factory-paused" "$(arg 1 --body)"
-has "daily todo" "KST 0시" "$(arg 2 --body)"
-has "human reason" "되돌림 두 번" "$(arg 3 --body)"
-has "human kind" "사람 넘김" "$(arg 3 --subject)"
-eq remembered "11 12 13 14" "$(remembered)"
+eq state "label 301 ready-for-human 2026-11-18T01:00:00Z test/coord" "$(state)"
 
-setup "a second run sends nothing again"
-markers
+setup "the same state run again sends nothing"
+issue 301 open ready-for-human "티켓 하나"
+labeled 301 ready-for-human 2026-11-18T01:00:00Z
 run
 run
 eq code 0 "$(code)"
-eq sends 4 "$(sent_count)"
+eq sends 1 "$(sent_count)"
 
-setup "only the new marker is sent on the next run"
-markers
+setup "taking the label off and putting it on again is one new mail"
+issue 301 open ready-for-human "티켓 하나"
+labeled 301 ready-for-human 2026-11-18T01:00:00Z
 run
-comment 16 301 "<!-- factory-human -->
-다시"
+unlabel 301 ready-for-human
 run
-eq sends 5 "$(sent_count)"
-eq key facet-factory-16 "$(arg 4 --idempotency-key)"
+eq "off: nothing" 1 "$(sent_count)"
+relabel 301 ready-for-human
+labeled 301 ready-for-human 2026-11-19T05:00:00Z
+run
+eq "on again: one more" 2 "$(sent_count)"
+has "new key" "2026-11-19T05-00-00Z" "$(arg 1 --idempotency-key)"
+run
+eq "and only once" 2 "$(sent_count)"
 
-setup "a question goes to the boss and every other kind to the coordinator"
-markers
+setup "human-check with no unchecked item sends nothing; with one it is sent"
+issue 310 open human-check "확인 끝남" "- [x] 창 확인
+- [x] 한글 확인"
+labeled 310 human-check 2026-11-18T01:00:00Z
+issue 311 open human-check "확인 남음" "본문
+- [x] 창 확인
+- [ ] 한글 확인"
+labeled 311 human-check 2026-11-18T02:00:00Z
+run
+eq code 0 "$(code)"
+eq sends 1 "$(sent_count)"
+eq subject "[facet 공장] 사람 확인: #311 확인 남음" "$(arg 0 --subject)"
+
+setup "queue done and no ticket: idle is sent once"
+issue 249 closed spec "공장 개선"
+issue 250 closed spec "검색"
+issue 260 closed ready-for-agent "끝난 티켓"
+export FACTORY_SPEC_QUEUE="249 250"
+run
+eq code 0 "$(code)"
+eq sends 1 "$(sent_count)"
+eq to test/coord "$(arg 0 --to)"
+eq key facet-factory-idle-249-250-test-coord "$(arg 0 --idempotency-key)"
+has subject "공장 idle" "$(arg 0 --subject)"
+run
+eq "once per queue" 1 "$(sent_count)"
+export FACTORY_SPEC_QUEUE="249,250 251"
+issue 251 closed spec "다음"
+run
+eq "a new queue value is a new mail" 2 "$(sent_count)"
+
+setup "idle is not sent while a queue spec is open or a ticket waits"
+issue 249 closed spec "공장 개선"
+issue 250 open spec "검색"
+export FACTORY_SPEC_QUEUE="249 250"
+run
+eq "open spec" 0 "$(sent_count)"
+issue 250 closed spec "검색"
+issue 270 open in-progress "도는 티켓"
+run
+eq "running ticket" 0 "$(sent_count)"
+issue 270 closed in-progress "도는 티켓"
+issue 271 open ready-for-agent "기다리는 티켓"
+run
+eq "waiting ticket" 0 "$(sent_count)"
+eq code 0 "$(code)"
+
+setup "an idle marker and the direct idle check of the same queue send one mail"
+issue 249 closed spec "공장 개선"
 issue 900 open factory-ledger "장부"
-comment 21 900 "<!-- factory-queue-empty 245 -->"
-comment 22 900 "<!-- factory-idle 245 -->"
+export FACTORY_SPEC_QUEUE="249"
+comment 21 900 "<!-- factory-idle 249 -->
+공장 idle"
 run
 eq code 0 "$(code)"
-eq sends 6 "$(sent_count)"
-eq "question to" sandcorp/boss "$(arg 0 --to)"
-eq "budget-spec to" facet/coordinator "$(arg 1 --to)"
-eq "budget-daily to" facet/coordinator "$(arg 2 --to)"
-eq "human to" facet/coordinator "$(arg 3 --to)"
-eq "queue-empty to" facet/coordinator "$(arg 4 --to)"
-eq "idle to" facet/coordinator "$(arg 5 --to)"
-has "log names the recipient" "sent human #301 to facet/coordinator" "$(cat "$tmp/log")"
+eq sends 1 "$(sent_count)"
+eq key facet-factory-idle-249-test-coord "$(arg 0 --idempotency-key)"
 
-setup "BRIDGE_TO_BOSS, BRIDGE_TO_COORD and SWITCHBOARD_PROFILE are passed through"
-markers
-export BRIDGE_TO_BOSS=boss/else BRIDGE_TO_COORD=coord/else SWITCHBOARD_PROFILE=other
-run
-eq "question to" boss/else "$(arg 0 --to)"
-eq "human to" coord/else "$(arg 3 --to)"
-eq profile other "$(jq -s -r '.[0].profile' "$FAKE_MAIL/sent.jsonl" | tr -d '\r')"
+# --- recipients ------------------------------------------------------------------------------------
 
-setup "a leftover BRIDGE_TO is ignored with a warning and never sends a question to the coordinator"
-markers
-export BRIDGE_TO=facet/coordinator
+setup "needs-decision goes to the boss only; the other labels to the coordinator and every BRIDGE_CC"
+issue 249 open spec,needs-decision "공장 개선"
+labeled 249 needs-decision 2026-11-18T01:00:00Z
+issue 250 open spec,factory-paused "검색"
+labeled 250 factory-paused 2026-11-18T01:00:00Z
+issue 301 open ready-for-human "티켓 하나"
+labeled 301 ready-for-human 2026-11-18T01:00:00Z
+export BRIDGE_CC="test/cc1, test/cc2,,"
 run
 eq code 0 "$(code)"
-eq "question to" sandcorp/boss "$(arg 0 --to)"
-eq "human to" facet/coordinator "$(arg 3 --to)"
-eq "budget-spec to" facet/coordinator "$(arg 1 --to)"
+eq tos "test/boss test/coord test/cc1 test/cc2 test/coord test/cc1 test/cc2" "$(tos)"
+eq "question subject" "[facet 공장] 질문: #249 공장 개선" "$(arg 0 --subject)"
+eq "cc key" "facet-factory-label-301-ready-for-human-2026-11-18T01-00-00Z-test-cc1" "$(arg 2 --idempotency-key)"
+run
+eq "not again" 7 "$(sent_count)"
+
+setup "a recipient added to BRIDGE_CC later gets only what still waits"
+issue 301 open ready-for-human "티켓 하나"
+labeled 301 ready-for-human 2026-11-18T01:00:00Z
+run
+export BRIDGE_CC=test/cc1
+run
+eq tos "test/coord test/cc1" "$(tos)"
+
+setup "without BRIDGE_TO_BOSS or BRIDGE_TO_COORD nothing is read or sent and the reason is printed"
+issue 301 open ready-for-human "티켓 하나"
+unset BRIDGE_TO_COORD
+run
+eq code 2 "$(code)"
+eq sends 0 "$(sent_count)"
+has reason "BRIDGE_TO_COORD" "$(cat "$tmp/log")"
+eq "gh not called" no "$([ -s "$FAKE_GH/calls.log" ] && echo yes || echo no)"
+export BRIDGE_TO_COORD=test/coord
+unset BRIDGE_TO_BOSS
+run
+eq "boss too" 2 "$(code)"
+has reason "BRIDGE_TO_BOSS" "$(cat "$tmp/log")"
+
+setup "a leftover BRIDGE_TO is ignored with a warning"
+issue 249 open needs-decision "공장 개선"
+labeled 249 needs-decision 2026-11-18T01:00:00Z
+export BRIDGE_TO=test/old
+run
+eq code 0 "$(code)"
+eq to test/boss "$(arg 0 --to)"
 has warning "BRIDGE_TO is ignored" "$(cat "$tmp/log")"
 
-# --- what is not sent ----------------------------------------------------------------------
-
-setup "a question whose needs-decision is gone, and closed issues, are not sent"
-issue 249 open spec "공장 개선"
-issue 260 closed spec,needs-decision "닫힌 spec"
-comment 11 249 "<!-- factory-question -->
-A냐 B냐"
-comment 12 260 "<!-- factory-question -->
-닫힘"
-run
-eq code 0 "$(code)"
-eq sends 0 "$(sent_count)"
-eq remembered "" "$(remembered)"
-issue 249 open spec,needs-decision "공장 개선"
-run
-eq "sent after the label is back" 1 "$(sent_count)"
-
-# --- who wrote the marker ------------------------------------------------------------------
-
-# perm <login> <permission> [role_name]
-perm() {
-  jq -n --arg p "$2" --arg r "${3:-$2}" '{permission: $p, role_name: $r}' | tr -d '\r' \
-    > "$FAKE_GH/permission-$1.json"
-}
-perm_calls() { grep -c 'collaborators/.*/permission' "$FAKE_GH/calls.log" || true; }
-
-setup "a marker by someone without write access is not sent and not looked at again"
-issue 249 open spec,needs-decision "공장 개선"
+setup "SWITCHBOARD_PROFILE is passed through"
 issue 301 open ready-for-human "티켓 하나"
-comment 11 249 "<!-- factory-question -->
-가짜 질문" stranger
-comment 12 301 "<!-- factory-human -->
-가짜 넘김" stranger
-perm stranger read
+export SWITCHBOARD_PROFILE=custom
+run
+eq profile custom "$(jq -s -r '.[0].profile' "$FAKE_MAIL/sent.jsonl" | tr -d '\r')"
+
+setup "needs-triage, needs-info, local and closed issues are not sent"
+issue 401 open needs-triage "분류 전"
+issue 402 open needs-info "정보 필요"
+issue 403 open local "로컬"
+issue 404 closed ready-for-human "닫힘"
 run
 eq code 0 "$(code)"
 eq sends 0 "$(sent_count)"
-eq remembered "11 12" "$(remembered)"
-has log "ignored question #249 by stranger" "$(cat "$tmp/log")"
-eq "asked once per run" 1 "$(perm_calls)"
-run
-eq sends 0 "$(sent_count)"
-eq "not asked again" 1 "$(perm_calls)"
 
-setup "a triage collaborator is not trusted either"
-issue 249 open spec,needs-decision "공장 개선"
-comment 11 249 "<!-- factory-question -->
-질문" helper
-perm helper read triage
-run
-eq sends 0 "$(sent_count)"
-eq remembered "11" "$(remembered)"
+# --- the reason ------------------------------------------------------------------------------------
 
-setup "markers by github-actions[bot] are sent without asking"
+setup "the reason is the latest trusted factory marker comment, quoted"
+issue 301 open ready-for-human "티켓 하나"
+labeled 301 ready-for-human 2026-11-18T01:00:00Z
+icomment 301 1 "<!-- factory-human -->
+되돌림 두 번" "github-actions[bot]" 2026-11-17T01:00:00Z
+icomment 301 2 "<!-- factory-human -->
+최신 까닭" "github-actions[bot]" 2026-11-17T02:00:00Z
+icomment 301 3 "<!-- factory-human -->
+가짜 까닭" "stranger" 2026-11-17T03:00:00Z
+icomment 301 4 "그냥 댓글" "github-actions[bot]" 2026-11-17T04:00:00Z
+run
+eq code 0 "$(code)"
+has quote "> 최신 까닭" "$(arg 0 --body)"
+case "$(arg 0 --body)" in *"가짜 까닭"*|*"그냥 댓글"*|*"되돌림 두 번"*) bad "only the latest trusted marker" ;; *) ok ;; esac
+
+setup "a label is sent even when every marker comment is by someone without write access"
+issue 301 open ready-for-human "티켓 하나"
+icomment 301 3 "<!-- factory-human -->
+가짜 까닭" "stranger"
+run
+eq sends 1 "$(sent_count)"
+has body "까닭 댓글 없음" "$(arg 0 --body)"
+
+# --- marker comments -------------------------------------------------------------------------------
+
+markers() {
+  issue 900 open factory-ledger "장부"
+  issue 901 open bench-alert "벤치"
+  comment 13 900 "<!-- factory-budget-daily 2026-11-17 -->
+하루 상한"
+  comment 14 900 "<!-- factory-queue-empty 250 -->
+마지막 spec"
+  comment 15 900 "<!-- factory-stalled 2026-11-18 -->
+- #301(ready-for-human)이 #302을 막는다"
+  comment 16 901 "<!-- factory-bench-regression abc123 -->
+search 한도 초과"
+  comment 17 900 "그냥 댓글"
+  comment 18 900 "<!-- factory-question -->
+옛 질문 표지(라벨이 맡는다)"
+}
+
+setup "each marker comment is mailed once to the coordinator with its kind and what to do"
 markers
 run
-eq sends 4 "$(sent_count)"
-eq "no permission lookups" 0 "$(perm_calls)"
-
-setup "markers by write, maintain and admin collaborators are sent"
-issue 249 open spec,needs-decision "공장 개선"
-issue 301 open ready-for-human "티켓 하나"
-issue 302 open ready-for-human "티켓 둘"
-comment 11 249 "<!-- factory-question -->
-질문" writer
-comment 12 301 "<!-- factory-human -->
-넘김" keeper
-comment 13 302 "<!-- factory-human -->
-넘김" boss
-comment 14 302 "<!-- factory-human -->
-또" writer
-perm writer write
-perm keeper write maintain
-perm boss admin
-run
 eq code 0 "$(code)"
 eq sends 4 "$(sent_count)"
-eq remembered "11 12 13 14" "$(remembered)"
-eq "one lookup per author" 3 "$(perm_calls)"
+eq tos "test/coord test/coord test/coord test/coord" "$(tos)"
+eq key facet-factory-13 "$(arg 0 --idempotency-key)"
+eq subject "[facet 공장] 하루 상한 멈춤: #900 장부" "$(arg 0 --subject)"
+has "queue-empty" "spec 큐 바닥남" "$(arg 1 --subject)"
+has "stalled" "공장 막힘" "$(arg 2 --subject)"
+has "stalled body" "#301(ready-for-human)이 #302을 막는다" "$(arg 2 --body)"
+has "bench" "벤치 한도 초과" "$(arg 3 --subject)"
+has "link" "https://github.com/owner/repo/issues/900#issuecomment-13" "$(arg 0 --body)"
+eq state "13
+14
+15
+16" "$(state)"
+run
+eq "not again" 4 "$(sent_count)"
+
+setup "marker comments are copied to every BRIDGE_CC"
+markers
+export BRIDGE_CC=test/cc1
+run
+eq sends 8 "$(sent_count)"
+eq "cc key" facet-factory-13-test-cc1 "$(arg 1 --idempotency-key)"
+has "cc state" "13 test/cc1" "$(state)"
+
+setup "a comment sent to the coordinator before #410 (bare id) is not sent to it again"
+markers
+mkdir -p "$XDG_STATE_HOME/facet-factory-bridge"
+printf '13\n14\n15\n16\n' > "$XDG_STATE_HOME/facet-factory-bridge/sent"
+run
+eq sends 0 "$(sent_count)"
+
+setup "a marker by someone without write access is not sent and not looked at again"
+issue 900 open factory-ledger "장부"
+comment 13 900 "<!-- factory-budget-daily 2026-11-17 -->" stranger
+export BRIDGE_CC=test/cc1
+run
+eq code 0 "$(code)"
+eq sends 0 "$(sent_count)"
+has state "13 ignored" "$(state)"
+: > "$FAKE_GH/calls.log"
+run
+case "$(cat "$FAKE_GH/calls.log")" in *collaborators*) bad "permission asked again" ;; *) ok ;; esac
+
+setup "markers by write, maintain and admin collaborators are sent; triage is not"
+issue 900 open factory-ledger "장부"
+for p in write maintain admin triage; do
+  echo "{\"permission\": \"$p\", \"role_name\": \"$p\"}" > "$FAKE_GH/permission-u$p.json"
+done
+comment 31 900 "<!-- factory-queue-empty 1 -->" uwrite
+comment 32 900 "<!-- factory-queue-empty 2 -->" umaintain
+comment 33 900 "<!-- factory-queue-empty 3 -->" uadmin
+comment 34 900 "<!-- factory-queue-empty 4 -->" utriage
+run
+eq sends 3 "$(sent_count)"
 
 setup "a permission that cannot be read is retried next run"
-issue 301 open ready-for-human "티켓 하나"
-comment 12 301 "<!-- factory-human -->
-넘김" writer
-perm writer write
+issue 900 open factory-ledger "장부"
+comment 13 900 "<!-- factory-budget-daily 2026-11-17 -->" someone
+echo '{"permission": "write", "role_name": "write"}' > "$FAKE_GH/permission-someone.json"
 touch "$FAKE_GH/fail-permission"
 run
 eq code 1 "$(code)"
 eq sends 0 "$(sent_count)"
-eq remembered "" "$(remembered)"
 rm "$FAKE_GH/fail-permission"
 run
 eq code 0 "$(code)"
 eq sends 1 "$(sent_count)"
 
-setup "--seed also remembers markers by others"
-issue 301 open ready-for-human "티켓 하나"
-comment 12 301 "<!-- factory-human -->
-가짜" stranger
-run --seed
-eq sends 0 "$(sent_count)"
-eq remembered "12" "$(remembered)"
-
-# --- failures ------------------------------------------------------------------------------
-
 setup "a failed send is not remembered and is retried next time"
+issue 301 open ready-for-human "티켓 하나"
 markers
 touch "$FAKE_MAIL/fail"
 run
 eq code 1 "$(code)"
 eq sends 0 "$(sent_count)"
-eq remembered "" "$(remembered)"
 rm "$FAKE_MAIL/fail"
 run
 eq code 0 "$(code)"
-eq sends 4 "$(sent_count)"
+eq sends 5 "$(sent_count)"
 
-# --- seed ----------------------------------------------------------------------------------
+# --- --seed ----------------------------------------------------------------------------------------
 
-setup "--seed remembers the markers without sending"
+setup "--seed remembers labels as they are now, marker comments and idle without sending"
+issue 249 open needs-decision "공장 개선"
+labeled 249 needs-decision 2026-11-18T01:00:00Z
+issue 301 open ready-for-human "티켓 하나"
+labeled 301 ready-for-human 2026-11-18T01:00:00Z
+issue 250 closed spec "검색"
 markers
+comment 40 900 "<!-- factory-stalled 2026-11-18 -->" stranger
+export FACTORY_SPEC_QUEUE=250 BRIDGE_CC=test/cc1
 run --seed
 eq code 0 "$(code)"
 eq sends 0 "$(sent_count)"
-eq calls 0 "$([ -f "$FAKE_MAIL/calls.log" ] && wc -l < "$FAKE_MAIL/calls.log" | tr -d ' ' || echo 0)"
-eq remembered "11 12 13 14" "$(remembered)"
-comment 16 301 "<!-- factory-human -->
-다시"
+has "label line" "label 301 ready-for-human 2026-11-18T01:00:00Z test/cc1" "$(state)"
+has "idle line" "idle 250 test/coord" "$(state)"
+has "ignored line" "40 ignored" "$(state)"
 run
-eq "only the new one after seeding" 1 "$(sent_count)"
-eq key facet-factory-16 "$(arg 0 --idempotency-key)"
-
-# --- the script itself ---------------------------------------------------------------------
-
-current="no address, token, host or home path in the script"
-eq "http" 0 "$(grep -c 'https\?://' "$script" || true)"
-eq "home" 0 "$(grep -ci '/home/\|/Users/\|C:\\' "$script" || true)"
-eq "token" 0 "$(grep -ci 'token' "$script" || true)"
-
-# --- spec queue markers on the ledger (#280) ------------------------------------------------
-
-setup "queue-empty and idle are sent with their label and what to do"
-issue 900 open factory-ledger "장부"
-comment 21 900 "<!-- factory-queue-empty 245 -->
-spec 큐 바닥남: #245"
-comment 22 900 "<!-- factory-idle 245 -->
-공장 idle"
+eq "nothing after seed" 0 "$(sent_count)"
+unlabel 301 ready-for-human; relabel 301 ready-for-human
+labeled 301 ready-for-human 2026-11-19T05:00:00Z
 run
-eq code 0 "$(code)"
-eq sends 2 "$(sent_count)"
-has "queue-empty subject" "spec 큐 바닥남: #900 장부" "$(arg 0 --subject)"
-has "queue-empty kind" "종류: spec 큐 바닥남" "$(arg 0 --body)"
-has "queue-empty comment" "<!-- factory-queue-empty 245 -->" "$(arg 0 --body)"
-has "queue-empty todo" "할 일: 다음 spec을 FACTORY_SPEC_QUEUE에 넣는다(조율자 몫)." "$(arg 0 --body)"
-has "idle subject" "공장 idle: #900 장부" "$(arg 1 --subject)"
-has "idle todo" "할 일: FACTORY_SPEC_QUEUE에 spec을 넣고 dispatch-next를 다시 돌린다(조율자 몫)." "$(arg 1 --body)"
-eq key facet-factory-22 "$(arg 1 --idempotency-key)"
-eq remembered "21 22" "$(remembered)"
-run
-eq "not again" 2 "$(sent_count)"
+eq "a label put on after the seed is sent" 2 "$(sent_count)"
 
-setup "queue markers by someone without write access are not sent"
-issue 900 open factory-ledger "장부"
-comment 23 900 "<!-- factory-idle none -->" mallory
-comment 24 900 "<!-- factory-queue-empty 1 -->" mallory
-run
-eq code 0 "$(code)"
-eq sends 0 "$(sent_count)"
-eq remembered "23 24" "$(remembered)"
-
-# --- bench regression (#366) ---------------------------------------------------------------
-
-setup "a bench regression goes to the coordinator with its label and what to do"
-issue 810 open bench-alert "벤치 한도 알림"
-comment 31 810 "<!-- factory-bench-regression abc123 -->
-전체 벤치가 실패했다.
-필터 상한 초과: 중앙값 200ms > 상한 160ms"
-run
-eq code 0 "$(code)"
-eq sends 1 "$(sent_count)"
-eq to facet/coordinator "$(arg 0 --to)"
-has subject "벤치 한도 초과: #810 벤치 한도 알림" "$(arg 0 --subject)"
-has "failing line" "필터 상한 초과" "$(arg 0 --body)"
-has todo "커밋 구간" "$(arg 0 --body)"
-export BRIDGE_TO_COORD=team/coord
-comment 32 810 "<!-- factory-bench-regression def456 -->"
-run
-eq "coordinator variable" team/coord "$(arg 1 --to)"
-
-setup "a bench regression marker by someone else is not sent"
-issue 810 open bench-alert "벤치 한도 알림"
-comment 31 810 "<!-- factory-bench-regression abc123 -->" stranger
-run
-eq code 0 "$(code)"
-eq sends 0 "$(sent_count)"
-eq remembered 31 "$(remembered)"
-
-# --- repository name (#380) ----------------------------------------------------------------
-
-setup "without FACTORY_REPO the task, key, subject and state file are exactly facet's"
-markers
-run
-eq code 0 "$(code)"
-eq task facet-factory "$(arg 0 --task)"
-eq key facet-factory-11 "$(arg 0 --idempotency-key)"
-eq subject "[facet 공장] 질문: #249 공장 개선" "$(arg 0 --subject)"
-eq "subject 2" "[facet 공장] spec 상한 멈춤: #250 검색" "$(arg 1 --subject)"
-eq "state file" "11
-12
-13
-14" "$(tr -d '\r' < "$XDG_STATE_HOME/facet-factory-bridge/sent")"
-eq "only that state folder" "facet-factory-bridge" "$(ls "$XDG_STATE_HOME" | tr -d '\r')"
-has "gh reads facet" "repos/farrar142/facet/issues/comments" "$(cat "$FAKE_GH/calls.log")"
+# --- repository name (#380) ------------------------------------------------------------------------
 
 setup "FACTORY_REPO=owner/other names the task, key, subject and state folder after other"
-markers
+issue 301 open ready-for-human "티켓 하나"
+labeled 301 ready-for-human 2026-11-18T01:00:00Z
 export FACTORY_REPO=owner/other
 run
 eq code 0 "$(code)"
-eq sends 4 "$(sent_count)"
 eq task other-factory "$(arg 0 --task)"
-eq key other-factory-11 "$(arg 0 --idempotency-key)"
-eq key4 other-factory-14 "$(arg 3 --idempotency-key)"
-eq subject "[other 공장] 질문: #249 공장 개선" "$(arg 0 --subject)"
-eq "state file" "11 12 13 14" "$(tr '\n' ' ' < "$XDG_STATE_HOME/other-factory-bridge/sent" | sed 's/ $//')"
-eq "no facet state" no "$([ -e "$XDG_STATE_HOME/facet-factory-bridge" ] && echo yes || echo no)"
-has "gh reads other" "repos/owner/other/issues/comments" "$(cat "$FAKE_GH/calls.log")"
-run
-eq "not again" 4 "$(sent_count)"
-
-setup "a facet marker already sent is not sent again by another repository's bridge, nor the reverse"
-markers
-run
-export FACTORY_REPO=owner/other
-run
-eq "each repository its own state" 8 "$(sent_count)"
-eq "other key" other-factory-11 "$(arg 4 --idempotency-key)"
+has key "other-factory-label-301" "$(arg 0 --idempotency-key)"
+eq subject "[other 공장] 사람 넘김: #301 티켓 하나" "$(arg 0 --subject)"
+eq "state folder" other-factory-bridge "$(ls "$XDG_STATE_HOME" | tr -d '\r')"
+has "gh reads other" "repos/owner/other/issues" "$(cat "$FAKE_GH/calls.log")"
 
 setup "BRIDGE_STATE_DIR is the state folder"
-markers
-export FACTORY_REPO=owner/other BRIDGE_STATE_DIR="$tmp/custom state"
+issue 301 open ready-for-human "티켓 하나"
+export BRIDGE_STATE_DIR="$tmp/custom state"
 run
 eq code 0 "$(code)"
-eq "state file" "11 12 13 14" "$(tr '\n' ' ' < "$tmp/custom state/sent" | sed 's/ $//')"
+has "state file" "label 301 ready-for-human" "$(cat "$tmp/custom state/sent")"
 eq "nothing under XDG_STATE_HOME" no "$([ -e "$XDG_STATE_HOME" ] && echo yes || echo no)"
 run
-eq "not again" 4 "$(sent_count)"
+eq "not again" 1 "$(sent_count)"
 
 echo "bridge.sh: $passes passed, $fails failed"
 [ "$fails" -eq 0 ]

@@ -12,6 +12,10 @@
 #   fail-dispatch       if present, workflow dispatches fail
 #   list-empty          if present, `gh issue list` finds nothing (a lagging search index);
 #   list-empty-once     the same for the next `gh issue list` only
+#   list-stale-<label>  numbers `gh issue list --label <label>` still finds whatever their state (lag)
+#   timeline-<n>.json   the timeline of issue <n> (`…/issues/<n>/timeline`), default []
+#   blocked-by-<n>.json the numbers of the issues blocking <n> (`…/issues/<n>/dependencies/blocked_by`
+#                       answers their issue-<m>.json), default []
 #   runs-list.json      runs for `gh run list`; `gh workflow run` adds one (runs-hidden: it does not)
 #   events-<n>.json     the events of issue <n> (`…/issues/<n>/events`), default []
 #   calls.log           every call's arguments, one line each
@@ -77,6 +81,10 @@ case "${1:-}" in
       list=$(jqf -s --arg l "$label" \
         '[.[] | select(.state == "open" and (has("pull_request") | not)
           and ($l == "" or any(.labels[]; .name == $l))) | {number}]' "${files[@]}")
+    fi
+    if [ -f "$d/list-stale-$label" ]; then
+      list=$(printf '%s' "$list" | jqf -c --rawfile s "$d/list-stale-$label" \
+        '. + ($s | split("\n") | map(select(. != "") | {number: tonumber}))')
     fi
     if [ -n "$expr" ]; then printf '%s' "$list" | jqf -r "$expr"; else printf '%s\n' "$list"; fi
     exit 0 ;;
@@ -275,6 +283,16 @@ case "$path" in
     jqf -s --arg l "$label" '[.[] | select(.state == "open" and ($l == "" or any(.labels[]; .name == $l)))]' "${files[@]}"
     ;;
   # ledger.sh event: the issue's events, events-<n>.json ([{event, created_at, label: {name}}], default []).
+  repos/*/*/issues/*/timeline)
+    n=${path%/timeline}; n=${n##*/}
+    if [ -f "$d/timeline-$n.json" ]; then cat "$d/timeline-$n.json"; else echo '[]'; fi
+    ;;
+  repos/*/*/issues/*/dependencies/blocked_by)
+    n=${path%/dependencies/blocked_by}; n=${n##*/}
+    if [ -f "$d/blocked-by-$n.json" ]; then
+      jqf -c '.[]' "$d/blocked-by-$n.json" | while read -r m; do cat "$d/issue-$m.json"; done | jqf -s .
+    else echo '[]'; fi
+    ;;
   repos/*/*/issues/*/events)
     n=${path%/events}; n=${n##*/}
     if [ -f "$d/events-$n.json" ]; then cat "$d/events-$n.json"; else echo '[]'; fi

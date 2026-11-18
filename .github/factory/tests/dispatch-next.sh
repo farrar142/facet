@@ -108,7 +108,7 @@ touch "$FAKE_GH/list-empty"
 run --tickets-only
 eq code 0 "$(code)"
 eq "nothing dispatched" "" "$(dispatched)"
-eq "two searches" 2 "$(searches)"
+eq "two searches and the idle check" 3 "$(searches)"
 
 # --- arguments -----------------------------------------------------------------------------
 
@@ -168,6 +168,41 @@ eq "not again" "<!-- factory-idle 60-61-62 -->" "$(marked '<!-- factory-idle')"
 FACTORY_SPEC_QUEUE=" 60  61 " run
 eq "a new queue" "<!-- factory-idle 60-61-62 --> <!-- factory-idle 60-61 -->" "$(marked '<!-- factory-idle')"
 eq "queue-empty not again" "<!-- factory-queue-empty 61 -->" "$(marked '<!-- factory-queue-empty')"
+
+setup "a closed ticket the search still lists is not running"
+spec 50 spec; ledger; spec 60 spec closed
+jq '.state = "closed"' "$FAKE_GH/issue-50.json" | tr -d '\r' > "$FAKE_GH/i" && mv "$FAKE_GH/i" "$FAKE_GH/issue-50.json"
+issue 70 in-progress; jq '.state = "closed"' "$FAKE_GH/issue-70.json" | tr -d '\r' > "$FAKE_GH/i" && mv "$FAKE_GH/i" "$FAKE_GH/issue-70.json"
+echo 70 > "$FAKE_GH/list-stale-in-progress"
+FACTORY_SPEC_QUEUE="60" run
+eq code 0 "$(code)"
+eq "idle although the search lags" "<!-- factory-idle 60 -->" "$(marked '<!-- factory-idle')"
+
+setup "a --tickets-only run leaves the idle marker once per queue"
+spec 50 spec; ledger; spec 60 spec closed
+jq '.state = "closed"' "$FAKE_GH/issue-50.json" | tr -d '\r' > "$FAKE_GH/i" && mv "$FAKE_GH/i" "$FAKE_GH/issue-50.json"
+FACTORY_SPEC_QUEUE="60" run --tickets-only
+eq code 0 "$(code)"
+eq "idle" "<!-- factory-idle 60 -->" "$(marked '<!-- factory-idle')"
+FACTORY_SPEC_QUEUE="60" run --tickets-only
+eq "not again" "<!-- factory-idle 60 -->" "$(marked '<!-- factory-idle')"
+
+setup "a --tickets-only run is not idle while a spec or a ticket is open"
+spec 50 spec; ledger; issue 71 in-progress
+FACTORY_SPEC_QUEUE="60" run --tickets-only
+eq code 0 "$(code)"
+eq "no idle" "" "$(marked '<!-- factory-idle')"
+eq "no decompose" "" "$(decomposed)"
+
+setup "a ticket blocked by a person's issue leaves the stalled marker once a day"
+spec 50 spec; ledger; issue 72 ready-for-agent 1; issue 73 ready-for-human
+echo '[73]' > "$FAKE_GH/blocked-by-72.json"
+FACTORY_NOW=1795050000 run --tickets-only --candidates "72"
+eq code 0 "$(code)"
+eq "stalled" "<!-- factory-stalled 2026-11-19 -->" "$(marked '<!-- factory-stalled')"
+has "names both" "#73(ready-for-human)이 #72을 막는다" "$(jq -r '.[-1].body' "$FAKE_GH/comments-900.json")"
+FACTORY_NOW=1795050600 run --tickets-only --candidates "72"
+eq "once a day" "<!-- factory-stalled 2026-11-19 -->" "$(marked '<!-- factory-stalled')"
 
 setup "an empty queue is idle as none"
 spec 50 spec; ledger
