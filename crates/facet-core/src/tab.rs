@@ -2606,6 +2606,11 @@ impl Tab {
         self.list.recycled(self.list_index(index)?)
     }
 
+    /// #358: 보이는 항목 `index`의 아이콘 캐시 키, 목록 밖이면 `None`.
+    pub fn icon_key(&self, _index: usize) -> Option<crate::icons::IconKey> {
+        todo!("#358")
+    }
+
     /// 복원할 휴지통 항목: 선택(정렬된 순서), 없으면 커서 항목. 휴지통 위치가 아니거나 정보를 모르는 항목은 뺀다.
     pub fn restore_items(&self) -> Vec<facet_win::recycle::RecycledItem> {
         let mut indices: Vec<usize> = self.selected_indices().collect();

@@ -348,6 +348,13 @@ pub struct Conflict {
     pub overwrite_is_permanent: bool,
 }
 
+impl Conflict {
+    /// #357: 「더 새것만 덮어쓰기」를 고를 수 있는지(덮어쓸 수 있고 두 쪽 모두 수정 시각이 있을 때만).
+    pub fn can_overwrite_if_newer(&self) -> bool {
+        todo!("#357")
+    }
+}
+
 /// 이름 충돌에 대한 답의 종류.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Resolution {
