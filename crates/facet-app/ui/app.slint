@@ -23,6 +23,11 @@ export struct Row {
     location: string,
     // 내용 검색 결과 항목의 「일치」 열 글자(일치 수와 첫 일치 줄, 내용 검색 결과가 아니면 비어 있다).
     matches: string,
+    // 내 PC 드라이브의 「전체 크기」「남은 공간」 열 글자(모르면 「—」, 드라이브가 아니면 비어 있다).
+    total: string,
+    free: string,
+    // 내 PC 드라이브의 사용량(0..1, 남은 공간이 적을수록 큼). 모르거나 드라이브가 아니면 음수라 막대를 그리지 않는다.
+    usage: float,
     // 휴지통 항목의 원래 위치(지우기 전에 든 폴더)와 지운 날짜(휴지통이 아니면 비어 있다).
     original-location: string,
     deleted: string,
@@ -110,7 +115,7 @@ export struct PanelData {
     // 보던 위치가 사라져 옮겨 온 까닭: 0 없음, 1 상위 폴더로, 2 홈 폴더로. 사라진 위치도 함께 온다.
     relocation: int,
     relocation-vanished: string,
-    // 정렬: 열(0 이름, 1 수정한 날짜, 2 유형, 3 크기)과 방향.
+    // 정렬: 열(0 이름, 1 수정한 날짜, 2 유형, 3 크기, 4 위치, 5 일치, 6 전체 크기, 7 남은 공간)과 방향.
     sort-column: int,
     sort-descending: bool,
     // 상태 표시줄 수치. 선택한 파일 크기 합의 글자는 선택이 없으면 비어 있다.
@@ -121,6 +126,8 @@ export struct PanelData {
     results: bool,
     // 내용 검색 결과인가(「일치」 열을 보인다).
     content-results: bool,
+    // 내 PC인가: 수정한 날짜·크기 열 대신 「전체 크기」「남은 공간」 열을 보이고 이름 열에 사용량 막대를 그린다.
+    this-pc: bool,
     // 휴지통인가(「원래 위치」·「지운 날짜」 열을 보이고 「수정한 날짜」 열을 감춘다).
     recycle-bin: bool,
     search-status: string,
@@ -1383,12 +1390,16 @@ component PanelView inherits Rectangle {
     in-out property <length> size-width;
     in-out property <length> location-width;
     in-out property <length> matches-width;
+    in-out property <length> total-width;
+    in-out property <length> free-width;
     in-out property <length> original-location-width;
     in-out property <length> deleted-width;
-    // 열 너비의 합(있으면 위치·일치·원래 위치·지운 날짜 열 포함, 휴지통은 수정한 날짜 열 없음): 자세히 보기 내용의 폭.
+    // 열 너비의 합(있으면 위치·일치·원래 위치·지운 날짜 열 포함, 휴지통은 수정한 날짜 열 없음,
+    // 내 PC면 수정한 날짜·크기 대신 전체 크기·남은 공간): 자세히 보기 내용의 폭.
     // 목록보다 넓으면 가로 스크롤 막대가 생긴다.
-    property <length> columns-width: root.name-width + (root.data.recycle-bin ? 0px : root.modified-width)
-        + root.type-width + root.size-width
+    property <length> columns-width: root.name-width + root.type-width
+        + (root.data.this-pc ? root.total-width + root.free-width
+            : (root.data.recycle-bin ? 0px : root.modified-width) + root.size-width)
         + (root.data.results ? root.location-width : 0px) + (root.data.content-results ? root.matches-width : 0px)
         + (root.data.recycle-bin ? root.original-location-width + root.deleted-width : 0px);
     in-out property <length> content-y <=> list.content-y;
@@ -1927,7 +1938,7 @@ component PanelView inherits Rectangle {
                         root.focus-list();
                     }
                 }
-                if !root.data.recycle-bin: Header {
+                if !root.data.recycle-bin && !root.data.this-pc: Header {
                     text: @tr("수정한 날짜");
                     column-width <=> root.modified-width;
                     sorted: root.data.sort-column == 1;
@@ -1949,7 +1960,7 @@ component PanelView inherits Rectangle {
                         root.focus-list();
                     }
                 }
-                Header {
+                if !root.data.this-pc: Header {
                     text: @tr("크기");
                     right-aligned: true;
                     column-width <=> root.size-width;
@@ -1958,6 +1969,30 @@ component PanelView inherits Rectangle {
                     sort => {
                         root.activate();
                         root.sort-by(3);
+                        root.focus-list();
+                    }
+                }
+                if root.data.this-pc: Header {
+                    text: @tr("전체 크기");
+                    right-aligned: true;
+                    column-width <=> root.total-width;
+                    sorted: root.data.sort-column == 8;
+                    descending: root.data.sort-descending;
+                    sort => {
+                        root.activate();
+                        root.sort-by(8);
+                        root.focus-list();
+                    }
+                }
+                if root.data.this-pc: Header {
+                    text: @tr("남은 공간");
+                    right-aligned: true;
+                    column-width <=> root.free-width;
+                    sorted: root.data.sort-column == 9;
+                    descending: root.data.sort-descending;
+                    sort => {
+                        root.activate();
+                        root.sort-by(9);
                         root.focus-list();
                     }
                 }
@@ -2343,6 +2378,22 @@ component PanelView inherits Rectangle {
                         border-width: 2px;
                         border-color: Palette.accent-background;
                     }
+                    // 내 PC 드라이브의 사용량 막대: 이름 열 아래쪽에 트랙과 쓴 만큼의 막대(남은 공간이 적을수록 찬다, 90%를 넘으면
+                    // 빨강). 용량을 모르면 그리지 않는다.
+                    if root.data.this-pc && row.usage >= 0: Rectangle {
+                        x: 28px;
+                        y: parent.height - 5px;
+                        width: max(0px, root.name-width - 40px);
+                        height: 3px;
+                        background: Palette.foreground.transparentize(0.85);
+                        Rectangle {
+                            x: 0;
+                            y: 0;
+                            width: parent.width * clamp(row.usage, 0, 1);
+                            height: parent.height;
+                            background: row.usage > 0.9 ? #d13438 : Palette.accent-background;
+                        }
+                    }
                     // 이름 글자의 너비를 재는 보이지 않는 글자: 이름 글자 오른쪽 여백(빈 곳)이 어디부터인지 정한다.
                     name-measure := Text {
                         text: row.name;
@@ -2493,7 +2544,7 @@ component PanelView inherits Rectangle {
                             vertical-alignment: center;
                             color: row.selected ? Palette.selection-foreground : Palette.foreground;
                         }
-                        if !root.data.recycle-bin: Text {
+                        if !root.data.recycle-bin && !root.data.this-pc: Text {
                             width: root.modified-width;
                             text: row.modified;
                             overflow: elide;
@@ -2507,11 +2558,33 @@ component PanelView inherits Rectangle {
                             vertical-alignment: center;
                             color: row.selected ? Palette.selection-foreground : Palette.foreground;
                         }
-                        HorizontalLayout {
+                        if !root.data.this-pc: HorizontalLayout {
                             width: root.size-width;
                             padding-right: 8px;
                             Text {
                                 text: row.size;
+                                overflow: elide;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                                color: row.selected ? Palette.selection-foreground : Palette.foreground;
+                            }
+                        }
+                        if root.data.this-pc: HorizontalLayout {
+                            width: root.total-width;
+                            padding-right: 8px;
+                            Text {
+                                text: row.total;
+                                overflow: elide;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                                color: row.selected ? Palette.selection-foreground : Palette.foreground;
+                            }
+                        }
+                        if root.data.this-pc: HorizontalLayout {
+                            width: root.free-width;
+                            padding-right: 8px;
+                            Text {
+                                text: row.free;
                                 overflow: elide;
                                 horizontal-alignment: right;
                                 vertical-alignment: center;
@@ -3223,6 +3296,8 @@ export component AppWindow inherits Window {
     in-out property <length> size-width: 90px;
     in-out property <length> location-width: 240px;
     in-out property <length> matches-width: 320px;
+    in-out property <length> total-width: 110px;
+    in-out property <length> free-width: 110px;
     in-out property <length> original-location-width: 240px;
     in-out property <length> deleted-width: 140px;
 
@@ -3601,6 +3676,8 @@ export component AppWindow inherits Window {
             size-width <=> root.size-width;
             location-width <=> root.location-width;
             matches-width <=> root.matches-width;
+            total-width <=> root.total-width;
+            free-width <=> root.free-width;
             original-location-width <=> root.original-location-width;
             deleted-width <=> root.deleted-width;
             activate => {
@@ -3792,6 +3869,8 @@ export component AppWindow inherits Window {
             size-width <=> root.size-width;
             location-width <=> root.location-width;
             matches-width <=> root.matches-width;
+            total-width <=> root.total-width;
+            free-width <=> root.free-width;
             original-location-width <=> root.original-location-width;
             deleted-width <=> root.deleted-width;
             activate => {

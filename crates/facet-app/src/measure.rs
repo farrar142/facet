@@ -21,8 +21,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use facet_core::Location;
 use facet_core::measure::{
-    ENV_GRID, ENV_INSTANT, ENV_MENU, ENV_OPEN, ENV_OUT, ENV_RENAME, ENV_SCROLL_ROWS, ENV_SEARCH,
-    ENV_START_US, ENV_WINDOWS, ScreenReport,
+    ENV_GRID, ENV_INSTANT, ENV_MENU, ENV_OPEN, ENV_OUT, ENV_PREVIEW, ENV_RENAME, ENV_SCROLL_ROWS,
+    ENV_SEARCH, ENV_START_US, ENV_WINDOWS, ScreenReport,
 };
 use slint::winit_030::winit::event::WindowEvent;
 use slint::{ComponentHandle, Model};
@@ -79,6 +79,15 @@ enum GridMode {
     Scroll,
 }
 
+/// #344: 미리보기 측정의 종류.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum PreviewMode {
+    /// 영역을 끈 채(`false`)·켠 채(`true`) 화살표로 끝까지 옮긴다.
+    Arrow(bool),
+    /// 영역을 켜고 그 이름의 항목을 골라 내용이 뜨기까지.
+    Show(String),
+}
+
 struct State {
     out: String,
     /// 이 창의 열쇠([`window_key`]).
@@ -105,6 +114,10 @@ struct State {
     grid: Option<GridMode>,
     /// 그리드로 바꾸는 프레임을 지났다(스크롤 측정).
     grid_started: bool,
+    /// #344: 첫 화면 뒤에 잴 미리보기 측정.
+    preview: Option<PreviewMode>,
+    /// 영역을 켜거나 끄는 프레임을 지났다(화살표 측정).
+    preview_started: bool,
     /// 이 횟수보다 많이 목록이 들어온 뒤의 프레임만 센다. 이동한 폴더의 목록을 기다릴 때 쓴다.
     loads_seen: usize,
     report: ScreenReport,
@@ -144,6 +157,11 @@ pub fn is_enabled() -> bool {
 /// 즉시 검색 측정인가(측정 모드이고 [`ENV_INSTANT`]가 있다). 이때만 측정 모드에서도 인덱서 연결을 띄운다.
 pub fn instant_enabled() -> bool {
     is_enabled() && std::env::var_os(ENV_INSTANT).is_some_and(|v| !v.is_empty())
+}
+
+/// #344: 미리보기 측정인가(측정 모드이고 [`ENV_PREVIEW`]가 있다). 이때만 측정 모드에서도 썸네일을 켠다.
+pub fn preview_enabled() -> bool {
+    is_enabled() && std::env::var_os(ENV_PREVIEW).is_some_and(|v| !v.is_empty())
 }
 
 /// 그리드 측정인가(측정 모드이고 [`ENV_GRID`]가 있다). 이때만 측정 모드에서도 썸네일을 켠다.
@@ -191,6 +209,17 @@ pub fn frame_counter(ui: &AppWindow, key: u64) -> Option<impl FnMut(&WindowEvent
                 }
             }),
         grid_started: false,
+        preview: std::env::var(ENV_PREVIEW)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .and_then(|v| match v.as_str() {
+                "arrow-off" => Some(PreviewMode::Arrow(false)),
+                "arrow-on" => Some(PreviewMode::Arrow(true)),
+                _ => v
+                    .strip_prefix("show:")
+                    .map(|name| PreviewMode::Show(name.to_owned())),
+            }),
+        preview_started: false,
         loads_seen: 0,
         report: ScreenReport::default(),
         last_frame: None,
@@ -295,6 +324,20 @@ fn presented(weak: &slint::Weak<AppWindow>, state: &Mutex<State>) {
                 });
                 return;
             }
+            if let Some(mode) = s.preview.clone() {
+                // #344: 영역을 켜거나 끄는 프레임은 세지 않는다(바뀐 뒤 프레임부터).
+                s.loads_seen = window_loads(s.key);
+                s.open_started = Some(Instant::now());
+                drop(s);
+                crate::with_first_view(|view| {
+                    if !view.measure_preview_start(&mode)
+                        && let Ok(mut s) = state.lock()
+                    {
+                        s.finish();
+                    }
+                });
+                return;
+            }
             if s.grid.is_some() {
                 // 그리드로 바꾼 프레임부터 잰다(바꾸기 전 프레임은 세지 않음, 아래).
                 s.loads_seen = window_loads(s.key);
@@ -340,6 +383,30 @@ fn presented(weak: &slint::Weak<AppWindow>, state: &Mutex<State>) {
                 }
             });
             return;
+        } else if let Some(mode) = s.preview.clone() {
+            let started = s.open_started.unwrap_or(now);
+            if let PreviewMode::Show(_) = mode {
+                drop(s);
+                let ready = crate::with_first_view_value(|view| view.measure_preview_ready());
+                let Ok(mut s) = state.lock() else { return };
+                if ready {
+                    s.report.open_frame = Some(now - started);
+                    s.report.rows = ROWS.load(Ordering::Relaxed);
+                    s.finish();
+                } else {
+                    // 아직 안 뜬 프레임(기다림 50ms·읽는 중): 다음 갱신을 기다린다.
+                    s.loads_seen = window_loads(s.key);
+                }
+                return;
+            }
+            if s.preview_started {
+                if let Some(last) = s.last_frame {
+                    s.report.frames.push(now - last);
+                }
+            } else {
+                s.preview_started = true;
+                s.report.rows = ROWS.load(Ordering::Relaxed);
+            }
         } else if let Some(mode) = s.grid {
             let started = s.open_started.unwrap_or(now);
             if mode == GridMode::Fill {
@@ -417,6 +484,17 @@ fn presented(weak: &slint::Weak<AppWindow>, state: &Mutex<State>) {
 /// 목록을 `scroll_rows`행 내린다. 더 내릴 곳이 없으면 측정을 끝낸다.
 fn step(ui: &AppWindow, state: &Mutex<State>) {
     let Ok(mut s) = state.lock() else { return };
+    if s.preview.is_some() {
+        // #344: 화살표를 누르고 있는 것과 같이 프레임마다 커서를 한 행 내린다.
+        drop(s);
+        // 더 내릴 곳이 없으면 다시 그려지지 않으므로 여기서 끝낸다.
+        if !crate::with_first_view_value(|view| view.measure_arrow_down())
+            && let Ok(mut s) = state.lock()
+        {
+            s.finish();
+        }
+        return;
+    }
     if s.grid.is_some() {
         // #331: 그리드는 한 줄(칸 높이)씩이 아니라 `scroll_rows`행(칸 줄)씩 내린다.
         match ui_grid_step(ui, s.scroll_rows) {

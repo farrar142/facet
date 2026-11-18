@@ -72,6 +72,10 @@ const USAGE: &str = "\
                                  사진 1만 장 폴더(경로를 빼면 임시 폴더의 facet-test-folders/photos-10000, 없으면 만듦)를
                                  앱의 그리드로 열어 한 화면 채우기와 스크롤 프레임을 재어 표와 JSON(기본 target/measure-grid.json)으로
                                  낸다. 통과 못 하면 0이 아닌 코드로 끝난다(데스크톱 세션 필요, 릴리스 빌드).
+  measure-preview [경로] [--runs N] [--json 파일]
+                                 사진·텍스트 파일이 섞인 시험 폴더(경로를 빼면 임시 폴더의 facet-test-folders/preview-200, 없으면 만듦)를
+                                 앱으로 열어 미리보기 영역을 끈 채·켠 채 화살표 이동 프레임과 이미지·텍스트 표시 시간을 재어 표와
+                                 JSON(기본 target/measure-preview.json)으로 낸다. 통과 못 하면 0이 아닌 코드로 끝난다(데스크톱 세션 필요, 릴리스 빌드).
   measure-recycle <폴더> [--count N] [--runs N] [--json 파일]
                                  측정 도구를 릴리스 빌드하고 폴더 안에 파일 N개(기본 10000)를 만들어 facet 휴지통 삭제 작업과
                                  탐색기(IFileOperation)가 번갈아 휴지통에 보낸 시간을 표와 JSON(기본 target/measure-recycle.json)으로
@@ -105,6 +109,7 @@ fn main() -> ExitCode {
         Some("measure") => run_measure(&args[1..]),
         Some("measure-copy") => run_measure_copy(&args[1..]),
         Some("measure-grid") => run_measure_grid(&args[1..]),
+        Some("measure-preview") => run_measure_preview(&args[1..]),
         Some("measure-recycle") => run_measure_recycle(&args[1..]),
         Some("mft-fixture") => match mft_fixture::run(&workspace_root()) {
             Ok(()) => ExitCode::SUCCESS,
@@ -1031,6 +1036,92 @@ fn measure_grid_args(rest: &[String], root: &std::path::Path) -> Result<Vec<Stri
         }
     }
     let json = json.unwrap_or_else(|| root.join("target").join("measure-grid.json"));
+    let mut args = Vec::new();
+    if let Some(path) = path {
+        args.push(path.display().to_string());
+    }
+    args.extend(["--json".to_owned(), json.display().to_string()]);
+    args.extend(passthrough);
+    Ok(args)
+}
+
+/// 앱과 측정 도구를 릴리스 빌드하고 `facet-bench preview`를 돌린다(미리보기 화면 수치 측정, #344).
+fn run_measure_preview(rest: &[String]) -> ExitCode {
+    let root = workspace_root();
+    let build = step(
+        "release 빌드",
+        &[
+            "build",
+            "--release",
+            "--locked",
+            "-p",
+            "facet-app",
+            "-p",
+            "facet-bench",
+        ],
+    );
+    if run_steps("measure-preview", &[build]) != ExitCode::SUCCESS {
+        return ExitCode::FAILURE;
+    }
+    let args = match measure_preview_args(rest, &root) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!(
+                "{e}
+
+{USAGE}"
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let target_dir = env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .map(|p| if p.is_relative() { root.join(p) } else { p })
+        .unwrap_or_else(|| root.join("target"));
+    let release = target_dir.join("release");
+    let status = Command::new(release.join("facet-bench.exe"))
+        .arg("preview")
+        .args(&args)
+        .arg("--app")
+        .arg(release.join("facet.exe"))
+        .status();
+    match status {
+        Ok(s) if s.success() => ExitCode::SUCCESS,
+        Ok(_) => ExitCode::FAILURE,
+        Err(e) => {
+            eprintln!("xtask measure-preview: facet-bench를 실행하지 못함: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `measure-preview`의 인자: 선택 경로(상대 경로는 명령을 부른 폴더 기준)와 `--runs`·`--refresh-hz`. `--json`을 빼면
+/// `target/measure-preview.json`.
+fn measure_preview_args(rest: &[String], root: &std::path::Path) -> Result<Vec<String>, String> {
+    let cwd = env::current_dir().map_err(|e| e.to_string())?;
+    let absolute = |p: &str| {
+        let p = PathBuf::from(p);
+        if p.is_relative() { cwd.join(p) } else { p }
+    };
+    let mut path = None;
+    let mut json = None;
+    let mut passthrough = Vec::new();
+    let mut it = rest.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--json" | "--runs" | "--refresh-hz" => {
+                let v = it.next().ok_or(format!("{arg} 뒤에 값이 없습니다"))?;
+                if arg == "--json" {
+                    json = Some(absolute(v));
+                } else {
+                    passthrough.extend([arg.clone(), v.clone()]);
+                }
+            }
+            _ if path.is_none() && !arg.starts_with("--") => path = Some(absolute(arg)),
+            _ => return Err(format!("알 수 없는 인자: {arg}")),
+        }
+    }
+    let json = json.unwrap_or_else(|| root.join("target").join("measure-preview.json"));
     let mut args = Vec::new();
     if let Some(path) = path {
         args.push(path.display().to_string());
