@@ -211,7 +211,7 @@ fn main() -> Result<(), slint::PlatformError> {
             .set_notice(text::clipboard_error_text(&error).into());
     }
     // 썸네일(그리드 칸). 캐시와 디코더는 처음 쓸 때 열리므로 여기서는 기다리지 않는다. 측정 모드는 켜지 않는다(그리드 측정만 예외).
-    if (!measure::is_enabled() || measure::grid_enabled())
+    if (!measure::is_enabled() || measure::grid_enabled() || measure::preview_enabled())
         && let Some(dir) = facet_core::thumbnail_cache::default_cache_dir()
     {
         app.borrow_mut()
@@ -1860,6 +1860,8 @@ impl View {
                 // 변경 따라가기·읽기가 끝나 영역의 내용이 바뀌었다: 그 창의 영역만 다시 그린다.
                 if *window == self.window {
                     self.render_preview();
+                    // #344 측정: 영역 내용이 바뀐 프레임을 세게 한다.
+                    self.mark_loaded();
                 }
                 continue;
             }
@@ -1952,6 +1954,68 @@ impl View {
         self.open_context_menu(count(panel), 0, (100.0, 100.0));
         self.mark_loaded();
         self.context_menu.borrow().is_some()
+    }
+
+    /// #344 측정 모드: 미리보기 영역을 맞추고(켜야 하면 켠다) 시작한다. 시작했으면 `true`.
+    fn measure_preview_start(&self, mode: &measure::PreviewMode) -> bool {
+        let visible = |view: &Self| {
+            let app = view.app.borrow();
+            app.window(view.window)
+                .is_some_and(|w| w.preview_pane().visible)
+        };
+        let want = !matches!(mode, measure::PreviewMode::Arrow(false));
+        if visible(self) != want {
+            self.execute(CommandId::TogglePreview);
+        }
+        if let measure::PreviewMode::Show(name) = mode {
+            let index = {
+                let app = self.app.borrow();
+                let tab = app.active_tab();
+                (0..tab.len()).find(|&i| {
+                    tab.get(i)
+                        .is_some_and(|item| item.name.as_os_str() == name.as_str())
+                })
+            };
+            let Some(index) = index else { return false };
+            self.app.borrow_mut().active_tab_mut().select_only(index);
+            self.render();
+            self.show_row(index);
+        }
+        self.render_preview();
+        self.mark_loaded();
+        true
+    }
+
+    /// #344 측정 모드: 영역에 고른 항목의 그림·글자가 떴는가.
+    fn measure_preview_ready(&self) -> bool {
+        use facet_core::preview::{PreviewBody, PreviewContent};
+        matches!(
+            self.preview_shown.borrow().as_ref(),
+            Some(PreviewContent::Item {
+                body: PreviewBody::Text(_)
+                    | PreviewBody::Image {
+                        placeholder: false,
+                        ..
+                    },
+                ..
+            })
+        )
+    }
+
+    /// #344 측정 모드: 아래 화살표를 누른 것과 같이 커서를 한 행 내린다. 움직였으면 `true`.
+    fn measure_arrow_down(&self) -> bool {
+        let before = self.app.borrow().active_tab().cursor();
+        let index = self
+            .app
+            .borrow_mut()
+            .active_tab_mut()
+            .move_cursor_picking(CursorMove::Down, Pick::for_cursor_key(false, false));
+        self.render();
+        if let Some(index) = index {
+            self.show_row(index);
+        }
+        self.mark_loaded();
+        self.app.borrow().active_tab().cursor() != before
     }
 
     /// #331 측정 모드: 활성 탭을 그리드(보통 크기)로 바꾸고 칸의 썸네일을 요청한다. 바꿨으면 `true`.
