@@ -5055,7 +5055,12 @@ impl Model for TabRows {
             folder: item.is_folder,
             has_icon: icon.is_some(),
             icon: icon.unwrap_or_default(),
-            modified: details::modified_text(item).into(),
+            // 가상 폴더(내 PC 등)의 항목은 셸이 수정한 날짜를 주지 않는다: 빈 칸으로 둔다.
+            modified: if tab.location().virtual_folder().is_some() {
+                SharedString::new()
+            } else {
+                details::modified_text(item).into()
+            },
             kind: text::file_type_text(&details::file_type(item)).into(),
             size: details::size_text(item).into(),
             location: if tab.location().is_search_results() {
