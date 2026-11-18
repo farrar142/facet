@@ -333,6 +333,9 @@ pub fn missing_item_text(path: &std::path::Path) -> String {
     format!("항목이 더 이상 없어 결과에서 뺐습니다: {}", path.display())
 }
 
+/// 위치의 되는 일이 막은 명령을 실행했을 때 상태 줄 글자.
+pub const NOT_ALLOWED_HERE: &str = "이 위치에서는 할 수 없음";
+
 /// 주소창 › 펼침 메뉴의 「읽는 중」 줄(#306).
 pub const CRUMB_LOADING: &str = "읽는 중…";
 
