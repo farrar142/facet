@@ -1,7 +1,7 @@
 //! 공급자: 한 종류의 위치를 읽고 조작하는 방법(ADR-0004).
 //!
-//! 지금은 파일 시스템 공급자 하나뿐이다. 압축 파일(S13)과 셸 공급자(S12)가 같은
-//! 인터페이스를 구현한다.
+//! 파일 시스템 공급자, 검색 결과 공급자, 셸 공급자(가상 폴더, S12)가 있다. 압축 파일(S13)도 같은 인터페이스를
+//! 구현한다.
 
 use std::ffi::OsStr;
 
@@ -176,5 +176,6 @@ pub fn provider_for(location: &Location) -> &'static dyn Provider {
     match location {
         Location::FileSystem(_) => &FileSystemProvider,
         Location::SearchResults(_) => &crate::search_results::SearchResultsProvider,
+        Location::Shell(_) => &crate::shell_provider::ShellProvider,
     }
 }

@@ -210,8 +210,8 @@ fn main() -> Result<(), slint::PlatformError> {
         view.ui
             .set_notice(text::clipboard_error_text(&error).into());
     }
-    // 썸네일(그리드 칸). 캐시와 디코더는 처음 쓸 때 열리므로 여기서는 기다리지 않는다. 측정 모드는 켜지 않는다.
-    if !measure::is_enabled()
+    // 썸네일(그리드 칸). 캐시와 디코더는 처음 쓸 때 열리므로 여기서는 기다리지 않는다. 측정 모드는 켜지 않는다(그리드 측정만 예외).
+    if (!measure::is_enabled() || measure::grid_enabled())
         && let Some(dir) = facet_core::thumbnail_cache::default_cache_dir()
     {
         app.borrow_mut()
@@ -561,6 +561,13 @@ fn with_first_view(f: impl FnOnce(&View)) {
     if let Some(window) = window {
         with_view(window, f);
     }
+}
+
+/// #331: [`with_first_view`]와 같되 값을 돌려준다(창이 없으면 `false`).
+fn with_first_view_value(f: impl FnOnce(&View) -> bool) -> bool {
+    let mut result = false;
+    with_first_view(|view| result = f(view));
+    result
 }
 
 /// 제목 줄의 닫기 단추로 창 `window`를 닫는다: 코어가 그 창의 탭들을 닫은 탭 목록에 넣는다.
@@ -1833,6 +1840,10 @@ impl View {
                 // 만든 칸만 그림을 두고 그 행만 다시 그린다. 실패한 칸은 종류별 아이콘으로 남는다(오류 창 없음).
                 if let Ok(thumbnail) = result {
                     thumbs::store(path, *side, thumbnail);
+                    if measure::is_enabled() {
+                        // 한 화면 채우기 측정: 그림이 들어왔으니 프레임을 다시 센다.
+                        self.mark_loaded();
+                    }
                     for panel in &self.panels {
                         panel.rows.refresh_path(path);
                     }
@@ -1935,6 +1946,39 @@ impl View {
         self.open_context_menu(count(panel), 0, (100.0, 100.0));
         self.mark_loaded();
         self.context_menu.borrow().is_some()
+    }
+
+    /// #331 측정 모드: 활성 탭을 그리드(보통 크기)로 바꾸고 칸의 썸네일을 요청한다. 바꿨으면 `true`.
+    fn measure_grid_start(&self) -> bool {
+        self.execute(CommandId::GridView(facet_core::view::GridSize::Medium));
+        self.request_thumbnails();
+        self.mark_loaded();
+        self.app.borrow().active_tab().view().mode == facet_core::view::ViewMode::Grid
+    }
+
+    /// #331 측정 모드: 보이는 칸이 모두 썸네일로 찼는가(폴더 칸은 아이콘이라 세지 않는다).
+    fn measure_grid_filled(&self) -> bool {
+        let panel = self.active_panel();
+        let list = PanelUi::of(&self.ui, panel);
+        let cell_height = list.grid_cell_height();
+        if cell_height <= 0.0 {
+            return false;
+        }
+        let columns = self.grid_columns(panel);
+        let first_row = (-list.grid_content_y() / cell_height).max(0.0) as usize;
+        let visible_rows = (list.grid_view_height() / cell_height).ceil().max(1.0) as usize;
+        let app = self.app.borrow();
+        let tab = app.active_tab();
+        let side = tab.view().grid_size.thumbnail_side();
+        let range = (first_row * columns).min(tab.len())
+            ..((first_row + visible_rows) * columns).min(tab.len());
+        !range.is_empty()
+            && range.into_iter().all(|row| {
+                tab.get(row).is_some_and(|item| item.is_folder)
+                    || tab
+                        .item_path(row)
+                        .is_some_and(|path| thumbs::get(&path, side).is_some())
+            })
     }
 
     /// 읽기 결과(목록이나 오류)가 창에 들어갔음을 측정 모드에 알린다.
@@ -2068,6 +2112,11 @@ impl View {
                 address_problem_value: address_problem_value.into(),
                 address_problem_detail: address_problem_detail.into(),
                 reading: tab.is_reading(now),
+                loading_text: tab
+                    .loading()
+                    .map(text::loading_text)
+                    .unwrap_or_default()
+                    .into(),
                 list_problem,
                 list_problem_location: list_problem_location.into(),
                 list_problem_detail: list_problem_detail.into(),
@@ -5262,9 +5311,14 @@ impl Model for TabRows {
             folder: item.is_folder,
             has_icon: icon.is_some(),
             icon: icon.unwrap_or_default(),
+            // 가상 폴더(내 PC 등)의 항목은 셸이 수정한 날짜를 주지 않는다: 빈 칸으로 둔다.
+            modified: if tab.location().virtual_folder().is_some() {
+                SharedString::new()
+            } else {
+                details::modified_text(item).into()
+            },
             has_thumb: thumb.is_some(),
             thumb: thumb.unwrap_or_default(),
-            modified: details::modified_text(item).into(),
             kind: text::file_type_text(&details::file_type(item)).into(),
             size: details::size_text(item).into(),
             location: if tab.location().is_search_results() {

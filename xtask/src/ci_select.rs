@@ -4,7 +4,7 @@
 //! 바뀐 파일은 부르는 쪽이 git으로 모아 넘긴다(기준과의 merge-base 대비, 작업 공간 루트 기준 `/` 구분 경로).
 
 /// 벤치마크 이름. `cargo xtask bench`·`ci`가 이 차례로 돌린다(`facet-bench`의 하위 명령 이름과 같다).
-pub const BENCHES: [&str; 18] = [
+pub const BENCHES: [&str; 19] = [
     "list",
     "index",
     "mft",
@@ -23,6 +23,7 @@ pub const BENCHES: [&str; 18] = [
     "thumbnail-cache",
     "text-preview",
     "shell-helper",
+    "shell-list",
 ];
 
 /// 바뀌면 벤치마크를 모두 돌리는 공통 파일. `/`로 끝나면 그 폴더 아래 전부다.
@@ -59,7 +60,7 @@ const TABLE: &[(&str, &[&str])] = &[
     // facet-core: 목록 읽기·탭·창.
     (
         "crates/facet-core/src/details.rs",
-        &["list", "menu", "batch-rename", "filter"],
+        &["list", "menu", "batch-rename", "filter", "shell-list"],
     ),
     (
         "crates/facet-core/src/file_system.rs",
@@ -67,16 +68,25 @@ const TABLE: &[(&str, &[&str])] = &[
     ),
     (
         "crates/facet-core/src/provider.rs",
-        &["list", "menu", "batch-rename", "filter"],
+        &["list", "menu", "batch-rename", "filter", "shell-list"],
     ),
     (
         "crates/facet-core/src/location.rs",
-        &["list", "session", "menu", "batch-rename", "filter"],
+        &[
+            "list",
+            "session",
+            "menu",
+            "batch-rename",
+            "filter",
+            "shell-list",
+        ],
     ),
     (
         "crates/facet-core/src/tab.rs",
-        &["menu", "batch-rename", "filter"],
+        &["menu", "batch-rename", "filter", "shell-list"],
     ),
+    // facet-core: 셸 공급자(가짜 셸 폴더로 목록 전달을 잰다).
+    ("crates/facet-core/src/shell_provider.rs", &["shell-list"]),
     (
         "crates/facet-core/src/selection.rs",
         &["menu", "batch-rename", "filter"],
@@ -164,6 +174,8 @@ const TABLE: &[(&str, &[&str])] = &[
     ("crates/facet-win/src/shell_copy.rs", &[]),
     ("crates/facet-win/src/windows_shell_copy.rs", &[]),
     ("crates/facet-win/src/shell_thread.rs", &[]),
+    ("crates/facet-win/src/shell_folder.rs", &[]),
+    ("crates/facet-win/src/windows_shell_folder.rs", &[]),
     ("crates/facet-win/src/windows_shell_thread.rs", &[]),
     ("crates/facet-win/src/single_instance.rs", &[]),
     ("crates/facet-win/src/windows_instance.rs", &[]),
@@ -423,7 +435,7 @@ mod tests {
     fn a_tab_change_runs_only_the_benches_that_use_tabs() {
         assert_eq!(
             picked(&["crates/facet-core/src/tab.rs"]),
-            ["menu", "batch-rename", "filter"]
+            ["menu", "batch-rename", "filter", "shell-list"]
         );
     }
 

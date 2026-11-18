@@ -16,14 +16,12 @@ fn ms(n: u64) -> Duration {
 }
 
 #[test]
-#[ignore = "#331"]
 fn 사진_1만_장과_한_화면_채우기_상한_100ms다() {
     assert_eq!(GRID_IMAGE_COUNT, 10_000);
     assert_eq!(GRID_FILL_LIMIT, ms(100));
 }
 
 #[test]
-#[ignore = "#331"]
 fn 채우기_중앙값과_프레임_최악값이_모두_맞아야_통과한다() {
     // 60Hz: 한 프레임 16.7ms, 두 배 33.3ms.
     let ok = judge(&[ms(40), ms(60), ms(500)], &[ms(5), ms(16), ms(30)], 60.0);
@@ -48,14 +46,12 @@ fn 채우기_중앙값과_프레임_최악값이_모두_맞아야_통과한다()
 }
 
 #[test]
-#[ignore = "#331"]
 fn 잰_값이_없으면_실패한다() {
     assert!(!judge(&[], &[ms(5)], 60.0).pass(), "채우기 없음");
     assert!(!judge(&[ms(40)], &[], 60.0).pass(), "프레임 없음");
 }
 
 #[test]
-#[ignore = "#331"]
 fn 앱_보고의_한_화면_채우기_줄을_그대로_읽는다() {
     assert!(ENV_GRID.starts_with("FACET_MEASURE_"));
     for other in [ENV_OPEN, ENV_RENAME, ENV_MENU, ENV_SEARCH, ENV_INSTANT] {
