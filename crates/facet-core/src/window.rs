@@ -707,7 +707,7 @@ pub enum Execution {
     /// 검색 결과에서 열려던 항목(열기·새 탭에서 열기·「폴더에서 보기」)이 디스크에 없다: 열지 않고 결과에서 뺐다(폴더면 그
     /// 아래 결과까지). 화면은 그 까닭([`Tab::missing_item`]의 경로)을 상태 줄에 보인다.
     ItemMissing,
-    /// #348: 위치의 되는 일이 막아 아무것도 하지 않았다.
+    /// 위치의 되는 일이 막아 아무것도 하지 않았다.
     NotAllowedHere,
     /// #354: 휴지통 비우기 전에 화면이 확인을 받는다.
     ConfirmEmptyRecycleBin,
@@ -2475,6 +2475,9 @@ impl App {
         if !self.has_windows() {
             return false;
         }
+        if !command.is_allowed_by(&self.active_tab().capabilities()) {
+            return false;
+        }
         match command {
             CommandId::ReopenClosedTab => !self.closed.is_empty(),
             CommandId::Undo => self.history.undo_target().is_some(),
@@ -2521,7 +2524,16 @@ impl App {
 
     /// 오른쪽 메뉴를 만든다([`menu::build`]). 순수 구성이라 선택이 많아도 시간이 같다.
     pub fn context_menu(&self, kind: MenuKind) -> Menu {
-        menu::build(&self.menu_context(kind))
+        let capabilities = self.active_tab().capabilities();
+        let mut menu = menu::build(&self.menu_context(kind));
+        for entry in &mut menu.entries {
+            if let menu::MenuEntry::Command(command) = entry
+                && !command.id.is_allowed_by(&capabilities)
+            {
+                command.enabled = false;
+            }
+        }
+        menu
     }
 
     /// 활성 창의 `panel`번 패널에서 오른쪽 클릭했다: 그 패널이 활성 패널이 되고, 항목 `index`를 눌렀으면 선택을
@@ -2567,6 +2579,9 @@ impl App {
     /// 열기는 커서 항목이 폴더면 그 안으로 가고, 파일이면 셸 일꾼 스레드에서 기본 프로그램으로 연다. 여는 결과는
     /// [`Update::Opened`]로 오고, 실패하면 탭의 [`Tab::open_error`]에 까닭이 남는다. 막지 않는다.
     pub fn execute(&mut self, command: CommandId) -> Execution {
+        if self.has_windows() && !command.is_allowed_by(&self.active_tab().capabilities()) {
+            return Execution::NotAllowedHere;
+        }
         if !self.can_execute(command) {
             return Execution::Disabled;
         }
