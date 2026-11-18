@@ -13,7 +13,7 @@
 //!   취소). 없는 항목은 이미 지워진 것으로 보고 묻지 않는다.
 //! - 휴지통에 보낸 항목은 작업 기록에 [`Step::Recycled`](원래 경로·휴지통 항목·보내기 전 모습)로 적는다.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -71,6 +71,7 @@ impl RecycleJob {
             engine: &mut engine,
             journal: self.journal,
             remembered: None,
+            released: HashSet::new(),
         }
         .run(self.sources);
         engine.finish()
@@ -83,6 +84,8 @@ struct Recycler<'e, 'a> {
     journal: Option<JournalSink>,
     /// 「나머지에도 적용」으로 받은 휴지통에 들어가지 않는 항목의 답.
     remembered: Option<NotRecyclableAnswer>,
+    /// 도우미의 미리보기를 내리고 다시 보낸 항목(#342, 한 번만).
+    released: HashSet<PathBuf>,
 }
 
 impl Recycler<'_, '_> {
@@ -136,6 +139,16 @@ impl Recycler<'_, '_> {
                     {
                         settled = true;
                         self.engine.reporter.items_done += 1;
+                    }
+                    // 도우미의 미리보기 처리기가 잡고 있다: 내리고 한 번 다시 보낸다(#342).
+                    Some(RecycleOutcome::Failed(error))
+                        if error.kind() == FileOpErrorKind::Locked
+                            && !self.released.contains(&path)
+                            && crate::shell_helper::release_held_preview(&path) =>
+                    {
+                        settled = true;
+                        self.released.insert(path.clone());
+                        again.push(path);
                     }
                     Some(RecycleOutcome::Failed(error)) => {
                         settled = true;

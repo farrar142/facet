@@ -191,7 +191,8 @@ impl Mover<'_> {
 
     /// 없는 이름 `target`으로 옮긴다: 이름 바꾸기, 다른 볼륨이면 복사 뒤 원본 삭제.
     fn rename_or_copy(&mut self, source: &Path, target: &Path) -> Outcome {
-        match file_ops::rename(source, target) {
+        // 도우미의 미리보기 처리기가 잡고 있으면 내리고 한 번 다시 시도한다(#342).
+        match crate::shell_helper::retry_held(source, || file_ops::rename(source, target)) {
             Ok(()) => {
                 self.copier.summary.items_renamed += 1;
                 self.copier.note_item(source, target, Replaced::Nothing);

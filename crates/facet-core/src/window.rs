@@ -89,7 +89,7 @@ use crate::menu::{self, Menu, MenuContext, MenuKind};
 use crate::placement::Placement;
 use crate::preview::{
     PREVIEW_WIDTH_MAX, PREVIEW_WIDTH_MIN, PreviewBody, PreviewContent, PreviewPane, PreviewRequest,
-    Previewer, load_preview,
+    Previewer, ShellPreview, load_preview,
 };
 use crate::query_syntax::{self, ParseError, Parsed, Today};
 use crate::search_results::PathChange;
@@ -431,6 +431,8 @@ enum Message {
     PreviewDue(WindowId),
     /// #339: 그 창의 미리보기 요청기에 결과가 왔다.
     PreviewReady(WindowId),
+    /// #342: 셸 확장 도우미 관리에 사건이 왔다.
+    ShellHelper,
     /// #341: 썸네일 캐시에서 꺼낸 흐린 자리 그림.
     PreviewPlaceholder {
         window: WindowId,
@@ -1029,11 +1031,18 @@ pub struct App {
     preview_notes: Vec<WindowId>,
     /// #341: 창마다 미리보기 영역의 긴 변(물리 픽셀). 없으면 기본값.
     preview_sides: HashMap<WindowId, u32>,
+    /// #342: 창마다 미리보기 영역의 자리(처리기 창을 붙일 곳). 화면이 알려 준다.
+    preview_hosts: HashMap<WindowId, crate::preview::PreviewHost>,
+    /// #342: 셸 미리보기 처리기 조회(점 없는 소문자 확장자). 요청기 일꾼이 함께 본다.
+    preview_lookup: Arc<std::sync::RwLock<HandlerLookup>>,
     /// 썸네일([`App::enable_thumbnails`]). 켜지 않았으면 `None`.
     thumbnails: Option<Thumbs>,
     outbox: Outbox,
     receiver: Receiver<Message>,
 }
+
+/// #342: 셸 미리보기 처리기 조회.
+type HandlerLookup = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// #339: 창 하나의 미리보기 영역 상태.
 struct PreviewState {
@@ -1043,6 +1052,21 @@ struct PreviewState {
     key: Option<(PathBuf, crate::Item)>,
     /// 미리 보던 항목이 지워졌다: 사용자가 다른 항목을 고를 때까지 「없음」 표시를 남긴다.
     gone: bool,
+    /// #342: 지금 항목을 도우미에 맡긴 요청(답을 기다림). 다른 요청의 답은 버린다.
+    shell: Option<crate::shell_helper::RequestId>,
+    /// #342: 도우미 종류인데 영역 자리를 몰라 아직 맡기지 않았다(자리를 알면 맡긴다).
+    shell_wanted: bool,
+    /// #342: 도우미에 미리보기를 맡겼다(다른 항목으로 가거나 영역을 끄면 내린다).
+    shell_active: bool,
+}
+
+impl PreviewState {
+    /// #342: 도우미에 맡긴 미리보기를 잊는다. 내려야 하면 `true`.
+    fn take_shell(&mut self) -> bool {
+        self.shell = None;
+        self.shell_wanted = false;
+        std::mem::take(&mut self.shell_active)
+    }
 }
 
 /// #339: 미리보기 본문의 긴 변(물리 픽셀)의 기본값.
@@ -1261,6 +1285,10 @@ impl App {
             previews: HashMap::new(),
             preview_notes: Vec::new(),
             preview_sides: HashMap::new(),
+            preview_hosts: HashMap::new(),
+            preview_lookup: Arc::new(std::sync::RwLock::new(Arc::new(
+                facet_win::preview::has_preview_handler,
+            ))),
             thumbnails: None,
             outbox: Outbox {
                 sender,
@@ -1372,8 +1400,13 @@ impl App {
     /// `w`번째 창을 목록에서 빼고 활성 창 번호를 맞춘다.
     fn remove_window(&mut self, w: usize) -> Window {
         let window = self.windows.remove(w);
-        self.previews.remove(&window.id);
+        if let Some(mut state) = self.previews.remove(&window.id)
+            && state.take_shell()
+        {
+            self.unload_shell_preview();
+        }
         self.preview_sides.remove(&window.id);
+        self.preview_hosts.remove(&window.id);
         if self.active > w || (self.active == w && self.active > 0) {
             self.active -= 1;
         }
@@ -2043,7 +2076,14 @@ impl App {
     /// 셸 확장 도우미 관리를 켠다(#321). 곧바로 돌아오고 도우미는 띄우지 않는다(첫 요청 때 뜬다). 이미 켰으면 새
     /// 설정으로 바꾼다(앞선 관리는 버려 그 도우미가 끝난다).
     pub fn enable_shell_helper(&mut self, options: HelperOptions) {
-        self.shell_helper = Some(ShellHelper::start(options));
+        let helper = ShellHelper::start(options);
+        let outbox = self.outbox.clone();
+        helper.set_waker(move || outbox.send(Message::ShellHelper));
+        // 앞선 관리의 미리보기는 그 도우미와 함께 사라졌다.
+        for state in self.previews.values_mut() {
+            state.take_shell();
+        }
+        self.shell_helper = Some(helper);
     }
 
     /// 켠 셸 확장 도우미 관리. 켜지 않았으면 `None`.
@@ -2099,17 +2139,30 @@ impl App {
 
     fn preview_state(&mut self, window: WindowId) -> &mut PreviewState {
         let outbox = self.outbox.clone();
+        let lookup = Arc::clone(&self.preview_lookup);
         self.previews.entry(window).or_insert_with(|| {
-            let previewer =
-                Previewer::new(|request, cancel| load_preview(request, cancel, &|_| false));
+            let previewer = Previewer::new(move |request, cancel| {
+                let lookup = Arc::clone(&lookup.read().unwrap_or_else(|e| e.into_inner()));
+                load_preview(request, cancel, &|extension| lookup(extension))
+            });
             previewer.set_waker(move || outbox.send(Message::PreviewReady(window)));
             PreviewState {
                 previewer,
                 content: None,
                 key: None,
                 gone: false,
+                shell: None,
+                shell_wanted: false,
+                shell_active: false,
             }
         })
+    }
+
+    /// #342: 도우미에 맡긴 미리보기를 내린다(기다리지 않음).
+    fn unload_shell_preview(&self) {
+        if let Some(helper) = &self.shell_helper {
+            helper.unload_preview();
+        }
     }
 
     fn sync_preview_window(&mut self, id: WindowId) {
@@ -2117,7 +2170,11 @@ impl App {
             return;
         };
         if !window.preview.visible {
-            self.previews.remove(&id);
+            if let Some(mut state) = self.previews.remove(&id)
+                && state.take_shell()
+            {
+                self.unload_shell_preview();
+            }
             return;
         }
         let tab = window.active_panel().active_tab();
@@ -2158,6 +2215,9 @@ impl App {
                 state.previewer.request(None, now);
                 state.key = None;
                 state.content = Some(PreviewContent::Nothing);
+                if state.take_shell() {
+                    self.unload_shell_preview();
+                }
             }
             (1, Some((path, item))) => {
                 state.gone = false;
@@ -2165,6 +2225,7 @@ impl App {
                     return;
                 }
                 state.key = Some((path.clone(), item.clone()));
+                let unload = state.take_shell();
                 let (path_for_key, item_for_key) = (path.clone(), item.clone());
                 state.content = Some(PreviewContent::Item {
                     path: path.clone(),
@@ -2180,6 +2241,9 @@ impl App {
                     }),
                     now,
                 );
+                if unload {
+                    self.unload_shell_preview();
+                }
                 self.schedule_preview(id);
                 if let Some(shared) = placeholder_source
                     && crate::thumbnail::is_decodable(&item_for_key.name)
@@ -2214,6 +2278,9 @@ impl App {
                     count,
                     total_size: total,
                 });
+                if state.take_shell() {
+                    self.unload_shell_preview();
+                }
             }
         }
     }
@@ -2276,11 +2343,15 @@ impl App {
                     };
                     state.previewer.request(None, now);
                     state.gone = true;
+                    let unload = state.take_shell();
                     state.content = Some(PreviewContent::Item {
                         path,
                         item,
                         body: PreviewBody::Unavailable(crate::preview::PreviewProblem::Missing),
                     });
+                    if unload {
+                        self.unload_shell_preview();
+                    }
                 }
                 Some(item) => {
                     let body = match state.content.take() {
@@ -2319,13 +2390,66 @@ impl App {
         }
         for done in state.previewer.poll() {
             if state.key.as_ref() == Some(&(done.request.path.clone(), done.request.item.clone())) {
+                let mut body = done.body;
+                if body == PreviewBody::Shell(ShellPreview::Loading) {
+                    // 도우미 관리가 꺼져 있으면 처리기를 싣지 않고 정보만 보인다.
+                    match &self.shell_helper {
+                        None => body = PreviewBody::Info,
+                        Some(helper) => {
+                            state.shell = None;
+                            state.shell_wanted = true;
+                            if let Some(host) = self.preview_hosts.get(&window) {
+                                state.shell =
+                                    Some(helper.preview(done.request.path.clone(), *host));
+                                state.shell_wanted = false;
+                                state.shell_active = true;
+                            }
+                        }
+                    }
+                }
                 state.content = Some(PreviewContent::Item {
                     path: done.request.path,
                     item: done.request.item,
-                    body: done.body,
+                    body,
                 });
             }
         }
+    }
+
+    /// #342: 도우미의 답을 그 미리보기에 넣는다. 지금 항목에 맡긴 요청의 답만 넣고 앞선 항목의 늦은 답은 버린다. 바뀐
+    /// 창 하나를 돌려주고 나머지는 다음 [`App::poll`]이 알린다.
+    fn deliver_shell_replies(&mut self) -> Option<WindowId> {
+        use crate::shell_helper::{HelperEvent, Reply};
+        let events = self
+            .shell_helper
+            .as_ref()
+            .map(|helper| helper.poll())
+            .unwrap_or_default();
+        let mut changed = Vec::new();
+        for HelperEvent::Reply { id, result } in events {
+            let Some((&window, state)) = self
+                .previews
+                .iter_mut()
+                .find(|(_, state)| state.shell == Some(id))
+            else {
+                continue;
+            };
+            state.shell = None;
+            let body = match result {
+                Ok(Reply::PreviewShowing) => PreviewBody::Shell(ShellPreview::Showing),
+                Ok(Reply::NoPreviewHandler) => PreviewBody::Info,
+                Ok(_) | Err(_) => {
+                    PreviewBody::Unavailable(crate::preview::PreviewProblem::ShellFailed)
+                }
+            };
+            if let Some(PreviewContent::Item { body: shown, .. }) = &mut state.content {
+                *shown = body;
+                changed.push(window);
+            }
+        }
+        let first = changed.first().copied();
+        self.preview_notes.extend(changed.into_iter().skip(1));
+        first
     }
 
     /// #341: 그 창 미리보기 영역의 긴 변(물리 픽셀).
@@ -2373,21 +2497,48 @@ impl App {
             .unwrap_or(PREVIEW_IMAGE_SIDE)
     }
 
-    /// #342: 그 창 미리보기 영역의 자리(처리기 창을 붙일 곳).
+    /// #342: 그 창 미리보기 영역의 자리(처리기 창을 붙일 곳, 화면 물리 픽셀)를 알린다. 화면이 영역을 놓거나 옮길
+    /// 때마다 부른다. 바뀌었고 도우미에 미리보기를 맡겼으면 도우미에 새 자리를 알리고, 자리를 몰라 기다리던 도우미
+    /// 종류 항목은 이제 맡긴다. `None`은 자리를 모름(영역이 없음).
     pub fn set_preview_host(
         &mut self,
-        _window: WindowId,
-        _host: Option<crate::preview::PreviewHost>,
+        window: WindowId,
+        host: Option<crate::preview::PreviewHost>,
     ) {
-        todo!("#342")
+        let Some(host) = host else {
+            self.preview_hosts.remove(&window);
+            return;
+        };
+        if self.preview_hosts.insert(window, host) == Some(host) {
+            return;
+        }
+        let Some(helper) = &self.shell_helper else {
+            return;
+        };
+        let Some(state) = self.previews.get_mut(&window) else {
+            return;
+        };
+        if state.shell_wanted {
+            if let Some((path, _)) = &state.key {
+                state.shell = Some(helper.preview(path.clone(), host));
+                state.shell_active = true;
+            }
+            state.shell_wanted = false;
+        } else if state.shell_active {
+            helper.move_preview(host);
+        }
     }
 
-    /// #342: 셸 미리보기 처리기 조회를 바꾼다(점 없는 소문자 확장자).
+    /// #342: 셸 미리보기 처리기 조회를 바꾼다(점 없는 소문자 확장자를 받아 처리기가 있으면 참). 기본은 레지스트리만
+    /// 읽는 [`facet_win::preview::has_preview_handler`]다. 다음 요청부터 쓴다.
     pub fn set_preview_handler_lookup(
         &mut self,
-        _lookup: impl Fn(&str) -> bool + Send + Sync + 'static,
+        lookup: impl Fn(&str) -> bool + Send + Sync + 'static,
     ) {
-        todo!("#342")
+        *self
+            .preview_lookup
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Arc::new(lookup);
     }
 
     /// #322: 오른쪽 메뉴의 셸 항목 자리를 연다(도우미에 셸 메뉴를 요청한다).
@@ -3006,6 +3157,12 @@ impl App {
             }
             Message::PreviewReady(window) => {
                 self.deliver_preview(window, false);
+                (self.window_tab_id(window), Update::Preview(window))
+            }
+            Message::ShellHelper => {
+                let window = self
+                    .deliver_shell_replies()
+                    .unwrap_or_else(|| self.active_window_id());
                 (self.window_tab_id(window), Update::Preview(window))
             }
             Message::PreviewPlaceholder {
