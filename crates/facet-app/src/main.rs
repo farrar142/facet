@@ -1257,7 +1257,7 @@ fn job_row(entry: &JobEntry) -> JobRow {
             JobKind::Recycle => JobType::Recycle,
             JobKind::Delete => JobType::Delete,
             JobKind::BatchRename => JobType::BatchRename,
-            JobKind::Restore => todo!("#353"),
+            JobKind::Restore => JobType::Restore,
         },
         target: entry.target.display().to_string().into(),
         status: match entry.state {

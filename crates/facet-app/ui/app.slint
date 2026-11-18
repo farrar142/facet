@@ -142,7 +142,7 @@ export enum JobStatus { queued, running, paused, awaiting-answer, finished, fail
 export enum JobAsk { none, conflict, error, not-recyclable }
 
 // 작업의 종류(코어의 `JobKind`): 복사, 이동, 실행취소, 다시 실행, 삭제(휴지통), 영구 삭제.
-export enum JobType { copy, move, undo, redo, recycle, delete, batch-rename }
+export enum JobType { copy, move, undo, redo, recycle, delete, batch-rename, restore }
 
 // 이름 충돌 대화의 덮어쓰기 경고: 덮어쓸 수 없음(파일과 폴더), 덮어쓴 파일이 휴지통으로 감(되살릴 수 있음), 되살릴 수
 // 없음(대상 위치에 휴지통이 없음).
@@ -865,6 +865,7 @@ component JobView inherits Rectangle {
                     : root.job.kind == JobType.recycle ? @tr("삭제: {}", root.job.target)
                     : root.job.kind == JobType.delete ? @tr("영구 삭제: {}", root.job.target)
                     : root.job.kind == JobType.batch-rename ? @tr("일괄 이름 바꾸기: {}", root.job.target)
+                    : root.job.kind == JobType.restore ? @tr("복원: {}", root.job.target)
                     : root.job.kind == JobType.move ? @tr("이동 → {}", root.job.target) : @tr("복사 → {}", root.job.target);
                 horizontal-stretch: 1;
                 overflow: elide;
