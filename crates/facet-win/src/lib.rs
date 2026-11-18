@@ -30,6 +30,8 @@
 //! - [`pipe_client`]: 이름 있는 파이프의 클라이언트 쪽(겹친 입출력). 읽는 쪽·쓰는 쪽을 다른 스레드에서 동시에 쓰고, 읽기에
 //!   마감 시각을 두고, 닫개로 기다리던 읽기를 깨운다. 코어의 인덱서 서비스 연결이 쓴다. Windows가 아니면 붙지 못한다.
 //! - [`process`]: 다른 프로세스가 끝나기를 기다린다(셸 확장 도우미의 부모 감시). Windows가 아니면 「지원하지 않음」이다.
+//! - [`shell_thread`]: 셸 호출용 전용 COM STA 스레드([`shell_thread::ShellThread`], 처음 요청 때 띄움, 시간 제한을 넘으면
+//!   그 스레드를 버리고 다음 요청은 새 스레드에서, 패닉은 그 요청만 실패). Windows가 아니면 COM 없는 보통 스레드다.
 //! - [`shell_copy`]: **측정 전용** 셸 복사(`IFileOperation`, 전용 스레드의 COM, 대화 없음). 탐색기 비교 측정만 부르고
 //!   앱은 부르지 않는다. Windows가 아니면 「지원하지 않음」이다.
 
@@ -72,6 +74,8 @@ mod windows_recycle;
 mod windows_screen;
 #[cfg(windows)]
 mod windows_shell_copy;
+#[cfg(windows)]
+mod windows_shell_thread;
 #[cfg(windows)]
 mod windows_watch;
 

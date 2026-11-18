@@ -153,6 +153,8 @@ const TABLE: &[(&str, &[&str])] = &[
     ("crates/facet-win/src/windows_recycle.rs", &[]),
     ("crates/facet-win/src/shell_copy.rs", &[]),
     ("crates/facet-win/src/windows_shell_copy.rs", &[]),
+    ("crates/facet-win/src/shell_thread.rs", &[]),
+    ("crates/facet-win/src/windows_shell_thread.rs", &[]),
     ("crates/facet-win/src/single_instance.rs", &[]),
     ("crates/facet-win/src/windows_instance.rs", &[]),
     (
