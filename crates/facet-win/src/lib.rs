@@ -8,6 +8,8 @@
 //! - [`DirectoryWatcher`]: 폴더 하나의 변경을 감시 스레드에서 알린다(`ReadDirectoryChangesW`).
 //! - [`top_level_window_at`]: 화면 점 아래 보이는 최상위 창(`WindowFromPoint`). 탭을 창 사이로 끌 때 쓴다.
 //!   Windows에서만 있다.
+//! - [`reclaim_focus_from_child`]: 창의 자식 창(다른 프로세스가 붙인 미리보기 처리기 창 등)이 키보드 포커스를 가져갔으면
+//!   그 창으로 되찾는다. Windows에서만 있다.
 //! - [`monitors`]: 붙어 있는 모니터마다 작업 영역과 주 모니터 여부(`EnumDisplayMonitors`). 세션의 창 자리를 보이는
 //!   곳으로 고칠 때 쓴다. Windows가 아니면 빈 목록이다.
 //! - [`drive_letters`]: 지금 있는 드라이브 문자들(`GetLogicalDrives`, 문자 순서). 주소창 맨 앞 › 목록이 쓴다.
@@ -62,6 +64,7 @@ pub mod file_ops;
 pub mod icon;
 pub mod pipe_client;
 pub mod preview;
+pub mod preview_handler;
 pub mod process;
 pub mod recycle;
 pub mod shell_copy;
@@ -91,6 +94,8 @@ mod windows_instance;
 #[cfg(windows)]
 mod windows_pipe_client;
 #[cfg(windows)]
+mod windows_preview_handler;
+#[cfg(windows)]
 mod windows_recycle;
 #[cfg(windows)]
 mod windows_screen;
@@ -112,7 +117,7 @@ pub use watch::{DirectoryChange, DirectoryWatcher};
 #[cfg(windows)]
 pub use windows_impl::compare_names_like_explorer;
 #[cfg(windows)]
-pub use windows_screen::top_level_window_at;
+pub use windows_screen::{reclaim_focus_from_child, top_level_window_at};
 
 /// 모니터 하나: 작업 영역(작업 표시줄을 뺀 영역)과 주 모니터 여부([`monitors`]).
 ///

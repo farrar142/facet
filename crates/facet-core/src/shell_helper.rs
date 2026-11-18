@@ -49,6 +49,8 @@
 //!   [`Reply::NoPreviewHandler`]이고, 쓴 때부터 [`SHELL_PREVIEW_TIMEOUT`](3초) 안에 답이 없으면 [`RequestError::TimedOut`]으로
 //!   끝나며 그 도우미를 끝낸다(붙잡힌 처리기 뒤에 다음 요청이 줄 서지 않게, 다음 요청 때 새로 띄운다. 죽음으로 세지 않음).
 //! - [`ShellHelper::move_preview`]·[`ShellHelper::unload_preview`]는 자리 바꾸기·내리기다.
+//! - 미리보기를 그리던 도우미가 끝나면(죽음, 멈춰서 끝냄) 붙인 처리기 창도 사라진다: 깨우기를 부르고
+//!   [`Inner::take_preview_lost`]가 한 번 참을 돌려준다(#343). 미리보기를 그리는 도우미는 쉬어도 끝내지 않는다.
 //! - 잡힌 파일: 이름바꾸기·삭제·이동 엔진이 공유 위반으로 실패하면 [`release_held_preview`]로 그 파일(또는 그 아래)을
 //!   미리 보고 있는 도우미의 미리보기를 내리고(답을 기다림) 한 번 다시 시도한다([`retry_held`]). 그래서 이 프로세스의
 //!   도우미 관리를 모두 약한 참조로 기억해 둔다.
@@ -219,6 +221,10 @@ struct State {
     waiters: HashMap<u64, Sender<Result<Reply, RequestError>>>,
     /// 마지막으로 맡긴 미리보기의 파일(내리면 `None`, #342).
     preview_path: Option<PathBuf>,
+    /// 마지막 미리보기 요청을 쓴 도우미의 번호(#343).
+    preview_session: Option<u64>,
+    /// 미리보기를 맡긴 도우미가 끝나 붙인 창이 사라졌다(#343, [`Inner::take_preview_lost`]가 지움).
+    preview_lost: bool,
 }
 
 struct Shared {
@@ -248,6 +254,14 @@ impl Shared {
                 result,
             });
         }
+        self.ready.notify_all();
+        let waker = self.waker.lock().ok().and_then(|w| w.clone());
+        if let Some(waker) = waker {
+            waker();
+        }
+    }
+
+    fn wake(&self) {
         self.ready.notify_all();
         let waker = self.waker.lock().ok().and_then(|w| w.clone());
         if let Some(waker) = waker {
@@ -499,6 +513,12 @@ impl Inner {
     pub fn unload_preview(&self) -> RequestId {
         self.shared.lock().preview_path = None;
         self.request(|id| Request::UnloadPreview { id })
+    }
+
+    /// 맡긴 미리보기를 그리던 도우미가 끝나(죽음·멈춤으로 끝냄) 붙인 처리기 창이 사라졌는가(#343). 한 번 알리면
+    /// 지운다. 그렇게 되면 깨우기를 부른다. 다음 미리보기 요청은 새 도우미를 띄운다.
+    pub fn take_preview_lost(&self) -> bool {
+        std::mem::take(&mut self.shared.lock().preview_lost)
     }
 
     /// `path`(또는 그 아래)를 미리 보고 있으면 내리고 답을 기다린다(많아야 [`SHELL_PREVIEW_TIMEOUT`]). 내렸으면 `true`.
@@ -805,6 +825,15 @@ impl Worker {
             return;
         };
         let session = helper.session;
+        let lost = {
+            let mut state = self.shared.lock();
+            let lost = state.preview_path.is_some() && state.preview_session == Some(session);
+            if lost {
+                state.preview_path = None;
+                state.preview_lost = true;
+            }
+            lost
+        };
         match ending {
             Ending::Ended => helper.end(),
             Ending::Lost => {
@@ -815,6 +844,9 @@ impl Worker {
             }
         }
         self.shared.fail_session(session);
+        if lost {
+            self.shared.wake();
+        }
     }
 
     /// 죽음 하나를 센다: 연달아 죽음이면 쉬기 시작하고, 확장을 알면 기록하고 세어 알린다.
@@ -884,6 +916,13 @@ impl Worker {
         if helper.outstanding > 0 {
             return;
         }
+        // 미리보기를 그리고 있는 도우미는 쉬어도 끝내지 않는다(끝내면 붙인 창이 사라진다, #343).
+        {
+            let state = self.shared.lock();
+            if state.preview_path.is_some() && state.preview_session == Some(helper.session) {
+                return;
+            }
+        }
         let elapsed = helper.last_activity.elapsed();
         let retire = if elapsed < idle.saturating_sub(margin) {
             false
@@ -927,6 +966,9 @@ impl Worker {
                     pending.session = helper.session;
                 }
                 None => return,
+            }
+            if matches!(request, Request::Preview { .. }) {
+                state.preview_session = Some(helper.session);
             }
         }
         if matches!(

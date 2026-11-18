@@ -30,6 +30,43 @@ pub fn top_level_window_at(x: i32, y: i32) -> Option<NonZeroIsize> {
     NonZeroIsize::new(root.0 as isize)
 }
 
+/// 최상위 창 `window`(핸들 값)의 자식 창이 키보드 포커스를 갖고 있으면 `window`로 되찾는다(#343). 되찾았으면 `true`.
+///
+/// 다른 프로세스가 붙인 자식 창(셸 확장 도우미의 미리보기 처리기 창)도 본다: 그 창의 스레드는 붙인 창과 입력 상태를
+/// 함께 쓰므로 포커스를 옮길 수 있다. `window`가 활성 창이 아니면(다른 프로그램으로 갔으면) 아무것도 하지 않는다.
+/// `window`를 만든 스레드(UI 스레드)에서 부른다.
+pub fn reclaim_focus_from_child(window: NonZeroIsize) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GUITHREADINFO, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, IsChild,
+    };
+    let hwnd = windows::Win32::Foundation::HWND(window.get() as *mut _);
+    // SAFETY: 핸들 값을 견주기만 한다.
+    if unsafe { GetForegroundWindow() } != hwnd {
+        return false;
+    }
+    // SAFETY: 살아 있을 수도 사라졌을 수도 있는 창 핸들을 넘긴다. 사라졌으면 0을 돌려줄 뿐이다.
+    let thread = unsafe { GetWindowThreadProcessId(hwnd, None) };
+    if thread == 0 {
+        return false;
+    }
+    let mut info = GUITHREADINFO {
+        cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `info`는 크기를 채운 지역 변수다.
+    if unsafe { GetGUIThreadInfo(thread, &mut info) }.is_err() {
+        return false;
+    }
+    let focus = info.hwndFocus;
+    // SAFETY: 두 핸들 값을 견주기만 한다.
+    if focus.is_invalid() || focus == hwnd || !unsafe { IsChild(hwnd, focus) }.as_bool() {
+        return false;
+    }
+    // SAFETY: 이 스레드가 만든 창에 포커스를 준다(부르는 쪽의 약속). 실패하면 그대로다.
+    unsafe { SetFocus(Some(hwnd)) }.is_ok()
+}
+
 /// 붙어 있는 모니터마다 작업 영역과 주 모니터 여부. 정보를 얻지 못한 모니터는 뺀다.
 pub fn monitors() -> Vec<MonitorInfo> {
     let mut found: Vec<MonitorInfo> = Vec::new();

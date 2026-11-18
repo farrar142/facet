@@ -486,6 +486,8 @@ fn open_view(app: &Rc<RefCell<App>>, window: WindowId) -> Result<Rc<View>, slint
                 WindowEvent::Focused(false) => {
                     marquee_event(window, View::marquee_cancel);
                     item_event(window, View::item_cancel);
+                    // 미리보기 영역에 붙인 처리기 창이 포커스를 가져갔으면 이벤트를 다 처리한 뒤 되찾는다(#343).
+                    Timer::single_shot(Duration::ZERO, move || reclaim_preview_focus(window));
                 }
                 _ => {}
             }
@@ -522,6 +524,20 @@ fn open_view(app: &Rc<RefCell<App>>, window: WindowId) -> Result<Rc<View>, slint
         view.restore_scroll(panel);
     }
     Ok(view)
+}
+
+/// #343: 창 `window`의 미리보기 영역에 붙인 처리기 창(셸 확장 도우미의 자식 창)이 키보드 포커스를 가져갔으면 그 창으로
+/// 되찾는다(목록의 키보드 이동이 이어지게). 다른 프로그램으로 간 포커스는 건드리지 않는다.
+fn reclaim_preview_focus(window: WindowId) {
+    #[cfg(windows)]
+    if let Some(view) = view_of(window)
+        && view.ui.get_preview_visible()
+        && let Some(hwnd) = view.handle()
+    {
+        facet_win::reclaim_focus_from_child(hwnd);
+    }
+    #[cfg(not(windows))]
+    let _ = window;
 }
 
 /// 창 `window`의 화면 상태로 `f`를 부른다. 사용자가 그 창에서 무언가를 했으므로 먼저 그 창을 코어의 활성 창으로
