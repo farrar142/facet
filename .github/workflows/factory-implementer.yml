@@ -380,12 +380,32 @@ jobs:
             You already implemented the ticket on branch ${{ env.BRANCH }}. Other tickets merged into
             main meanwhile, and merging origin/main left conflicts (see `git status`).
             Resolve every conflict so that both your ticket's behaviour and main's changes survive.
-            Never drop main's changes to make yours fit. Then run `cargo xtask ci` until it passes,
-            and finish with `git commit --no-edit`. Do not push.
+            Never drop main's changes to make yours fit. Then run `cargo xtask ci` until it passes.
+            Do not commit, abort the merge or push: the workflow stages your work and makes the
+            merge commit after you end, and fails the run if a conflict or a conflict marker is left.
           claude_args: >-
             --model ${{ steps.guard.outputs.model }}
             --max-turns 60
             --allowedTools "Bash,Read,Edit,Write,Glob,Grep"
+
+      # Make the merge commit the conflict agent was asked not to make (#434): it resolved the
+      # conflicts and ended without committing in runs 44389000388 and 44393130003 (#342). Fails when
+      # a path is still unmerged or a conflict marker is among the merge's added lines.
+      - name: Finish merge
+        id: finish
+        if: steps.guard.outputs.go == 'true' && steps.rebase.outputs.conflict == 'true'
+        run: bash .github/factory/merge-check.sh finish
+
+      # What the conflict agent said last and which commands it ran, in the run summary (#434).
+      # Only those: the full execution log stays off this public repository. Masked values (`***`)
+      # and token shapes are taken out. Before "Record cost (conflicts)", which moves the file away.
+      - name: Conflict agent summary
+        if: always() && steps.guard.outputs.go == 'true' && steps.rebase.outputs.conflict == 'true'
+        continue-on-error: true
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/factory/agent-summary.sh "$RUNNER_TEMP/claude-execution-output.json" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Record cost (conflicts)
         if: always() && steps.guard.outputs.go == 'true' && steps.rebase.outputs.conflict == 'true'
@@ -409,7 +429,7 @@ jobs:
       - name: Require main merged
         id: merged
         if: steps.guard.outputs.go == 'true'
-        run: bash .github/factory/merge-check.sh "${{ steps.rebase.outputs.main }}"
+        run: bash .github/factory/merge-check.sh check "${{ steps.rebase.outputs.main }}"
 
       # Commits that touch `.github/workflows/` cannot be pushed (GITHUB_TOKEN has no `workflows`
       # permission): hand the ticket to a person now, before the checks. No failure is counted and
@@ -559,9 +579,10 @@ jobs:
       - name: Record failure
         if: failure() && steps.guard.outputs.go == 'true'
         env:
-          FAILURE_REASON: ${{ steps.merged.outputs.reason }}
+          FAILURE_REASON: ${{ steps.finish.outputs.reason || steps.merged.outputs.reason }}
         run: |
-          if [ "${{ steps.checks.outcome }}" = failure ] || [ "${{ steps.merged.outcome }}" = failure ]; then
+          if [ "${{ steps.checks.outcome }}" = failure ] || [ "${{ steps.merged.outcome }}" = failure ] \
+             || [ "${{ steps.finish.outcome }}" = failure ]; then
             what=code
           else
             what=infra
