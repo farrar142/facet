@@ -256,7 +256,8 @@ pub enum ListError {
         location: Location,
         source: io::Error,
     },
-    /// #355: 셸 호출이 시간 제한 안에 응답하지 않았다.
+    /// 셸 호출이 시간 제한([`crate::shell_provider::CALL_TIMEOUT`]) 안에 응답하지 않았다(「응답 없음」). 탭은
+    /// 원래 위치에 남고 [`crate::tab::Tab::retry`]로 다시 읽는다.
     NotResponding { location: Location },
 }
 
@@ -293,7 +294,7 @@ impl fmt::Display for ListError {
             Self::Io { location, source } => {
                 write!(f, "위치를 읽지 못했습니다: {location}: {source}")
             }
-            Self::NotResponding { .. } => todo!("#355"),
+            Self::NotResponding { location } => write!(f, "응답 없음: {location}"),
         }
     }
 }

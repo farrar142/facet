@@ -62,6 +62,8 @@ export enum Problem {
     permission-denied,
     not-a-folder,
     io,
+    // 셸 호출이 시간 제한 안에 응답하지 않음
+    not-responding,
     // 기본 프로그램으로 열기
     no-association,
     path-too-long,
@@ -107,6 +109,8 @@ export struct PanelData {
     list-problem: Problem,
     list-problem-location: string,
     list-problem-detail: string,
+    // 실패한 읽기를 「다시 시도」할 수 있는가.
+    can-retry: bool,
     // 마지막으로 파일을 기본 프로그램으로 열지 못한 까닭.
     open-problem: Problem,
     open-problem-detail: string,
@@ -1481,6 +1485,8 @@ component PanelView inherits Rectangle {
     callback search-submit(string);
     callback cancel-search();
     callback stop-search();
+    // 실패한 읽기의 「다시 시도」 단추.
+    callback retry-read();
     callback search-edited(string);
     callback search-down();
     callback search-under();
@@ -1815,13 +1821,35 @@ component PanelView inherits Rectangle {
             color: #c42b1c;
         }
 
-        if root.data.list-problem != Problem.none: Text {
-            text: root.data.list-problem == Problem.not-found ? @tr("위치가 없습니다: {}", root.data.list-problem-location)
-                : root.data.list-problem == Problem.permission-denied ? @tr("위치를 읽을 권한이 없습니다: {}", root.data.list-problem-location)
-                : root.data.list-problem == Problem.not-a-folder ? @tr("폴더가 아닙니다: {}", root.data.list-problem-location)
-                : @tr("위치를 읽지 못했습니다: {}: {}", root.data.list-problem-location, root.data.list-problem-detail);
-            wrap: word-wrap;
-            color: #c42b1c;
+        if root.data.list-problem != Problem.none: HorizontalLayout {
+            spacing: 8px;
+            Text {
+                horizontal-stretch: 1;
+                text: root.data.list-problem == Problem.not-found ? @tr("위치가 없습니다: {}", root.data.list-problem-location)
+                    : root.data.list-problem == Problem.permission-denied ? @tr("위치를 읽을 권한이 없습니다: {}", root.data.list-problem-location)
+                    : root.data.list-problem == Problem.not-a-folder ? @tr("폴더가 아닙니다: {}", root.data.list-problem-location)
+                    : root.data.list-problem == Problem.not-responding ? @tr("응답 없음: {}", root.data.list-problem-location)
+                    : @tr("위치를 읽지 못했습니다: {}: {}", root.data.list-problem-location, root.data.list-problem-detail);
+                wrap: word-wrap;
+                color: #c42b1c;
+            }
+            if root.data.can-retry: Rectangle {
+                width: 72px;
+                height: 24px;
+                border-width: 1px;
+                border-radius: 3px;
+                border-color: Palette.border;
+                Text {
+                    text: @tr("다시 시도");
+                    color: Palette.foreground;
+                }
+                TouchArea {
+                    clicked => {
+                        root.activate();
+                        root.retry-read();
+                    }
+                }
+            }
         }
 
         if root.data.open-problem != Problem.none: Text {
@@ -3426,6 +3454,8 @@ export component AppWindow inherits Window {
     callback search-submit(string);
     callback cancel-search();
     callback stop-search();
+    // 패널의 「다시 시도」 단추: 활성 탭의 실패한 읽기를 다시 한다.
+    callback retry-read();
     callback search-edited(string);
     callback search-down();
     callback search-under();
@@ -3785,6 +3815,9 @@ export component AppWindow inherits Window {
             stop-search => {
                 root.stop-search();
             }
+            retry-read => {
+                root.retry-read();
+            }
             search-edited(text) => {
                 root.search-edited(text);
             }
@@ -3977,6 +4010,9 @@ export component AppWindow inherits Window {
             }
             stop-search => {
                 root.stop-search();
+            }
+            retry-read => {
+                root.retry-read();
             }
             search-edited(text) => {
                 root.search-edited(text);

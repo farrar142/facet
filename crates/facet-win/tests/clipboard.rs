@@ -179,8 +179,15 @@ fn change_notification_reports_new_summary() {
     }
     assert!(child.wait().unwrap().success());
     assert!(wait_for(&events, Option::is_none), "글자 알림이 없음");
-    assert_eq!(
-        s.clipboard.text().unwrap().as_deref().map(str::trim),
-        Some("facet")
-    );
+    // 클립보드는 프로세스 밖까지 하나라 알림 직후 한 번 읽으면 그 사이(clip.exe가 비운 직후 등)를 볼 수 있다.
+    // 글자가 보일 때까지 잠깐 다시 읽는다.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let text = loop {
+        let text = s.clipboard.text().unwrap();
+        if text.as_deref().map(str::trim) == Some("facet") || Instant::now() >= deadline {
+            break text;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(text.as_deref().map(str::trim), Some("facet"));
 }
