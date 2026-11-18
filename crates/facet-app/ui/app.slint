@@ -10,6 +10,9 @@ export { ScrollMath } from "scrollbar.slint";
 export struct Row {
     name: string,
     folder: bool,
+    // 파일 종류별 아이콘(코어 캐시에서 얻은 것). 없으면 `has-icon`이 거짓이고 내장 아이콘을 그린다.
+    has-icon: bool,
+    icon: image,
     modified: string,
     kind: string,
     size: string,
@@ -1032,12 +1035,20 @@ component Header inherits Rectangle {
     }
 }
 
-// 내장 아이콘 두 가지: 폴더와 파일. 파일 종류별 아이콘은 S10이다.
+// 항목 아이콘: 파일 종류별 아이콘(`has-icon`)이 있으면 그것을, 얻기 전·얻지 못하면 내장 아이콘(폴더와 파일)을 그린다.
 component ItemIcon inherits Rectangle {
     in property <bool> folder;
+    in property <bool> has-icon;
+    in property <image> icon;
     width: 16px;
     height: 16px;
-    if root.folder: Rectangle {
+    if root.has-icon: Image {
+        width: 16px;
+        height: 16px;
+        source: root.icon;
+        image-fit: fill;
+    }
+    if !root.has-icon && root.folder: Rectangle {
         Rectangle {
             x: 1px;
             y: 2px;
@@ -1055,7 +1066,7 @@ component ItemIcon inherits Rectangle {
             background: #f2c94c;
         }
     }
-    if !root.folder: Rectangle {
+    if !root.has-icon && !root.folder: Rectangle {
         x: 3px;
         y: 1px;
         width: 10px;
@@ -2344,6 +2355,8 @@ component PanelView inherits Rectangle {
                                 alignment: center;
                                 ItemIcon {
                                     folder: row.folder;
+                                    has-icon: row.has-icon;
+                                    icon: row.icon;
                                     opacity: row.cut ? 0.45 : 1.0;
                                 }
                             }
