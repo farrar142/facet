@@ -836,6 +836,9 @@ pub struct App {
     changed_results: Vec<TabId>,
     /// 인덱서 서비스 연결([`App::enable_indexer`]). 즉시 검색이 쓴다. 아직이면 `None`이고 즉시 검색은 「서비스 없음」이다.
     indexer: Option<IndexerClient>,
+    /// 셸 확장 도우미 관리([`App::enable_shell_helper`]). 「속성」·「연결 프로그램」이 쓴다. 아직이면 `None`이고 두 명령은
+    /// 아무것도 띄우지 않는다.
+    shell_helper: Option<crate::shell_helper::ShellHelper>,
     /// 즉시 검색 결과의 인덱스 변경 확인([`App::poll`])을 깨우도록 잡아 둔 시각. 잡지 않았으면 `None`이다.
     follow_wake: Option<Instant>,
     /// 마지막 일괄 이름 바꾸기 미리 보기 요청의 번호([`App::request_batch_rename_preview`]). 일꾼이 보고 앞선 요청의
@@ -1051,6 +1054,7 @@ impl App {
             cut_pastes: HashMap::new(),
             changed_results: Vec::new(),
             indexer: None,
+            shell_helper: None,
             follow_wake: None,
             batch_preview: Arc::default(),
             subfolders: Arc::default(),
@@ -1650,6 +1654,10 @@ impl App {
         updates.extend(self.pump_indexer());
         updates.extend(self.pump_demoted());
         self.pump_follow();
+        // 「속성」·「연결 프로그램」의 결과는 화면에 보일 것이 없다(대화상자는 도우미가 띄운다). 쌓이지 않게 받아 버린다.
+        if let Some(helper) = &self.shell_helper {
+            helper.poll();
+        }
         for id in std::mem::take(&mut self.changed_results) {
             if !updates.contains(&(id, Update::Search)) {
                 updates.push((id, Update::Search));
@@ -1706,14 +1714,47 @@ impl App {
         todo!("#330")
     }
 
-    /// #321: 셸 확장 도우미 관리를 켠다(도우미는 첫 요청 때 뜬다).
-    pub fn enable_shell_helper(&mut self, _options: crate::shell_helper::HelperOptions) {
-        todo!("#321")
+    /// 셸 확장 도우미 관리를 켠다([`crate::shell_helper::ShellHelper::start`], 곧바로 돌아오고 도우미는 첫 요청 때 뜬다).
+    /// 앱(화면)이 시작한 뒤 한 번 부른다: 코어는 시험이 진짜 도우미를 띄우지 않게 스스로 켜지 않는다. 이미 켰으면 아무것도
+    /// 하지 않는다. 도우미의 사건은 같은 깨우기로 알리고 [`App::poll`]이 받는다.
+    pub fn enable_shell_helper(&mut self, options: crate::shell_helper::HelperOptions) {
+        if self.shell_helper.is_some() {
+            return;
+        }
+        let helper = crate::shell_helper::ShellHelper::start(options);
+        let outbox = self.outbox.clone();
+        helper.set_waker(move || outbox.wake());
+        self.shell_helper = Some(helper);
     }
 
-    /// #321: 켠 셸 확장 도우미 관리.
+    /// 켠 셸 확장 도우미 관리. [`App::enable_shell_helper`]를 부르기 전이면 `None`이다.
     pub fn shell_helper(&self) -> Option<&crate::shell_helper::ShellHelper> {
-        todo!("#321")
+        self.shell_helper.as_ref()
+    }
+
+    /// 「속성」: 활성 탭에서 고른 항목(목록 순서)의 속성 대화상자를, 고른 것이 없으면 현재 폴더의 속성 대화상자를
+    /// 도우미에 청한다(기다리지 않음). 도우미 관리를 켜지 않았으면 아무것도 하지 않는다.
+    fn show_properties(&mut self) {
+        let tab = self.active_tab();
+        let mut paths = tab.selected_paths();
+        if paths.is_empty()
+            && let Some(folder) = tab.location().file_system_path()
+        {
+            paths.push(folder.to_path_buf());
+        }
+        if let Some(helper) = &self.shell_helper
+            && !paths.is_empty()
+        {
+            helper.properties(paths);
+        }
+    }
+
+    /// 「연결 프로그램」: 활성 탭의 커서 파일로 「연결 프로그램」 대화상자를 도우미에 청한다(기다리지 않음).
+    fn show_open_with(&mut self) {
+        let path = self.active_tab().cursor_path();
+        if let (Some(helper), Some(path)) = (&self.shell_helper, path) {
+            helper.open_with(path);
+        }
     }
 
     /// #339: 그 창의 미리보기 영역 내용(꺼져 있으면 `None`).
@@ -2571,7 +2612,14 @@ impl App {
         }
         let navigation = match command {
             CommandId::Open => return self.open_cursor_item(),
-            CommandId::OpenWith | CommandId::Properties => todo!("#321"),
+            CommandId::OpenWith => {
+                self.show_open_with();
+                return Execution::Done;
+            }
+            CommandId::Properties => {
+                self.show_properties();
+                return Execution::Done;
+            }
             CommandId::OpenThisPc => todo!("#350"),
             CommandId::OpenRecycleBin => todo!("#352"),
             CommandId::Restore => todo!("#353"),

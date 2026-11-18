@@ -314,15 +314,19 @@ mod tests {
     #[test]
     fn arrow_keys_skip_disabled_rows_and_separators() {
         let mut menu = item_menu();
-        // 파일 하나: 열기(켜짐), 새 탭에서 열기(꺼짐), 구분선, 잘라내기(켜짐)…
+        // 파일 하나: 열기(켜짐), 연결 프로그램(켜짐), 새 탭에서 열기(꺼짐), 구분선, 잘라내기(켜짐)… 끝은 속성(켜짐).
         menu.step(1);
         assert_eq!(menu.selected(), Some(0));
         menu.step(1);
-        assert_eq!(menu.selected(), Some(3), "꺼진 줄과 구분선을 건너뛴다");
+        assert_eq!(menu.selected(), Some(1));
+        menu.step(1);
+        assert_eq!(menu.selected(), Some(4), "꺼진 줄과 구분선을 건너뛴다");
+        menu.step(-1);
+        assert_eq!(menu.selected(), Some(1));
         menu.step(-1);
         assert_eq!(menu.selected(), Some(0));
         menu.step(-1);
-        assert_eq!(menu.selected(), Some(15), "처음에서 위로 가면 끝으로 돈다");
+        assert_eq!(menu.selected(), Some(18), "처음에서 위로 가면 끝으로 돈다");
     }
 
     #[test]
@@ -331,8 +335,8 @@ mod tests {
         menu.step(1);
         assert_eq!(menu.enter(), Outcome::Run(CommandId::Open));
         // 꺼진 줄(새 탭에서 열기)은 눌러도 아무 일이 없다.
-        assert_eq!(menu.activate(1), Outcome::None);
-        menu.hover(1);
+        assert_eq!(menu.activate(2), Outcome::None);
+        menu.hover(2);
         assert_eq!(menu.selected(), Some(0), "꺼진 줄 위로는 고르지 않는다");
     }
 
@@ -394,15 +398,15 @@ mod tests {
     #[test]
     fn heights_follow_the_rows() {
         let menu = item_menu();
-        // 열세 줄과 구분선 셋.
+        // 열다섯 줄과 구분선 넷.
         assert_eq!(
             menu.height(),
-            8.0 + 13.0 * ROW_HEIGHT + 3.0 * SEPARATOR_HEIGHT
+            8.0 + 15.0 * ROW_HEIGHT + 4.0 * SEPARATOR_HEIGHT
         );
         assert_eq!(menu.row_top(0), PADDING);
         assert_eq!(
-            menu.row_top(3),
-            PADDING + 2.0 * ROW_HEIGHT + SEPARATOR_HEIGHT
+            menu.row_top(4),
+            PADDING + 3.0 * ROW_HEIGHT + SEPARATOR_HEIGHT
         );
     }
 }

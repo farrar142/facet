@@ -30,6 +30,12 @@ pub fn top_level_window_at(x: i32, y: i32) -> Option<NonZeroIsize> {
     NonZeroIsize::new(root.0 as isize)
 }
 
+/// 프로세스 `pid`가 창을 앞으로 가져올 수 있게 한다. 이 프로세스가 앞에 있지 않으면 Windows가 거절하고 그대로 둔다.
+pub fn allow_set_foreground_window(pid: u32) {
+    // SAFETY: 값으로 받는 프로세스 번호 하나만 넘긴다.
+    let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(pid) };
+}
+
 /// 붙어 있는 모니터마다 작업 영역과 주 모니터 여부. 정보를 얻지 못한 모니터는 뺀다.
 pub fn monitors() -> Vec<MonitorInfo> {
     let mut found: Vec<MonitorInfo> = Vec::new();

@@ -155,9 +155,11 @@ pub enum CommandId {
     GridView(GridSize),
     /// #330: 썸네일 캐시를 비운다.
     ClearThumbnailCache,
-    /// #321: 연결 프로그램(`open-with`).
+    /// 연결 프로그램: 커서 파일로 Windows 「연결 프로그램」 대화상자를 연다(셸 확장 도우미가 띄움). 커서 항목이 파일이고
+    /// 실제 파일 시스템 항목(실제 폴더·검색 결과 위치)일 때 켜진다. 기본 단축키는 없다.
     OpenWith,
-    /// #321: 속성(`properties`, Alt+Enter).
+    /// 속성: 고른 항목(목록 순서)의 Windows 속성 대화상자를 연다(셸 확장 도우미가 띄움). 고른 항목이 없으면 현재 폴더의
+    /// 속성이다(커서 항목은 보지 않음). 기본 단축키 Alt+Enter.
     Properties,
     /// #350: 내 PC 열기(`open-this-pc`).
     OpenThisPc,
@@ -173,7 +175,7 @@ pub enum CommandId {
 
 impl CommandId {
     /// 모든 명령. 명령 팔레트는 검색어가 없으면 이 순서로 보인다.
-    pub const ALL: [CommandId; 56] = [
+    pub const ALL: [CommandId; 58] = [
         CommandId::Open,
         CommandId::Back,
         CommandId::Forward,
@@ -230,6 +232,8 @@ impl CommandId {
         CommandId::ShowInFolder,
         CommandId::StopSearch,
         CommandId::InstantUnderFolder,
+        CommandId::OpenWith,
+        CommandId::Properties,
     ];
 
     /// 바뀌지 않는 ID 글자. 화면 문장이 아니다.
@@ -431,12 +435,13 @@ impl CommandId {
             CommandId::Cut => const { &[key(letter('X')).ctrl()] },
             CommandId::Paste => const { &[key(letter('V')).ctrl()] },
             CommandId::CopyPath => const { &[key(letter('C')).ctrl().shift()] },
-            CommandId::OpenWith | CommandId::Properties => &[], // #321
-            CommandId::OpenThisPc => &[],                       // #350
-            CommandId::OpenRecycleBin => &[],                   // #352
-            CommandId::Restore => &[],                          // #353
-            CommandId::EmptyRecycleBin => &[],                  // #354
-            CommandId::TogglePreview => &[],                    // #339
+            CommandId::OpenWith => &[],
+            CommandId::Properties => const { &[key(Key::Enter).alt()] },
+            CommandId::OpenThisPc => &[],      // #350
+            CommandId::OpenRecycleBin => &[],  // #352
+            CommandId::Restore => &[],         // #353
+            CommandId::EmptyRecycleBin => &[], // #354
+            CommandId::TogglePreview => &[],   // #339
         }
     }
 
@@ -457,6 +462,8 @@ impl CommandId {
     /// - 삭제·영구 삭제·복사: 원본(선택, 없으면 커서 항목)이 있고 탭 위치가 실제 폴더일 때.
     /// - 붙여넣기·경로 복사: 탭 위치가 실제 폴더일 때(붙여넣기는 클립보드에 파일이 있을 때도, 앱 상태라
     ///   [`crate::window::App::can_execute`]가 본다).
+    /// - 연결 프로그램: 커서 항목이 파일이고 탭의 항목이 실제 파일 시스템 항목일 때.
+    /// - 속성: 고른 항목이 있고 탭의 항목이 실제 파일 시스템 항목일 때, 또는 탭 위치가 실제 폴더일 때(현재 폴더의 속성).
     /// - 나머지는 늘 켜져 있다. 다음·이전·n번째 탭은 탭 하나만 보아서는 모르므로 켜져 있다고 하고, 패널의 탭
     ///   수는 [`CommandId::is_enabled_in`]이 본다. 닫은 탭 되살리기도 켜져 있다고 하고, 닫은 탭 목록은
     ///   [`crate::window::App::can_execute`]가 본다. 패널 나누기/합치기와 활성 패널 바꾸기도 켜져 있다고 하고, 창의
@@ -497,7 +504,14 @@ impl CommandId {
             CommandId::InstantUnderFolder => tab.instant_base().is_some(),
             CommandId::DetailsView | CommandId::GridView(_) => todo!("#327"),
             CommandId::ClearThumbnailCache => todo!("#330"),
-            CommandId::OpenWith | CommandId::Properties => todo!("#321"),
+            CommandId::OpenWith => {
+                has_real_items(tab) && tab.cursor_item().is_some_and(|item| !item.is_folder)
+            }
+            // 고른 항목의 속성이거나, 고른 것이 없으면 현재 폴더(실제 폴더일 때)의 속성.
+            CommandId::Properties => {
+                (has_real_items(tab) && tab.selected_items().next().is_some())
+                    || tab.location().file_system_path().is_some()
+            }
             CommandId::OpenThisPc => todo!("#350"),
             CommandId::OpenRecycleBin => todo!("#352"),
             CommandId::Restore => todo!("#353"),

@@ -118,7 +118,6 @@ fn background_layout() -> Vec<Row> {
 }
 
 #[test]
-#[ignore = "#321"]
 fn item_menu_has_open_with_below_open_and_properties_at_the_end() {
     let menu = build(&file_context());
     assert_eq!(menu.kind, MenuKind::Item);
@@ -127,7 +126,6 @@ fn item_menu_has_open_with_below_open_and_properties_at_the_end() {
 }
 
 #[test]
-#[ignore = "#321"]
 fn search_results_item_menu_keeps_the_same_order_after_its_two_head_rows() {
     let menu = build(&MenuContext {
         location_is_folder: false,
@@ -143,7 +141,6 @@ fn search_results_item_menu_keeps_the_same_order_after_its_two_head_rows() {
 }
 
 #[test]
-#[ignore = "#321"]
 fn background_menu_ends_with_the_folder_properties() {
     let menu = build(&context(MenuKind::Background));
     assert_eq!(menu.kind, MenuKind::Background);
@@ -152,7 +149,6 @@ fn background_menu_ends_with_the_folder_properties() {
 }
 
 #[test]
-#[ignore = "#321"]
 fn the_order_is_the_same_whatever_the_context() {
     for selected_count in [0, 1, 2, 10_000] {
         for has_cursor in [false, true] {
@@ -188,7 +184,6 @@ fn the_order_is_the_same_whatever_the_context() {
 }
 
 #[test]
-#[ignore = "#321"]
 fn open_with_is_enabled_only_for_a_file_under_the_cursor() {
     assert!(enabled(&build(&file_context()), CommandId::OpenWith));
 
@@ -222,7 +217,6 @@ fn open_with_is_enabled_only_for_a_file_under_the_cursor() {
 }
 
 #[test]
-#[ignore = "#321"]
 fn properties_is_enabled_when_there_is_something_to_show() {
     // 항목 메뉴: 고른 항목이 있을 때(오른쪽 클릭은 누른 항목을 고른다). 커서만 있으면 꺼진다: 그때 실행하면 현재
     // 폴더의 속성이라 항목 메뉴의 뜻과 다르다.
@@ -275,7 +269,6 @@ fn properties_is_enabled_when_there_is_something_to_show() {
 }
 
 #[test]
-#[ignore = "#321"]
 fn alt_enter_is_properties_and_open_with_has_no_default_shortcut() {
     let alt_enter = Shortcut::new(Key::Enter).alt();
     assert_eq!(find_by_shortcut(alt_enter), Some(CommandId::Properties));
@@ -289,7 +282,6 @@ fn alt_enter_is_properties_and_open_with_has_no_default_shortcut() {
 }
 
 #[test]
-#[ignore = "#321"]
 fn the_two_commands_have_fixed_ids_and_appear_in_the_palette() {
     assert_eq!(CommandId::OpenWith.as_str(), "open-with");
     assert_eq!(CommandId::Properties.as_str(), "properties");

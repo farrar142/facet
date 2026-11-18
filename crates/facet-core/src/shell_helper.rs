@@ -18,6 +18,10 @@
 //! # 요청과 결과
 //!
 //! - 메뉴([`ShellHelper::menu`])·항목 실행([`ShellHelper::invoke`], 메뉴를 만든 요청 번호와 항목 번호).
+//! - 속성 대화상자([`ShellHelper::properties`])·「연결 프로그램」 대화상자([`ShellHelper::open_with`]): 도우미가 띄우면 곧바로
+//!   [`Reply::Done`]이다. 띄우기 전에 도우미에 앞으로 나올 권한을 넘긴다.
+//! - 쉬면 끝내기: 도우미 명령 줄에 `--idle-ms <`[`HelperOptions::idle_timeout`]`>`를 넘기고, 도우미는 마지막 요청 뒤 그만큼
+//!   요청이 없으면(떠 있는 대화상자가 없을 때) 스스로 끝난다. 다음 요청 때 새 도우미를 띄운다.
 //! - 응답이 쓴 때부터 [`HelperOptions::reply_timeout`](기본 [`REPLY_TIMEOUT`], 2초) 안에 오지 않으면
 //!   [`RequestError::TimedOut`]으로 끝나고, 그 뒤 늦게 온 응답은 버린다.
 //! - 메뉴를 놓으면([`ShellHelper::release`]) 기다리던 그 메뉴 요청은 아무 사건도 내지 않는다(이미 쌓인 사건도 지운다).
@@ -52,7 +56,7 @@ use crate::menu::MenuKind;
 pub const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
 /// 멈춤 판정 시간(10초). 동작은 「도우미 수명」 티켓(#320)이 만든다.
 pub const STALL_TIMEOUT: Duration = Duration::from_secs(10);
-/// 쉬면 끝내기 시간(5분). 동작은 #320.
+/// 쉬면 끝내기 시간(5분). 도우미에 넘기고, 도우미는 대화상자가 떠 있지 않을 때 이만큼 요청이 없으면 끝난다.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// 연달아 죽음을 세는 시간(1분). 동작은 #320.
 pub const CRASH_WINDOW: Duration = Duration::from_secs(60);
@@ -86,7 +90,7 @@ pub struct HelperOptions {
     pub reply_timeout: Duration,
     /// 멈춤 판정 시간(#320).
     pub stall_timeout: Duration,
-    /// 쉬면 끝내기 시간(#320).
+    /// 쉬면 끝내기 시간(도우미 명령 줄 `--idle-ms`로 넘긴다).
     pub idle_timeout: Duration,
     /// 연달아 죽음을 세는 시간(#320).
     pub crash_window: Duration,
@@ -358,14 +362,29 @@ impl ShellHelper {
         todo!("#320")
     }
 
-    /// #321: 속성 대화상자 요청.
-    pub fn properties(&self, _paths: Vec<PathBuf>) -> RequestId {
-        todo!("#321")
+    /// 속성 대화상자 요청: 도우미가 `paths`(하나면 그 항목, 여럿이면 여러 항목)의 Windows 속성 대화상자를 띄우고
+    /// [`Reply::Done`]으로 답한다(대화상자를 닫을 때까지 기다리지 않음).
+    pub fn properties(&self, paths: Vec<PathBuf>) -> RequestId {
+        self.dialog(|id| Request::Properties { id, paths })
     }
 
-    /// #321: 「연결 프로그램」 대화상자 요청.
-    pub fn open_with(&self, _path: PathBuf) -> RequestId {
-        todo!("#321")
+    /// 「연결 프로그램」 대화상자 요청: 도우미가 파일 `path`로 Windows 「연결 프로그램」 대화상자를 띄우고
+    /// [`Reply::Done`]으로 답한다(대화상자를 닫을 때까지 기다리지 않음).
+    pub fn open_with(&self, path: PathBuf) -> RequestId {
+        self.dialog(|id| Request::OpenWith { id, path })
+    }
+
+    fn dialog(&self, request: impl FnOnce(u64) -> Request) -> RequestId {
+        let id = self.next();
+        self.shared.lock().pending.insert(
+            id,
+            Pending {
+                deadline: None,
+                session: 0,
+            },
+        );
+        self.send(id, request(id));
+        RequestId(id)
     }
 }
 
@@ -500,6 +519,13 @@ impl Worker {
                 None => return,
             }
         }
+        if matches!(
+            request,
+            Request::Properties { .. } | Request::OpenWith { .. }
+        ) {
+            // 도우미가 띄운 대화상자가 facet 창 앞으로 나오게 이 프로세스(지금 앞에 있는 UI)의 권한을 넘긴다.
+            facet_win::allow_set_foreground_window(helper.child.id());
+        }
         if write_message(&mut helper.writer, &request).is_err() {
             self.end_helper();
         }
@@ -536,6 +562,8 @@ impl Worker {
                     .unwrap_or_else(std::process::id)
                     .to_string(),
             )
+            .arg("--idle-ms")
+            .arg(self.options.idle_timeout.as_millis().to_string())
             .args(&self.options.args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

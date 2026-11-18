@@ -135,6 +135,7 @@ fn item_menu_has_batch_rename_right_below_rename() {
     use CommandId::*;
     let expected = vec![
         Some(Open),
+        Some(OpenWith),
         Some(OpenInNewTab),
         None,
         Some(Cut),
@@ -150,6 +151,8 @@ fn item_menu_has_batch_rename_right_below_rename() {
         Some(Rename),
         Some(BatchRename),
         Some(Delete),
+        None,
+        Some(Properties),
     ];
     for selected in [0, 1, 2, 10_000] {
         let menu = build(&context(selected, true, false));

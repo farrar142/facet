@@ -29,6 +29,9 @@
 //!   최적화된 이동 규약을 따른다. 창을 만든 UI 스레드(STA)에서만 등록한다. Windows가 아니면 「지원하지 않음」이다.
 //! - [`pipe_client`]: 이름 있는 파이프의 클라이언트 쪽(겹친 입출력). 읽는 쪽·쓰는 쪽을 다른 스레드에서 동시에 쓰고, 읽기에
 //!   마감 시각을 두고, 닫개로 기다리던 읽기를 깨운다. 코어의 인덱서 서비스 연결이 쓴다. Windows가 아니면 붙지 못한다.
+//! - [`shell_dialog`]: Windows 속성 대화상자와 「연결 프로그램」 대화상자(전용 STA 스레드, 띄우면 곧바로 돌아옴). 셸 확장을
+//!   싣으므로 셸 확장 도우미만 부른다. [`allow_set_foreground_window`]: 다른 프로세스(도우미)가 창을 앞으로 가져오게 한다.
+//!   Windows가 아니면 「지원하지 않음」·아무것도 하지 않음이다.
 //! - [`shell_copy`]: **측정 전용** 셸 복사(`IFileOperation`, 전용 스레드의 COM, 대화 없음). 탐색기 비교 측정만 부르고
 //!   앱은 부르지 않는다. Windows가 아니면 「지원하지 않음」이다.
 
@@ -47,6 +50,7 @@ pub mod pipe_client;
 pub mod preview;
 pub mod recycle;
 pub mod shell_copy;
+pub mod shell_dialog;
 pub mod shell_thread;
 pub mod single_instance;
 mod watch;
@@ -70,6 +74,8 @@ mod windows_recycle;
 mod windows_screen;
 #[cfg(windows)]
 mod windows_shell_copy;
+#[cfg(windows)]
+mod windows_shell_dialog;
 #[cfg(windows)]
 mod windows_watch;
 
@@ -131,6 +137,17 @@ fn letters_from_mask(mask: u32) -> Vec<char> {
         .map(|bit| char::from(b'A' + bit))
         .collect()
 }
+
+/// 프로세스 `pid`가 자기 창을 앞으로 가져올 수 있게 이 프로세스(지금 앞에 있는 앱)의 권한을 넘긴다
+/// (`AllowSetForegroundWindow`). 셸 확장 도우미가 띄우는 대화상자가 facet 창 앞에 나오게 쓴다. 실패해도 아무 일도 없다.
+#[cfg(windows)]
+pub fn allow_set_foreground_window(pid: u32) {
+    windows_screen::allow_set_foreground_window(pid);
+}
+
+/// Windows가 아니면 아무것도 하지 않는다.
+#[cfg(not(windows))]
+pub fn allow_set_foreground_window(_pid: u32) {}
 
 /// 기본 프로그램으로 열기가 실패한 까닭.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -87,6 +87,8 @@ fn background_layout() -> Vec<Row> {
         Row::Command(TogglePanelSplit),
         Row::Separator,
         Row::Command(CopyPath),
+        Row::Separator,
+        Row::Command(Properties),
     ]
 }
 
@@ -239,6 +241,7 @@ fn item_menu_is_unchanged_by_the_new_fields() {
     c.has_cursor = true;
     let expected = vec![
         Row::Command(Open),
+        Row::Command(OpenWith),
         Row::Command(OpenInNewTab),
         Row::Separator,
         Row::Command(Cut),
@@ -254,6 +257,8 @@ fn item_menu_is_unchanged_by_the_new_fields() {
         Row::Command(Rename),
         Row::Command(BatchRename),
         Row::Command(Delete),
+        Row::Separator,
+        Row::Command(Properties),
     ];
     assert_eq!(rows(&build(&c)), expected);
     c.can_go_back = false;
