@@ -227,8 +227,47 @@ pub enum PreviewKind {
 }
 
 /// #337: 항목의 미리보기 종류를 고른다.
-pub fn choose_kind(_path: &Path, _item: &Item, _has_handler: &dyn Fn(&str) -> bool) -> PreviewKind {
-    todo!("#337")
+pub fn choose_kind(path: &Path, item: &Item, has_handler: &dyn Fn(&str) -> bool) -> PreviewKind {
+    if item.is_folder {
+        return PreviewKind::Folder;
+    }
+    if item.attributes.online_only {
+        return PreviewKind::Unavailable(PreviewProblem::OnlineOnly);
+    }
+    if crate::thumbnail::is_decodable(&item.name) {
+        return PreviewKind::Image;
+    }
+    let ext = extension_lower(&item.name);
+    let text_ext = ext.as_deref().is_some_and(|e| TEXT_EXTENSIONS.contains(&e));
+    if !text_ext
+        && let Some(e) = ext.as_deref()
+        && has_handler(e)
+    {
+        return PreviewKind::Shell;
+    }
+    match read_text_head(path, SNIFF_LIMIT) {
+        Ok(_) => PreviewKind::Text,
+        Err(PreviewProblem::NotText) => PreviewKind::Info,
+        Err(problem) => PreviewKind::Unavailable(problem),
+    }
+}
+
+/// #337: 텍스트로 보는 확장자(소문자).
+const TEXT_EXTENSIONS: &[&str] = &[
+    "txt", "log", "md", "json", "csv", "xml", "ini", "rs", "toml", "yaml", "yml", "cfg", "conf",
+    "html", "htm", "css", "js", "ts", "py", "c", "h", "cpp", "java", "sh", "bat", "ps1", "slint",
+];
+
+/// #337: 종류를 정할 때 앞부분을 보는 크기.
+const SNIFF_LIMIT: usize = 8 * 1024;
+
+fn extension_lower(name: &std::ffi::OsStr) -> Option<String> {
+    let name = name.to_str()?;
+    let (stem, ext) = name.rsplit_once('.')?;
+    if stem.is_empty() || ext.is_empty() {
+        return None;
+    }
+    Some(ext.to_lowercase())
 }
 
 /// #337: 미리보기 내용 요청.
@@ -266,11 +305,74 @@ pub enum PreviewBody {
 
 /// #337: 종류대로 미리보기 내용을 만든다.
 pub fn load_preview(
-    _request: &PreviewRequest,
-    _cancel: &AtomicBool,
-    _has_handler: &dyn Fn(&str) -> bool,
+    request: &PreviewRequest,
+    cancel: &AtomicBool,
+    has_handler: &dyn Fn(&str) -> bool,
 ) -> PreviewBody {
-    todo!("#337")
+    let run = || match choose_kind(&request.path, &request.item, has_handler) {
+        PreviewKind::Folder => PreviewBody::Folder {
+            count: count_folder(&request.path, request.show_hidden),
+        },
+        PreviewKind::Image => {
+            match crate::thumbnail::make_thumbnail_with(
+                &request.path,
+                request.image_side,
+                &crate::thumbnail::DecodeLimits::default(),
+                cancel,
+            ) {
+                Ok(image) => PreviewBody::Image {
+                    image: Arc::new(image),
+                    placeholder: false,
+                },
+                Err(error) => PreviewBody::Unavailable(match error {
+                    crate::thumbnail::ThumbnailError::Unsupported => PreviewProblem::Unsupported,
+                    crate::thumbnail::ThumbnailError::NotFound => PreviewProblem::Missing,
+                    crate::thumbnail::ThumbnailError::AccessDenied => PreviewProblem::AccessDenied,
+                    crate::thumbnail::ThumbnailError::TooLarge => PreviewProblem::TooLarge,
+                    crate::thumbnail::ThumbnailError::Corrupt => PreviewProblem::Corrupt,
+                    crate::thumbnail::ThumbnailError::Io(kind) => PreviewProblem::Io(kind),
+                    crate::thumbnail::ThumbnailError::Cancelled
+                    | crate::thumbnail::ThumbnailError::Panicked => PreviewProblem::Failed,
+                }),
+            }
+        }
+        PreviewKind::Text => match read_text_head(&request.path, TEXT_HEAD_LIMIT) {
+            Ok(text) => PreviewBody::Text(text),
+            Err(PreviewProblem::NotText) => PreviewBody::Info,
+            Err(problem) => PreviewBody::Unavailable(problem),
+        },
+        PreviewKind::Shell => PreviewBody::Shell(ShellPreview::Loading),
+        PreviewKind::Info => PreviewBody::Info,
+        PreviewKind::Unavailable(problem) => PreviewBody::Unavailable(problem),
+    };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(run))
+        .unwrap_or(PreviewBody::Unavailable(PreviewProblem::Failed))
+}
+
+fn count_folder(path: &Path, show_hidden: bool) -> Option<u64> {
+    let entries = std::fs::read_dir(path).ok()?;
+    let mut count = 0u64;
+    for entry in entries.flatten() {
+        if !show_hidden && is_hidden(&entry) {
+            continue;
+        }
+        count += 1;
+    }
+    Some(count)
+}
+
+#[cfg(windows)]
+fn is_hidden(entry: &std::fs::DirEntry) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    // FILE_ATTRIBUTE_HIDDEN
+    entry
+        .metadata()
+        .is_ok_and(|m| m.file_attributes() & 0x2 != 0)
+}
+
+#[cfg(not(windows))]
+fn is_hidden(_entry: &std::fs::DirEntry) -> bool {
+    false
 }
 
 /// #338: 선택이 바뀐 뒤 요청을 내기까지 기다리는 시간(50ms).
