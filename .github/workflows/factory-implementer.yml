@@ -483,14 +483,22 @@ jobs:
             # A fresh implementation starts from main and replaces an earlier attempt's branch.
             pushargs=(--force origin "$BRANCH")
           fi
-          if ! git push "${pushargs[@]}" 2> .factory/push.log; then
+          if git push "${pushargs[@]}" 2> .factory/push.log; then
             cat .factory/push.log
-            # A refused workflow file (a fix may have added one) is for a person, not a failure to
-            # count or retry (#389).
-            if bash .github/factory/workflow-guard.sh push-failed "$N" .factory/push.log; then exit 0; fi
-            exit 1
+          else
+            cat .factory/push.log
+            # A refused workflow file is for a person, not a failure to count or retry (#389), unless
+            # main changed one during this run and the branch touches none: then catch up with main
+            # (conflict mode merges, else rebase) and push once more (#417). The PR keeps `$sha` as
+            # the checked commit: the caught-up head was not checked, so Verify runs `cargo xtask ci`.
+            rc=0
+            bash .github/factory/workflow-guard.sh push-retry "$N" .factory/push.log "$MODE" "${pushargs[@]}" || rc=$?
+            case $rc in
+              0) ;;
+              3) exit 0 ;;
+              *) exit 1 ;;
+            esac
           fi
-          cat .factory/push.log
           body=.factory/pr-body.md
           run="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           if [ "$MODE" = conflict ]; then
