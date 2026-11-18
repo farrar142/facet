@@ -65,7 +65,6 @@ fn shortcut(digit: u8) -> Shortcut {
 }
 
 #[test]
-#[ignore = "#327"]
 fn 새_탭은_자세히_보기_보통_크기다() {
     assert_eq!(ViewMode::default(), ViewMode::Details);
     assert_eq!(GridSize::default(), GridSize::Medium);
@@ -82,7 +81,6 @@ fn 새_탭은_자세히_보기_보통_크기다() {
 }
 
 #[test]
-#[ignore = "#327"]
 fn 칸_크기는_네_단계이고_한_변이_차례로_커진다() {
     assert_eq!(
         GridSize::ALL,
@@ -109,7 +107,6 @@ fn 칸_크기는_네_단계이고_한_변이_차례로_커진다() {
 }
 
 #[test]
-#[ignore = "#327"]
 fn 보기_명령은_바뀌지_않는_id와_탐색기와_같은_단축키를_갖는다() {
     for (command, id, digit) in VIEW_COMMANDS {
         assert_eq!(command.as_str(), id);
@@ -130,7 +127,6 @@ fn 보기_명령은_바뀌지_않는_id와_탐색기와_같은_단축키를_갖�
 }
 
 #[test]
-#[ignore = "#327"]
 fn 명령으로_보기를_바꾸고_지금_보기에_켜짐_표시가_붙는다() {
     let dir = folder(3);
     let mut app = app_at(dir.path());
@@ -169,7 +165,6 @@ fn 명령으로_보기를_바꾸고_지금_보기에_켜짐_표시가_붙는다(
 }
 
 #[test]
-#[ignore = "#327"]
 fn 보기_명령은_빈_폴더에서도_켜지고_팔레트에_나온다() {
     let dir = folder(0);
     let app = app_at(dir.path());
@@ -185,7 +180,6 @@ fn 보기_명령은_빈_폴더에서도_켜지고_팔레트에_나온다() {
 }
 
 #[test]
-#[ignore = "#327"]
 fn 보기_방식과_칸_크기는_탭마다_따로다() {
     let dir = folder(3);
     let mut app = app_at(dir.path());
@@ -210,7 +204,6 @@ fn 보기_방식과_칸_크기는_탭마다_따로다() {
 }
 
 #[test]
-#[ignore = "#327"]
 fn ctrl_휠은_칸_크기를_한_단계씩_바꾸고_끝에서_멈춘다() {
     let dir = folder(3);
     let mut app = app_at(dir.path());
@@ -232,7 +225,6 @@ fn ctrl_휠은_칸_크기를_한_단계씩_바꾸고_끝에서_멈춘다() {
 }
 
 #[test]
-#[ignore = "#327"]
 fn 세션에_탭마다_보기가_남고_되살아난다() {
     let dir = folder(3);
     let mut app = app_at(dir.path());
@@ -281,7 +273,6 @@ const OLDER_FILE: &str = r#"{
 }"#;
 
 #[test]
-#[ignore = "#327"]
 fn 보기가_없는_앞선_세션_파일은_자세히_보기_보통으로_읽는다() {
     let session = Session::from_json(OLDER_FILE).expect("앞선 파일도 읽는다");
     assert_eq!(session.windows[0].panels[0].tabs[0].view, View::default());
@@ -290,7 +281,6 @@ fn 보기가_없는_앞선_세션_파일은_자세히_보기_보통으로_읽는
 }
 
 #[test]
-#[ignore = "#327"]
 fn 창_폭과_칸_폭으로_열_수를_정하고_적어도_한_열이다() {
     assert_eq!(GridLayout::for_width(1000, 150).columns, 6);
     assert_eq!(GridLayout::for_width(300, 150).columns, 2);
@@ -300,7 +290,6 @@ fn 창_폭과_칸_폭으로_열_수를_정하고_적어도_한_열이다() {
 }
 
 #[test]
-#[ignore = "#327"]
 fn 순번과_행열을_오간다() {
     let layout = GridLayout { columns: 6 };
     assert_eq!(layout.rows(0), 0);
@@ -317,7 +306,6 @@ fn 순번과_행열을_오간다() {
 }
 
 #[test]
-#[ignore = "#327"]
 fn 화살표는_행과_열을_따라_움직인다() {
     // 열 넷, 항목 열: 0..=3 / 4..=7 / 8..=9
     let layout = GridLayout { columns: 4 };
@@ -345,7 +333,6 @@ fn 화살표는_행과_열을_따라_움직인다() {
 }
 
 #[test]
-#[ignore = "#327"]
 fn 보이는_칸과_위아래_한_화면을_순번_범위로_준다() {
     let layout = GridLayout { columns: 4 };
     assert_eq!(
@@ -382,7 +369,6 @@ fn 보이는_칸과_위아래_한_화면을_순번_범위로_준다() {
 }
 
 #[test]
-#[ignore = "#327"]
 fn 그리드_화살표는_커서_키와_같은_선택_규칙이고_보기를_바꿔도_선택이_남는다() {
     let dir = folder(10);
     let mut app = app_at(dir.path());

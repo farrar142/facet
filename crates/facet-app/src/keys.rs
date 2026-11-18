@@ -19,6 +19,25 @@ use slint::winit_030::winit::keyboard::{KeyCode, PhysicalKey};
 thread_local! {
     /// 마지막으로 누른 키가 백슬래시 자리였는가. 키 이벤트를 하나도 받지 못했으면 `None`이다.
     static BACKSLASH_POSITION: Cell<Option<bool>> = const { Cell::new(None) };
+    /// #327: 마지막으로 누른 키가 윗줄 숫자 키(1~6)였다면 그 숫자. Shift로 글자가 「!」「@」 등 배열마다 달라지므로
+    /// Ctrl+Shift+숫자는 키 위치로 맞춘다.
+    static DIGIT_POSITION: Cell<Option<u8>> = const { Cell::new(None) };
+}
+
+/// #327: 윗줄 숫자 키 위치의 숫자(`KeyCode::Digit1`~`Digit9`).
+fn digit_of(code: KeyCode) -> Option<u8> {
+    Some(match code {
+        KeyCode::Digit1 => 1,
+        KeyCode::Digit2 => 2,
+        KeyCode::Digit3 => 3,
+        KeyCode::Digit4 => 4,
+        KeyCode::Digit5 => 5,
+        KeyCode::Digit6 => 6,
+        KeyCode::Digit7 => 7,
+        KeyCode::Digit8 => 8,
+        KeyCode::Digit9 => 9,
+        _ => return None,
+    })
 }
 
 /// 창의 winit 이벤트 하나. 키를 눌렀으면 그 키가 백슬래시 자리인지 적는다. Slint는 이 이벤트를 받은 바로 뒤에
@@ -29,6 +48,11 @@ pub fn note_window_event(event: &WindowEvent) {
     {
         let backslash = event.physical_key == PhysicalKey::Code(KeyCode::Backslash);
         BACKSLASH_POSITION.with(|slot| slot.set(Some(backslash)));
+        let digit = match event.physical_key {
+            PhysicalKey::Code(code) => digit_of(code),
+            _ => None,
+        };
+        DIGIT_POSITION.with(|slot| slot.set(digit));
     }
 }
 
@@ -83,7 +107,23 @@ const FUNCTION: [SlintKey; 24] = [
 /// ([`shortcut_at`]).
 pub fn shortcut_of(text: &str, ctrl: bool, alt: bool, shift: bool) -> Option<Shortcut> {
     let position = BACKSLASH_POSITION.with(Cell::get);
+    if let Some(shortcut) = digit_by_position(ctrl, alt, shift, DIGIT_POSITION.with(Cell::get)) {
+        return Some(shortcut);
+    }
     shortcut_at(text, ctrl, alt, shift, position)
+}
+
+/// #327: Ctrl+Shift와 함께 누른 윗줄 숫자 키는 글자(「!」「@」 …, 배열마다 다름)가 아니라 키 위치의 숫자로 본다.
+pub fn digit_by_position(
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    digit: Option<u8>,
+) -> Option<Shortcut> {
+    match digit {
+        Some(n) if ctrl && shift && !alt => Some(Shortcut::new(Key::Digit(n)).ctrl().shift()),
+        _ => None,
+    }
 }
 
 /// 키 이벤트를 코어의 키 조합으로. Shift+Tab은 Slint가 따로 「Backtab」 글자로 주므로 Tab 키에 Shift를 더한
@@ -305,5 +345,21 @@ mod tests {
                 .and_then(find_by_shortcut),
             Some(CommandId::PreviousTab)
         );
+    }
+}
+
+#[cfg(test)]
+mod digit_tests {
+    use super::*;
+
+    #[test]
+    fn ctrl_shift_숫자는_키_위치로_맞춘다() {
+        assert_eq!(
+            digit_by_position(true, false, true, Some(3)),
+            Some(Shortcut::new(Key::Digit(3)).ctrl().shift())
+        );
+        assert_eq!(digit_by_position(true, false, false, Some(3)), None);
+        assert_eq!(digit_by_position(true, false, true, None), None);
+        assert_eq!(digit_by_position(true, true, true, Some(3)), None);
     }
 }
