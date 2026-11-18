@@ -118,6 +118,7 @@ mod palette;
 mod preset_store;
 mod question;
 mod rename;
+mod scrollbar;
 mod search_bar;
 mod tab_drag;
 mod target;
@@ -402,6 +403,7 @@ fn view_of(window: WindowId) -> Option<Rc<View>> {
 /// 코어 창 `window`의 Slint 창을 만들고 콜백을 잇는다. 보이기는 부르는 쪽이 한다. 측정 모드면 창마다 프레임 세기를 건다.
 fn open_view(app: &Rc<RefCell<App>>, window: WindowId) -> Result<Rc<View>, slint::PlatformError> {
     let ui = AppWindow::new()?;
+    scrollbar::install(&ui);
     // Slint는 창마다 winit 이벤트 훅을 하나만 둔다: 키 위치를 적고(Ctrl+백슬래시), 그 창이 포커스를 얻으면 활성
     // 창으로 알리고, 측정 모드면 프레임을 센다.
     let mut frames = measure::frame_counter(&ui, measure::window_key(window));
@@ -3821,6 +3823,7 @@ impl View {
             width: ui.list_width(),
             height: ui.view_height(),
             scroll: (-ui.content_y()).max(0.0),
+            scroll_x: (-ui.content_x()).max(0.0),
             row_height: self.ui.get_row_height(),
             rows,
         })
@@ -4592,6 +4595,15 @@ impl<'a> PanelUi<'a> {
         }
     }
 
+    /// 가로로 넘긴 거리(0 이하).
+    fn content_x(&self) -> f32 {
+        if self.right {
+            self.ui.get_right_content_x()
+        } else {
+            self.ui.get_left_content_x()
+        }
+    }
+
     fn list_width(&self) -> f32 {
         if self.right {
             self.ui.get_right_list_width()
@@ -4793,6 +4805,7 @@ impl View {
                         width: ui.list_width(),
                         height: ui.view_height(),
                         scroll: (-ui.content_y()).max(0.0),
+                        scroll_x: (-ui.content_x()).max(0.0),
                         row_height,
                         rows: tab.len(),
                     },
