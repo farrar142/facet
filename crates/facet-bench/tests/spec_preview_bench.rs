@@ -11,14 +11,12 @@ use facet_bench::{
 };
 
 #[test]
-#[ignore = "#336"]
 fn the_limit_is_ten_times_the_five_millisecond_target() {
     assert_eq!(TEXT_PREVIEW_TARGET, Duration::from_millis(5));
     assert_eq!(TEXT_PREVIEW_LIMIT, TEXT_PREVIEW_TARGET * 10);
 }
 
 #[test]
-#[ignore = "#336"]
 fn a_median_over_the_limit_fails_with_the_numbers() {
     let ms = Duration::from_millis;
     let m = Measurement {
@@ -35,7 +33,6 @@ fn a_median_over_the_limit_fails_with_the_numbers() {
 }
 
 #[test]
-#[ignore = "#336"]
 fn a_small_run_measures_each_round() {
     let m = measure_text_preview(3).expect("측정한다");
     assert_eq!(m.times.len(), 3, "회차 수만큼");

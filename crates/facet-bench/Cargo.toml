@@ -19,6 +19,8 @@ facet-indexer = { path = "../facet-indexer" }
 facet-protocol.workspace = true
 # 셸 확장 도우미 요청 왕복 벤치마크의 메뉴 대상(`MenuTarget`).
 facet-shell-protocol.workspace = true
+# 텍스트 미리보기 벤치마크의 CP949 시험 글자.
+encoding_rs = "0.8"
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 # 탐색기 비교 측정의 셸 복사(`facet_win::shell_copy`, 측정 전용).
 facet-win.workspace = true
