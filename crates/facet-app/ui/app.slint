@@ -3351,6 +3351,11 @@ export component AppWindow inherits Window {
     in property <string> preview-note;
     in property <image> preview-picture;
     in property <bool> preview-placeholder;
+    // 미리보기 영역의 창 안 자리(#342): Rust가 화면 자리로 바꿔 처리기 창을 붙일 곳으로 코어에 알린다.
+    out property <length> preview-area-x: panels.x + panels.width + 6px;
+    out property <length> preview-area-y: panels.y;
+    out property <length> preview-area-width: root.preview-width;
+    out property <length> preview-area-height: panels.height;
     // 영역 경계를 끌었다: 바라는 폭. Rust가 코어(`Window::set_preview_width`)로 한도 안으로 자른다.
     callback preview-width-dragged(length);
 

@@ -848,7 +848,8 @@ pub fn preview_problem_text(problem: facet_core::preview::PreviewProblem) -> Opt
         P::Corrupt => "파일이 깨져 볼 수 없음",
         P::TooLarge => "너무 커서 보지 않음",
         P::NotText | P::Unsupported => return None,
-        P::Failed | P::ShellFailed | P::Io(_) => "미리 보지 못함",
+        P::ShellFailed => "미리보기를 불러오지 못함",
+        P::Failed | P::Io(_) => "미리 보지 못함",
     };
     Some(text.to_owned())
 }

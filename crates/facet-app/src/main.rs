@@ -386,6 +386,11 @@ fn note_placement(window: WindowId) {
         };
         let placement = placement::Placement::observe(core.placement(), rect, state);
         core.set_placement(placement);
+        // 창을 옮기거나 크기를 바꾸면 미리보기 영역의 화면 자리도 바뀐다(#342).
+        if core.preview_pane().visible {
+            let host = view.preview_host();
+            app.set_preview_host(window, host);
+        }
     }
     save_session();
 }
@@ -2358,7 +2363,7 @@ impl View {
 
     /// 코어의 미리보기 내용(`App::preview`)을 영역에 옮긴다. 파일은 읽지 않는다.
     fn render_preview(&self) {
-        use facet_core::preview::{PreviewBody, PreviewContent, TEXT_HEAD_LIMIT};
+        use facet_core::preview::{PreviewBody, PreviewContent, ShellPreview, TEXT_HEAD_LIMIT};
         let ui = &self.ui;
         // 영역의 긴 변(물리 픽셀)을 코어에 알린다: 이미지면 그 크기로 다시 요청한다.
         {
@@ -2376,6 +2381,11 @@ impl View {
                 let side = (long * scale).round() as u32;
                 self.app.borrow_mut().set_preview_side(self.window, side);
             }
+            // 영역의 화면 자리(처리기 창을 붙일 곳, #342)를 코어에 알린다. 바뀌었을 때만 도우미에 알린다.
+            let host = pane_width
+                .filter(|_| ui.get_preview_visible())
+                .and_then(|_| self.preview_host());
+            self.app.borrow_mut().set_preview_host(self.window, host);
         }
         let app = self.app.borrow();
         let Some(window) = app.window(self.window) else {
@@ -2442,7 +2452,9 @@ impl View {
                     file_list::format_modified_local(item.modified),
                 );
                 match body {
-                    PreviewBody::Loading => message = text::preview_loading_text(),
+                    PreviewBody::Loading | PreviewBody::Shell(ShellPreview::Loading) => {
+                        message = text::preview_loading_text()
+                    }
                     PreviewBody::Text(preview) => {
                         kind = 2;
                         lines = preview.text.lines().map(SharedString::from).collect();
@@ -2467,7 +2479,10 @@ impl View {
                     PreviewBody::Unavailable(problem) => {
                         message = text::preview_problem_text(*problem).unwrap_or_default();
                     }
-                    PreviewBody::Folder { .. } | PreviewBody::Shell(_) | PreviewBody::Info => {}
+                    // 도우미가 그리는 중이면 영역을 비워 둔다(처리기 창은 그 자리에 붙는다).
+                    PreviewBody::Folder { .. }
+                    | PreviewBody::Shell(ShellPreview::Showing)
+                    | PreviewBody::Info => {}
                 }
             }
         }
@@ -3590,6 +3605,31 @@ impl View {
                 _ => None,
             })
             .flatten()
+    }
+
+    /// 미리보기 영역 본문의 화면 자리(#342, 창 핸들 값과 화면 물리 픽셀). 창이 아직 화면에 없으면 `None`이다.
+    fn preview_host(&self) -> Option<facet_core::preview::PreviewHost> {
+        #[cfg(windows)]
+        let parent = self.handle()?.get() as u64;
+        #[cfg(not(windows))]
+        let parent = 0;
+        let frame = self.frame()?;
+        let ui = &self.ui;
+        let at = |x: f32, y: f32| frame.to_screen(Point { x, y });
+        let x = ui.get_preview_area_x();
+        let y = ui.get_preview_area_y();
+        let top_left = at(x, y);
+        let bottom_right = at(
+            x + ui.get_preview_area_width(),
+            y + ui.get_preview_area_height(),
+        );
+        Some(facet_core::preview::PreviewHost {
+            parent,
+            x: top_left.x.round() as i32,
+            y: top_left.y.round() as i32,
+            width: (bottom_right.x - top_left.x).round().max(0.0) as u32,
+            height: (bottom_right.y - top_left.y).round().max(0.0) as u32,
+        })
     }
 
     /// 이 창의 화면 자리와 배율. 아직 화면에 없으면 `None`이다.
