@@ -89,7 +89,6 @@ fn tree() -> Vec<MenuItem> {
 }
 
 #[test]
-#[ignore = "#318"]
 fn hello_within_the_supported_range_is_accepted() {
     assert_eq!(MAX_SUPPORTED_VERSION, PROTOCOL_VERSION);
     assert_eq!(
@@ -107,7 +106,6 @@ fn hello_within_the_supported_range_is_accepted() {
 }
 
 #[test]
-#[ignore = "#318"]
 fn hello_outside_the_supported_range_is_rejected_with_the_range() {
     let rejected = Response::HelloRejected {
         min_version: MIN_SUPPORTED_VERSION,
@@ -121,7 +119,6 @@ fn hello_outside_the_supported_range_is_rejected_with_the_range() {
 }
 
 #[test]
-#[ignore = "#318"]
 fn hello_messages_round_trip() {
     let hello = Request::Hello {
         version: PROTOCOL_VERSION,
@@ -141,7 +138,6 @@ fn hello_messages_round_trip() {
 }
 
 #[test]
-#[ignore = "#318"]
 fn menu_requests_for_items_and_background_round_trip() {
     let items = Request::Menu {
         id: 42,
@@ -161,7 +157,6 @@ fn menu_requests_for_items_and_background_round_trip() {
 }
 
 #[test]
-#[ignore = "#318"]
 fn menu_tree_reply_round_trips() {
     let reply = Response::Menu {
         id: 7,
@@ -177,7 +172,6 @@ fn menu_tree_reply_round_trips() {
 }
 
 #[test]
-#[ignore = "#318"]
 fn several_messages_in_one_stream_are_read_in_order() {
     let first = Request::Hello {
         version: PROTOCOL_VERSION,
@@ -196,7 +190,6 @@ fn several_messages_in_one_stream_are_read_in_order() {
 }
 
 #[test]
-#[ignore = "#318"]
 fn a_frame_over_the_limit_is_rejected_before_reading_the_body() {
     let mut bytes = (MAX_FRAME_LEN + 1).to_le_bytes().to_vec();
     bytes.extend_from_slice(&[0u8; 16]);
@@ -210,7 +203,6 @@ fn a_frame_over_the_limit_is_rejected_before_reading_the_body() {
 }
 
 #[test]
-#[ignore = "#318"]
 fn truncated_or_garbage_bytes_are_errors_not_panics() {
     let mut bytes = Vec::new();
     write_message(
