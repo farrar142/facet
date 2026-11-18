@@ -225,6 +225,11 @@ fn main() -> Result<(), slint::PlatformError> {
         app.borrow_mut()
             .enable_indexer(facet_core::indexer_client::ClientOptions::default());
     }
+    // 셸 확장 도우미 관리(「속성」·「연결 프로그램」 대화상자, ADR-0006). 켜도 도우미는 뜨지 않고 첫 요청 때 뜬다.
+    app.borrow_mut()
+        .enable_shell_helper(facet_core::shell_helper::HelperOptions::new(
+            facet_core::shell_helper::default_program(),
+        ));
     drop(view);
 
     // 수신기는 이벤트 루프가 생긴 뒤(첫 창을 만든 뒤) 연다. 받은 인자는 수신기 스레드에서 해석하고 UI 스레드에는

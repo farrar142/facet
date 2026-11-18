@@ -159,9 +159,12 @@ pub enum CommandId {
     GridView(GridSize),
     /// #330: 썸네일 캐시를 비운다.
     ClearThumbnailCache,
-    /// #321: 연결 프로그램(`open-with`).
+    /// 연결 프로그램(`open-with`, #321): 커서 파일의 「연결 프로그램」 대화상자를 셸 확장 도우미가 띄운다. 커서 항목이
+    /// 파일이고 실제 파일 시스템 항목(실제 폴더나 검색 결과 위치)일 때 켜진다. 기본 단축키는 없다.
     OpenWith,
-    /// #321: 속성(`properties`, Alt+Enter).
+    /// 속성(`properties`, Alt+Enter, #321): 고른 항목(목록 순서)의 Windows 속성 대화상자를 셸 확장 도우미가 띄운다.
+    /// 고른 항목이 없으면 현재 폴더의 속성이다(커서 항목은 보지 않음). 고른 실제 파일 시스템 항목이 있거나 위치가 실제
+    /// 폴더일 때 켜진다.
     Properties,
     /// 내 PC 열기(`open-this-pc`): 활성 탭을 내 PC로 옮긴다(보통 이동, 기록에 남음). 기본 단축키는 없고 늘 켜진다.
     OpenThisPc,
@@ -177,8 +180,9 @@ pub enum CommandId {
 
 impl CommandId {
     /// 모든 명령. 명령 팔레트는 검색어가 없으면 이 순서로 보인다.
-    pub const ALL: [CommandId; 65] = [
+    pub const ALL: [CommandId; 67] = [
         CommandId::Open,
+        CommandId::OpenWith,
         CommandId::Back,
         CommandId::Forward,
         CommandId::Up,
@@ -230,6 +234,7 @@ impl CommandId {
         CommandId::Cut,
         CommandId::Paste,
         CommandId::CopyPath,
+        CommandId::Properties,
         CommandId::SortByLocation,
         CommandId::SortByMatches,
         CommandId::ShowInFolder,
@@ -451,11 +456,12 @@ impl CommandId {
             CommandId::Cut => const { &[key(letter('X')).ctrl()] },
             CommandId::Paste => const { &[key(letter('V')).ctrl()] },
             CommandId::CopyPath => const { &[key(letter('C')).ctrl().shift()] },
-            CommandId::OpenWith | CommandId::Properties => &[], // #321
-            CommandId::OpenThisPc => &[],                       // #350
-            CommandId::OpenRecycleBin => &[],                   // #352
-            CommandId::Restore => &[],                          // #353
-            CommandId::EmptyRecycleBin => &[],                  // #354
+            CommandId::OpenWith => &[],
+            CommandId::Properties => const { &[key(Key::Enter).alt()] },
+            CommandId::OpenThisPc => &[],      // #350
+            CommandId::OpenRecycleBin => &[],  // #352
+            CommandId::Restore => &[],         // #353
+            CommandId::EmptyRecycleBin => &[], // #354
             CommandId::TogglePreview => const { &[key(letter('P')).alt()] },
         }
     }
@@ -542,7 +548,13 @@ impl CommandId {
             CommandId::InstantUnderFolder => tab.instant_base().is_some(),
             CommandId::DetailsView | CommandId::GridView(_) => true,
             CommandId::ClearThumbnailCache => true,
-            CommandId::OpenWith | CommandId::Properties => todo!("#321"),
+            CommandId::OpenWith => {
+                has_real_items(tab) && tab.cursor_item().is_some_and(|item| !item.is_folder)
+            }
+            CommandId::Properties => {
+                (has_real_items(tab) && tab.selected_items().next().is_some())
+                    || tab.location().file_system_path().is_some()
+            }
 
             CommandId::OpenRecycleBin => true,
             CommandId::Restore => {

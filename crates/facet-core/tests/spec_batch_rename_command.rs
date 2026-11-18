@@ -131,7 +131,6 @@ fn the_command_has_an_id_and_sits_after_rename() {
 }
 
 #[test]
-#[ignore = "#321"]
 fn item_menu_has_batch_rename_right_below_rename() {
     use CommandId::*;
     let expected = vec![
