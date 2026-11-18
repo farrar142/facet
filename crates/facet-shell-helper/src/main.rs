@@ -24,6 +24,16 @@
 //! 권한이 없으면 죽지 않고 실패로 답한다. `--crash-state`가 있으면 처리되지 않은 예외로 죽을 때 그 주소가 든 확장 DLL을
 //! 적는다([`facet_win::shell_menu::record_crashes`]).
 //!
+//! # 실제 미리보기(#343)
+//!
+//! 미리보기 요청은 메뉴와 따로 둔 미리보기 전용 COM STA 셸 스레드에서 그 파일의 셸 미리보기 처리기를 싣고
+//! ([`facet_win::preview_handler::PreviewHandler`], 초기화는 스트림을 먼저) 처리기 창을 UI 창(요청의 `host.parent`)의
+//! 자식 창으로 그 자리에 붙인다. 처리기가 없으면 「처리기 없음」, 싣거나 그리지 못하면 실패로 답한다. 자리 바꾸기는 그
+//! 창을 옮기고, 내리기·다음 미리보기 요청은 처리기를 내려(`Unload`) 잡고 있던 파일을 놓는다. 그 셸 스레드가 요청 사이에
+//! 메시지를 돌려 처리기 창이 그려진다. 미리보기가 떠 있는 동안은 쉬어도 끝나지 않는다(끝나면 붙인 창이 사라진다).
+//! 자리 바꾸기·내리기가 [`PREVIEW_CALL_TIMEOUT`] 안에 끝나지 않으면(처리기가 멈춤) 완료로 답한 뒤 스스로 끝난다: 멈춘
+//! 처리기의 창과 잡힌 파일은 프로세스가 끝나야 놓이기 때문이다.
+//!
 //! # 속성·연결 프로그램(#321)
 //!
 //! 속성 요청은 Windows 속성 대화상자를, 연결 프로그램 요청은 「연결 프로그램」 대화상자를 대화상자마다 띄운 스레드에서
@@ -43,8 +53,7 @@
 //! 시작하면 그 파일을 공유 없이 열어 둔 채 「보이기 시작함」으로 답하고 미리보기를 내리거나 다음 미리보기 요청이 올 때
 //! 닫는다. 그 밖에는 곧바로 「보이기 시작함」. 자리 바꾸기·내리기는 완료로 답한다.
 //!
-//! 시험용 모드가 아니면 실제 처리기는 아직 싣지 않고(뒤 티켓) 미리보기 요청에 「처리기 없음」으로 답한다(앱은 정보만
-//! 보인다).
+//! 시험용 모드가 아니면 실제 처리기를 싣는다(#343, 아래 「실제 미리보기」).
 //!
 //! 속성 요청은 첫 경로가 든 폴더에 `facet-fake-properties.txt`를 만들어 줄마다 경로들의 이름을 쓰고 완료로 답하며,
 //! 「대화상자」가 1.5초 동안 떠 있는 것으로 친다(그동안 쉬면 끝내기를 미룸). 연결 프로그램 요청은 그 파일이 든 폴더에
@@ -64,6 +73,8 @@ fn main() {
 
 #[cfg(windows)]
 mod real_menu;
+#[cfg(windows)]
+mod real_preview;
 
 #[cfg(windows)]
 mod helper {
@@ -83,7 +94,7 @@ mod helper {
     use facet_win::pipe_client;
     use facet_win::shell_thread::{CallError, ShellThread};
 
-    use super::real_menu;
+    use super::{real_menu, real_preview};
 
     /// 파이프에 청하는 권한: 읽기(`FILE_GENERIC_READ`)와 데이터 쓰기(`FILE_WRITE_DATA`).
     const PIPE_ACCESS: u32 = 0x0012_0089 | 0x0002;
@@ -192,7 +203,7 @@ mod helper {
                 .as_ref()
                 .is_none_or(|response| write_message(&mut writer, response).is_ok());
             activity.end();
-            if !written {
+            if !written || preview.exit_after_reply {
                 return 0;
             }
         }
@@ -305,6 +316,10 @@ mod helper {
     #[derive(Default)]
     struct Preview {
         held: Option<fs::File>,
+        /// 실제 처리기가 떠 있는 동안 쉬어도 끝나지 않게 잡는 표지(#343).
+        shown: Option<DialogOpen>,
+        /// 답을 쓴 뒤 스스로 끝낸다(멈춘 처리기를 놓으려고, #343).
+        exit_after_reply: bool,
     }
 
     /// 요청 하나에 답한다. `None`이면 답하지 않는다.
@@ -316,18 +331,26 @@ mod helper {
         request: Request,
     ) -> Option<Response> {
         match request {
-            Request::Preview { id, path, .. } => {
+            Request::Preview { id, path, host } => {
                 // 앞선 미리보기를 내린다.
                 preview.held = None;
                 if args.fake {
                     fake_preview(args, preview, id, &path)
                 } else {
-                    Some(Response::NoPreviewHandler { id })
+                    Some(shell.preview(activity, preview, id, path, host))
                 }
             }
-            Request::MovePreview { id, .. } => Some(Response::Done { id }),
+            Request::MovePreview { id, host } => {
+                if !args.fake {
+                    shell.move_preview(preview, host);
+                }
+                Some(Response::Done { id })
+            }
             Request::UnloadPreview { id } => {
                 preview.held = None;
+                if !args.fake {
+                    shell.unload_preview(preview);
+                }
                 Some(Response::Done { id })
             }
             Request::Properties { id, paths } if args.fake => {
@@ -372,15 +395,81 @@ mod helper {
     /// 안에 돌아온다.
     pub(super) const INVOKE_ANSWER_WAIT: Duration = Duration::from_secs(1);
 
-    /// 실제 셸 메뉴를 다루는 셸 스레드(COM STA). 만든 메뉴 객체는 그 스레드에 있다([`real_menu`]).
+    /// 처리기를 싣고 그리기 시작하기를 기다리는 가장 긴 시간(#343).
+    ///
+    /// 근거: 관리 쪽이 미리보기 요청을 3초(`SHELL_PREVIEW_TIMEOUT`)에 끊고 이 도우미를 끝내므로 실제로는 그쪽이 먼저다. 이
+    /// 값은 관리 쪽이 없을 때(시험) 붙잡혀 있지 않게 하는 안전망이다.
+    const PREVIEW_LOAD_TIMEOUT: Duration = Duration::from_secs(10);
+    /// 자리 바꾸기·내리기를 기다리는 가장 긴 시간(#343). 넘으면 처리기가 멈춘 것으로 보고 답한 뒤 끝난다.
+    ///
+    /// 근거: 창 옮기기와 `Unload`는 보통 수 ms다. 관리 쪽 응답 시간 제한(`REPLY_TIMEOUT`, 2초) 안에 답해야 한다.
+    pub(super) const PREVIEW_CALL_TIMEOUT: Duration = Duration::from_millis(1500);
+
+    /// 실제 셸 메뉴를 다루는 셸 스레드(COM STA). 만든 메뉴 객체는 그 스레드에 있다([`real_menu`]). 미리보기 처리기는
+    /// 따로 둔 셸 스레드에 있다([`real_preview`], 처리기가 멈춰도 메뉴는 돈다).
     struct Shell {
         thread: std::sync::Mutex<ShellThread>,
+        preview: ShellThread,
     }
 
     impl Shell {
         fn new() -> Shell {
             Shell {
                 thread: std::sync::Mutex::new(ShellThread::new()),
+                preview: ShellThread::new(),
+            }
+        }
+
+        /// 실제 미리보기(#343): 앞선 처리기를 내리고 `path`의 처리기를 `host`에 붙인다.
+        fn preview(
+            &self,
+            activity: &Arc<Activity>,
+            preview: &mut Preview,
+            id: u64,
+            path: PathBuf,
+            host: facet_shell_protocol::PreviewHost,
+        ) -> Response {
+            use facet_win::preview_handler::LoadError;
+            preview.shown = None;
+            match self.preview.call(PREVIEW_LOAD_TIMEOUT, move || {
+                real_preview::show(&path, host)
+            }) {
+                Ok(Ok(())) => {
+                    preview.shown = Some(activity.dialog());
+                    Response::PreviewShowing { id }
+                }
+                Ok(Err(LoadError::NoHandler)) => Response::NoPreviewHandler { id },
+                Ok(Err(LoadError::Failed(message))) => Response::Error {
+                    id,
+                    kind: ErrorKind::Failed,
+                    message,
+                },
+                Err(error) => call_failed(id, error),
+            }
+        }
+
+        fn move_preview(&self, preview: &mut Preview, host: facet_shell_protocol::PreviewHost) {
+            if preview.shown.is_none() {
+                return;
+            }
+            let moved = self
+                .preview
+                .call(PREVIEW_CALL_TIMEOUT, move || real_preview::move_to(host));
+            if moved.is_err() {
+                preview.exit_after_reply = true;
+            }
+        }
+
+        fn unload_preview(&self, preview: &mut Preview) {
+            if preview.shown.take().is_none() {
+                return;
+            }
+            if self
+                .preview
+                .call(PREVIEW_CALL_TIMEOUT, real_preview::unload)
+                .is_err()
+            {
+                preview.exit_after_reply = true;
             }
         }
 
