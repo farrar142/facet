@@ -86,7 +86,6 @@ fn load(request: &PreviewRequest, has_handler: &dyn Fn(&str) -> bool) -> Preview
 }
 
 #[test]
-#[ignore = "#337"]
 fn text_extensions_are_text_in_any_case() {
     let dir = TempDir::new().unwrap();
     for name in [
@@ -98,7 +97,6 @@ fn text_extensions_are_text_in_any_case() {
 }
 
 #[test]
-#[ignore = "#337"]
 fn image_extensions_are_images_in_any_case() {
     let dir = TempDir::new().unwrap();
     for name in [
@@ -110,7 +108,6 @@ fn image_extensions_are_images_in_any_case() {
 }
 
 #[test]
-#[ignore = "#337"]
 fn a_folder_is_a_folder() {
     let dir = TempDir::new().unwrap();
     let folder = dir.path().join("사진.txt");
@@ -119,7 +116,6 @@ fn a_folder_is_a_folder() {
 }
 
 #[test]
-#[ignore = "#337"]
 fn files_without_a_known_extension_are_judged_by_nul_bytes() {
     let dir = TempDir::new().unwrap();
     let readme = write(dir.path(), "README", "설명서\nhello\n".as_bytes());
@@ -135,7 +131,6 @@ fn files_without_a_known_extension_are_judged_by_nul_bytes() {
 }
 
 #[test]
-#[ignore = "#337"]
 fn utf16_text_without_a_bom_is_not_mistaken_for_binary() {
     let dir = TempDir::new().unwrap();
     let path = write(
@@ -153,7 +148,6 @@ fn utf16_text_without_a_bom_is_not_mistaken_for_binary() {
 }
 
 #[test]
-#[ignore = "#337"]
 fn a_binary_with_a_text_extension_is_info_only() {
     let dir = TempDir::new().unwrap();
     let path = write(dir.path(), "fake.txt", &binary());
@@ -161,7 +155,6 @@ fn a_binary_with_a_text_extension_is_info_only() {
 }
 
 #[test]
-#[ignore = "#337"]
 fn a_registered_handler_makes_it_a_shell_preview() {
     let dir = TempDir::new().unwrap();
     let pdf = write(dir.path(), "문서.PDF", &binary());
@@ -190,7 +183,6 @@ fn a_registered_handler_makes_it_a_shell_preview() {
 }
 
 #[test]
-#[ignore = "#337"]
 fn online_only_items_are_not_previewed_and_not_opened() {
     let dir = TempDir::new().unwrap();
     for name in ["없음.txt", "없음.jpg", "없음.pdf", "없음"] {
@@ -205,7 +197,6 @@ fn online_only_items_are_not_previewed_and_not_opened() {
 
 #[cfg(windows)]
 #[test]
-#[ignore = "#337"]
 fn online_only_items_are_decided_even_when_the_file_is_locked() {
     use std::os::windows::fs::OpenOptionsExt;
 
@@ -233,7 +224,6 @@ fn online_only_items_are_decided_even_when_the_file_is_locked() {
 }
 
 #[test]
-#[ignore = "#337"]
 fn a_missing_file_is_missing() {
     let dir = TempDir::new().unwrap();
     let path = write(dir.path(), "gone.xyz", b"x");
@@ -247,7 +237,6 @@ fn a_missing_file_is_missing() {
 
 #[cfg(windows)]
 #[test]
-#[ignore = "#337"]
 fn a_locked_file_is_locked() {
     use std::os::windows::fs::OpenOptionsExt;
 
@@ -266,7 +255,6 @@ fn a_locked_file_is_locked() {
 }
 
 #[test]
-#[ignore = "#337"]
 fn loading_a_text_file_gives_its_text() {
     let dir = TempDir::new().unwrap();
     let path = write(dir.path(), "메모.txt", "첫 줄\n둘째 줄\n".as_bytes());
@@ -290,7 +278,6 @@ fn loading_a_text_file_gives_its_text() {
 }
 
 #[test]
-#[ignore = "#337"]
 fn loading_a_folder_counts_its_items() {
     let dir = TempDir::new().unwrap();
     let folder = dir.path().join("폴더");
@@ -306,7 +293,6 @@ fn loading_a_folder_counts_its_items() {
 
 #[cfg(windows)]
 #[test]
-#[ignore = "#337"]
 fn loading_a_folder_follows_the_hidden_items_setting() {
     let dir = TempDir::new().unwrap();
     let folder = dir.path().join("폴더");
@@ -330,7 +316,6 @@ fn loading_a_folder_follows_the_hidden_items_setting() {
 }
 
 #[test]
-#[ignore = "#337"]
 fn loading_info_shell_and_problems_gives_those_values() {
     let dir = TempDir::new().unwrap();
     let zip = write(dir.path(), "a.zip", &binary());

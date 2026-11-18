@@ -1165,23 +1165,91 @@ pub fn measure_thumbnail_decode(dir: &Path, runs: usize) -> Result<Measurement, 
 
 /// #328: 캐시 읽기 벤치마크의 건수.
 pub const THUMBNAIL_CACHE_READ_COUNT: usize = 1000;
-/// #328: 캐시 읽기 1천 건 시간의 로컬 기준.
-pub const THUMBNAIL_CACHE_READ_TARGET: Duration = Duration::ZERO; // #328
+/// #328: 캐시 읽기 1천 건 시간의 로컬 기준(메모리를 거치지 않는 디스크 읽기: 파일 열기·읽기·PNG 해독, 건당 0.2ms).
+pub const THUMBNAIL_CACHE_READ_TARGET: Duration = Duration::from_millis(200);
 /// #328: CI가 실패시키는 캐시 읽기 상한(기준의 10배).
-pub const THUMBNAIL_CACHE_READ_LIMIT: Duration = Duration::ZERO; // #328
+pub const THUMBNAIL_CACHE_READ_LIMIT: Duration = Duration::from_millis(2000);
 
 /// #328: 캐시 읽기 중앙값이 `limit`을 넘으면 중앙값과 상한을 담은 메시지를 돌려준다.
-pub fn check_thumbnail_cache_read_limit(_m: &Measurement, _limit: Duration) -> Result<(), String> {
-    todo!("#328")
+pub fn check_thumbnail_cache_read_limit(m: &Measurement, limit: Duration) -> Result<(), String> {
+    if m.median() > limit {
+        return Err(format!(
+            "썸네일 캐시 읽기 상한 초과: 중앙값 {:.1}ms > 상한 {}ms (최악 {:.1}ms)",
+            m.median().as_secs_f64() * 1000.0,
+            limit.as_millis(),
+            m.max().as_secs_f64() * 1000.0
+        ));
+    }
+    Ok(())
 }
 
-/// #328: `dir`에 캐시를 만들어 `count`건 읽기를 `runs`회 잰다.
+/// #328: `dir`에 캐시를 만들어 `count`건 읽기를 `runs`회 잰다(메모리 상한 0이라 모두 디스크에서 읽음).
+/// 끝나면(실패해도) 만든 것을 지운다.
 pub fn measure_thumbnail_cache_read(
-    _dir: &Path,
-    _count: usize,
-    _runs: usize,
+    dir: &Path,
+    count: usize,
+    runs: usize,
 ) -> Result<Measurement, String> {
-    todo!("#328")
+    use facet_core::thumbnail::{Thumbnail, ThumbnailKey};
+    use facet_core::thumbnail_cache::{CacheLimits, ThumbnailCache};
+    use std::sync::Arc;
+
+    let cache_dir = dir.join("thumbnail-cache-bench");
+    let result = (|| {
+        let cache = ThumbnailCache::open(
+            &cache_dir,
+            CacheLimits {
+                disk_bytes: u64::MAX,
+                memory_bytes: 0,
+            },
+        )
+        .map_err(|e| format!("{}: {e}", cache_dir.display()))?;
+        let modified = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let keys: Vec<ThumbnailKey> = (0..count)
+            .map(|i| ThumbnailKey {
+                path: std::path::PathBuf::from(format!(r"C:\사진\bench-{i}.jpg")),
+                side: 96,
+                modified,
+                file_size: 1000 + i as u64,
+            })
+            .collect();
+        for (i, key) in keys.iter().enumerate() {
+            let rgba: Vec<u8> = (0..96 * 96u32)
+                .flat_map(|p| {
+                    let (x, y) = (p % 96, p / 96);
+                    [(x * 2) as u8, (y * 2) as u8, (i % 256) as u8, 255]
+                })
+                .collect();
+            let t = Thumbnail {
+                width: 96,
+                height: 96,
+                rgba,
+            };
+            cache
+                .put(key, Arc::new(t))
+                .map_err(|e| format!("캐시 쓰기 실패: {e}"))?;
+        }
+        let read_all = || -> Result<(), String> {
+            for key in &keys {
+                let t = cache.get(key).ok_or("캐시에서 꺼내지 못했습니다")?;
+                std::hint::black_box(&t);
+            }
+            Ok(())
+        };
+        read_all()?;
+        let mut times = Vec::with_capacity(runs);
+        for _ in 0..runs {
+            let start = Instant::now();
+            read_all()?;
+            times.push(start.elapsed());
+        }
+        Ok(Measurement {
+            item_count: count,
+            times,
+        })
+    })();
+    let _ = std::fs::remove_dir_all(&cache_dir);
+    result
 }
 
 /// 필터 벤치마크에서 거르는 항목 수(기본 시험 폴더).
@@ -1654,7 +1722,7 @@ pub fn measure_shell_helper(helper: &Path, runs: usize) -> Result<Measurement, S
     options.args = vec!["--fake".into()];
     options.crash_log = None;
     let shell = ShellHelper::start(options);
-    let target = MenuTarget::Items(vec![PathBuf::from(r"C:acet-bench\시험.txt")]);
+    let target = MenuTarget::Items(vec![PathBuf::from(r"C:\facet-bench\시험.txt")]);
     let round_trip = || -> Result<(Duration, usize), String> {
         let start = Instant::now();
         let id = shell.menu(target.clone());
