@@ -13,6 +13,7 @@ use facet_bench::delete::{
     self, DELETE_BENCH_COUNT, DELETE_BENCH_RUNS, DELETE_LIMIT, DELETE_TARGET, RECYCLE_COUNT,
     UNDO_TARGET_LIMIT, UNDO_TARGET_RUNS, UNDO_TARGET_TARGET,
 };
+use facet_bench::grid_screen::{self, GRID_IMAGE_COUNT, GridPlan};
 use facet_bench::screen::{self, DEFAULT_SCROLL_ROWS, Plan};
 use facet_bench::{
     BENCH_QUERY, BENCH_RESULT_LIMIT, BENCH_SORT, BENCH_SORTED_QUERY, BenchCaller, DEFAULT_COUNT,
@@ -104,7 +105,12 @@ const USAGE: &str = "\
       시험 폴더를 만들거나 확인한 뒤 앱을 측정 모드로 띄워 콜드 스타트(--runs회, 기본 5),
       시험 폴더의 상위로 띄운 창에서 시험 폴더로 이동한 폴더 열기 첫 화면(--runs회),
       스크롤 프레임 시간(--scroll-runs회, 기본 1)을 잰다. 표를 출력하고 --json이면 JSON도 쓴다.
-      통과 기준을 못 맞추면 실패한다. 보통 `cargo xtask measure`로 부른다.";
+      통과 기준을 못 맞추면 실패한다. 보통 `cargo xtask measure`로 부른다.
+  facet-bench grid [경로] --app <facet 실행 파일> [--count N] [--runs N] [--refresh-hz N] [--json <파일>]
+      사진 N장(기본 10000, 4000x3000 JPEG, 경로를 빼면 임시 폴더의 facet-test-folders/photos-N, 빠진 것만 채움)
+      폴더를 앱의 그리드(보통 크기)로 열어 캐시가 찬 두 번째 열기에서 한 화면이 썸네일로 다 차기까지(--runs회,
+      기본 5, 중앙값 100ms 미만)와 끝까지 스크롤하는 프레임 시간(최악값이 한 프레임의 두 배 이하)을 잰다.
+      표를 출력하고 --json이면 JSON도 쓴다. 통과 못 하면 실패한다. 보통 `cargo xtask measure-grid`로 부른다.";
 
 const DEFAULT_RUNS: usize = 5;
 
@@ -240,6 +246,7 @@ fn main() -> ExitCode {
         "shell-list" => shell_list(&args),
         "compare-recycle" => compare_recycle(&args),
         "compare-copy" => compare_copy(&args),
+        "grid" => grid(&args),
         "screen" => make_folder(&args).and_then(|()| screen(&args)),
         other => Err(format!("알 수 없는 명령: {other}\n\n{USAGE}")),
     };
@@ -800,6 +807,39 @@ fn screen(args: &Args) -> Result<(), String> {
         refresh_hz: args.refresh_hz,
     };
     let result = screen::measure(&plan)?;
+    println!(
+        "
+{}",
+        result.to_table()
+    );
+    if let Some(json) = &args.json {
+        std::fs::write(json, result.to_json())
+            .map_err(|e| format!("{}를 쓰지 못함: {e}", json.display()))?;
+        println!("JSON: {}", json.display());
+    }
+    if result.verdict().pass() {
+        Ok(())
+    } else {
+        Err("통과 기준을 맞추지 못했습니다".to_owned())
+    }
+}
+
+/// #331: 그리드 화면 수치 측정.
+fn grid(args: &Args) -> Result<(), String> {
+    let app = args.app.as_deref().ok_or("--app이 없습니다")?;
+    let count = args.count.unwrap_or(GRID_IMAGE_COUNT);
+    let folder = args
+        .path
+        .clone()
+        .unwrap_or_else(|| grid_screen::default_photo_folder(count));
+    let plan = GridPlan {
+        app,
+        folder: &folder,
+        count,
+        runs: args.runs(),
+        refresh_hz: args.refresh_hz,
+    };
+    let result = grid_screen::measure(&plan)?;
     println!(
         "
 {}",
