@@ -1,5 +1,5 @@
 // target: crates/facet-core/tests/spec_virtual_folders_recycle_bin.rs
-// AC: #352: 휴지통 열기·주소창 이름과 지운 파일의 원래 이름·원래 위치·지운 날짜·크기, 다른 볼륨의 휴지통도 한 목록, 원래 위치·지운 날짜 정렬, 휴지통의 되는 일과 막힌 명령, 메뉴의 꺼진 줄, 끌기 원본 아님, 세션
+// AC: #352: 휴지통 열기·주소창 이름과 지운 파일의 원래 이름·원래 위치·지운 날짜·크기, 다른 볼륨의 휴지통도 한 목록, 원래 위치·지운 날짜 정렬, 휴지통의 되는 일과 막힌 명령(팔레트에도 꺼진 채), 메뉴의 꺼진 줄, 끌기 원본 아님, 세션
 //! 셸 공급자의 「휴지통」 위치를 실제 휴지통으로 공개 인터페이스(`App`·`Tab`)에서 확인한다. 임시 폴더의 파일을 S4의
 //! 휴지통 삭제로 넣고 휴지통을 열어 그 항목이 원래 이름·원래 위치·지운 날짜·크기로 보이는지, 원래 위치·지운 날짜로
 //! 정렬되는지, 휴지통 안에서 이름바꾸기·새 폴더·붙여넣기·복사·잘라내기 등이 위치에 막혀(`NotAllowedHere`) 아무것도
@@ -351,6 +351,16 @@ fn blocked_commands_are_not_allowed_here_and_change_nothing() {
     app.active_tab_mut().select_only(first);
     app.active_tab_mut().toggle_select(second);
     let jobs = app.work_area().entries().len();
+
+    // 명령 팔레트에도 꺼진 채 보인다.
+    let palette = app.search_commands("", |command| command.as_str());
+    for command in BLOCKED {
+        let entry = palette
+            .iter()
+            .find(|entry| entry.command == command)
+            .unwrap_or_else(|| panic!("팔레트에 {command:?}가 보인다"));
+        assert!(!entry.enabled, "팔레트의 {command:?}는 꺼진 채 보인다");
+    }
 
     for command in BLOCKED {
         assert!(!app.can_execute(command), "{command:?}는 꺼진다");

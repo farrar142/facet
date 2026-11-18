@@ -90,6 +90,8 @@ pub enum JobKind {
     Recycle,
     /// **일괄 이름 바꾸기**([`JobQueue::batch_rename`]). 차례를 기다리지 않고 곧바로 시작한다.
     BatchRename,
+    /// #353: 휴지통에서 복원.
+    Restore,
 }
 
 /// 작업의 상태.
@@ -927,7 +929,8 @@ impl JobQueue {
             | JobKind::Redo
             | JobKind::Delete
             | JobKind::Recycle
-            | JobKind::BatchRename => Err(CopyRejection::NoSources),
+            | JobKind::BatchRename
+            | JobKind::Restore => Err(CopyRejection::NoSources),
         }
     }
 
@@ -955,7 +958,8 @@ impl JobQueue {
             | JobKind::Redo
             | JobKind::Delete
             | JobKind::Recycle
-            | JobKind::BatchRename => {
+            | JobKind::BatchRename
+            | JobKind::Restore => {
                 return Err(CopyRejection::NoSources);
             }
         };

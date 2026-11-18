@@ -159,6 +159,14 @@ pub enum CommandId {
     OpenWith,
     /// #321: 속성(`properties`, Alt+Enter).
     Properties,
+    /// #350: 내 PC 열기(`open-this-pc`).
+    OpenThisPc,
+    /// #352: 휴지통 열기(`open-recycle-bin`).
+    OpenRecycleBin,
+    /// #353: 복원(`restore`).
+    Restore,
+    /// #354: 휴지통 비우기(`empty-recycle-bin`).
+    EmptyRecycleBin,
 }
 
 impl CommandId {
@@ -291,6 +299,10 @@ impl CommandId {
             CommandId::ClearThumbnailCache => "clear-thumbnail-cache",
             CommandId::OpenWith => "open-with",
             CommandId::Properties => "properties",
+            CommandId::OpenThisPc => "open-this-pc",
+            CommandId::OpenRecycleBin => "open-recycle-bin",
+            CommandId::Restore => "restore",
+            CommandId::EmptyRecycleBin => "empty-recycle-bin",
         }
     }
 
@@ -300,7 +312,7 @@ impl CommandId {
     }
 
     /// 그 열로 정렬하는 명령.
-    pub const fn sort_by(column: Column) -> CommandId {
+    pub fn sort_by(column: Column) -> CommandId {
         match column {
             Column::Name => CommandId::SortByName,
             Column::Modified => CommandId::SortByModified,
@@ -308,6 +320,8 @@ impl CommandId {
             Column::Size => CommandId::SortBySize,
             Column::Location => CommandId::SortByLocation,
             Column::Matches => CommandId::SortByMatches,
+            Column::TotalSize | Column::FreeSpace => todo!("#351"),
+            Column::OriginalLocation | Column::DateDeleted => todo!("#352"),
         }
     }
 
@@ -415,7 +429,16 @@ impl CommandId {
             CommandId::Paste => const { &[key(letter('V')).ctrl()] },
             CommandId::CopyPath => const { &[key(letter('C')).ctrl().shift()] },
             CommandId::OpenWith | CommandId::Properties => &[], // #321
+            CommandId::OpenThisPc => &[],                       // #350
+            CommandId::OpenRecycleBin => &[],                   // #352
+            CommandId::Restore => &[],                          // #353
+            CommandId::EmptyRecycleBin => &[],                  // #354
         }
+    }
+
+    /// #348: 되는 일 `capabilities`가 이 명령을 막지 않는가.
+    pub fn is_allowed_by(self, _capabilities: &crate::Capabilities) -> bool {
+        todo!("#348")
     }
 
     /// 탭 상태에서 지금 실행할 수 있는가.
@@ -471,6 +494,10 @@ impl CommandId {
             CommandId::DetailsView | CommandId::GridView(_) => todo!("#327"),
             CommandId::ClearThumbnailCache => todo!("#330"),
             CommandId::OpenWith | CommandId::Properties => todo!("#321"),
+            CommandId::OpenThisPc => todo!("#350"),
+            CommandId::OpenRecycleBin => todo!("#352"),
+            CommandId::Restore => todo!("#353"),
+            CommandId::EmptyRecycleBin => todo!("#354"),
             CommandId::Refresh
             | CommandId::EditAddress
             | CommandId::ToggleHidden

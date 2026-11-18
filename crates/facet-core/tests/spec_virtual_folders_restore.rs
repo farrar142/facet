@@ -1,5 +1,5 @@
 // target: crates/facet-core/tests/spec_virtual_folders_restore.rs
-// AC: #353: 복원 작업이 생기고 원래 자리로 돌아와 휴지통에서 빠진다, 같은 이름이면 충돌 질문으로 멈추고 덮어쓰지 않는다, 건너뛰기, 둘 다 유지, 휴지통 밖에서는 NotAllowedHere
+// AC: #353: 복원 작업이 생기고 원래 자리로 돌아와 휴지통에서 빠진다, 같은 이름이면 충돌 질문으로 멈추고 덮어쓰지 않는다, 건너뛰기, 둘 다 유지, 휴지통 밖에서는 NotAllowedHere, 고른 것이 없으면 꺼짐
 //! 휴지통 위치의 「복원」을 실제 휴지통으로 공개 인터페이스(`App`)에서 확인한다: 임시 폴더의 파일을 S4의 휴지통 삭제로
 //! 넣고 휴지통에서 골라 「복원」하면 복원 작업이 작업 영역에 생기고 원래 자리에 원래 내용으로 돌아오며 휴지통 목록에서
 //! 빠지는지, 원래 자리에 같은 이름이 있으면 이름 충돌 질문으로 멈춰 덮어쓰지 않고 건너뛰기·둘 다 유지의 답대로 하는지,
@@ -248,6 +248,32 @@ fn keep_both_restores_under_a_numbered_name() {
         "지운 내용"
     );
     assert!(!still_recycled(&mut app, &path));
+}
+
+#[test]
+#[ignore = "#353"]
+fn restore_is_disabled_when_nothing_is_chosen_in_the_recycle_bin() {
+    let dir = TempDir::new().unwrap();
+    let mut app = app_at(dir.path());
+    assert_eq!(app.execute(CommandId::OpenRecycleBin), Execution::Done);
+    settle(&mut app, &Location::recycle_bin());
+
+    // 어느 항목에도 맞지 않는 필터로 보이는 항목을 모두 가려 선택과 커서를 없앤다.
+    let tab = app.active_tab_mut();
+    let request = tab
+        .request_filter("facet-복원-시험-맞는-항목-없음-7f3a9c")
+        .expect("필터 요청");
+    tab.finish_filter(request.run());
+    assert!(tab.is_empty(), "보이는 항목이 없다");
+    assert_eq!(tab.selected_count(), 0);
+    assert_eq!(tab.cursor(), None);
+
+    assert!(
+        !app.can_execute(CommandId::Restore),
+        "고른 것이 없으면 꺼진다"
+    );
+    assert_eq!(app.execute(CommandId::Restore), Execution::Disabled);
+    assert!(app.work_area().is_empty(), "작업을 넣지 않았다");
 }
 
 #[test]

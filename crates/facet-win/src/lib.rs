@@ -46,6 +46,7 @@ pub mod icon;
 pub mod pipe_client;
 pub mod recycle;
 pub mod shell_copy;
+pub mod shell_thread;
 pub mod single_instance;
 mod watch;
 #[cfg(windows)]

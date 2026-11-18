@@ -92,6 +92,11 @@ fn name(command: CommandId) -> &'static str {
         // 오른쪽 메뉴의 자체 항목(자세한 확인은 tests/spec_shell_helper_menu_layout.rs).
         CommandId::OpenWith => "연결 프로그램",
         CommandId::Properties => "속성",
+        // 가상 폴더의 명령(자세한 확인은 tests/spec_virtual_folders_*.rs).
+        CommandId::OpenThisPc => "내 PC 열기",
+        CommandId::OpenRecycleBin => "휴지통 열기",
+        CommandId::Restore => "복원",
+        CommandId::EmptyRecycleBin => "휴지통 비우기",
     }
 }
 
