@@ -51,10 +51,16 @@ pub fn pixel_size(scale: f32) -> u32 {
 /// `folder` 안 항목의 아이콘(`size` 화소). 아직 없거나 얻지 못했거나 캐시를 띄우지 않았으면 `None`이다. 기다리지
 /// 않는다.
 pub fn icon(folder: &Path, item: &Item, size: u32) -> Option<Image> {
+    icon_for(&icon_key(folder, item), size)
+}
+
+/// 아이콘 키 `key`의 아이콘(`size` 화소, 키는 코어의 `Tab::icon_key`). 아직 없거나 얻지 못했거나 캐시를 띄우지
+/// 않았으면 `None`이다. 기다리지 않는다.
+pub fn icon_for(key: &IconKey, size: u32) -> Option<Image> {
     ICONS.with(|slot| {
         let slot = slot.borrow();
         let icons = slot.as_ref()?;
-        let key = (icon_key(folder, item), size);
+        let key = (key.clone(), size);
         if let Some(image) = icons.images.borrow().get(&key) {
             return Some(image.clone());
         }

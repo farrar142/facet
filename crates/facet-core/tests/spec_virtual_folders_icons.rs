@@ -153,7 +153,6 @@ fn wait_icon(cache: &IconCache, key: &IconKey) -> Arc<IconImage> {
 }
 
 #[test]
-#[ignore = "#358"]
 fn recycled_items_of_one_type_share_one_icon() {
     let dir = TempDir::new().unwrap();
     let first = dir.path().join("첫째.txt");
@@ -201,7 +200,6 @@ fn recycled_items_of_one_type_share_one_icon() {
 }
 
 #[test]
-#[ignore = "#358"]
 fn the_system_drive_has_its_own_shell_icon() {
     let dir = TempDir::new().unwrap();
     let mut app = app_at(Location::file_system(dir.path()));
@@ -229,7 +227,6 @@ fn the_system_drive_has_its_own_shell_icon() {
 }
 
 #[test]
-#[ignore = "#358"]
 fn items_of_a_real_folder_keep_their_icon_keys() {
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("문서.txt"), "내용").unwrap();

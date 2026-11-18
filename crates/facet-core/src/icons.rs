@@ -33,6 +33,11 @@ pub enum IconKey {
     NoExtension,
     /// 파일마다 아이콘이 다른 파일 하나(전체 경로).
     File(PathBuf),
+    /// 내 PC의 드라이브 하나(루트 경로, 예: `C:\`). 셸이 드라이브 종류(시스템·로컬·USB·네트워크·광학)마다 주는
+    /// 아이콘이다.
+    Drive(PathBuf),
+    /// 실제 경로가 없는 셸 항목 하나(휴대폰 등, 절대 PIDL 바이트).
+    ShellItem(Vec<u8>),
 }
 
 /// 파일마다 아이콘이 다른 확장자(소문자, 점 없음).
@@ -40,19 +45,31 @@ pub const PER_FILE_EXTENSIONS: [&str; 4] = ["exe", "ico", "lnk", "url"];
 
 /// 항목의 아이콘 키. `folder`는 항목이 든 폴더다.
 pub fn icon_key(folder: &Path, item: &Item) -> IconKey {
+    match type_key(item) {
+        IconKey::Extension(extension)
+            if !item.attributes.online_only
+                && PER_FILE_EXTENSIONS.contains(&extension.as_str()) =>
+        {
+            IconKey::File(folder.join(&item.name))
+        }
+        key => key,
+    }
+}
+
+/// 형식만 보는 아이콘 키: 폴더는 폴더 키, 파일은 확장자 키(확장자가 없으면 확장자 없음 키). 파일 하나의 고유
+/// 아이콘을 쓰지 않는다. 휴지통 항목처럼 원래 자리에 파일이 없는 항목이 쓴다(같은 형식은 키 하나를 나눠 씀).
+pub fn type_key(item: &Item) -> IconKey {
     if item.is_folder {
         return IconKey::Folder;
     }
     let name = item.name.to_string_lossy();
-    let extension = match name.rfind('.') {
+    match name.rfind('.') {
         // 점으로 시작하는 이름(`.gitignore`)과 점으로 끝나는 이름은 확장자가 없다.
-        Some(dot) if dot > 0 && dot + 1 < name.len() => name[dot + 1..].to_lowercase(),
-        _ => return IconKey::NoExtension,
-    };
-    if !item.attributes.online_only && PER_FILE_EXTENSIONS.contains(&extension.as_str()) {
-        return IconKey::File(folder.join(&item.name));
+        Some(dot) if dot > 0 && dot + 1 < name.len() => {
+            IconKey::Extension(name[dot + 1..].to_lowercase())
+        }
+        _ => IconKey::NoExtension,
     }
-    IconKey::Extension(extension)
 }
 
 /// 얻기 함수.
@@ -210,6 +227,7 @@ fn load_system_icon(key: &IconKey, size: u32) -> Option<IconImage> {
                 .unwrap_or_default();
             facet_win::icon::extension_icon(&extension, size)
         }),
+        IconKey::Drive(_) | IconKey::ShellItem(_) => crate::shell_provider::item_icon(key, size),
     }
 }
 

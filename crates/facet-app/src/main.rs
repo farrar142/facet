@@ -5449,8 +5449,8 @@ impl Model for TabRows {
         let marks = app.cut_marks();
         // 아이콘은 캐시에 있을 때만 그린다(UI 스레드는 아이콘을 얻지 않는다). 없으면 내장 아이콘이고 얻으면 다시 그린다.
         let icon = tab
-            .folder_of(row)
-            .and_then(|folder| icons::icon(folder, item, self.icon_size.get()));
+            .icon_key(row)
+            .and_then(|key| icons::icon_for(&key, self.icon_size.get()));
         if icon.is_none() {
             self.waiting_icons.borrow_mut().insert(row);
         }
