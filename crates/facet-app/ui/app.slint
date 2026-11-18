@@ -324,6 +324,8 @@ export struct JobRow {
     newer: Compare,
     larger: Compare,
     can-overwrite: bool,
+    // 「더 새것만 덮어쓰기」를 고를 수 있는지(두 쪽 모두 수정 시각이 있고 덮어쓸 수 있을 때만, 날짜를 주지 않는 장치면 꺼짐).
+    can-overwrite-if-newer: bool,
     overwrite-note: OverwriteNote,
     // 항목별 오류: 원본 경로와 까닭.
     error-path: string,
@@ -458,7 +460,7 @@ component ConflictQuestion inherits FocusScope {
     in-out property <int> choice: 3;
 
     function usable(i: int) -> bool {
-        return i >= 2 || root.job.can-overwrite;
+        return i >= 2 || (i == 0 && root.job.can-overwrite) || (i == 1 && root.job.can-overwrite-if-newer);
     }
     // 꺼진 선택지(0·1)를 건너뛰며 `d` 방향으로 하나 옮긴다.
     function step(d: int) {
@@ -591,7 +593,7 @@ component ConflictQuestion inherits FocusScope {
                 }
                 ChoiceButton {
                     text: @tr("더 새것만 덮어쓰기");
-                    enabled: root.job.can-overwrite;
+                    enabled: root.job.can-overwrite-if-newer;
                     current: root.has-focus && root.choice == 1;
                     clicked => {
                         root.press(1);

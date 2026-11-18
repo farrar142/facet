@@ -1304,6 +1304,7 @@ fn job_row(entry: &JobEntry) -> JobRow {
         newer: asked.newer,
         larger: asked.larger,
         can_overwrite: asked.can_overwrite,
+        can_overwrite_if_newer: asked.can_overwrite_if_newer,
         overwrite_note: asked.overwrite_note,
         error_path: asked.error_path.into(),
         error_reason: asked.error_reason,

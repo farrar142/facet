@@ -38,13 +38,11 @@ fn some_time() -> Option<SystemTime> {
 }
 
 #[test]
-#[ignore = "#357"]
 fn newer_only_is_offered_when_both_sides_have_a_date() {
     assert!(conflict(some_time(), some_time(), true).can_overwrite_if_newer());
 }
 
 #[test]
-#[ignore = "#357"]
 fn newer_only_is_off_when_the_device_gives_no_date() {
     assert!(
         !conflict(None, some_time(), true).can_overwrite_if_newer(),
@@ -63,14 +61,12 @@ fn newer_only_is_off_when_the_device_gives_no_date() {
 }
 
 #[test]
-#[ignore = "#357"]
 fn newer_only_is_off_when_overwriting_is_not_allowed() {
     assert!(!conflict(some_time(), some_time(), false).can_overwrite_if_newer());
 }
 
 #[cfg(windows)]
 #[test]
-#[ignore = "#357"]
 fn a_conflict_between_pc_files_still_offers_newer_only() {
     use std::fs;
     use std::time::Instant;

@@ -349,9 +349,20 @@ pub struct Conflict {
 }
 
 impl Conflict {
-    /// #357: 「더 새것만 덮어쓰기」를 고를 수 있는지(덮어쓸 수 있고 두 쪽 모두 수정 시각이 있을 때만).
+    /// 「더 새것만 덮어쓰기」([`Resolution::OverwriteIfNewer`])를 고를 수 있는지: 덮어쓸 수 있고([`Conflict::can_overwrite`])
+    /// 두 쪽 모두 수정 시각이 있을 때만 `true`다. 날짜를 주지 않는 장치(휴대폰)와의 충돌은 어느 쪽이 새것인지 알 수
+    /// 없어 고를 수 없고, 그 답은 거부된다([`AnswerError::OverwriteNotAllowed`]). 화면은 이 값으로 그 단추를 끈다.
     pub fn can_overwrite_if_newer(&self) -> bool {
-        todo!("#357")
+        self.can_overwrite && self.source.modified.is_some() && self.target.modified.is_some()
+    }
+
+    /// 이 충돌에 `resolution`으로 답할 수 있는지.
+    pub fn allows(&self, resolution: Resolution) -> bool {
+        answer_allowed(
+            resolution,
+            self.can_overwrite,
+            self.can_overwrite_if_newer(),
+        )
     }
 }
 
@@ -442,7 +453,8 @@ pub enum AnswerError {
     /// 그 작업은 그 종류의 질문(이름 충돌, 항목별 오류, 휴지통에 들어가지 않는 항목)에 답을 기다리지 않는다(없는·끝난·취소 중인 작업, 다른
     /// 종류의 질문을 기다리는 작업 포함).
     NotAsking,
-    /// 파일과 폴더가 부딪힌 충돌에 덮어쓰기 답을 했다. 작업은 계속 답을 기다린다.
+    /// 파일과 폴더가 부딪힌 충돌에 덮어쓰기 답을 했거나, 수정 시각을 모르는 쪽이 있는 충돌에 더 새것만 덮어쓰기로
+    /// 답했다([`Conflict::can_overwrite_if_newer`]). 작업은 계속 답을 기다린다.
     OverwriteNotAllowed,
 }
 
@@ -566,8 +578,11 @@ struct Flags {
 /// 작업이 묻는 질문의 종류. 답을 기다리는 동안 판에 둔다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Question {
-    /// 이름 충돌. 덮어쓰기 답을 받을 수 있는지.
-    Conflict { can_overwrite: bool },
+    /// 이름 충돌. 덮어쓰기·더 새것만 덮어쓰기 답을 받을 수 있는지.
+    Conflict {
+        can_overwrite: bool,
+        can_overwrite_if_newer: bool,
+    },
     /// 항목별 오류.
     Error,
     /// 휴지통에 들어가지 않는 항목.
@@ -650,6 +665,7 @@ impl Context<'_> {
     fn ask_conflict(&self, conflict: Conflict) -> Option<ConflictAnswer> {
         let question = Question::Conflict {
             can_overwrite: conflict.can_overwrite,
+            can_overwrite_if_newer: conflict.can_overwrite_if_newer(),
         };
         let event = JobEvent::Conflict {
             job: self.id,
@@ -1253,13 +1269,17 @@ impl JobQueue {
         let Some(slot) = board.jobs.get_mut(&job) else {
             return Err(AnswerError::NotAsking);
         };
-        let Some(Question::Conflict { can_overwrite }) = slot.question else {
+        let Some(Question::Conflict {
+            can_overwrite,
+            can_overwrite_if_newer,
+        }) = slot.question
+        else {
             return Err(AnswerError::NotAsking);
         };
         if slot.cancelling || slot.state != JobState::AwaitingAnswer {
             return Err(AnswerError::NotAsking);
         }
-        if answer.resolution.overwrites() && !can_overwrite {
+        if !answer_allowed(answer.resolution, can_overwrite, can_overwrite_if_newer) {
             return Err(AnswerError::OverwriteNotAllowed);
         }
         slot.question = None;
@@ -1360,6 +1380,20 @@ impl JobQueue {
             .spawn(move || run_job(id, job, &control, &shared, &outbox))
             .expect("작업 스레드를 띄우지 못했다");
         true
+    }
+}
+
+/// 이름 충돌에 `resolution`으로 답할 수 있는지(덮어쓰기는 `can_overwrite`, 더 새것만 덮어쓰기는
+/// `can_overwrite_if_newer`일 때만).
+fn answer_allowed(
+    resolution: Resolution,
+    can_overwrite: bool,
+    can_overwrite_if_newer: bool,
+) -> bool {
+    match resolution {
+        Resolution::Overwrite => can_overwrite,
+        Resolution::OverwriteIfNewer => can_overwrite_if_newer,
+        Resolution::Skip | Resolution::KeepBoth => true,
     }
 }
 
@@ -1490,6 +1524,71 @@ mod tests {
     fn windows는_대소문자를_가리지_않는다() {
         assert!(is_within(Path::new(r"C:\Foo\Bar"), Path::new(r"c:\foo")));
         assert!(same_path(Path::new(r"C:\Foo"), Path::new(r"c:\FOO")));
+    }
+
+    /// 답을 기다리는 이름 충돌 하나를 판에 둔 대기열.
+    fn asking(can_overwrite: bool, can_overwrite_if_newer: bool) -> (JobQueue, JobId) {
+        let queue = JobQueue::new();
+        let id = JobId::for_test(7);
+        queue.shared.board().jobs.insert(
+            id,
+            Slot {
+                state: JobState::AwaitingAnswer,
+                job: None,
+                control: Arc::default(),
+                cancelling: false,
+                question: Some(Question::Conflict {
+                    can_overwrite,
+                    can_overwrite_if_newer,
+                }),
+            },
+        );
+        (queue, id)
+    }
+
+    #[test]
+    fn 날짜를_모르는_충돌은_더_새것만_덮어쓰기_답을_거부한다() {
+        let (mut queue, id) = asking(true, false);
+        assert_eq!(
+            queue.answer_conflict(id, ConflictAnswer::once(Resolution::OverwriteIfNewer)),
+            Err(AnswerError::OverwriteNotAllowed)
+        );
+        assert_eq!(queue.state(id), Some(JobState::AwaitingAnswer));
+        // 덮어쓰기는 그대로 받는다.
+        assert_eq!(
+            queue.answer_conflict(id, ConflictAnswer::once(Resolution::Overwrite)),
+            Ok(())
+        );
+        assert_eq!(queue.state(id), Some(JobState::Running));
+    }
+
+    #[test]
+    fn 날짜가_있으면_더_새것만_덮어쓰기_답을_받는다() {
+        let (mut queue, id) = asking(true, true);
+        assert_eq!(
+            queue.answer_conflict(id, ConflictAnswer::once(Resolution::OverwriteIfNewer)),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn 충돌이_허락하는_답() {
+        let item = |modified: Option<SystemTime>| ConflictItem {
+            path: PathBuf::from("a"),
+            kind: ItemKind::File,
+            size: Some(1),
+            modified,
+        };
+        let conflict = Conflict {
+            source: item(None),
+            target: item(Some(SystemTime::UNIX_EPOCH)),
+            can_overwrite: true,
+            overwrite_is_permanent: true,
+        };
+        assert!(conflict.allows(Resolution::Overwrite));
+        assert!(!conflict.allows(Resolution::OverwriteIfNewer));
+        assert!(conflict.allows(Resolution::Skip));
+        assert!(conflict.allows(Resolution::KeepBoth));
     }
 
     #[test]

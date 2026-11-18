@@ -23,6 +23,8 @@ pub struct QuestionView {
     pub newer: Compare,
     pub larger: Compare,
     pub can_overwrite: bool,
+    /// 「더 새것만 덮어쓰기」를 고를 수 있는지([`Conflict::can_overwrite_if_newer`]).
+    pub can_overwrite_if_newer: bool,
     pub overwrite_note: OverwriteNote,
     pub error_path: String,
     pub error_reason: ErrorReason,
@@ -37,6 +39,7 @@ impl Default for QuestionView {
             newer: Compare::Unknown,
             larger: Compare::Unknown,
             can_overwrite: false,
+            can_overwrite_if_newer: false,
             overwrite_note: OverwriteNote::NotAllowed,
             error_path: String::new(),
             error_reason: ErrorReason::Other,
@@ -71,6 +74,7 @@ fn conflict_view(conflict: &Conflict) -> QuestionView {
         newer: newer(conflict.source.modified, conflict.target.modified),
         larger: larger(&conflict.source, &conflict.target),
         can_overwrite: conflict.can_overwrite,
+        can_overwrite_if_newer: conflict.can_overwrite_if_newer(),
         overwrite_note: overwrite_note(conflict),
         ..QuestionView::default()
     }
@@ -241,6 +245,25 @@ mod tests {
         assert_eq!(view.larger, Compare::Unknown);
         assert!(!view.can_overwrite);
         assert_eq!(view.overwrite_note, OverwriteNote::NotAllowed);
+    }
+
+    #[test]
+    fn 날짜를_주지_않는_장치와의_충돌은_더_새것만_덮어쓰기를_끈다() {
+        let time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let conflict = |source, target| Conflict {
+            source: file(1, source),
+            target: file(2, target),
+            can_overwrite: true,
+            overwrite_is_permanent: true,
+        };
+        let device = view(Some(&JobQuestion::Conflict(conflict(None, Some(time)))));
+        assert!(device.can_overwrite);
+        assert!(!device.can_overwrite_if_newer);
+        let pc = view(Some(&JobQuestion::Conflict(conflict(
+            Some(time),
+            Some(time),
+        ))));
+        assert!(pc.can_overwrite_if_newer);
     }
 
     #[test]
