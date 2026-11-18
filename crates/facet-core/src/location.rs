@@ -259,6 +259,12 @@ pub enum ListError {
     /// 셸 호출이 시간 제한([`crate::shell_provider::CALL_TIMEOUT`]) 안에 응답하지 않았다(「응답 없음」). 탭은
     /// 원래 위치에 남고 [`crate::tab::Tab::retry`]로 다시 읽는다.
     NotResponding { location: Location },
+    /// 휴대폰(장치)이 빠졌다(「연결 끊김」). 탭은 원래 위치에 남고, 같은 장치(장치 식별자로 판단)를 다시 꽂은 뒤
+    /// [`crate::tab::Tab::retry`]로 이어 간다.
+    Disconnected { location: Location },
+    /// 휴대폰(장치)이 꽂혀 있지만 저장소를 보여 주지 않는다: 잠겨 있거나 USB 사용이 「파일 전송」이 아니다. 화면은
+    /// 빈 목록 대신 까닭과 할 일을 보인다.
+    DeviceNotReady { location: Location },
 }
 
 impl ListError {
@@ -278,6 +284,8 @@ impl ListError {
             | Self::PermissionDenied { location }
             | Self::NotAFolder { location }
             | Self::NotResponding { location }
+            | Self::Disconnected { location }
+            | Self::DeviceNotReady { location }
             | Self::Io { location, .. } => location,
         }
     }
@@ -295,6 +303,10 @@ impl fmt::Display for ListError {
                 write!(f, "위치를 읽지 못했습니다: {location}: {source}")
             }
             Self::NotResponding { location } => write!(f, "응답 없음: {location}"),
+            Self::Disconnected { location } => write!(f, "연결 끊김: {location}"),
+            Self::DeviceNotReady { location } => {
+                write!(f, "장치가 저장소를 보여 주지 않습니다: {location}")
+            }
         }
     }
 }

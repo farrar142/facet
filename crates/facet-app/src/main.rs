@@ -5322,6 +5322,24 @@ fn set_panel_data(ui: &AppWindow, panel: usize, data: PanelData) {
     }
 }
 
+/// 수정한 날짜 칸을 비우는가: 가상 폴더의 항목은 셸이 날짜를 주지 않고, 휴대폰 안 항목은 장치가 준 것만 보인다.
+fn device_blank_date(location: &Location, item: &facet_core::Item) -> bool {
+    match location.virtual_folder() {
+        None => false,
+        Some(facet_core::VirtualFolder::Device) => {
+            item.modified == std::time::SystemTime::UNIX_EPOCH
+        }
+        Some(_) => true,
+    }
+}
+
+/// 크기 칸을 비우는가: 휴대폰 안 파일의 크기를 장치가 주지 않았으면(0으로 남음) 비운다.
+fn device_blank_size(location: &Location, item: &facet_core::Item) -> bool {
+    location.virtual_folder() == Some(facet_core::VirtualFolder::Device)
+        && !item.is_folder
+        && item.size == 0
+}
+
 /// 목록 읽기 오류를 화면의 종류와 값으로. 문장은 화면이 만든다.
 fn list_problem(error: &ListError) -> (Problem, String, String) {
     let location = error.location().to_string();
@@ -5331,6 +5349,8 @@ fn list_problem(error: &ListError) -> (Problem, String, String) {
         ListError::NotAFolder { .. } => (Problem::NotAFolder, location, String::new()),
         ListError::Io { source, .. } => (Problem::Io, location, source.to_string()),
         ListError::NotResponding { .. } => (Problem::NotResponding, location, String::new()),
+        ListError::Disconnected { .. } => (Problem::Disconnected, location, String::new()),
+        ListError::DeviceNotReady { .. } => (Problem::DeviceNotReady, location, String::new()),
     }
 }
 
@@ -5465,8 +5485,9 @@ impl Model for TabRows {
             folder: item.is_folder,
             has_icon: icon.is_some(),
             icon: icon.unwrap_or_default(),
-            // 가상 폴더(내 PC 등)의 항목은 셸이 수정한 날짜를 주지 않는다: 빈 칸으로 둔다.
-            modified: if tab.location().virtual_folder().is_some() {
+            // 가상 폴더(내 PC 등)의 항목은 셸이 수정한 날짜를 주지 않는다: 빈 칸으로 둔다. 휴대폰 안 항목은 장치가 준
+            // 날짜만 보인다(주지 않았으면 빈 칸).
+            modified: if device_blank_date(tab.location(), item) {
                 SharedString::new()
             } else {
                 details::modified_text(item).into()
@@ -5474,7 +5495,11 @@ impl Model for TabRows {
             has_thumb: thumb.is_some(),
             thumb: thumb.unwrap_or_default(),
             kind: text::file_type_text(&details::file_type(item)).into(),
-            size: details::size_text(item).into(),
+            size: if device_blank_size(tab.location(), item) {
+                SharedString::new()
+            } else {
+                details::size_text(item).into()
+            },
             location: if tab.location().is_search_results() {
                 tab.folder_of(row)
                     .map_or_else(String::new, |folder| folder.display().to_string())

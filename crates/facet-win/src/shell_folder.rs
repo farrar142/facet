@@ -13,12 +13,17 @@ pub struct ShellEntry {
     pub name: String,
     /// 실제 파일 시스템 경로가 있으면 그 경로(`SFGAO_FILESYSTEM`일 때 `SIGDN_FILESYSPATH`, 예: `C:\`).
     pub path: Option<PathBuf>,
-    /// 바탕 화면부터의 해석 이름(`SIGDN_DESKTOPABSOLUTEPARSING`). 장치(휴대폰)는 `\\?\` 장치 경로를 품는다.
+    /// 바탕 화면부터의 해석 이름(`SIGDN_DESKTOPABSOLUTEPARSING`). 장치(휴대폰)는 `\?\` 장치 경로를 품는다.
     pub parsing_name: String,
     /// 폴더인가(`SFGAO_FOLDER`).
     pub is_folder: bool,
     /// 이 항목의 절대 PIDL 바이트.
     pub id: Vec<u8>,
+    /// 셸 속성의 크기(바이트, `PKEY_Size`). [`enumerate_detailed`]로 읽은 파일만 있고, 장치가 주지 않으면 없다.
+    pub size: Option<u64>,
+    /// 셸 속성의 수정한 날짜(`FILETIME`, `PKEY_DateModified`). [`enumerate_detailed`]로 읽은 것만 있고, 장치가 주지
+    /// 않으면 없다.
+    pub modified: Option<u64>,
 }
 
 /// 셸 폴더를 읽지 못한 까닭.
@@ -91,7 +96,60 @@ pub fn enumerate(
     if !is_valid_id(id) {
         return Err(ShellFolderError::InvalidId);
     }
-    crate::windows_shell_folder::enumerate(id, batch.max(1), on_batch)
+    crate::windows_shell_folder::enumerate(id, batch.max(1), false, on_batch)
+}
+
+/// [`enumerate`]와 같되 항목마다 크기·수정한 날짜 셸 속성([`ShellEntry::size`]·[`ShellEntry::modified`])도 읽는다
+/// (휴대폰 폴더의 열). COM STA 스레드에서 부른다.
+#[cfg(windows)]
+pub fn enumerate_detailed(
+    id: &[u8],
+    batch: usize,
+    on_batch: &mut dyn FnMut(Vec<ShellEntry>) -> bool,
+) -> Result<(), ShellFolderError> {
+    if !is_valid_id(id) {
+        return Err(ShellFolderError::InvalidId);
+    }
+    crate::windows_shell_folder::enumerate(id, batch.max(1), true, on_batch)
+}
+
+/// Windows가 아니면 늘 「지원하지 않음」이다.
+#[cfg(not(windows))]
+pub fn enumerate_detailed(
+    _id: &[u8],
+    _batch: usize,
+    _on_batch: &mut dyn FnMut(Vec<ShellEntry>) -> bool,
+) -> Result<(), ShellFolderError> {
+    Err(ShellFolderError::Unsupported)
+}
+
+/// 식별자 `id`의 셸 항목의 바탕 화면부터의 해석 이름(`SIGDN_DESKTOPABSOLUTEPARSING`, 휴대폰은 `\\?\` 장치 경로를
+/// 품는다). COM STA 스레드에서 부른다.
+#[cfg(windows)]
+pub fn parsing_name(id: &[u8]) -> Result<String, ShellFolderError> {
+    if !is_valid_id(id) {
+        return Err(ShellFolderError::InvalidId);
+    }
+    crate::windows_shell_folder::parsing_name(id)
+}
+
+/// Windows가 아니면 늘 「지원하지 않음」이다.
+#[cfg(not(windows))]
+pub fn parsing_name(_id: &[u8]) -> Result<String, ShellFolderError> {
+    Err(ShellFolderError::Unsupported)
+}
+
+/// 바탕 화면부터의 해석 이름 `name`의 셸 항목 식별자(절대 PIDL 바이트, `SHParseDisplayName`). 그 항목이 없으면
+/// 「없음」이다. COM STA 스레드에서 부른다.
+#[cfg(windows)]
+pub fn id_from_parsing_name(name: &str) -> Result<Vec<u8>, ShellFolderError> {
+    crate::windows_shell_folder::id_from_parsing_name(name)
+}
+
+/// Windows가 아니면 늘 「지원하지 않음」이다.
+#[cfg(not(windows))]
+pub fn id_from_parsing_name(_name: &str) -> Result<Vec<u8>, ShellFolderError> {
+    Err(ShellFolderError::Unsupported)
 }
 
 /// Windows가 아니면 늘 「지원하지 않음」이다.

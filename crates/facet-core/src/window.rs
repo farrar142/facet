@@ -716,6 +716,9 @@ fn read_subfolders(
             ListError::NotAFolder { .. } => SubfoldersError::NotAFolder,
             ListError::Io { source, .. } => SubfoldersError::Io(source.kind()),
             ListError::NotResponding { .. } => SubfoldersError::Io(std::io::ErrorKind::TimedOut),
+            ListError::Disconnected { .. } | ListError::DeviceNotReady { .. } => {
+                SubfoldersError::Io(std::io::ErrorKind::NotConnected)
+            }
         })?;
     let mut folders: Vec<Candidate> = items
         .into_iter()

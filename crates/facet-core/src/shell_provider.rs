@@ -2,8 +2,9 @@
 //!
 //! - 위치는 [`Location::Shell`]이고 셸 항목 식별자(PIDL) 바이트와 종류([`VirtualFolder`])를 갖는다. 내 PC는 정해진
 //!   식별자([`THIS_PC_ID`])라 셸을 부르지 않고 만든다([`Location::this_pc`]).
-//! - 셸 호출은 모두 프로세스에 하나인 전용 COM STA 스레드([`facet_win::shell_thread::ShellThread`])에서 한다. 스레드는
-//!   처음 가상 폴더를 읽을 때 만든다(콜드 스타트에 들지 않음). 목록 읽기는 탭의 읽기 일꾼 스레드가 그 스레드에 맡기고
+//! - 셸 호출은 전용 COM STA 스레드([`facet_win::shell_thread::ShellThread`])에서 한다: 내 PC·휴지통은 프로세스에
+//!   하나인 스레드, 휴대폰은 장치마다 하나 더(한 장치가 멈춰도 내 PC·휴지통·다른 장치는 산다). 스레드는
+//!   처음 그 가상 폴더를 읽을 때 만든다(콜드 스타트에 들지 않음). 목록 읽기는 탭의 읽기 일꾼 스레드가 그 스레드에 맡기고
 //!   기다린다. UI 스레드는 셸을 부르지 않는다. 호출마다 시간 제한([`CALL_TIMEOUT`])이 있어 넘으면 그 스레드를 버리고
 //!   읽기는 「응답 없음」([`ListError::NotResponding`])으로 실패한다. 다음 호출은 새 스레드에서 하고 버린 스레드의 늦은
 //!   결과는 버려진다. 탭은 [`crate::tab::Tab::retry`]로 같은 읽기를 다시 한다.
@@ -20,7 +21,14 @@
 //!   보이고, 탭이 목록을 받은 뒤 드라이브마다 따로 띄운 스레드가 파일 시스템 API([`facet_win::devices::disk_space`])로
 //!   얻어 채운다([`query_space`]). 끊긴 네트워크 드라이브·빈 카드 리더는 다른 드라이브를 기다리게 하지 않고 모름으로 남는다.
 //! - 변경 감시: 내 PC는 볼륨·휴대용 장치가 붙거나 떨어지면([`facet_win::devices::watch_devices`]) 그리고 드라이브 문자
-//!   목록이 바뀌면([`DRIVE_POLL`]마다 확인) 목록을 다시 읽으라고 알린다. 다른 가상 폴더는 아직 감시하지 않는다.
+//!   목록이 바뀌면([`DRIVE_POLL`]마다 확인) 목록을 다시 읽으라고 알린다. 휴대폰 위치는 장치 알림이 오면 그 장치(장치
+//!   식별자 [`device_id`])가 내 PC에 있는지 보고, 빠지거나 다시 꽂혔으면 다시 읽으라고 알린다. 휴지통은 감시하지 않는다.
+//! - 휴대폰([`VirtualFolder::Device`]): 위치의 위(상위)는 식별자의 마지막 조각을 뗀 것이고 장치 바로 위는 내 PC다.
+//!   열은 셸 속성의 크기·수정한 날짜다(장치가 주는 만큼). 읽지 못한 까닭은 장치가 빠짐([`ListError::Disconnected`])과
+//!   잠김·「파일 전송」이 아님([`ListError::DeviceNotReady`], 장치 바로 아래가 비어 있을 때도)으로 가른다
+//!   ([`device_problem`]). 빠진 장치의 위치를 다시 읽을 때 식별자가 바뀌었으면 내 PC에서 같은 장치(장치 식별자가 같은
+//!   항목)를 찾아 같은 해석 이름의 새 식별자로 이어 읽는다([`relink_parsing_name`]). 되는 일은 열기뿐이다(이름바꾸기·새
+//!   폴더는 spec #27 밖이라 꺼 둔다).
 //! - 휴지통([`Location::recycle_bin`], 정해진 식별자 [`RECYCLE_BIN_ID`])은 셸이 여러 드라이브의 휴지통을 하나로 열거한
 //!   것을 그대로 보인다. 항목마다 셸이 준 휴지통 안 경로(`$R...`) 옆의 정보 파일(`$I...`)을 읽어 원래 이름(확장자 포함,
 //!   탐색기의 확장자 숨김 설정과 상관없음)·원래 크기·원래 위치·지운 날짜([`RecycledEntry`])를 얻는다. 되는 일은 복원·
@@ -77,6 +85,121 @@ pub const RECYCLE_BIN_ID: [u8; 22] = [
 /// 열거 묶음 하나의 항목 수. 묶음마다 읽은 항목 수를 탭에 알린다: 셸 항목 하나는 셸 호출 몇 번(이름·속성·식별자)이라
 /// 느린 장치에서도 묶음 하나가 금방 차고, 1만 항목 휴지통에서도 알림이 40번 남짓이라 깨우기가 넘치지 않는다.
 pub const LIST_BATCH: usize = 256;
+
+/// 셸 항목 식별자 바이트의 조각들(끝 표시 제외). 형식이 틀렸으면 읽은 데까지다.
+fn id_chunks(id: &[u8]) -> Vec<&[u8]> {
+    let mut chunks = Vec::new();
+    let mut rest = id;
+    while let Some((cb, _)) = rest.split_first_chunk::<2>() {
+        let cb = usize::from(u16::from_le_bytes(*cb));
+        if cb < 2 || cb > rest.len() {
+            break;
+        }
+        chunks.push(&rest[..cb]);
+        rest = &rest[cb..];
+    }
+    chunks
+}
+
+/// 조각들을 이어 끝 표시(0 두 바이트)를 붙인 식별자.
+fn join_chunks(chunks: &[&[u8]]) -> Vec<u8> {
+    let mut id: Vec<u8> = chunks.concat();
+    id.extend([0, 0]);
+    id
+}
+
+/// 식별자의 상위(마지막 조각을 뗀 것). 조각이 하나 이하면 `None`.
+fn parent_id(id: &[u8]) -> Option<Vec<u8>> {
+    let chunks = id_chunks(id);
+    (chunks.len() >= 2).then(|| join_chunks(&chunks[..chunks.len() - 1]))
+}
+
+/// 휴대폰 위치 식별자의 장치 부분(앞 두 조각: 내 PC와 장치). 장치마다 셸 스레드를 가르는 열쇠다.
+fn device_root_id(id: &[u8]) -> Vec<u8> {
+    let chunks = id_chunks(id);
+    join_chunks(&chunks[..chunks.len().min(2)])
+}
+
+/// 휴대폰 위치가 장치 자신(내 PC 바로 아래)인가.
+fn is_device_root(id: &[u8]) -> bool {
+    let chunks = id_chunks(id);
+    chunks.len() == 2 && chunks[0] == &THIS_PC_ID[..THIS_PC_ID.len() - 2]
+}
+
+/// 셸 해석 이름(`SIGDN_DESKTOPABSOLUTEPARSING`)에서 장치 식별자: `\\?\`로 시작하는 장치 경로 조각(예:
+/// `\\?\usb#vid_18d1&pid_4ee1#0123456789abcdef#{6ac27878-a6fa-4155-ba85-f98f491d4f33}`)을 소문자로 바꾼 것. USB 장치
+/// 경로는 제조사·제품 번호와 일련 번호를 품어, 같은 휴대폰을 뽑았다 다시 꽂으면(다른 포트여도) 같다. 장치 경로가 없으면
+/// `None`이다.
+pub fn device_id(parsing_name: &str) -> Option<String> {
+    let (start, end) = device_span(parsing_name)?;
+    Some(parsing_name[start..end].to_lowercase())
+}
+
+/// 두 해석 이름이 같은 장치의 것인가(장치 식별자가 있고 같다).
+pub fn same_device(a: &str, b: &str) -> bool {
+    matches!((device_id(a), device_id(b)), (Some(a), Some(b)) if a == b)
+}
+
+/// 해석 이름에서 장치 경로 조각의 바이트 범위.
+fn device_span(parsing_name: &str) -> Option<(usize, usize)> {
+    const PREFIX: &str = r"\\?\";
+    let start = parsing_name.find(PREFIX)?;
+    let body = start + PREFIX.len();
+    let end = parsing_name[body..]
+        .find('\\')
+        .map_or(parsing_name.len(), |at| body + at);
+    (end > body).then_some((start, end))
+}
+
+/// 빠졌다 다시 꽂힌 장치의 폴더 `old`(해석 이름)를 지금 내 PC의 장치 항목 `device`(해석 이름)에 이은 해석 이름:
+/// `device`의 장치 경로까지에 `old`의 장치 경로 뒤를 붙인다. 같은 장치가 아니면 `None`이다.
+pub fn relink_parsing_name(old: &str, device: &str) -> Option<String> {
+    if !same_device(old, device) {
+        return None;
+    }
+    let (_, old_end) = device_span(old)?;
+    let (_, device_end) = device_span(device)?;
+    Some(format!("{}{}", &device[..device_end], &old[old_end..]))
+}
+
+/// 휴대폰 위치를 읽지 못한 까닭의 갈래.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceProblem {
+    /// 장치가 빠졌다(「연결 끊김」).
+    Disconnected,
+    /// 장치가 잠겼거나 「파일 전송」이 아니다.
+    NotReady,
+}
+
+/// 셸이 알린 실패를 휴대폰 위치의 까닭으로 가른다. 휴대폰 갈래가 아니면 `None`(그대로 읽기 오류)이다.
+pub fn device_problem(error: &ShellFolderError) -> Option<DeviceProblem> {
+    /// `HRESULT_FROM_WIN32(code)`.
+    const fn win32(code: u32) -> i32 {
+        (0x8007_0000 | code) as i32
+    }
+    const DISCONNECTED: [i32; 5] = [
+        win32(31),   // ERROR_GEN_FAILURE: 장치가 빠지는 중 WPD가 돌려줌
+        win32(55),   // ERROR_DEV_NOT_EXIST
+        win32(433),  // ERROR_NO_SUCH_DEVICE
+        win32(1167), // ERROR_DEVICE_NOT_CONNECTED
+        win32(1617), // ERROR_DEVICE_REMOVED
+    ];
+    const NOT_READY: [i32; 3] = [
+        win32(5),   // E_ACCESSDENIED: 잠긴 휴대폰
+        win32(21),  // ERROR_NOT_READY
+        win32(170), // ERROR_BUSY
+    ];
+    match error {
+        ShellFolderError::NotFound => Some(DeviceProblem::Disconnected),
+        ShellFolderError::Failed { code } if DISCONNECTED.contains(code) => {
+            Some(DeviceProblem::Disconnected)
+        }
+        ShellFolderError::Failed { code } if NOT_READY.contains(code) => {
+            Some(DeviceProblem::NotReady)
+        }
+        _ => None,
+    }
+}
 
 /// 내 PC의 드라이브 용량(바이트). 모르거나 아직 채우지 않았으면 `None`이다(화면은 「—」).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,20 +320,39 @@ impl Provider for ShellProvider {
             .unwrap_or_else(|| location.clone())
     }
 
-    /// 내 PC에는 상위가 없다.
-    fn parent(&self, _location: &Location) -> Option<Location> {
-        None
+    /// 내 PC·휴지통에는 상위가 없다. 휴대폰 위치는 식별자의 마지막 조각을 뗀 위치이고, 장치 자신의 위는 내 PC다.
+    fn parent(&self, location: &Location) -> Option<Location> {
+        let shell = location.shell_location()?;
+        if shell.folder() != VirtualFolder::Device {
+            return None;
+        }
+        let parent = parent_id(shell.id())?;
+        if parent[..] == THIS_PC_ID[..] {
+            Some(Location::this_pc())
+        } else if id_chunks(&parent).len() >= 2 {
+            Some(Location::shell(VirtualFolder::Device, parent))
+        } else {
+            None
+        }
     }
 
-    /// 그 위치 하나의 조각(이름은 셸의 표시 이름).
+    /// 위(상위)부터 그 위치까지의 조각(이름은 셸의 표시 이름): 내 PC·휴지통은 하나, 휴대폰 위치는 내 PC·장치·저장소·
+    /// 폴더들.
     fn segments(&self, location: &Location) -> Vec<PathSegment> {
-        let Some(shell) = location.shell_location() else {
-            return Vec::new();
-        };
-        vec![PathSegment {
-            label: display_name(shell),
-            location: location.clone(),
-        }]
+        let mut segments = Vec::new();
+        let mut current = Some(location.clone());
+        while let Some(location) = current {
+            let Some(shell) = location.shell_location() else {
+                break;
+            };
+            segments.push(PathSegment {
+                label: display_name(shell),
+                location: location.clone(),
+            });
+            current = self.parent(&location);
+        }
+        segments.reverse();
+        segments
     }
 
     fn resolve(&self, text: &str) -> Result<Resolved, ResolveError> {
@@ -221,19 +363,25 @@ impl Provider for ShellProvider {
         FileSystemProvider.complete(text)
     }
 
-    /// 내 PC는 장치 붙임·뗌과 드라이브 문자 목록의 변화를 [`WatchEvent::Overflow`](다시 읽기)로 알린다. 다른 가상
-    /// 폴더는 아직 감시하지 않는다.
+    /// 내 PC는 장치 붙임·뗌과 드라이브 문자 목록의 변화를, 휴대폰 위치는 그 장치가 빠지거나 다시 꽂힌 것을
+    /// [`WatchEvent::Overflow`](다시 읽기)로 알린다. 휴지통은 감시하지 않는다.
     fn watch(
         &self,
         location: &Location,
         on_event: Box<dyn FnMut(WatchEvent) + Send>,
     ) -> Result<Watch, WatchError> {
-        if location.virtual_folder() != Some(VirtualFolder::ThisPc) {
-            return Err(WatchError::Unsupported {
-                location: location.clone(),
-            });
-        }
-        watch_this_pc(on_event).map_err(|source| WatchError::Io {
+        let watched = match location.virtual_folder() {
+            Some(VirtualFolder::ThisPc) => watch_this_pc(on_event),
+            Some(VirtualFolder::Device) if is_watched(location, VirtualFolder::Device) => {
+                watch_device(location, on_event)
+            }
+            _ => {
+                return Err(WatchError::Unsupported {
+                    location: location.clone(),
+                });
+            }
+        };
+        watched.map_err(|source| WatchError::Io {
             location: location.clone(),
             source,
         })
@@ -303,6 +451,94 @@ fn watch_this_pc(mut on_event: Box<dyn FnMut(WatchEvent) + Send>) -> std::io::Re
             }
         })?;
     Ok(Watch::new((devices, sender)))
+}
+
+/// 가상 폴더 `location`(종류 `folder`)을 감시하는가: 내 PC와 휴대폰 위치(시험용 가짜 폴더는 빼고).
+pub(crate) fn is_watched(location: &Location, folder: VirtualFolder) -> bool {
+    match folder {
+        VirtualFolder::ThisPc => true,
+        VirtualFolder::Device => location
+            .shell_location()
+            .is_some_and(|shell| !fakes().contains_key(shell.id())),
+        VirtualFolder::RecycleBin => false,
+    }
+}
+
+/// 휴대폰 위치 감시: 장치 알림이 오면 그 장치가 내 PC에 있는지 보고, 있고 없음이 바뀌었으면 다시 읽으라고 알린다.
+/// 감시(돌려준 값)를 버리면 알림이 풀리고 통로가 끊겨 스레드가 끝난다.
+fn watch_device(
+    location: &Location,
+    mut on_event: Box<dyn FnMut(WatchEvent) + Send>,
+) -> std::io::Result<Watch> {
+    let (sender, receiver) = mpsc::channel::<Signal>();
+    let device_sender = Mutex::new(sender.clone());
+    let devices = facet_win::devices::watch_devices(move || {
+        let sender = device_sender
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ = sender.send(Signal::Device);
+    })
+    .ok();
+    let id: Box<[u8]> = location
+        .shell_location()
+        .map(|shell| shell.id().into())
+        .unwrap_or_default();
+    std::thread::Builder::new()
+        .name("facet-device-watch".into())
+        .spawn(move || {
+            // 감시를 거는 때는 그 장치를 읽으려는 때라 있다고 본다.
+            let mut present = true;
+            while let Ok(Signal::Device) = receiver.recv() {
+                std::thread::sleep(DEVICE_SETTLE);
+                while receiver.try_recv().is_ok() {}
+                // 장치 식별자는 목록을 읽으며 알아 둔 해석 이름에서 얻는다(아직 모르면 이번 알림은 넘긴다).
+                let Some(parsing) = known_parsing_name(&id) else {
+                    continue;
+                };
+                if let Some(now) = device_present(&parsing)
+                    && now != present
+                {
+                    present = now;
+                    on_event(WatchEvent::Overflow);
+                }
+            }
+        })?;
+    Ok(Watch::new((devices, sender)))
+}
+
+/// 해석 이름 `parsing`의 장치가 지금 내 PC에 있는가. 내 PC를 읽지 못하면 `None`이다.
+fn device_present(parsing: &str) -> Option<bool> {
+    this_pc_devices().map(|devices| devices.iter().any(|(_, name)| same_device(name, parsing)))
+}
+
+/// 지금 내 PC의 장치 항목들(식별자와 해석 이름). 프로세스의 셸 스레드에서 읽는다. 읽지 못하면 `None`이다.
+fn this_pc_devices() -> Option<Vec<(Vec<u8>, String)>> {
+    let outcome = shell_thread().call(call_timeout(), || {
+        let mut devices = Vec::new();
+        shell_folder::enumerate(&THIS_PC_ID, LIST_BATCH, &mut |batch| {
+            devices.extend(
+                batch
+                    .into_iter()
+                    .filter(|entry| {
+                        entry.path.is_none() && device_id(&entry.parsing_name).is_some()
+                    })
+                    .map(|entry| (entry.id, entry.parsing_name)),
+            );
+            true
+        })
+        .map(|()| devices)
+    });
+    outcome.ok()?.ok()
+}
+
+/// 식별자 `id`의 알아 둔 해석 이름. 그 위치가 모르면 장치 자신의 것을 본다(장치 식별자만 쓰는 쪽).
+fn known_parsing_name(id: &[u8]) -> Option<String> {
+    let known = known();
+    known
+        .parsing
+        .get(id)
+        .or_else(|| known.parsing.get(&device_root_id(id)[..]))
+        .cloned()
 }
 
 /// 가상 폴더 `location`의 목록 `list`에서 드라이브 항목(이름과 루트 경로). 내 PC가 아니면 빈 목록이다.
@@ -436,31 +672,46 @@ pub(crate) fn list_streaming(
                     break;
                 }
             }
-            (None, collector)
+            (Names::default(), collector)
         }
         None => {
-            let id = shell.id().to_vec();
             let folder = shell.folder();
-            let stall = fault::stall_for(location);
-            let outcome = shell_thread().call(call_timeout(), move || {
-                if let Some(stall) = stall {
-                    std::thread::sleep(stall);
-                }
-                let name = shell_folder::display_name(&id).ok();
-                let mut collector = Collector::new(folder);
-                shell_folder::enumerate(&id, LIST_BATCH, &mut |batch| {
-                    collector.add(batch);
-                    if let Some(progress) = &progress {
-                        progress(collector.items.len());
+            let id = known()
+                .relinked
+                .get(shell.id())
+                .cloned()
+                .unwrap_or_else(|| shell.id().to_vec());
+            let read = |id: Vec<u8>| {
+                enumerate_on(location, id, folder, progress.clone(), Arc::clone(&cancel))
+            };
+            match read(id.clone()) {
+                Ok(listing) => listing,
+                Err(Failure::Call(error)) => return Err(call_error(location, error)),
+                Err(Failure::Shell(error)) if folder == VirtualFolder::Device => {
+                    match device_problem(&error) {
+                        Some(DeviceProblem::NotReady) => return Err(not_ready(location)),
+                        Some(DeviceProblem::Disconnected) => {
+                            // 같은 장치가 다른 식별자로 다시 꽂혔으면 그 식별자로 이어 읽는다.
+                            let Some(new_id) = relink(shell.id(), &id) else {
+                                return Err(disconnected(location));
+                            };
+                            match read(new_id.clone()) {
+                                Ok(listing) => {
+                                    known().relinked.insert(shell.id().into(), new_id);
+                                    listing
+                                }
+                                Err(Failure::Call(error)) => {
+                                    return Err(call_error(location, error));
+                                }
+                                Err(Failure::Shell(error)) => {
+                                    return Err(device_error(location, error));
+                                }
+                            }
+                        }
+                        None => return Err(list_error(location, error)),
                     }
-                    !cancel.load(Ordering::Relaxed)
-                })
-                .map(|()| (name, collector))
-            });
-            match outcome {
-                Ok(Ok(listing)) => listing,
-                Ok(Err(error)) => return Err(list_error(location, error)),
-                Err(error) => return Err(call_error(location, error)),
+                }
+                Err(Failure::Shell(error)) => return Err(list_error(location, error)),
             }
         }
     };
@@ -468,21 +719,164 @@ pub(crate) fn list_streaming(
         items,
         children,
         mut recycled,
+        names,
+        parsing,
         ..
     } = collector;
+    // 장치 바로 아래가 비어 있으면 잠겼거나 「파일 전송」이 아니다(저장소를 보여 주지 않는다).
+    if shell.folder() == VirtualFolder::Device
+        && is_device_root(shell.id())
+        && items.is_empty()
+        && !stopped.load(Ordering::Relaxed)
+    {
+        return Err(not_ready(location));
+    }
     if shell.folder() == VirtualFolder::RecycleBin {
         use_sent_paths(&mut recycled, !stopped.load(Ordering::Relaxed));
     }
     let replaced = {
         let mut known = known();
-        if let Some(name) = name.filter(|name| !name.trim().is_empty()) {
+        if let Some(name) = name.name.filter(|name| !name.trim().is_empty()) {
             known.names.insert(shell.id().into(), name);
         }
+        if let Some(parsing_name) = name.parsing {
+            known.parsing.insert(shell.id().into(), parsing_name);
+        }
+        for (id, ancestor) in name.ancestors {
+            if !ancestor.trim().is_empty() {
+                known.names.insert(id, ancestor);
+            }
+        }
+        for (id, child) in names {
+            known.names.entry(id).or_insert(child);
+        }
+        known.parsing.extend(parsing);
         known.children.insert(shell.id().into(), children)
     };
     // 앞 열거의 표는 잠금 밖에서 버린다.
     drop(replaced);
     Ok(Listed { items, recycled })
+}
+
+/// 셸 스레드 호출의 실패.
+enum Failure {
+    /// 셸이 실패를 알렸다.
+    Shell(ShellFolderError),
+    /// 시간 제한을 넘었거나 일이 패닉했다.
+    Call(CallError),
+}
+
+/// 열거하며 알게 된 폴더 자신의 이름들.
+#[derive(Default)]
+struct Names {
+    /// 폴더 자신의 표시 이름.
+    name: Option<String>,
+    /// 휴대폰 위치면 폴더 자신의 해석 이름(장치 식별자, 다시 꽂힌 장치에 잇기).
+    parsing: Option<String>,
+    /// 휴대폰 위치면 위(상위)들의 식별자와 표시 이름(경로 조각).
+    ancestors: Vec<(Box<[u8]>, String)>,
+}
+
+/// 식별자 `id`의 폴더(종류 `folder`)를 그 셸 스레드에서 열거한다. `location`은 시험용 멈춤 주입을 찾는 열쇠다.
+fn enumerate_on(
+    location: &Location,
+    id: Vec<u8>,
+    folder: VirtualFolder,
+    progress: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+    cancel: Arc<AtomicBool>,
+) -> Result<(Names, Collector), Failure> {
+    let stall = fault::stall_for(location);
+    let thread = thread_for(folder, &id);
+    let outcome = thread.call(call_timeout(), move || {
+        if let Some(stall) = stall {
+            std::thread::sleep(stall);
+        }
+        let mut names = Names {
+            name: shell_folder::display_name(&id).ok(),
+            ..Names::default()
+        };
+        let device = folder == VirtualFolder::Device;
+        if device {
+            names.parsing = shell_folder::parsing_name(&id).ok();
+            let mut ancestor = parent_id(&id);
+            while let Some(at) = ancestor.filter(|at| id_chunks(at).len() >= 2) {
+                if let Ok(name) = shell_folder::display_name(&at) {
+                    names.ancestors.push((at.as_slice().into(), name));
+                }
+                ancestor = parent_id(&at);
+            }
+        }
+        let mut collector = Collector::new(folder);
+        let mut on_batch = |batch| {
+            collector.add(batch);
+            if let Some(progress) = &progress {
+                progress(collector.items.len());
+            }
+            !cancel.load(Ordering::Relaxed)
+        };
+        let enumerated = if device {
+            shell_folder::enumerate_detailed(&id, LIST_BATCH, &mut on_batch)
+        } else {
+            shell_folder::enumerate(&id, LIST_BATCH, &mut on_batch)
+        };
+        enumerated.map(|()| (names, collector))
+    });
+    match outcome {
+        Ok(Ok(listing)) => Ok(listing),
+        Ok(Err(error)) => Err(Failure::Shell(error)),
+        Err(error) => Err(Failure::Call(error)),
+    }
+}
+
+/// 빠졌던 휴대폰 위치 `original`(지금 읽으려던 식별자 `current`)을 다시 꽂힌 같은 장치에 잇는다: 알아 둔 해석
+/// 이름의 장치 식별자로 내 PC에서 같은 장치를 찾아 그 장치 아래 같은 해석 이름의 식별자. 장치가 없거나 식별자가 그대로면
+/// `None`이다.
+fn relink(original: &[u8], current: &[u8]) -> Option<Vec<u8>> {
+    let old = {
+        let known = known();
+        known
+            .parsing
+            .get(current)
+            .or_else(|| known.parsing.get(original))
+            .cloned()
+    }?;
+    let devices = this_pc_devices()?;
+    let parsing = devices
+        .iter()
+        .find_map(|(_, device)| relink_parsing_name(&old, device))?;
+    let lookup = parsing.clone();
+    let new_id = shell_thread()
+        .call(call_timeout(), move || {
+            shell_folder::id_from_parsing_name(&lookup)
+        })
+        .ok()?
+        .ok()?;
+    if new_id == current {
+        return None;
+    }
+    known().parsing.insert(new_id.as_slice().into(), parsing);
+    Some(new_id)
+}
+
+fn disconnected(location: &Location) -> ListError {
+    ListError::Disconnected {
+        location: location.clone(),
+    }
+}
+
+fn not_ready(location: &Location) -> ListError {
+    ListError::DeviceNotReady {
+        location: location.clone(),
+    }
+}
+
+/// 휴대폰 위치를 읽지 못한 셸 실패를 까닭으로.
+fn device_error(location: &Location, error: ShellFolderError) -> ListError {
+    match device_problem(&error) {
+        Some(DeviceProblem::Disconnected) => disconnected(location),
+        Some(DeviceProblem::NotReady) => not_ready(location),
+        None => list_error(location, error),
+    }
 }
 
 /// facet이 보낸 휴지통 항목은 보낼 때 넘긴 경로를 원래 경로로 쓰고, 끝까지 읽었으면(`complete`) 휴지통에 더는 없는
@@ -514,6 +908,10 @@ struct Collector {
     children: HashMap<OsString, Location>,
     /// 휴지통이면 `items`와 같은 차례의 휴지통 정보([`Listed::recycled`]).
     recycled: Vec<Option<(RecycledEntry, PathBuf)>>,
+    /// 가상 폴더인 항목(휴대폰의 장치·저장소·폴더)의 식별자와 표시 이름(경로 조각).
+    names: Vec<(Box<[u8]>, String)>,
+    /// 가상 폴더인 항목의 식별자와 해석 이름(장치 식별자).
+    parsing: Vec<(Box<[u8]>, String)>,
 }
 
 impl Collector {
@@ -523,6 +921,8 @@ impl Collector {
             items: Vec::new(),
             children: HashMap::new(),
             recycled: Vec::new(),
+            names: Vec::new(),
+            parsing: Vec::new(),
         }
     }
 
@@ -543,16 +943,34 @@ impl Collector {
                         VirtualFolder::RecycleBin => VirtualFolder::RecycleBin,
                         VirtualFolder::ThisPc | VirtualFolder::Device => VirtualFolder::Device,
                     };
+                    if entry.is_folder {
+                        let id: Box<[u8]> = entry.id.as_slice().into();
+                        self.names.push((id.clone(), entry.name.clone()));
+                        if !entry.parsing_name.is_empty() {
+                            self.parsing.push((id, entry.parsing_name.clone()));
+                        }
+                    }
                     Location::shell(kind, entry.id)
                 }
+            };
+            // 휴대폰 안 항목은 장치가 준 크기·수정한 날짜를 쓴다(없으면 0·알 수 없음, 화면은 비움).
+            let (size, modified) = if self.folder == VirtualFolder::Device {
+                (
+                    entry.size.unwrap_or(0),
+                    entry
+                        .modified
+                        .map_or(SystemTime::UNIX_EPOCH, filetime_to_system_time),
+                )
+            } else {
+                (0, SystemTime::UNIX_EPOCH)
             };
             let name = OsString::from(entry.name);
             self.children.insert(name.clone(), location);
             self.items.push(Item {
                 name,
                 is_folder: entry.is_folder,
-                size: 0,
-                modified: SystemTime::UNIX_EPOCH,
+                size,
+                modified,
                 attributes: Attributes::default(),
             });
         }
@@ -752,10 +1170,28 @@ fn call_error(location: &Location, error: CallError) -> ListError {
     }
 }
 
-/// 프로세스에 하나인 셸 스레드(처음 부를 때 만든다).
-fn shell_thread() -> &'static ShellThread {
-    static SHELL: OnceLock<ShellThread> = OnceLock::new();
-    SHELL.get_or_init(ShellThread::new)
+/// 프로세스에 하나인 셸 스레드(내 PC·휴지통, 처음 부를 때 만든다).
+fn shell_thread() -> &'static Arc<ShellThread> {
+    static SHELL: OnceLock<Arc<ShellThread>> = OnceLock::new();
+    SHELL.get_or_init(|| Arc::new(ShellThread::new()))
+}
+
+/// 식별자 `id`의 폴더(종류 `folder`)를 읽을 셸 스레드: 휴대폰은 장치마다 하나(앞 두 조각으로 가름), 그 밖은 프로세스에
+/// 하나. 한 장치가 응답하지 않아 그 스레드를 버려도 다른 장치·내 PC·휴지통의 스레드는 그대로다.
+fn thread_for(folder: VirtualFolder, id: &[u8]) -> Arc<ShellThread> {
+    if folder != VirtualFolder::Device {
+        return Arc::clone(shell_thread());
+    }
+    type Threads = HashMap<Vec<u8>, Arc<ShellThread>>;
+    static DEVICES: LazyLock<Mutex<Threads>> = LazyLock::new(Mutex::default);
+    let mut devices = DEVICES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    Arc::clone(
+        devices
+            .entry(device_root_id(id))
+            .or_insert_with(|| Arc::new(ShellThread::new())),
+    )
 }
 
 /// 열거하며 알게 된 것.
@@ -765,6 +1201,10 @@ struct Known {
     names: HashMap<Box<[u8]>, String>,
     /// 가상 폴더 식별자 → (항목 이름 → 위치). 마지막 열거의 것이다.
     children: HashMap<Box<[u8]>, HashMap<OsString, Location>>,
+    /// 휴대폰 위치 식별자 → 해석 이름(장치 식별자를 품는다).
+    parsing: HashMap<Box<[u8]>, String>,
+    /// 다시 꽂힌 장치에 이은 휴대폰 위치: 탭의 위치 식별자 → 지금 읽는 식별자.
+    relinked: HashMap<Box<[u8]>, Vec<u8>>,
 }
 
 fn known() -> MutexGuard<'static, Known> {
@@ -893,6 +1333,105 @@ mod tests {
         assert_eq!(
             info_path(recycled).unwrap(),
             Path::new(r"C:\$Recycle.Bin\S-1-5-21\$IZH5LXC.txt")
+        );
+    }
+
+    const PHONE: &str = r"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}\\\?\usb#vid_18d1&pid_4ee1#0123456789ABCDEF#{6ac27878-a6fa-4155-ba85-f98f491d4f33}";
+
+    #[test]
+    fn 해석_이름에서_장치_식별자를_얻는다() {
+        assert_eq!(
+            device_id(PHONE).as_deref(),
+            Some(
+                r"\\?\usb#vid_18d1&pid_4ee1#0123456789abcdef#{6ac27878-a6fa-4155-ba85-f98f491d4f33}"
+            )
+        );
+        let dcim = format!(r"{PHONE}\SID-{{10001,,25048915968}}\{{00000001-0000}}");
+        assert_eq!(device_id(&dcim), device_id(PHONE));
+        assert_eq!(device_id(r"C:\사진"), None);
+        assert_eq!(device_id(r"::{20D04FE0}\\\?\"), None);
+    }
+
+    #[test]
+    fn 장치_식별자로_같은_장치를_찾는다() {
+        let dcim = format!(r"{PHONE}\SID-{{10001,,25048915968}}\DCIM");
+        // 대소문자만 다른 장치 경로는 같은 장치다.
+        assert!(same_device(&dcim, &PHONE.to_uppercase()));
+        let other = PHONE.replace("0123456789ABCDEF", "FEDCBA9876543210");
+        assert!(!same_device(&dcim, &other));
+        assert!(!same_device(r"C:\a", r"C:\a"));
+    }
+
+    #[test]
+    fn 다시_꽂힌_장치에_폴더를_잇는다() {
+        let old = format!(r"{PHONE}\SID-{{10001,,25048915968}}\DCIM");
+        // 다시 꽂은 장치 항목의 해석 이름(여기서는 대소문자가 다름)에 그 아래 같은 폴더를 잇는다.
+        let replugged = PHONE.to_lowercase();
+        assert_eq!(
+            relink_parsing_name(&old, &replugged),
+            Some(format!(r"{replugged}\SID-{{10001,,25048915968}}\DCIM"))
+        );
+        let other = PHONE.replace("0123456789ABCDEF", "FEDCBA9876543210");
+        assert_eq!(relink_parsing_name(&old, &other), None);
+    }
+
+    #[test]
+    fn 셸_실패를_휴대폰_까닭으로_가른다() {
+        let failed = |code: u32| ShellFolderError::Failed { code: code as i32 };
+        assert_eq!(
+            device_problem(&ShellFolderError::NotFound),
+            Some(DeviceProblem::Disconnected)
+        );
+        assert_eq!(
+            device_problem(&failed(0x8007_048F)),
+            Some(DeviceProblem::Disconnected)
+        );
+        assert_eq!(
+            device_problem(&failed(0x8007_001F)),
+            Some(DeviceProblem::Disconnected)
+        );
+        assert_eq!(
+            device_problem(&failed(0x8007_0005)),
+            Some(DeviceProblem::NotReady)
+        );
+        assert_eq!(
+            device_problem(&failed(0x8007_0015)),
+            Some(DeviceProblem::NotReady)
+        );
+        assert_eq!(device_problem(&failed(0x8000_4005)), None);
+        assert_eq!(device_problem(&ShellFolderError::InvalidId), None);
+    }
+
+    #[test]
+    fn 휴대폰_위치의_위는_식별자를_하나씩_뗀_위치이고_장치_위는_내_pc다() {
+        let this_pc = &THIS_PC_ID[..THIS_PC_ID.len() - 2];
+        let device_chunk = [6u8, 0, 1, 2, 3, 4];
+        let storage_chunk = [4u8, 0, 5, 6];
+        let device = join_chunks(&[this_pc, &device_chunk]);
+        let storage = join_chunks(&[this_pc, &device_chunk, &storage_chunk]);
+        let device_location = Location::shell(VirtualFolder::Device, device.clone());
+        let storage_location = Location::shell(VirtualFolder::Device, storage.clone());
+        assert!(is_device_root(&device));
+        assert!(!is_device_root(&storage));
+        assert_eq!(device_root_id(&storage), device);
+        assert_eq!(
+            ShellProvider.parent(&storage_location),
+            Some(device_location.clone())
+        );
+        assert_eq!(
+            ShellProvider.parent(&device_location),
+            Some(Location::this_pc())
+        );
+        assert_eq!(ShellProvider.parent(&Location::this_pc()), None);
+        assert_eq!(ShellProvider.parent(&Location::recycle_bin()), None);
+        let segments: Vec<Location> = ShellProvider
+            .segments(&storage_location)
+            .into_iter()
+            .map(|segment| segment.location)
+            .collect();
+        assert_eq!(
+            segments,
+            vec![Location::this_pc(), device_location, storage_location]
         );
     }
 

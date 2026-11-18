@@ -18,6 +18,8 @@ fn entries(count: usize) -> Vec<ShellEntry> {
             parsing_name: format!(r"\\?\fake#{i}"),
             is_folder: true,
             id: vec![4, 0, (i % 256) as u8, (i / 256) as u8, 0, 0],
+            size: None,
+            modified: None,
         })
         .collect()
 }
