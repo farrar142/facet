@@ -14,6 +14,7 @@
 #   <!-- factory-human -->               a ticket handed to a person
 #   <!-- factory-queue-empty S -->       the last spec S of FACTORY_SPEC_QUEUE was started (ledger issue)
 #   <!-- factory-idle Q -->              every spec of the queue is labelled; the factory is idle (ledger)
+#   <!-- factory-bench-regression SHA -->  the hourly benchmark failed at SHA (`bench-alert` issue, #366)
 #
 # Anyone can write those markers on a public repository, so only comments by `github-actions[bot]` or by
 # someone with write access (collaborator permission admin, maintain or write) are sent. A comment by
@@ -22,8 +23,13 @@
 #
 # It sends each comment it has not sent before:
 #
-#   agent-mail send --to "$BRIDGE_TO" --task facet-factory --idempotency-key facet-factory-<comment id>
+#   agent-mail send --to <recipient> --task facet-factory --idempotency-key facet-factory-<comment id>
 #     --subject … --body …
+#
+# The recipient depends on the kind (owner's decision 2026-11-18): a question goes to the boss
+# (BRIDGE_TO_BOSS), because only the owner decides it; every other kind (budget-spec, budget-daily, human,
+# queue-empty, idle, bench-regression) goes straight to the repository's coordinator (BRIDGE_TO_COORD), who
+# acts on it.
 #
 # The body has the kind, the issue link, its title, the comment as written and what to do. The comment
 # id is remembered in the state file only after a successful send, so a failed send is tried again on the
@@ -32,7 +38,11 @@
 #
 # Environment:
 #   FACTORY_REPO          owner/name (default farrar142/facet); gh must be logged in
-#   BRIDGE_TO             recipient role (default sandcorp/boss)
+#   BRIDGE_TO_BOSS        recipient of questions (default sandcorp/boss)
+#   BRIDGE_TO_COORD       recipient of every other kind (default facet/coordinator)
+#   BRIDGE_TO             removed (it sent every kind to one place) and ignored: a warning is printed when
+#                         it is still set and the two variables above (or their defaults) are used, so a
+#                         leftover BRIDGE_TO can never send a question to the coordinator.
 #   AGENT_MAIL_PROFILE    agent-mail credential profile (default automation); the profile knows the server
 #   BRIDGE_LOOKBACK_DAYS  how far back to read comments (default 14)
 #   BRIDGE_SINCE          ISO 8601 time to read from instead (tests)
@@ -42,7 +52,11 @@
 # Exits 1 when a send failed (the others are still sent). Needs bash, gh, jq and agent-mail.
 set -u
 REPO=${FACTORY_REPO:-farrar142/facet}
-TO=${BRIDGE_TO:-sandcorp/boss}
+TO_BOSS=${BRIDGE_TO_BOSS:-sandcorp/boss}
+TO_COORD=${BRIDGE_TO_COORD:-facet/coordinator}
+if [ -n "${BRIDGE_TO:-}" ]; then
+  echo "bridge: BRIDGE_TO is ignored; use BRIDGE_TO_BOSS (questions) and BRIDGE_TO_COORD (the rest)" >&2
+fi
 export AGENT_MAIL_PROFILE=${AGENT_MAIL_PROFILE:-automation}
 STATE_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/facet-factory-bridge
 SENT=$STATE_DIR/sent
@@ -82,6 +96,7 @@ matches=$(printf '%s' "$comments" | j -s -r '
      elif ($b | contains("<!-- factory-human -->")) then "human"
      elif ($b | contains("<!-- factory-queue-empty ")) then "queue-empty"
      elif ($b | contains("<!-- factory-idle ")) then "idle"
+     elif ($b | contains("<!-- factory-bench-regression ")) then "bench-regression"
      else empty end) as $k
   | [(.id | tostring), $k, (.issue_url | sub(".*/"; "")), (.user.login // "")] | @tsv')
 
@@ -151,6 +166,9 @@ while IFS=$'\t' read -r id kind n author; do
     idle)
       label="공장 idle"
       todo="FACTORY_SPEC_QUEUE에 spec을 넣고 dispatch-next를 다시 돌린다(조율자 몫)." ;;
+    bench-regression)
+      label="벤치 한도 초과"
+      todo="위 커밋 구간에서 한도를 넘긴 커밋을 찾아 고칠 티켓을 낸다(조율자 몫)." ;;
   esac
   text="종류: $label
 이슈: $url
@@ -160,10 +178,12 @@ while IFS=$'\t' read -r id kind n author; do
 $body
 
 할 일: $todo"
-  if agent-mail send --to "$TO" --task facet-factory --idempotency-key "facet-factory-$id" \
+  to=$TO_COORD
+  [ "$kind" = question ] && to=$TO_BOSS
+  if agent-mail send --to "$to" --task facet-factory --idempotency-key "facet-factory-$id" \
     --subject "[facet 공장] $label: #$n $title" --body "$text" > /dev/null; then
     remember "$id"
-    echo "bridge: sent $kind #$n (comment $id)"
+    echo "bridge: sent $kind #$n to $to (comment $id)"
   else
     echo "bridge: could not send $kind #$n (comment $id); will retry" >&2
     failed=1

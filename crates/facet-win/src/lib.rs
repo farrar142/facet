@@ -31,6 +31,7 @@
 //!   마감 시각을 두고, 닫개로 기다리던 읽기를 깨운다. 코어의 인덱서 서비스 연결이 쓴다. Windows가 아니면 붙지 못한다.
 //! - [`icon`]: 파일 종류별 시스템 아이콘(확장자·폴더·파일 하나의 고유 아이콘)을 요청 크기의 RGBA로 얻는다(시스템 아이콘
 //!   목록). 부른 스레드에서 셸을 기다리므로 UI 스레드에서 부르지 않는다. Windows가 아니면 `None`이다.
+//! - [`process`]: 다른 프로세스가 끝나기를 기다린다(셸 확장 도우미의 부모 감시). Windows가 아니면 「지원하지 않음」이다.
 //! - [`shell_copy`]: **측정 전용** 셸 복사(`IFileOperation`, 전용 스레드의 COM, 대화 없음). 탐색기 비교 측정만 부르고
 //!   앱은 부르지 않는다. Windows가 아니면 「지원하지 않음」이다.
 
@@ -46,8 +47,11 @@ pub mod drop_target;
 pub mod file_ops;
 pub mod icon;
 pub mod pipe_client;
+pub mod preview;
+pub mod process;
 pub mod recycle;
 pub mod shell_copy;
+pub mod shell_thread;
 pub mod single_instance;
 mod watch;
 #[cfg(windows)]

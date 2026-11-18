@@ -130,7 +130,6 @@ fn starts_with_local_time(line: &str) -> bool {
 }
 
 #[test]
-#[ignore = "#320"]
 fn a_stalled_helper_is_ended_and_the_next_request_gets_a_new_one() {
     let dir = TempDir::new().unwrap();
     let a = file(dir.path(), "a.txt");
@@ -156,7 +155,6 @@ fn a_stalled_helper_is_ended_and_the_next_request_gets_a_new_one() {
 }
 
 #[test]
-#[ignore = "#320"]
 fn three_crashes_in_a_minute_do_not_rest_the_helper() {
     let dir = TempDir::new().unwrap();
     let a = file(dir.path(), "a.txt");
@@ -171,7 +169,6 @@ fn three_crashes_in_a_minute_do_not_rest_the_helper() {
 }
 
 #[test]
-#[ignore = "#320"]
 fn a_fourth_crash_in_a_minute_rests_the_helper_until_the_rest_is_over() {
     let dir = TempDir::new().unwrap();
     let a = file(dir.path(), "a.txt");
@@ -218,7 +215,6 @@ fn a_fourth_crash_in_a_minute_rests_the_helper_until_the_rest_is_over() {
 }
 
 #[test]
-#[ignore = "#320"]
 fn an_idle_helper_ends_by_itself_and_comes_back_on_demand() {
     let dir = TempDir::new().unwrap();
     let a = file(dir.path(), "a.txt");
@@ -239,7 +235,6 @@ fn an_idle_helper_ends_by_itself_and_comes_back_on_demand() {
 }
 
 #[test]
-#[ignore = "#320"]
 fn the_helper_ends_when_its_parent_ends() {
     let dir = TempDir::new().unwrap();
     let a = file(dir.path(), "a.txt");
@@ -261,7 +256,6 @@ fn the_helper_ends_when_its_parent_ends() {
 }
 
 #[test]
-#[ignore = "#320"]
 fn each_crash_is_logged_and_three_crashes_of_one_extension_are_reported() {
     let dir = TempDir::new().unwrap();
     let crash = file(dir.path(), "crash");
@@ -310,7 +304,6 @@ fn each_crash_is_logged_and_three_crashes_of_one_extension_are_reported() {
 }
 
 #[test]
-#[ignore = "#320"]
 fn the_lifetime_defaults_are_the_specs() {
     assert_eq!(STALL_TIMEOUT, Duration::from_secs(10));
     assert_eq!(IDLE_TIMEOUT, Duration::from_secs(5 * 60));

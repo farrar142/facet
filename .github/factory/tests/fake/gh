@@ -3,7 +3,7 @@
 #
 # `gh api` is supported, plus the `gh issue list` and `gh workflow run` calls of dispatch-next.sh (below).
 #   issue-<n>.json      the issue as the REST API returns it ({number, state, body, labels: [{name}]})
-#   comments-<n>.json   its comments ([{id, created_at, body}]); posting a comment appends to it
+#   comments-<n>.json   its comments ([{id, created_at, body, user: {login}}]); posting appends one by FAKE_GH_LOGIN (default github-actions[bot])
 #   fail-comments       if present, posting a comment fails
 #   sub-issues-<n>.json the sub-issues of issue <n> ([{number, state}]), default []
 #   pulls.json          pull requests ([{number, state, title, body, head: {ref}, base: {ref}}]); opening a
@@ -196,15 +196,18 @@ case "$method $path" in
     cat "$f"; exit 0 ;;
   "DELETE repos/"*/*/git/refs/heads/*) echo '{}'; exit 0 ;;
   # prune-runs.sh: runs.json ([{id, event, head_branch, triggering_actor: {login}, jobs, cancelled}],
-  # default []). GET …/workflows/<f>/runs filters by the query's branch= and event=; …/runs/<id>/jobs
+  # default []; bench-gate.sh adds head_sha, status, conclusion). GET …/workflows/<f>/runs filters by the
+  # query's branch=, event= and status= (status or conclusion), newest first as written; …/runs/<id>/jobs
   # gives {total_count: jobs}; DELETE …/runs/<id> removes the run (fails while fail-delete-run exists);
   # POST …/runs/<id>/cancel sets cancelled (fails while fail-cancel-run exists).
   "GET repos/"*/*/actions/workflows/*/runs)
     f="$d/runs.json"; [ -f "$f" ] || echo '[]' > "$f"
     b=$(printf '%s' "$query" | tr '&' '\n' | sed -n 's/^branch=//p')
     e=$(printf '%s' "$query" | tr '&' '\n' | sed -n 's/^event=//p')
-    jqf --arg b "$b" --arg e "$e" \
-      '{workflow_runs: [.[] | select(($b == "" or .head_branch == $b) and ($e == "" or .event == $e))]}' "$f"
+    s=$(printf '%s' "$query" | tr '&' '\n' | sed -n 's/^status=//p')
+    jqf --arg b "$b" --arg e "$e" --arg s "$s" \
+      '{workflow_runs: [.[] | select(($b == "" or .head_branch == $b) and ($e == "" or .event == $e)
+        and ($s == "" or .status == $s or .conclusion == $s))]}' "$f"
     exit 0 ;;
   "GET repos/"*/*/actions/runs/*/jobs)
     id=${path%/jobs}; id=${id##*/}
@@ -255,6 +258,15 @@ case "$path" in
     else echo '{"permission": "read", "role_name": "read"}'; fi
     ;;
   repos/*/*/issues)
+    # bench-gate.sh: POST opens an issue (number 800 + the issue files) with title, body and labels[].
+    if [ "$method" = POST ]; then
+      shopt -s nullglob; all=("$d"/issue-*.json)
+      n=$((800 + ${#all[@]}))
+      jqf -n --argjson n "$n" --arg t "$(field title)" --arg b "$(field body)" --arg l "$(field 'labels[]')" \
+        '{number: $n, state: "open", title: $t, body: $b, html_url: "https://github.com/owner/repo/issues/\($n)",
+          labels: ($l | split(",") | map(select(. != "") | {name: .}))}' > "$d/issue-$n.json"
+      cat "$d/issue-$n.json"; exit 0
+    fi
     label=$(printf '%s' "$query" | tr '&' '\n' | sed -n 's/^labels=//p')
     shopt -s nullglob
     files=("$d"/issue-*.json)
@@ -275,7 +287,8 @@ case "$path" in
     [ -e "$d/fail-comments" ] && fail "commenting is broken"
     body=$(field body) || fail "no body"
     jqf --arg b "$body" --arg t "${FAKE_GH_NOW:-2026-11-17T03:00:00Z}" \
-      '. + [{id: (length + 1), created_at: $t, body: $b}]' "$f" > "$f.new" && mv "$f.new" "$f"
+      --arg u "${FAKE_GH_LOGIN:-github-actions[bot]}" \
+      '. +[{id: (length + 1), created_at: $t, body: $b, user: {login: $u}}]' "$f" > "$f.new" && mv "$f.new" "$f"
     echo '{}'
     ;;
   repos/*/*/issues/*/labels)

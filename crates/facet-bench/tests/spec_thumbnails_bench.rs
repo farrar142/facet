@@ -34,14 +34,12 @@ fn left_in(dir: &Path) -> Vec<std::ffi::OsString> {
 }
 
 #[test]
-#[ignore = "#326"]
 fn 디코딩_상한은_기준의_10배다() {
     assert_eq!(THUMBNAIL_DECODE_LIMIT, THUMBNAIL_DECODE_TARGET * 10);
     assert!(THUMBNAIL_DECODE_TARGET > Duration::ZERO);
 }
 
 #[test]
-#[ignore = "#326"]
 fn 디코딩_중앙값이_상한을_넘으면_수치를_담아_실패한다() {
     let m = sample();
     assert!(check_thumbnail_decode_limit(&m, ms(200)).is_ok());
@@ -54,7 +52,6 @@ fn 디코딩_중앙값이_상한을_넘으면_수치를_담아_실패한다() {
 }
 
 #[test]
-#[ignore = "#326"]
 fn 디코딩_측정은_회차마다_재고_남긴_것이_없다() {
     let root = TempDir::new().unwrap();
     let m = measure_thumbnail_decode(root.path(), 2).expect("측정한다");

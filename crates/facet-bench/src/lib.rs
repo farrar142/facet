@@ -33,6 +33,7 @@ pub mod content;
 pub mod copy;
 pub mod delete;
 pub mod grid_screen;
+pub mod preview_screen;
 pub mod screen;
 
 use std::collections::BTreeMap;
@@ -690,6 +691,7 @@ pub fn session_fixture(
                 .collect(),
             active_panel: 1,
             split_ratio: 0.5,
+            preview: Default::default(),
             placement: None,
         })
         .collect();
@@ -1020,19 +1022,145 @@ pub fn check_batch_rename_limit(m: &BatchRenameMeasurement, limit: Duration) -> 
     Ok(())
 }
 
-/// #326: 4000×3000 JPEG 하나를 보통 크기로 축소 디코딩하는 시간의 로컬 기준.
-pub const THUMBNAIL_DECODE_TARGET: Duration = Duration::ZERO; // #326
-/// #326: CI가 실패시키는 디코딩 시간 상한(기준의 10배).
-pub const THUMBNAIL_DECODE_LIMIT: Duration = Duration::ZERO; // #326
+/// #326: 시험 JPEG의 가로.
+pub const THUMBNAIL_DECODE_WIDTH: u32 = 4000;
+/// #326: 시험 JPEG의 세로.
+pub const THUMBNAIL_DECODE_HEIGHT: u32 = 3000;
+/// #326: 시험에서 요청하는 썸네일의 한 변(보통 크기).
+pub const THUMBNAIL_DECODE_SIDE: u32 = 256;
+
+/// #326: 4000×3000 JPEG 하나를 보통 크기로 축소 디코딩하는 시간의 로컬 기준. 축소 디코딩(1/8)이라 원래 크기를 다 푸는
+/// 것보다 훨씬 빨라야 하고, 화면 가득 썸네일을 채울 때 파일 하나당 이 정도면 된다는 값이다.
+pub const THUMBNAIL_DECODE_TARGET: Duration = Duration::from_millis(50);
+/// #326: CI가 실패시키는 디코딩 시간 상한(기준의 10배, 공유 러너의 편차를 견디고 축소 없이 전부 푸는 실수만 잡는다).
+pub const THUMBNAIL_DECODE_LIMIT: Duration = Duration::from_millis(500);
 
 /// #326: 디코딩 중앙값이 `limit`을 넘으면 중앙값과 상한을 담은 메시지를 돌려준다.
-pub fn check_thumbnail_decode_limit(_m: &Measurement, _limit: Duration) -> Result<(), String> {
-    todo!("#326")
+pub fn check_thumbnail_decode_limit(m: &Measurement, limit: Duration) -> Result<(), String> {
+    if m.median() > limit {
+        return Err(format!(
+            "썸네일 디코딩 상한 초과: 중앙값 {:.1}ms > 상한 {}ms (최악 {:.1}ms)",
+            m.median().as_secs_f64() * 1000.0,
+            limit.as_millis(),
+            m.max().as_secs_f64() * 1000.0
+        ));
+    }
+    Ok(())
 }
 
-/// #326: `dir`에 시험 JPEG를 만들어 한 번 데우고 `runs`회 잰다.
-pub fn measure_thumbnail_decode(_dir: &Path, _runs: usize) -> Result<Measurement, String> {
-    todo!("#326")
+/// 8×8 덩어리마다 한 색인 기준선 JPEG(DC 계수만, 양자화 표 1)를 만든다. 덩어리 색은 자리마다 달라진다.
+fn bench_jpeg(width: u32, height: u32) -> Vec<u8> {
+    fn segment(out: &mut Vec<u8>, marker: u8, data: &[u8]) {
+        out.extend_from_slice(&[0xFF, marker]);
+        out.extend_from_slice(&((data.len() + 2) as u16).to_be_bytes());
+        out.extend_from_slice(data);
+    }
+    let mut out = vec![0xFF, 0xD8];
+    let mut dqt = vec![0u8];
+    dqt.extend_from_slice(&[1; 64]);
+    segment(&mut out, 0xDB, &dqt);
+    let mut sof = vec![8];
+    sof.extend_from_slice(&(height as u16).to_be_bytes());
+    sof.extend_from_slice(&(width as u16).to_be_bytes());
+    sof.push(3);
+    for id in 1..=3u8 {
+        sof.extend_from_slice(&[id, 0x11, 0]);
+    }
+    segment(&mut out, 0xC0, &sof);
+    let mut dht = vec![0x00];
+    let mut counts = [0u8; 16];
+    counts[3] = 12;
+    dht.extend_from_slice(&counts);
+    dht.extend(0..12u8);
+    dht.push(0x10);
+    let mut counts = [0u8; 16];
+    counts[0] = 1;
+    dht.extend_from_slice(&counts);
+    dht.push(0x00);
+    segment(&mut out, 0xC4, &dht);
+    segment(&mut out, 0xDA, &[3, 1, 0x00, 2, 0x00, 3, 0x00, 0, 63, 0]);
+
+    let (mut acc, mut used) = (0u32, 0u32);
+    let mut put = |out: &mut Vec<u8>, value: u32, bits: u32| {
+        for i in (0..bits).rev() {
+            acc = (acc << 1) | ((value >> i) & 1);
+            used += 1;
+            if used == 8 {
+                out.push(acc as u8);
+                if acc as u8 == 0xFF {
+                    out.push(0);
+                }
+                acc = 0;
+                used = 0;
+            }
+        }
+        used
+    };
+    let mut previous = [0i32; 3];
+    for by in 0..height / 8 {
+        for bx in 0..width / 8 {
+            let seed = bx.wrapping_mul(31).wrapping_add(by.wrapping_mul(17));
+            for (c, prev) in previous.iter_mut().enumerate() {
+                let dc = ((seed.wrapping_mul(7 + c as u32) % 200) as i32 - 100) * 4;
+                let diff = dc - *prev;
+                *prev = dc;
+                let size = 32 - diff.unsigned_abs().leading_zeros();
+                put(&mut out, size, 4);
+                if size > 0 {
+                    let mag = if diff >= 0 {
+                        diff as u32
+                    } else {
+                        ((diff - 1) as u32) & ((1 << size) - 1)
+                    };
+                    put(&mut out, mag, size);
+                }
+                put(&mut out, 0, 1);
+            }
+        }
+    }
+    let left = put(&mut out, 0, 0);
+    if left > 0 {
+        let pad = 8 - left;
+        put(&mut out, (1 << pad) - 1, pad);
+    }
+    out.extend_from_slice(&[0xFF, 0xD9]);
+    out
+}
+
+/// #326: `dir`에 시험 JPEG를 만들어 한 번 데우고 `runs`회 잰다. 끝나면(실패해도) 만든 파일을 지운다.
+pub fn measure_thumbnail_decode(dir: &Path, runs: usize) -> Result<Measurement, String> {
+    let path = dir.join("thumbnail-decode-bench.jpg");
+    std::fs::write(
+        &path,
+        bench_jpeg(THUMBNAIL_DECODE_WIDTH, THUMBNAIL_DECODE_HEIGHT),
+    )
+    .map_err(|e| format!("{}: {e}", path.display()))?;
+    let result = (|| {
+        let decode = || {
+            facet_core::thumbnail::make_thumbnail(&path, THUMBNAIL_DECODE_SIDE)
+                .map_err(|e| format!("썸네일 디코딩 실패: {e:?}"))
+        };
+        let warm = decode()?;
+        if warm.width.max(warm.height) != THUMBNAIL_DECODE_SIDE {
+            return Err(format!(
+                "썸네일 크기가 다릅니다: {}×{}",
+                warm.width, warm.height
+            ));
+        }
+        let mut times = Vec::with_capacity(runs);
+        for _ in 0..runs {
+            let start = Instant::now();
+            let t = decode()?;
+            times.push(start.elapsed());
+            std::hint::black_box(&t);
+        }
+        Ok(Measurement {
+            item_count: 1,
+            times,
+        })
+    })();
+    let _ = std::fs::remove_file(&path);
+    result
 }
 
 /// #328: 캐시 읽기 벤치마크의 건수.
@@ -1068,6 +1196,21 @@ pub const FILTER_TARGET: Duration = Duration::from_millis(16);
 /// CI가 실패시키는 필터 시간 상한: 로컬 기준 [`FILTER_TARGET`]의 10배([`LIST_LIMIT`]과 같은 까닭: 공유 러너의
 /// 편차를 견디면서 알고리즘이 한 단계 나빠지는 실수만 잡는다).
 pub const FILTER_LIMIT: Duration = Duration::from_millis(160);
+
+/// #336: 미리보기 텍스트(256KB 추정+디코딩) 로컬 기준(5ms).
+pub const TEXT_PREVIEW_TARGET: Duration = Duration::ZERO; // #336
+/// #336: 미리보기 텍스트 CI 상한(기준 × 10).
+pub const TEXT_PREVIEW_LIMIT: Duration = Duration::ZERO; // #336
+
+/// #336: 중앙값이 상한을 넘으면 중앙값과 상한을 담은 `Err`.
+pub fn check_text_preview_limit(_m: &Measurement, _limit: Duration) -> Result<(), String> {
+    todo!("#336")
+}
+
+/// #336: 메모리의 256KB CP949 텍스트를 한 번 데우고 `runs`회 추정+디코딩한다.
+pub fn measure_text_preview(_runs: usize) -> Result<Measurement, String> {
+    todo!("#336")
+}
 
 /// 필터 측정 글자: 빈 필터에서 한 글자, 그 한 글자에서 두 글자.
 pub const FILTER_STEPS: [&str; 2] = ["r", "re"];
@@ -1459,17 +1602,80 @@ pub fn check_batch_rename_job_limit(m: &Measurement, limit: Duration) -> Result<
     check_median("일괄 이름 바꾸기 실행", m, limit)
 }
 
-/// #324: 셸 확장 도우미 요청 왕복의 로컬 기준(5ms).
-pub const SHELL_HELPER_TARGET: Duration = Duration::ZERO; // #324
-/// #324: 셸 확장 도우미 요청 왕복의 CI 상한(기준의 10배).
-pub const SHELL_HELPER_LIMIT: Duration = Duration::ZERO; // #324
+/// 셸 확장 도우미 요청 왕복의 로컬 기준(5ms). 셸 호출 시간을 뺀 오버헤드다.
+pub const SHELL_HELPER_TARGET: Duration = Duration::from_millis(5);
+/// 셸 확장 도우미 요청 왕복의 CI 상한(기준의 10배).
+pub const SHELL_HELPER_LIMIT: Duration = Duration::from_millis(50);
 
-/// #324: 시험용 모드 도우미에 셸 메뉴 요청을 `runs`회 보내 왕복 시간을 잰다.
-pub fn measure_shell_helper(_helper: &Path, _runs: usize) -> Result<Measurement, String> {
-    todo!("#324")
+/// 시험용 모드(`--fake`) 도우미에 셸 메뉴 요청을 `runs`회 보내 왕복 시간을 잰다.
+///
+/// 첫 요청(도우미 띄우기)은 데우기로 재지 않는다. `item_count`는 응답 트리의 맨 위 줄 수다.
+pub fn measure_shell_helper(helper: &Path, runs: usize) -> Result<Measurement, String> {
+    use facet_core::shell_helper::{HelperEvent, HelperOptions, Reply, ShellHelper};
+    use facet_shell_protocol::MenuTarget;
+
+    const WAIT: Duration = Duration::from_secs(30);
+    let mut options = HelperOptions::new(helper);
+    options.args = vec!["--fake".into()];
+    options.crash_log = None;
+    let shell = ShellHelper::start(options);
+    let target = MenuTarget::Items(vec![PathBuf::from(r"C:acet-bench\시험.txt")]);
+    let round_trip = || -> Result<(Duration, usize), String> {
+        let start = Instant::now();
+        let id = shell.menu(target.clone());
+        let deadline = start + WAIT;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match shell.wait_event(left) {
+                Some(HelperEvent::Reply { id: got, result }) if got == id => {
+                    let elapsed = start.elapsed();
+                    return match result {
+                        Ok(Reply::Menu(items)) => Ok((elapsed, items.len())),
+                        other => Err(format!("메뉴 요청에 뜻밖의 답이 왔습니다: {other:?}")),
+                    };
+                }
+                Some(_) => {}
+                None => return Err("메뉴 요청에 제때 답이 오지 않았습니다".into()),
+            }
+        }
+    };
+    round_trip()?;
+    let mut times = Vec::with_capacity(runs);
+    let mut item_count = 0;
+    for _ in 0..runs {
+        let (time, count) = round_trip()?;
+        times.push(time);
+        item_count = count;
+    }
+    // 도우미가 끝나길 기다린다: 관리를 버리면 일꾼이 도우미를 끝낸다.
+    let pid = shell.process_id();
+    drop(shell);
+    if let Some(pid) = pid {
+        wait_process_gone(pid);
+    }
+    Ok(Measurement { item_count, times })
 }
 
-/// #324: 왕복 중앙값이 상한을 넘으면 수치를 담아 실패한다.
-pub fn check_shell_helper_limit(_m: &Measurement, _limit: Duration) -> Result<(), String> {
-    todo!("#324")
+/// 프로세스 `pid`가 사라질 때까지 20초 안에서 기다린다(Windows가 아니면 곧바로 돌아온다).
+fn wait_process_gone(pid: u32) {
+    if !cfg!(windows) {
+        return;
+    }
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        let out = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+            .output();
+        match out {
+            Ok(o) if String::from_utf8_lossy(&o.stdout).contains(&format!("\"{pid}\"")) => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            _ => return,
+        }
+    }
+}
+
+/// 왕복 중앙값이 상한을 넘으면 중앙값·상한(ms)을 담은 메시지.
+pub fn check_shell_helper_limit(m: &Measurement, limit: Duration) -> Result<(), String> {
+    check_median("셸 확장 도우미 요청 왕복", m, limit)
 }

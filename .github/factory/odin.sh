@@ -27,16 +27,32 @@
 #                                       when the PR could not be merged (nothing else is done then).
 #   odin.sh empty <S> <PR>              the spec PR has no test: close it and delete its branch, then
 #                                       label the tickets and dispatch the first one as `pass` does.
+#   odin.sh conflict <S> <PR> <files> <reason> [--dispatch]
+#                                       the spec PR conflicts with main (#359; <files>: the conflicting
+#                                       paths, one per line, may be empty when GitHub only refused the
+#                                       merge). Counts the conflict rounds on the spec PR: comments starting
+#                                       with `<!-- factory-odin-conflict -->` after the last hand-over to a
+#                                       human (`<!-- factory-odin-human -->`). Under the limit it comments a
+#                                       new round with the files, writes resolve=true and exits 0; with
+#                                       --dispatch it also dispatches factory-odin.yml with mode=conflict
+#                                       (that run merges main again and resolves without a new review). At
+#                                       the limit, or when the dispatch fails, it writes the reason with the
+#                                       files to <reason>, writes resolve=false and exits 1: the caller
+#                                       runs `human`.
 #
 # Environment: REPO (or GITHUB_REPOSITORY), GH_TOKEN, BASE (default main); RUN_URL (link in comments,
 # optional); FACTORY_DISPATCH_NEXT (command run instead of dispatch-next.sh, tests); FACTORY_PRUNE_RUNS
 # (command run with the branch instead of prune-runs.sh, tests);
-# FACTORY_MERGE_WAIT (seconds between merge attempts, default 15). Needs bash, gh and jq.
+# FACTORY_MERGE_WAIT (seconds between merge attempts, default 15); ODIN_CONFLICT_LIMIT (conflict
+# rounds before a human, default 2). Needs bash, gh and jq.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 REPO=${REPO:-${GITHUB_REPOSITORY:-}}
 BASE=${BASE:-main}
 HUMAN='<!-- factory-human -->'
+PR_HUMAN='<!-- factory-odin-human -->'
+CONFLICT='<!-- factory-odin-conflict -->'
+CONFLICT_LIMIT=${ODIN_CONFLICT_LIMIT:-2}
 
 j() { jq "$@" | tr -d '\r'; }
 
@@ -45,7 +61,7 @@ output() {
 }
 
 usage() {
-  echo "usage: odin.sh state <S> | verdict <S> [file] | question <S> <PR> [report] | human <S> <PR> <reason> | pass <S> <PR> [report] | empty <S> <PR>" >&2
+  echo "usage: odin.sh state <S> | verdict <S> [file] | question <S> <PR> [report] | human <S> <PR> <reason> | pass <S> <PR> [report] | empty <S> <PR> | conflict <S> <PR> <files> <reason> [--dispatch]" >&2
   exit 2
 }
 
@@ -133,7 +149,8 @@ human() {
   local s=$1 pr=$2 file=$3 reason
   reason=$(cat "$file" 2> /dev/null)
   [ -n "$reason" ] || reason="(까닭이 남지 않았다)"
-  comment "$pr" "Odin$(run_link): 병합하지 않음
+  comment "$pr" "$PR_HUMAN
+Odin$(run_link): 병합하지 않음
 
 $reason" || echo "::warning::could not comment on PR #$pr"
   add_label "$s" ready-for-human || echo "::warning::could not label #$s ready-for-human"
@@ -204,6 +221,57 @@ empty() {
   start_chain "$s"
 }
 
+# --- conflict (#359) -----------------------------------------------------------------------------
+
+# Conflict rounds already spent on a spec PR since its last hand-over to a human. Only the factory's
+# own comments count: on a public repository anyone could write the markers.
+conflict_rounds() {
+  gh api "repos/$REPO/issues/$1/comments?per_page=100" --paginate \
+    | j -s -r --arg h "$PR_HUMAN" --arg c "$CONFLICT" --arg bot "${FACTORY_BOT:-github-actions[bot]}" \
+      'add // [] | map(select((.user.login // "") == $bot and (.body // "" | type) == "string"))
+       | ([to_entries[] | select(.value.body | startswith($h)) | .key] | max // -1) as $i
+       | .[($i + 1):] | map(select(.body | startswith($c))) | length'
+}
+
+conflict() {
+  local s=$1 pr=$2 files_file=$3 reason=$4 dispatch=${5:-} rounds list
+  list=$(sed '/^[[:space:]]*$/d; s/\r$//; s/^/- /' "$files_file" 2> /dev/null)
+  [ -n "$list" ] || list="- (충돌 파일을 알아내지 못했다: GitHub이 병합을 거절했다)"
+  rounds=$(conflict_rounds "$pr")
+  if [ -z "$rounds" ]; then
+    echo "::warning::could not count the conflict rounds on PR #$pr; counting none"
+    rounds=0
+  fi
+  if [ "$rounds" -ge "$CONFLICT_LIMIT" ]; then
+    printf '### 스펙 PR이 %s와 충돌하는데 충돌 풀기 한도(%s회)를 다 썼다\n\n충돌 파일:\n\n%s\n' \
+      "$BASE" "$CONFLICT_LIMIT" "$list" > "$reason"
+    output resolve=false
+    return 1
+  fi
+  # The comment is the round counter: without it the rounds would never reach the limit.
+  if ! comment "$pr" "$CONFLICT
+Odin$(run_link): $BASE와 충돌, 풀기 $((rounds + 1))/$CONFLICT_LIMIT
+
+$list"; then
+    printf '### 스펙 PR이 %s와 충돌하는데 충돌 풀기 횟수를 PR에 적지 못했다\n\n충돌 파일:\n\n%s\n' \
+      "$BASE" "$list" > "$reason"
+    output resolve=false
+    return 1
+  fi
+  if [ "$dispatch" = --dispatch ]; then
+    if gh api -X POST "repos/$REPO/actions/workflows/factory-odin.yml/dispatches" \
+      -f "ref=$BASE" -f "inputs[spec]=$s" -f "inputs[mode]=conflict" > /dev/null; then
+      echo "dispatched factory-odin.yml for #$s (mode=conflict)"
+    else
+      printf '### 스펙 PR이 %s와 충돌해 충돌 풀기 run을 dispatch하려 했으나 실패했다\n\n충돌 파일:\n\n%s\n' \
+        "$BASE" "$list" > "$reason"
+      output resolve=false
+      return 1
+    fi
+  fi
+  output resolve=true
+}
+
 : "${REPO:?REPO is not set}"
 case "${1:-}" in
   state) [ $# -eq 2 ] || usage; state "$2" ;;
@@ -212,5 +280,8 @@ case "${1:-}" in
   human) [ $# -eq 4 ] || usage; human "$2" "$3" "$4" ;;
   pass) [ $# -ge 3 ] || usage; pass "$2" "$3" "${4:-}" ;;
   empty) [ $# -eq 3 ] || usage; empty "$2" "$3" ;;
+  conflict)
+    [ $# -eq 5 ] || { [ $# -eq 6 ] && [ "$6" = --dispatch ]; } || usage
+    conflict "$2" "$3" "$4" "$5" "${6:-}" ;;
   *) usage ;;
 esac

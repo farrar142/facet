@@ -4,7 +4,7 @@
 //! 바뀐 파일은 부르는 쪽이 git으로 모아 넘긴다(기준과의 merge-base 대비, 작업 공간 루트 기준 `/` 구분 경로).
 
 /// 벤치마크 이름. `cargo xtask bench`·`ci`가 이 차례로 돌린다(`facet-bench`의 하위 명령 이름과 같다).
-pub const BENCHES: [&str; 14] = [
+pub const BENCHES: [&str; 16] = [
     "list",
     "index",
     "mft",
@@ -19,6 +19,8 @@ pub const BENCHES: [&str; 14] = [
     "copy",
     "delete",
     "batch-rename-run",
+    "thumbnail-decode",
+    "shell-helper",
 ];
 
 /// 바뀌면 벤치마크를 모두 돌리는 공통 파일. `/`로 끝나면 그 폴더 아래 전부다.
@@ -96,6 +98,7 @@ const TABLE: &[(&str, &[&str])] = &[
     ("crates/facet-core/src/session.rs", &["session"]),
     ("crates/facet-core/src/placement.rs", &["session"]),
     ("crates/facet-core/src/clipboard.rs", &["clipboard"]),
+    ("crates/facet-core/src/thumbnail.rs", &["thumbnail-decode"]),
     ("crates/facet-core/src/query_syntax.rs", &["query-syntax"]),
     ("crates/facet-core/src/live_search.rs", &["search"]),
     ("crates/facet-core/src/condition_match.rs", &["search"]),
@@ -126,6 +129,7 @@ const TABLE: &[(&str, &[&str])] = &[
     ("crates/facet-core/src/measure.rs", &[]),
     ("crates/facet-core/src/rename_presets.rs", &[]),
     ("crates/facet-core/src/search_results.rs", &[]),
+    ("crates/facet-core/src/shell_helper.rs", &["shell-helper"]),
     ("crates/facet-core/src/work_area.rs", &[]),
     // facet-win.
     (

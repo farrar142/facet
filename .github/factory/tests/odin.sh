@@ -230,9 +230,157 @@ eq "not merged" false "$(merged)"
 eq "no ticket approved" "" "$(approved)"
 eq "nothing dispatched" "" "$(dispatched)"
 
+has "PR hand-over marker (#359)" "<!-- factory-odin-human -->" "$(pr_comments)"
+
+# --- conflicts with main (#359) ---------------------------------------------------------------
+
+odin_dispatches() { grep -c 'factory-odin.yml/dispatches' "$FAKE_GH/calls.log" | tr -d '\r'; }
+conflict_comments() { jq -r '[.[] | select(.body | startswith("<!-- factory-odin-conflict -->"))] | length' \
+  "$FAKE_GH/comments-70.json" 2> /dev/null | tr -d '\r'; }
+conflict_files() { printf 'crates/facet-core/src/command.rs\ncrates/facet-app/src/text.rs\n' > "$tmp/files"; }
+# comment_on_70 <body> [login]: a comment already on the spec PR (by the factory unless a login is given)
+comment_on_70() {
+  f="$FAKE_GH/comments-70.json"
+  [ -f "$f" ] || echo '[]' > "$f"
+  jq --arg b "$1" --arg u "${2:-github-actions[bot]}" \
+    '. +[{id: (length + 1), created_at: "2026-11-17T01:00:00Z", body: $b, user: {login: $u}}]' "$f" > "$f.new" \
+    && mv "$f.new" "$f"
+}
+
+setup conflict-first-round
+conflict_files
+bash "$odin" conflict 50 70 "$tmp/files" "$tmp/reason.md" > /dev/null 2>&1
+eq "exit" 0 "$?"
+eq "resolve" true "$(out resolve)"
+eq "round counted on the PR" 1 "$(conflict_comments)"
+has "files on the PR" "crates/facet-core/src/command.rs" "$(pr_comments)"
+has "round of limit" "풀기 1/2" "$(pr_comments)"
+eq "no dispatch without --dispatch" 0 "$(odin_dispatches)"
+eq "spec untouched" spec "$(labels_of 50)"
+
+setup conflict-resolved-then-merged
+# The checkout conflicts, the agent resolves, the checks pass: the merge goes through.
+conflict_files
+bash "$odin" conflict 50 70 "$tmp/files" "$tmp/reason.md" > /dev/null 2>&1
+eq "resolve" true "$(out resolve)"
+bash "$odin" pass 50 70 > /dev/null 2>&1
+eq "pass exit" 0 "$?"
+eq "merged" true "$(merged)"
+eq "open tickets approved" "61 62 63" "$(approved)"
+eq "first dispatch" 62 "$(dispatched)"
+eq "no human" spec "$(labels_of 50)"
+
+setup conflict-merge-fails-dispatches-a-round
+# The squash merge fails (main moved again): the next round runs as a new Odin run in conflict mode.
+touch "$FAKE_GH/fail-merge"
+conflict_files
+bash "$odin" pass 50 70 > /dev/null 2>&1
+eq "pass exit" 1 "$?"
+bash "$odin" conflict 50 70 "$tmp/files" "$tmp/reason.md" --dispatch > /dev/null 2>&1
+eq "exit" 0 "$?"
+eq "resolve" true "$(out resolve)"
+eq "one Odin run dispatched" 1 "$(odin_dispatches)"
+has "conflict mode" "inputs[mode]=conflict" "$(grep 'factory-odin.yml/dispatches' "$FAKE_GH/calls.log")"
+has "same spec" "inputs[spec]=50" "$(grep 'factory-odin.yml/dispatches' "$FAKE_GH/calls.log")"
+# The dispatched run resolves and merges.
+rm "$FAKE_GH/fail-merge"
+bash "$odin" pass 50 70 > /dev/null 2>&1
+eq "merged on the next round" true "$(merged)"
+eq "no human" spec "$(labels_of 50)"
+
+setup conflict-limit-goes-to-a-human
+# Every merge attempt fails: two rounds, then a human with the conflicting files.
+touch "$FAKE_GH/fail-merge"
+conflict_files
+for round in 1 2; do
+  bash "$odin" pass 50 70 > /dev/null 2>&1
+  bash "$odin" conflict 50 70 "$tmp/files" "$tmp/reason.md" --dispatch > /dev/null 2>&1
+  eq "round $round exit" 0 "$?"
+done
+bash "$odin" pass 50 70 > /dev/null 2>&1
+: > "$GITHUB_OUTPUT"
+bash "$odin" conflict 50 70 "$tmp/files" "$tmp/reason.md" --dispatch > /dev/null 2>&1
+eq "third round refused" 1 "$?"
+eq "resolve" false "$(out resolve)"
+eq "rounds stay at the limit" 2 "$(conflict_comments)"
+eq "no third dispatch" 2 "$(odin_dispatches)"
+has "limit in the reason" "한도(2회)" "$(cat "$tmp/reason.md")"
+has "files in the reason" "crates/facet-app/src/text.rs" "$(cat "$tmp/reason.md")"
+bash "$odin" human 50 70 "$tmp/reason.md" > /dev/null 2>&1
+eq "spec to a human" "ready-for-human,spec" "$(labels_of 50)"
+has "files on the spec" "crates/facet-core/src/command.rs" "$(spec_comments)"
+eq "not merged" false "$(merged)"
+eq "no ticket approved" "" "$(approved)"
+
+setup conflict-limit-from-env
+ODIN_CONFLICT_LIMIT=1 bash "$odin" conflict 50 70 /dev/null "$tmp/reason.md" > /dev/null 2>&1
+eq "first round under a limit of 1" 0 "$?"
+ODIN_CONFLICT_LIMIT=1 bash "$odin" conflict 50 70 /dev/null "$tmp/reason.md" > /dev/null 2>&1
+eq "second round over a limit of 1" 1 "$?"
+has "no files known" "GitHub이 병합을 거절했다" "$(cat "$tmp/reason.md")"
+
+setup conflict-counts-after-a-human
+# A person fixed the PR after a hand-over and ran Odin again: the rounds start over.
+comment_on_70 "<!-- factory-odin-conflict -->
+round"
+comment_on_70 "<!-- factory-odin-conflict -->
+round"
+comment_on_70 "<!-- factory-odin-human -->
+Odin: 병합하지 않음"
+conflict_files
+bash "$odin" conflict 50 70 "$tmp/files" "$tmp/reason.md" > /dev/null 2>&1
+eq "rounds start over after a human" 0 "$?"
+has "round 1 again" "풀기 1/2" "$(pr_comments)"
+
+setup conflict-old-rounds-count
+comment_on_70 "<!-- factory-odin-conflict -->
+round"
+comment_on_70 "<!-- factory-odin-conflict -->
+round"
+conflict_files
+bash "$odin" conflict 50 70 "$tmp/files" "$tmp/reason.md" > /dev/null 2>&1
+eq "earlier runs' rounds count" 1 "$?"
+
+setup conflict-markers-by-others-do-not-count
+# Anyone can comment on a public repository: neither a stranger's rounds nor a stranger's hand-over count.
+comment_on_70 "<!-- factory-odin-conflict -->
+round"
+comment_on_70 "<!-- factory-odin-conflict -->
+round"
+comment_on_70 "<!-- factory-odin-human -->
+reset" someone
+conflict_files
+bash "$odin" conflict 50 70 "$tmp/files" "$tmp/reason.md" > /dev/null 2>&1
+eq "a stranger's hand-over does not reset" 1 "$?"
+setup conflict-stranger-rounds
+comment_on_70 "<!-- factory-odin-conflict -->
+round" someone
+comment_on_70 "<!-- factory-odin-conflict -->
+round" someone
+conflict_files
+bash "$odin" conflict 50 70 "$tmp/files" "$tmp/reason.md" > /dev/null 2>&1
+eq "a stranger's rounds do not count" 0 "$?"
+
+setup conflict-dispatch-fails
+touch "$FAKE_GH/fail-dispatch"
+conflict_files
+bash "$odin" conflict 50 70 "$tmp/files" "$tmp/reason.md" --dispatch > /dev/null 2>&1
+eq "a failed dispatch goes to a human" 1 "$?"
+eq "resolve" false "$(out resolve)"
+has "says so" "dispatch" "$(cat "$tmp/reason.md")"
+
+setup conflict-comment-fails
+touch "$FAKE_GH/fail-comments"
+conflict_files
+bash "$odin" conflict 50 70 "$tmp/files" "$tmp/reason.md" --dispatch > /dev/null 2>&1
+eq "an uncounted round goes to a human" 1 "$?"
+eq "nothing dispatched" 0 "$(odin_dispatches)"
+
 setup usage
 bash "$odin" pass 50 > /dev/null 2>&1
 eq "usage exit" 2 "$?"
+bash "$odin" conflict 50 70 "$tmp/files" > /dev/null 2>&1
+eq "conflict usage exit" 2 "$?"
 
 echo "odin.sh: $passes passed, $fails failed"
 [ "$fails" -eq 0 ]

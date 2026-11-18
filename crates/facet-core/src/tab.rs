@@ -2418,6 +2418,26 @@ impl Tab {
         }
     }
 
+    /// #348: 이 탭 위치의 되는 일(공급자가 알린 값).
+    pub fn capabilities(&self) -> crate::Capabilities {
+        todo!("#348")
+    }
+
+    /// #350: 셸 공급자 위치의 목록을 흘려 받는 중이면 지금까지 읽은 항목 수.
+    pub fn loading(&self) -> Option<usize> {
+        todo!("#350")
+    }
+
+    /// #351: 보이는 항목 `index`가 내 PC의 드라이브면 그 용량.
+    pub fn drive(&self, _index: usize) -> Option<&crate::shell_provider::DriveSpace> {
+        todo!("#351")
+    }
+
+    /// #352: 보이는 항목 `index`가 휴지통 항목이면 그 정보.
+    pub fn recycled(&self, _index: usize) -> Option<&crate::shell_provider::RecycledEntry> {
+        todo!("#352")
+    }
+
     /// 커서 항목의 번호.
     pub fn cursor(&self) -> Option<usize> {
         self.cursor.as_ref().map(|(_, index)| *index)

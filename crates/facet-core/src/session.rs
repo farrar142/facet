@@ -66,6 +66,8 @@ pub struct WindowSession {
     pub split_ratio: f32,
     /// 창의 화면 자리·크기·최대화. 모르면(아직 띄우지 않은 창) `None`이다.
     pub placement: Option<Placement>,
+    /// #339: 미리보기 영역(켜짐·폭).
+    pub preview: crate::preview::PreviewPane,
 }
 
 /// 패널 하나: 탭들과 활성 탭.
@@ -501,6 +503,7 @@ impl FileV1 {
                 .windows
                 .into_iter()
                 .map(|window| WindowSession {
+                    preview: Default::default(), // #339
                     placement: PlacementV1::read(window.placement),
                     split_ratio: window.split_ratio,
                     active_panel: window.active_panel,
@@ -540,6 +543,8 @@ impl TabV1 {
                     // 위치 열은 검색 결과에만 뜻이 있고, 검색 결과 위치는 검색한 폴더로 남으므로 이름으로 남긴다(형식
                     // 버전을 올리지 않으려고 열을 더하지 않는다).
                     Column::Location | Column::Matches => ColumnV1::Name,
+                    Column::TotalSize | Column::FreeSpace => todo!("#351"),
+                    Column::OriginalLocation | Column::DateDeleted => todo!("#352"),
                 },
                 direction: match tab.sort.direction {
                     Direction::Ascending => DirectionV1::Ascending,

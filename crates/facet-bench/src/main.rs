@@ -72,11 +72,17 @@ const USAGE: &str = "\
       복사 작업으로 각각 N회(기본 3) 복사해(한 번 데운 뒤, 대상은 매번 지움) 큰 파일 처리량 중앙값이 하한
       (10MB/s)보다 낮거나 작은 파일 복사 시간 중앙값이 상한(20000ms)을 넘으면 실패한다. Windows가 아니면 건너뛴다.
   facet-bench delete [--count N] [--runs N]
+  facet-bench thumbnail-decode [--runs N] [--limit-ms N]
+      4000×3000 JPEG 하나를 썸네일 크기(256)로 축소 디코딩하는 시간을 N회(기본 5) 재어 중앙값이 상한(기본 500ms)을
+      넘으면 실패한다.
   facet-bench batch-rename-run [--count N] [--runs N]
       임시 폴더에 4KiB 파일 N개(기본 10000)가 든 폴더를 만들고 작업 대기열의 영구 삭제 작업으로 지우는 시간을
       N회(기본 5) 재어(한 번 데운 뒤, 회차마다 폴더를 새로 만듦) 중앙값이 상한(10000ms)을 넘으면 실패한다.
       이어 작업 기록 100개(되돌릴 수 없는 것과 섞음)에서 실행취소 대상을 찾는 시간도 재어 중앙값이
       상한(10ms)을 넘으면 실패한다. 삭제는 Windows가 아니면 건너뛴다.
+  facet-bench shell-helper [--runs N]
+      시험용 모드(--fake) 셸 확장 도우미에 메뉴 요청을 보내 응답을 받을 때까지의 왕복 시간을 N회(기본 20) 재어
+      (첫 요청은 데우기) 중앙값이 상한(50ms)을 넘으면 실패한다. 도우미는 이 실행 파일 옆의 facet-shell-helper.exe다.
   facet-bench compare-recycle <폴더> [--count N] [--runs N] [--json <파일>]
       폴더 안에 파일 N개(기본 10000)를 만들어 facet 휴지통 삭제 작업과 탐색기 엔진(IFileOperation 휴지통 보내기)이
       번갈아 N회(기본 5)씩 휴지통에 보내는 시간을 표로 낸다(상한 없음, 비교만). --json이면 JSON도 쓴다. 휴지통에 넣은
@@ -220,6 +226,8 @@ fn main() -> ExitCode {
         "copy" => copy_bench(&args),
         "delete" => delete_bench(&args),
         "batch-rename-run" => batch_rename_run(&args),
+        "shell-helper" => shell_helper_bench(&args),
+        "thumbnail-decode" => thumbnail_decode(&args),
         "compare-recycle" => compare_recycle(&args),
         "compare-copy" => compare_copy(&args),
         "screen" => make_folder(&args).and_then(|()| screen(&args)),
@@ -903,6 +911,40 @@ fn compare_copy(args: &Args) -> Result<(), String> {
 }
 
 /// 영구 삭제 벤치마크와 실행취소 대상 찾기: CI가 상한을 지킨다.
+fn thumbnail_decode(args: &Args) -> Result<(), String> {
+    use facet_bench::{
+        THUMBNAIL_DECODE_LIMIT, THUMBNAIL_DECODE_TARGET, check_thumbnail_decode_limit,
+        measure_thumbnail_decode,
+    };
+    if args.path.is_some() {
+        return Err(format!(
+            "thumbnail-decode 명령은 경로를 받지 않습니다
+
+{USAGE}"
+        ));
+    }
+    warn_debug();
+    let limit = args.limit.unwrap_or(THUMBNAIL_DECODE_LIMIT);
+    let root = std::env::temp_dir().join(format!("facet-bench-thumbnail-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).map_err(|e| format!("{}: {e}", root.display()))?;
+    let result = measure_thumbnail_decode(&root, args.runs());
+    let _ = std::fs::remove_dir_all(&root);
+    let m = result?;
+    println!("썸네일 디코딩 (4000×3000 JPEG, {}회):", m.times.len());
+    print_times(&m);
+    println!(
+        "  중앙값 {:.1}ms, 최악 {:.1}ms / 로컬 기준 {}ms, CI 상한 {}ms",
+        ms(m.median()),
+        ms(m.max()),
+        THUMBNAIL_DECODE_TARGET.as_millis(),
+        limit.as_millis()
+    );
+    check_thumbnail_decode_limit(&m, limit)?;
+    println!("  상한 안: 통과");
+    Ok(())
+}
+
 fn batch_rename_run(args: &Args) -> Result<(), String> {
     use facet_bench::{
         BATCH_RENAME_JOB_COUNT, BATCH_RENAME_JOB_LIMIT, BATCH_RENAME_JOB_TARGET,
@@ -942,6 +984,51 @@ fn batch_rename_run(args: &Args) -> Result<(), String> {
         BATCH_RENAME_JOB_LIMIT.as_millis()
     );
     check_batch_rename_job_limit(&m, BATCH_RENAME_JOB_LIMIT)?;
+    println!("  상한 안: 통과");
+    Ok(())
+}
+
+fn shell_helper_bench(args: &Args) -> Result<(), String> {
+    use facet_bench::{
+        SHELL_HELPER_LIMIT, SHELL_HELPER_TARGET, check_shell_helper_limit, measure_shell_helper,
+    };
+    if args.path.is_some() {
+        return Err(format!(
+            "shell-helper 명령은 경로를 받지 않습니다
+
+{USAGE}"
+        ));
+    }
+    warn_debug();
+    if !cfg!(windows) {
+        println!("셸 확장 도우미 왕복 벤치마크: Windows가 아니므로 건너뜀");
+        return Ok(());
+    }
+    let helper = std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .with_file_name("facet-shell-helper.exe");
+    if !helper.exists() {
+        return Err(format!(
+            "도우미 실행 파일이 없습니다: {} (cargo build -p facet-shell-helper)",
+            helper.display()
+        ));
+    }
+    let runs = args.runs.unwrap_or(20);
+    let m = measure_shell_helper(&helper, runs)?;
+    println!(
+        "셸 확장 도우미 요청 왕복 (시험용 모드, 응답 {}줄, {}회):",
+        m.item_count,
+        m.times.len()
+    );
+    print_times(&m);
+    println!(
+        "  중앙값 {:.1}ms, 최악 {:.1}ms / 로컬 기준 {}ms, CI 상한 {}ms",
+        ms(m.median()),
+        ms(m.max()),
+        SHELL_HELPER_TARGET.as_millis(),
+        SHELL_HELPER_LIMIT.as_millis()
+    );
+    check_shell_helper_limit(&m, SHELL_HELPER_LIMIT)?;
     println!("  상한 안: 통과");
     Ok(())
 }

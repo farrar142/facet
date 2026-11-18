@@ -97,7 +97,12 @@ pub fn server_sort(sort: Sort) -> Option<(SortKey, Order)> {
         Column::Location => SortKey::Path,
         Column::Size => SortKey::Size,
         Column::Modified => SortKey::Modified,
-        Column::Type | Column::Matches => return None,
+        Column::Type
+        | Column::Matches
+        | Column::TotalSize
+        | Column::FreeSpace
+        | Column::OriginalLocation
+        | Column::DateDeleted => return None,
     };
     let order = match sort.direction {
         Direction::Ascending => Order::Ascending,
