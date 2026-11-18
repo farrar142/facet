@@ -32,6 +32,7 @@ use std::time::{Duration, Instant};
 
 use crate::details::{DetailsList, Sort};
 use crate::selection::{CursorMove, Pick, StatusSummary, TypeAhead, ViewState, starts_with_folded};
+use crate::view::{GridLayout, GridMove, View};
 use crate::watch::{self, ChangeBatch, ChangeSink, Watch, WatchError};
 use crate::window::home_location;
 use facet_win::OpenError;
@@ -2431,6 +2432,31 @@ impl Tab {
         let key = self.key(index)?;
         self.cursor = Some((key, index));
         Some(index)
+    }
+
+    /// #327: 탭의 보기 방식과 칸 크기.
+    pub fn view(&self) -> View {
+        todo!("#327")
+    }
+
+    /// #327: 보기 방식과 칸 크기를 바꾼다.
+    pub fn set_view(&mut self, _view: View) {
+        todo!("#327")
+    }
+
+    /// #327: 칸 크기를 `steps` 단계 바꾼다(양수가 크게). 바뀌었는가.
+    pub fn zoom_grid(&mut self, _steps: i32) -> bool {
+        todo!("#327")
+    }
+
+    /// #327: 그리드에서 커서를 2차원으로 옮기고 `pick` 규칙으로 선택을 바꾼다.
+    pub fn move_grid_cursor(
+        &mut self,
+        _movement: GridMove,
+        _layout: GridLayout,
+        _pick: Pick,
+    ) -> Option<usize> {
+        todo!("#327")
     }
 
     /// 커서를 옮긴다. 선택은 바꾸지 않는다. 옮긴 뒤의 번호를 돌려주고, 항목이 없으면 `None`이다.

@@ -95,6 +95,9 @@ use crate::tab::{
     ChangeOutcome, ClosedTab, CompletionId, CompletionResult, FilterResult, InstantReply,
     Navigation, ReadOutcome, ReadRequest, ReadResult, Retarget, Tab,
 };
+use crate::thumbnail::{Thumbnail, ThumbnailError};
+use crate::thumbnail_cache::CacheLimits;
+use crate::view::{GridSpans, View};
 use crate::watch::ChangeBatch;
 use crate::work_area::WorkArea;
 use crate::{Candidate, Location, provider_for};
@@ -480,6 +483,28 @@ pub enum Update {
     ShellMenu(crate::shell_helper::ShellMenuId),
     /// #339: 그 창의 미리보기 영역 내용이 바뀌었다.
     Preview(WindowId),
+    /// #330: 썸네일 요청([`App::request_thumbnails`])의 결과.
+    Thumbnail {
+        path: PathBuf,
+        side: u32,
+        result: Result<Arc<Thumbnail>, ThumbnailError>,
+        from_cache: bool,
+    },
+}
+
+/// #330: 썸네일 켜기 설정.
+#[derive(Debug, Clone)]
+pub struct ThumbnailOptions {
+    pub cache_dir: PathBuf,
+    pub limits: CacheLimits,
+    pub workers: usize,
+}
+
+impl ThumbnailOptions {
+    /// #330: 그 캐시 폴더와 기본 상한·작업자 수의 설정.
+    pub fn new(_cache_dir: impl Into<PathBuf>) -> ThumbnailOptions {
+        todo!("#330")
+    }
 }
 
 /// #303: 하위 폴더 목록·맨 앞 목록 요청의 번호.
@@ -952,6 +977,7 @@ impl App {
                                 // 검색 결과 위치는 검색한 폴더로 남는다.
                                 location: tab.location().for_session(),
                                 sort: tab.sort(),
+                                view: View::default(), // #327
                             })
                             .collect(),
                         active_tab: panel.active,
@@ -1663,6 +1689,16 @@ impl App {
             // 정규식은 해석 때 이미 확인했다. 그래도 여기 오면 검색 없이 끝난다.
             Err(StartError::Regex(_)) => tab.stop_search_unstarted(),
         }
+    }
+
+    /// #330: 썸네일을 켠다(곧바로 돌아옴, 캐시는 처음 쓸 때 연다).
+    pub fn enable_thumbnails(&mut self, _options: ThumbnailOptions) {
+        todo!("#330")
+    }
+
+    /// #330: 그 탭 목록의 순번 범위의 썸네일을 요청한다(크기는 탭의 칸 크기).
+    pub fn request_thumbnails(&mut self, _tab: TabId, _spans: GridSpans) {
+        todo!("#330")
     }
 
     /// #321: 셸 확장 도우미 관리를 켠다(도우미는 첫 요청 때 뜬다).
@@ -2631,6 +2667,8 @@ impl App {
             CommandId::Filter => return Execution::Filter,
             CommandId::Search => return Execution::Search,
             CommandId::ContentSearch => return Execution::ContentSearch,
+            CommandId::DetailsView | CommandId::GridView(_) => todo!("#327"),
+            CommandId::ClearThumbnailCache => todo!("#330"),
             CommandId::InstantUnderFolder => {
                 let id = self.active_tab_id();
                 let tab = self.active_tab_mut();

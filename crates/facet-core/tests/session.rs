@@ -61,6 +61,7 @@ fn tab(path: &Path, sort: Sort) -> TabSession {
     TabSession {
         location: loc(path),
         sort,
+        view: Default::default(),
     }
 }
 

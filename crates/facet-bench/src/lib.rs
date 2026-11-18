@@ -32,6 +32,7 @@
 pub mod content;
 pub mod copy;
 pub mod delete;
+pub mod grid_screen;
 pub mod preview_screen;
 pub mod screen;
 
@@ -682,6 +683,7 @@ pub fn session_fixture(
                                     Direction::Descending
                                 },
                             },
+                            view: Default::default(),
                         })
                         .collect(),
                     active_tab: tabs_per_panel.saturating_sub(1),
@@ -1018,6 +1020,42 @@ pub fn check_batch_rename_limit(m: &BatchRenameMeasurement, limit: Duration) -> 
         ));
     }
     Ok(())
+}
+
+/// #326: 4000×3000 JPEG 하나를 보통 크기로 축소 디코딩하는 시간의 로컬 기준.
+pub const THUMBNAIL_DECODE_TARGET: Duration = Duration::ZERO; // #326
+/// #326: CI가 실패시키는 디코딩 시간 상한(기준의 10배).
+pub const THUMBNAIL_DECODE_LIMIT: Duration = Duration::ZERO; // #326
+
+/// #326: 디코딩 중앙값이 `limit`을 넘으면 중앙값과 상한을 담은 메시지를 돌려준다.
+pub fn check_thumbnail_decode_limit(_m: &Measurement, _limit: Duration) -> Result<(), String> {
+    todo!("#326")
+}
+
+/// #326: `dir`에 시험 JPEG를 만들어 한 번 데우고 `runs`회 잰다.
+pub fn measure_thumbnail_decode(_dir: &Path, _runs: usize) -> Result<Measurement, String> {
+    todo!("#326")
+}
+
+/// #328: 캐시 읽기 벤치마크의 건수.
+pub const THUMBNAIL_CACHE_READ_COUNT: usize = 1000;
+/// #328: 캐시 읽기 1천 건 시간의 로컬 기준.
+pub const THUMBNAIL_CACHE_READ_TARGET: Duration = Duration::ZERO; // #328
+/// #328: CI가 실패시키는 캐시 읽기 상한(기준의 10배).
+pub const THUMBNAIL_CACHE_READ_LIMIT: Duration = Duration::ZERO; // #328
+
+/// #328: 캐시 읽기 중앙값이 `limit`을 넘으면 중앙값과 상한을 담은 메시지를 돌려준다.
+pub fn check_thumbnail_cache_read_limit(_m: &Measurement, _limit: Duration) -> Result<(), String> {
+    todo!("#328")
+}
+
+/// #328: `dir`에 캐시를 만들어 `count`건 읽기를 `runs`회 잰다.
+pub fn measure_thumbnail_cache_read(
+    _dir: &Path,
+    _count: usize,
+    _runs: usize,
+) -> Result<Measurement, String> {
+    todo!("#328")
 }
 
 /// 필터 벤치마크에서 거르는 항목 수(기본 시험 폴더).

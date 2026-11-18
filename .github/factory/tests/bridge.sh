@@ -16,7 +16,7 @@ setup() {
   tmp=$(mktemp -d "$root/t.XXXXXX")
   export FAKE_GH="$tmp/gh" FAKE_MAIL="$tmp/mail" XDG_STATE_HOME="$tmp/state"
   export FACTORY_REPO=owner/repo BRIDGE_SINCE=2026-11-01T00:00:00Z
-  unset BRIDGE_TO AGENT_MAIL_PROFILE
+  unset BRIDGE_TO BRIDGE_TO_BOSS BRIDGE_TO_COORD AGENT_MAIL_PROFILE
   mkdir -p "$FAKE_GH" "$FAKE_MAIL"
   echo '[]' > "$FAKE_GH/repo-comments.json"
 }
@@ -115,12 +115,39 @@ run
 eq sends 5 "$(sent_count)"
 eq key facet-factory-16 "$(arg 4 --idempotency-key)"
 
-setup "BRIDGE_TO and AGENT_MAIL_PROFILE are passed through"
+setup "a question goes to the boss and every other kind to the coordinator"
 markers
-export BRIDGE_TO=someone/else AGENT_MAIL_PROFILE=other
+issue 900 open factory-ledger "장부"
+comment 21 900 "<!-- factory-queue-empty 245 -->"
+comment 22 900 "<!-- factory-idle 245 -->"
 run
-eq to someone/else "$(arg 0 --to)"
+eq code 0 "$(code)"
+eq sends 6 "$(sent_count)"
+eq "question to" sandcorp/boss "$(arg 0 --to)"
+eq "budget-spec to" facet/coordinator "$(arg 1 --to)"
+eq "budget-daily to" facet/coordinator "$(arg 2 --to)"
+eq "human to" facet/coordinator "$(arg 3 --to)"
+eq "queue-empty to" facet/coordinator "$(arg 4 --to)"
+eq "idle to" facet/coordinator "$(arg 5 --to)"
+has "log names the recipient" "sent human #301 to facet/coordinator" "$(cat "$tmp/log")"
+
+setup "BRIDGE_TO_BOSS, BRIDGE_TO_COORD and AGENT_MAIL_PROFILE are passed through"
+markers
+export BRIDGE_TO_BOSS=boss/else BRIDGE_TO_COORD=coord/else AGENT_MAIL_PROFILE=other
+run
+eq "question to" boss/else "$(arg 0 --to)"
+eq "human to" coord/else "$(arg 3 --to)"
 eq profile other "$(jq -s -r '.[0].profile' "$FAKE_MAIL/sent.jsonl" | tr -d '\r')"
+
+setup "a leftover BRIDGE_TO is ignored with a warning and never sends a question to the coordinator"
+markers
+export BRIDGE_TO=facet/coordinator
+run
+eq code 0 "$(code)"
+eq "question to" sandcorp/boss "$(arg 0 --to)"
+eq "human to" facet/coordinator "$(arg 3 --to)"
+eq "budget-spec to" facet/coordinator "$(arg 1 --to)"
+has warning "BRIDGE_TO is ignored" "$(cat "$tmp/log")"
 
 # --- what is not sent ----------------------------------------------------------------------
 

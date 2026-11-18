@@ -42,6 +42,7 @@ pub mod clipboard;
 pub mod drag_source;
 pub mod drop_target;
 pub mod file_ops;
+pub mod icon;
 pub mod pipe_client;
 pub mod preview;
 pub mod recycle;
