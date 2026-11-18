@@ -18,6 +18,8 @@
 //! # 요청과 결과
 //!
 //! - 메뉴([`ShellHelper::menu`])·항목 실행([`ShellHelper::invoke`], 메뉴를 만든 요청 번호와 항목 번호).
+//! - 속성 대화상자([`ShellHelper::properties`])·「연결 프로그램」 대화상자([`ShellHelper::open_with`], #321). 도우미는
+//!   띄우자마자 답하고, 대화상자가 떠 있는 동안 쉬면 끝내기를 미룬다.
 //! - 응답이 쓴 때부터 [`HelperOptions::reply_timeout`](기본 [`REPLY_TIMEOUT`], 2초) 안에 오지 않으면
 //!   [`RequestError::TimedOut`]으로 끝나고, 그 뒤 늦게 온 응답은 버린다.
 //! - 메뉴를 놓으면([`ShellHelper::release`]) 기다리던 그 메뉴 요청은 아무 사건도 내지 않는다(이미 쌓인 사건도 지운다).
@@ -89,6 +91,11 @@ const EXIT_WAIT: Duration = Duration::from_secs(2);
 const EXIT_POLL: Duration = Duration::from_millis(10);
 /// 쉬면 끝내기 시간에서 이 몫(1/10, 많아야 1초) 안쪽으로 닿은 도우미에는 쓰지 않고 새로 띄운다(엇갈림을 피함).
 const IDLE_MARGIN_MAX: Duration = Duration::from_secs(1);
+/// 쉬면 끝내기 시간이 지난 뒤 도우미가 스스로 끝나기까지 기다려 주는 시간(#321). 이보다 더 살아 있으면 대화상자 때문에
+/// 끝내기를 미룬 것으로 본다.
+///
+/// 근거: 도우미는 쉬는 시간을 많아야 0.5초마다 확인하므로 그 두 배면 미루지 않은 도우미는 끝나 있다.
+const IDLE_EXIT_GRACE: Duration = Duration::from_secs(1);
 
 /// 도우미를 띄워 버전 인사를 마칠 때까지의 가장 긴 시간. 넘으면 그 도우미를 끝내고 요청을
 /// [`RequestError::Spawn`]([`std::io::ErrorKind::TimedOut`])으로 끝낸다.
@@ -394,14 +401,30 @@ impl ShellHelper {
         self.shared.lock().crashing.clone()
     }
 
-    /// #321: 속성 대화상자 요청.
-    pub fn properties(&self, _paths: Vec<PathBuf>) -> RequestId {
-        todo!("#321")
+    /// 속성 대화상자 요청(#321): 도우미가 `paths`(목록 순서, 여럿이면 여러 항목의 속성)의 Windows 속성 대화상자를
+    /// 띄운다. 도우미는 띄우자마자 [`Reply::Done`]으로 답하고, 대화상자가 떠 있는 동안은 쉬면 끝내기를 미룬다.
+    pub fn properties(&self, paths: Vec<PathBuf>) -> RequestId {
+        self.request(|id| Request::Properties { id, paths })
     }
 
-    /// #321: 「연결 프로그램」 대화상자 요청.
-    pub fn open_with(&self, _path: PathBuf) -> RequestId {
-        todo!("#321")
+    /// 「연결 프로그램」 대화상자 요청(#321): 도우미가 파일 `path`의 프로그램 고르기 대화상자를 띄운다. 띄우자마자
+    /// [`Reply::Done`]으로 답한다.
+    pub fn open_with(&self, path: PathBuf) -> RequestId {
+        self.request(|id| Request::OpenWith { id, path })
+    }
+
+    /// 메뉴와 상관없는 요청 하나를 기다리는 요청으로 적고 보낸다.
+    fn request(&self, make: impl FnOnce(u64) -> Request) -> RequestId {
+        let id = self.next();
+        self.shared.lock().pending.insert(
+            id,
+            Pending {
+                deadline: None,
+                session: 0,
+            },
+        );
+        self.send(id, make(id));
+        RequestId(id)
     }
 }
 
@@ -702,13 +725,27 @@ impl Worker {
     }
 
     /// 떠 있는 도우미가 쉬면 끝내기 시간에 거의 닿았으면(엇갈림을 피해) 조용히 끝낸다.
+    ///
+    /// 쉬는 시간을 넉넉히(그 몫만큼 더) 넘기고도 살아 있는 도우미는 대화상자가 떠 있어 끝내기를 미룬 것이라(#321) 그대로
+    /// 쓴다: 끝내면 사용자가 보던 대화상자가 닫힌다. 이미 끝났으면 거둔다.
     fn retire_idle_helper(&mut self) {
         let idle = self.options.idle_timeout;
         let margin = (idle / 10).min(IDLE_MARGIN_MAX);
-        let near = self.helper.as_ref().is_some_and(|h| {
-            h.outstanding == 0 && h.last_activity.elapsed() >= idle.saturating_sub(margin)
-        });
-        if near {
+        let Some(helper) = self.helper.as_mut() else {
+            return;
+        };
+        if helper.outstanding > 0 {
+            return;
+        }
+        let elapsed = helper.last_activity.elapsed();
+        let retire = if elapsed < idle.saturating_sub(margin) {
+            false
+        } else if elapsed <= idle + margin + IDLE_EXIT_GRACE {
+            true
+        } else {
+            !matches!(helper.child.try_wait(), Ok(None))
+        };
+        if retire {
             self.end_helper(Ending::Ended);
         }
     }
@@ -743,6 +780,13 @@ impl Worker {
                 }
                 None => return,
             }
+        }
+        if matches!(
+            request,
+            Request::Properties { .. } | Request::OpenWith { .. }
+        ) {
+            // 도우미가 띄울 대화상자가 facet 창 앞에 나오게 포그라운드 권한을 넘긴다.
+            facet_win::shell_dialog::allow_foreground(helper.child.id());
         }
         if write_message(&mut helper.writer, &request).is_err() {
             self.end_helper(Ending::Lost);

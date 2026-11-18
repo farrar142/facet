@@ -15,6 +15,12 @@
 //!
 //! 실제 셸 메뉴는 아직 부르지 않는다(뒤 티켓): 시험용 모드(`--fake`)가 아니면 메뉴·실행 요청에 오류로 답한다.
 //!
+//! # 속성·연결 프로그램(#321)
+//!
+//! 속성 요청은 Windows 속성 대화상자를, 연결 프로그램 요청은 「연결 프로그램」 대화상자를 대화상자마다 띄운 스레드에서
+//! 띄우고([`facet_win::shell_dialog`]) 곧바로 완료로 답한다(대화상자가 떠 있는 동안 요청을 붙잡지 않아 관리 쪽의 멈춤
+//! 판정에 걸리지 않는다). 대화상자가 떠 있는 동안은 쉬면 끝내기를 미루고, 닫힌 때부터 쉬는 시간을 다시 센다.
+//!
 //! # 시험용 모드(`--fake`)
 //!
 //! 셸을 부르지 않고 정해진 대로 답한다(#319의 약속). 메뉴 요청은 항목 대상이면 첫 대상의 파일 이름으로 동작을 고른다:
@@ -22,6 +28,10 @@
 //! 확장」으로 적어 두고(`--crash-state`가 있을 때 그 파일에) 곧바로 끝난다. 그 밖에는 시험용 트리로 답한다. 항목
 //! 실행은 첫 대상이 든 폴더(폴더 배경이면 그 폴더)에 `facet-fake-invoked.txt`를 만든다. `--fake-version <n>`이면 버전
 //! 인사에서 자기 버전을 `n`으로 말한다(`n`만 받는다).
+//!
+//! 속성 요청은 첫 경로가 든 폴더에 `facet-fake-properties.txt`를 만들어 줄마다 경로들의 이름을 쓰고 완료로 답하며,
+//! 「대화상자」가 1.5초 동안 떠 있는 것으로 친다(그동안 쉬면 끝내기를 미룸). 연결 프로그램 요청은 그 파일이 든 폴더에
+//! `facet-fake-open-with.txt`를 만들어 파일 이름을 쓰고 완료로 답한다.
 
 fn main() {
     #[cfg(windows)]
@@ -42,7 +52,7 @@ mod helper {
     use std::io::Write;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -63,6 +73,12 @@ mod helper {
     const FAKE_NAME: &str = "Fake Extension";
     /// 항목 실행이 만드는 표지 파일.
     const INVOKED_FILE: &str = "facet-fake-invoked.txt";
+    /// 시험용 속성 요청이 만드는 표지 파일.
+    const PROPERTIES_FILE: &str = "facet-fake-properties.txt";
+    /// 시험용 연결 프로그램 요청이 만드는 표지 파일.
+    const OPEN_WITH_FILE: &str = "facet-fake-open-with.txt";
+    /// 시험용 속성 「대화상자」가 떠 있는 시간(#321의 약속).
+    const FAKE_DIALOG_TIME: Duration = Duration::from_millis(1500);
 
     /// 쉬면 끝내기로 스스로 끝날 때의 종료 코드(관리 쪽은 깨끗한 끝으로 본다).
     const IDLE_EXIT_CODE: i32 = 0;
@@ -141,7 +157,7 @@ mod helper {
                 return 0; // 끊김: UI가 끝났거나 도우미를 버렸다.
             };
             activity.begin();
-            let response = handle(&args, request);
+            let response = handle(&args, &activity, request);
             let written = response
                 .as_ref()
                 .is_none_or(|response| write_message(&mut writer, response).is_ok());
@@ -171,6 +187,8 @@ mod helper {
     struct Activity {
         started: Instant,
         busy: AtomicBool,
+        /// 떠 있는 대화상자 수(#321). 하나라도 있으면 쉬지 않는다.
+        dialogs: AtomicUsize,
         /// `started`부터 마지막 활동까지의 밀리초.
         last_ms: AtomicU64,
     }
@@ -180,6 +198,7 @@ mod helper {
             Arc::new(Activity {
                 started: Instant::now(),
                 busy: AtomicBool::new(false),
+                dialogs: AtomicUsize::new(0),
                 last_ms: AtomicU64::new(0),
             })
         }
@@ -198,15 +217,31 @@ mod helper {
             self.busy.store(false, Ordering::SeqCst);
         }
 
-        /// 처리 중이 아니고 마지막 활동 뒤 `idle`이 지났는가.
+        /// 대화상자 하나가 떴다. 돌려받은 표지를 버리면 닫힌 것이고 그때부터 쉬는 시간을 다시 센다.
+        fn dialog(self: &Arc<Self>) -> DialogOpen {
+            self.dialogs.fetch_add(1, Ordering::SeqCst);
+            DialogOpen(Arc::clone(self))
+        }
+
+        /// 처리 중이 아니고 떠 있는 대화상자도 없으며 마지막 활동 뒤 `idle`이 지났는가.
         fn idle_for(&self, idle: Duration) -> bool {
-            if self.busy.load(Ordering::SeqCst) {
+            if self.busy.load(Ordering::SeqCst) || self.dialogs.load(Ordering::SeqCst) > 0 {
                 return false;
             }
             let since = self
                 .now_ms()
                 .saturating_sub(self.last_ms.load(Ordering::SeqCst));
             Duration::from_millis(since) >= idle
+        }
+    }
+
+    /// 떠 있는 대화상자 하나(#321). 버리면 닫힌 것이다.
+    struct DialogOpen(Arc<Activity>);
+
+    impl Drop for DialogOpen {
+        fn drop(&mut self) {
+            self.0.last_ms.store(self.0.now_ms(), Ordering::SeqCst);
+            self.0.dialogs.fetch_sub(1, Ordering::SeqCst);
         }
     }
 
@@ -237,8 +272,18 @@ mod helper {
     }
 
     /// 요청 하나에 답한다. `None`이면 답하지 않는다.
-    fn handle(args: &Args, request: Request) -> Option<Response> {
+    fn handle(args: &Args, activity: &Arc<Activity>, request: Request) -> Option<Response> {
         match request {
+            Request::Properties { id, paths } if args.fake => {
+                Some(fake_properties(activity, id, &paths))
+            }
+            Request::OpenWith { id, path } if args.fake => Some(fake_open_with(id, &path)),
+            Request::Properties { id, paths } => Some(dialog(activity, id, move || {
+                facet_win::shell_dialog::show_properties(&paths)
+            })),
+            Request::OpenWith { id, path } => Some(dialog(activity, id, move || {
+                facet_win::shell_dialog::show_open_with(&path)
+            })),
             Request::Hello { version } => Some(hello(args, version)),
             Request::Menu { id, target } if args.fake => fake_menu(args, id, &target),
             Request::Execute {
@@ -248,13 +293,86 @@ mod helper {
             } if args.fake => Some(fake_execute(id, &target, command)),
             Request::Menu { id, .. }
             | Request::Execute { id, .. }
-            | Request::DropMenu { id, .. }
-            | Request::Properties { id, .. }
-            | Request::OpenWith { id, .. } => Some(Response::Error {
+            | Request::DropMenu { id, .. } => Some(Response::Error {
                 id,
                 kind: ErrorKind::Failed,
                 message: "not supported yet".into(),
             }),
+        }
+    }
+
+    /// 대화상자를 따로 스레드에서 띄우고 곧바로 완료로 답한다. 스레드가 끝날 때(대화상자가 닫힐 때)까지 쉬지 않는다.
+    fn dialog(
+        activity: &Arc<Activity>,
+        id: u64,
+        show: impl FnOnce() -> std::io::Result<()> + Send + 'static,
+    ) -> Response {
+        let open = activity.dialog();
+        let spawned = thread::Builder::new()
+            .name("facet-shell-helper-dialog".into())
+            .spawn(move || {
+                let _open = open;
+                let _ = show();
+            });
+        match spawned {
+            Ok(_) => Response::Done { id },
+            Err(e) => Response::Error {
+                id,
+                kind: ErrorKind::Failed,
+                message: e.to_string(),
+            },
+        }
+    }
+
+    /// 시험용 속성: 첫 경로가 든 폴더에 표지 파일을 쓰고, 「대화상자」를 1.5초 띄운 것으로 친다.
+    fn fake_properties(activity: &Arc<Activity>, id: u64, paths: &[PathBuf]) -> Response {
+        let Some(folder) = paths.first().and_then(|p| p.parent()) else {
+            return no_target(id);
+        };
+        let names: Vec<String> = paths.iter().map(|p| file_name(p)).collect();
+        let response = write_marker(id, &folder.join(PROPERTIES_FILE), &names);
+        if matches!(response, Response::Done { .. }) {
+            let open = activity.dialog();
+            let _ = thread::Builder::new()
+                .name("facet-shell-helper-fake-dialog".into())
+                .spawn(move || {
+                    let _open = open;
+                    thread::sleep(FAKE_DIALOG_TIME);
+                });
+        }
+        response
+    }
+
+    /// 시험용 연결 프로그램: 그 파일이 든 폴더에 표지 파일을 쓴다.
+    fn fake_open_with(id: u64, path: &Path) -> Response {
+        let Some(folder) = path.parent() else {
+            return no_target(id);
+        };
+        write_marker(id, &folder.join(OPEN_WITH_FILE), &[file_name(path)])
+    }
+
+    fn no_target(id: u64) -> Response {
+        Response::Error {
+            id,
+            kind: ErrorKind::NotFound,
+            message: "no target".into(),
+        }
+    }
+
+    /// 표지 파일에 줄마다 이름을 쓴다.
+    fn write_marker(id: u64, file: &Path, names: &[String]) -> Response {
+        let mut text = String::new();
+        for name in names {
+            text.push_str(name);
+            text.push('\n');
+        }
+        match fs::write(file, text) {
+            Ok(()) => Response::Done { id },
+            Err(e) => Response::Error {
+                id,
+                kind: ErrorKind::Failed,
+                message: e.to_string(),
+            },
         }
     }
 

@@ -82,7 +82,6 @@ fn is_alive(pid: u32) -> bool {
 }
 
 #[test]
-#[ignore = "#321"]
 fn enabling_the_helper_does_not_start_it() {
     let dir = tree();
     let app = app_at(dir.path(), fake_options());
@@ -92,7 +91,6 @@ fn enabling_the_helper_does_not_start_it() {
 }
 
 #[test]
-#[ignore = "#321"]
 fn properties_of_the_selection_open_through_the_helper() {
     let dir = tree();
     let mut app = app_at(dir.path(), fake_options());
@@ -117,7 +115,6 @@ fn properties_of_the_selection_open_through_the_helper() {
 }
 
 #[test]
-#[ignore = "#321"]
 fn background_properties_are_the_current_folders() {
     let dir = tree();
     let mut app = app_at(&dir.path().join("f"), fake_options());
@@ -135,7 +132,6 @@ fn background_properties_are_the_current_folders() {
 }
 
 #[test]
-#[ignore = "#321"]
 fn open_with_goes_to_the_helper_for_the_cursor_file_only() {
     let dir = tree();
     let mut app = app_at(dir.path(), fake_options());
@@ -161,7 +157,6 @@ fn open_with_goes_to_the_helper_for_the_cursor_file_only() {
 }
 
 #[test]
-#[ignore = "#321"]
 fn the_helper_does_not_end_idle_while_a_dialog_is_open() {
     let dir = tree();
     let mut options = fake_options();
