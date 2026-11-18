@@ -78,7 +78,7 @@ marker, not a reason'
 say_at 2026-11-17T02:05:00Z '.github/workflows/ci.yml에 단계를 하나 더해야 한다.'
 bash "$script" 7 infra https://example.invalid/run/1 2026-11-17T02:00:00Z > /dev/null 2>&1
 eq labels ready-for-human "$(labels)"
-eq "no failure marker" 0 "$(count '<!-- factory-implementer-infra-failed -->')"
+eq "no new failure marker (only the one said above)" 1 "$(count '<!-- factory-implementer-infra-failed -->')"
 eq "human marker" 1 "$(count '<!-- factory-human -->')"
 eq "quotes the reason" true "$(jq '.[-1].body | contains("ci.yml에 단계를")' "$FAKE_GH/comments-7.json" | tr -d '')"
 eq "not the older comment" false "$(jq '.[-1].body | contains("이전 run")' "$FAKE_GH/comments-7.json" | tr -d '')"
