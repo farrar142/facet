@@ -135,6 +135,7 @@ const TABLE: &[(&str, &[&str])] = &[
     ("crates/facet-core/src/history.rs", &["delete"]),
     ("crates/facet-core/src/job/moving.rs", &[]),
     ("crates/facet-core/src/job/recycle.rs", &[]),
+    ("crates/facet-core/src/job/restore.rs", &[]),
     ("crates/facet-core/src/job/revert.rs", &[]),
     // facet-core: 벤치마크가 재지 않는 것.
     ("crates/facet-core/src/dragdrop.rs", &[]),

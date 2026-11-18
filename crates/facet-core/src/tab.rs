@@ -2606,6 +2606,25 @@ impl Tab {
         self.list.recycled(self.list_index(index)?)
     }
 
+    /// 복원할 휴지통 항목: 선택(정렬된 순서), 없으면 커서 항목. 휴지통 위치가 아니거나 정보를 모르는 항목은 뺀다.
+    pub fn restore_items(&self) -> Vec<facet_win::recycle::RecycledItem> {
+        let mut indices: Vec<usize> = self.selected_indices().collect();
+        if indices.is_empty() {
+            indices.extend(self.cursor());
+        }
+        indices
+            .into_iter()
+            .filter_map(|i| {
+                let entry = self.recycled(i)?;
+                let path = self.list.recycled_path(self.list_index(i)?)?;
+                Some(facet_win::recycle::RecycledItem::new(
+                    entry.original.clone(),
+                    path.to_path_buf(),
+                ))
+            })
+            .collect()
+    }
+
     /// 커서 항목의 번호.
     pub fn cursor(&self) -> Option<usize> {
         self.cursor.as_ref().map(|(_, index)| *index)

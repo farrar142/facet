@@ -30,7 +30,6 @@ fn passing() -> PreviewScreenResult {
 }
 
 #[test]
-#[ignore = "#344"]
 fn the_limits_are_150_and_50_milliseconds_and_ten_percent() {
     assert_eq!(IMAGE_SHOW_LIMIT, Duration::from_millis(150));
     assert_eq!(TEXT_SHOW_LIMIT, Duration::from_millis(50));
@@ -39,7 +38,6 @@ fn the_limits_are_150_and_50_milliseconds_and_ten_percent() {
 }
 
 #[test]
-#[ignore = "#344"]
 fn a_result_within_every_limit_passes() {
     let v = passing().verdict();
     assert!(v.arrow_pass && v.image_pass && v.text_pass);
@@ -47,7 +45,6 @@ fn a_result_within_every_limit_passes() {
 }
 
 #[test]
-#[ignore = "#344"]
 fn the_image_show_median_must_be_under_150ms() {
     let mut r = passing();
     r.image_shows = all(&[100.0, 140.0, 900.0]);
@@ -62,7 +59,6 @@ fn the_image_show_median_must_be_under_150ms() {
 }
 
 #[test]
-#[ignore = "#344"]
 fn the_text_show_median_must_be_under_50ms() {
     let mut r = passing();
     r.text_shows = all(&[20.0, 49.0, 60.0]);
@@ -75,7 +71,6 @@ fn the_text_show_median_must_be_under_50ms() {
 }
 
 #[test]
-#[ignore = "#344"]
 fn arrow_frames_with_the_pane_on_must_match_those_with_it_off() {
     let mut r = passing();
     r.arrow_off = all(&[10.0, 10.0, 10.0]);
@@ -88,7 +83,6 @@ fn arrow_frames_with_the_pane_on_must_match_those_with_it_off() {
 }
 
 #[test]
-#[ignore = "#344"]
 fn the_worst_arrow_frame_with_the_pane_on_is_at_most_two_frames() {
     let mut r = passing();
     r.arrow_off = all(&[16.0, 16.0, 16.0]);
@@ -103,7 +97,6 @@ fn the_worst_arrow_frame_with_the_pane_on_is_at_most_two_frames() {
 }
 
 #[test]
-#[ignore = "#344"]
 fn missing_arrow_measurements_fail() {
     let mut r = passing();
     r.arrow_on = Vec::new();

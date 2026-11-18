@@ -3275,7 +3275,23 @@ impl App {
             CommandId::OpenWith | CommandId::Properties => todo!("#321"),
             CommandId::OpenThisPc => Navigation::Go(Location::this_pc()),
             CommandId::OpenRecycleBin => Navigation::Go(Location::recycle_bin()),
-            CommandId::Restore => todo!("#353"),
+            CommandId::Restore => {
+                let items = self.active_tab().restore_items();
+                let count = items.len();
+                let target = items
+                    .first()
+                    .and_then(|item| item.original().parent())
+                    .map(PathBuf::from)
+                    .unwrap_or_default();
+                return match self.jobs.restore(items) {
+                    Ok(id) => {
+                        self.work_area.add(id, JobKind::Restore, target, count);
+                        self.poll_jobs();
+                        Execution::Done
+                    }
+                    Err(_) => Execution::Disabled,
+                };
+            }
             CommandId::EmptyRecycleBin => todo!("#354"),
             CommandId::TogglePreview => {
                 let window = self.active_window_mut();

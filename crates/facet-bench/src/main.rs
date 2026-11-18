@@ -110,7 +110,11 @@ const USAGE: &str = "\
       사진 N장(기본 10000, 4000x3000 JPEG, 경로를 빼면 임시 폴더의 facet-test-folders/photos-N, 빠진 것만 채움)
       폴더를 앱의 그리드(보통 크기)로 열어 캐시가 찬 두 번째 열기에서 한 화면이 썸네일로 다 차기까지(--runs회,
       기본 5, 중앙값 100ms 미만)와 끝까지 스크롤하는 프레임 시간(최악값이 한 프레임의 두 배 이하)을 잰다.
-      표를 출력하고 --json이면 JSON도 쓴다. 통과 못 하면 실패한다. 보통 `cargo xtask measure-grid`로 부른다.";
+      표를 출력하고 --json이면 JSON도 쓴다. 통과 못 하면 실패한다. 보통 `cargo xtask measure-grid`로 부른다.
+  facet-bench preview [경로] --app <facet 실행 파일> [--count N] [--runs N] [--refresh-hz N] [--json <파일>]
+      사진(4000x3000 JPEG)과 텍스트 파일 각 N개(기본 200)가 섞인 폴더를 열어 미리보기 영역을 끈 채·켠 채 화살표로
+      끝까지 옮기는 프레임 시간과, 사진·텍스트 하나를 고른 때부터 내용이 뜨기까지(--runs회, 기본 5, 150ms·50ms 미만)를
+      잰다. 표를 출력하고 --json이면 JSON도 쓴다. 통과 못 하면 실패한다. 보통 `cargo xtask measure-preview`로 부른다.";
 
 const DEFAULT_RUNS: usize = 5;
 
@@ -247,6 +251,7 @@ fn main() -> ExitCode {
         "compare-recycle" => compare_recycle(&args),
         "compare-copy" => compare_copy(&args),
         "grid" => grid(&args),
+        "preview" => preview(&args),
         "screen" => make_folder(&args).and_then(|()| screen(&args)),
         other => Err(format!("알 수 없는 명령: {other}\n\n{USAGE}")),
     };
@@ -851,6 +856,36 @@ fn grid(args: &Args) -> Result<(), String> {
         println!("JSON: {}", json.display());
     }
     if result.verdict().pass() {
+        Ok(())
+    } else {
+        Err("통과 기준을 맞추지 못했습니다".to_owned())
+    }
+}
+
+/// #344: 미리보기 화면 수치 측정.
+fn preview(args: &Args) -> Result<(), String> {
+    use facet_bench::preview_screen::{self, PREVIEW_FILES_EACH, PreviewPlan};
+    let app = args.app.as_deref().ok_or("--app이 없습니다")?;
+    let each = args.count.unwrap_or(PREVIEW_FILES_EACH);
+    let folder = args
+        .path
+        .clone()
+        .unwrap_or_else(|| preview_screen::default_folder(each));
+    let plan = PreviewPlan {
+        app,
+        folder: &folder,
+        each,
+        runs: args.runs(),
+        refresh_hz: args.refresh_hz,
+    };
+    let run = preview_screen::measure(&plan)?;
+    println!("\n{}", run.to_table());
+    if let Some(json) = &args.json {
+        std::fs::write(json, run.to_json())
+            .map_err(|e| format!("{}를 쓰지 못함: {e}", json.display()))?;
+        println!("JSON: {}", json.display());
+    }
+    if run.result.verdict().pass() {
         Ok(())
     } else {
         Err("통과 기준을 맞추지 못했습니다".to_owned())

@@ -451,6 +451,14 @@ impl DetailsList {
             .map(|recycled| &recycled.entry)
     }
 
+    /// `index`번째 휴지통 항목의 휴지통 안 경로(`$R...`). 휴지통 항목이 아니면 `None`이다.
+    pub fn recycled_path(&self, index: usize) -> Option<&Path> {
+        self.entries
+            .get(index)
+            .and_then(|e| e.recycled.as_deref())
+            .map(|recycled| recycled.key.as_path())
+    }
+
     /// 지금 정렬 기준.
     pub fn sort(&self) -> Sort {
         self.sort
