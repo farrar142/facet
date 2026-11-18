@@ -78,6 +78,8 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::ShowInFolder => "폴더에서 보기",
         CommandId::StopSearch => "검색 중지",
         CommandId::InstantUnderFolder => "현재 폴더 아래만",
+        CommandId::DetailsView | CommandId::GridView(_) => todo!("#327"),
+        CommandId::ClearThumbnailCache => todo!("#330"),
         CommandId::OpenWith | CommandId::Properties => todo!("#321"),
     }
 }

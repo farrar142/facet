@@ -50,6 +50,8 @@ pub const ENV_INSTANT: &str = "FACET_MEASURE_INSTANT";
 pub const ENV_WINDOWS: &str = "FACET_MEASURE_WINDOWS";
 /// 0보다 크면 첫 화면 뒤에 프레임마다 이만큼의 행씩 목록 끝까지 자동으로 스크롤한다.
 pub const ENV_SCROLL_ROWS: &str = "FACET_MEASURE_SCROLL_ROWS";
+/// #331: 그리드 한 화면 채우기 측정.
+pub const ENV_GRID: &str = "FACET_MEASURE_GRID"; // #331
 
 /// 앱이 쓰고 측정 도구가 읽는 측정 결과.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -72,6 +74,8 @@ pub struct ScreenReport {
     pub instant_frame: Option<Duration>,
     /// 즉시 검색이 강등됐다(줄 `instant_demoted 1`).
     pub instant_demoted: bool,
+    /// #331: 그리드 한 화면이 썸네일로 다 차기까지.
+    pub grid_fill: Option<Duration>,
     /// 스크롤하는 동안의 프레임 시간들.
     pub frames: Vec<Duration>,
 }
@@ -175,6 +179,7 @@ mod tests {
             search_frame: Some(Duration::from_micros(40_000)),
             instant_frame: Some(Duration::from_micros(30_000)),
             instant_demoted: true,
+            grid_fill: None,
             frames: vec![Duration::from_micros(16_700), Duration::from_micros(33_000)],
         };
         assert_eq!(ScreenReport::parse(&report.to_text()), Ok(report));

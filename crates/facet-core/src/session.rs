@@ -35,6 +35,7 @@ use serde::{Deserialize, Serialize};
 use crate::Location;
 use crate::details::{Column, Direction, Sort};
 use crate::placement::{Placement, Rect};
+use crate::view::View;
 
 /// 세션 파일의 형식 버전. 형식을 바꾸면 올린다. 이 버전이 아닌 파일은 깨진 파일처럼 옆에 남긴다.
 pub const FORMAT_VERSION: u64 = 1;
@@ -80,6 +81,8 @@ pub struct PanelSession {
 pub struct TabSession {
     pub location: Location,
     pub sort: Sort,
+    /// #327: 보기 방식과 칸 크기.
+    pub view: View,
 }
 
 /// 세션 파일을 해석하지 못한 까닭.
@@ -564,6 +567,7 @@ impl TabV1 {
                     DirectionV1::Descending => Direction::Descending,
                 },
             },
+            view: View::default(), // #327
         }
     }
 }

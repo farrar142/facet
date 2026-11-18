@@ -165,6 +165,8 @@ pub struct Attributes {
     pub system: bool,
     /// 읽기 전용 속성.
     pub read_only: bool,
+    /// #325: 온라인 전용(내용이 이 기계에 없음) 표시.
+    pub online_only: bool,
 }
 
 /// 목록 읽기가 실패한 까닭.
