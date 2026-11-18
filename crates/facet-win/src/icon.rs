@@ -53,3 +53,21 @@ pub fn file_icon(path: &Path, size: u32) -> Option<IconImage> {
         None
     }
 }
+
+/// 셸 항목 하나(절대 PIDL 바이트, [`crate::shell_folder`]와 같은 형식)의 아이콘을 `size` 화소로 얻는다. 드라이브·휴대폰
+/// 같은 가상 폴더 항목의 아이콘이다. 장치를 부를 수 있으므로 셸 스레드([`crate::shell_thread::ShellThread`])에서
+/// 시간 제한을 두고 부른다. 형식이 틀린 식별자는 `None`이다. `size`는 1..=256.
+pub fn shell_item_icon(id: &[u8], size: u32) -> Option<IconImage> {
+    if !crate::shell_folder::is_valid_id(id) {
+        return None;
+    }
+    #[cfg(windows)]
+    {
+        crate::windows_icon::shell_item_icon(id, size)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = size;
+        None
+    }
+}

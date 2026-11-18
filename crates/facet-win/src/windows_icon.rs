@@ -6,7 +6,8 @@
 
 use std::ffi::OsStr;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Gdi::{
@@ -19,8 +20,8 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT};
 use windows::Win32::UI::Shell::{
-    SHFILEINFOW, SHGFI_FLAGS, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW,
-    SHGetImageList, SHIL_EXTRALARGE, SHIL_JUMBO, SHIL_LARGE, SHIL_SMALL,
+    SHFILEINFOW, SHGFI_FLAGS, SHGFI_PIDL, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES,
+    SHGetFileInfoW, SHGetImageList, SHIL_EXTRALARGE, SHIL_JUMBO, SHIL_LARGE, SHIL_SMALL,
 };
 use windows::Win32::UI::WindowsAndMessaging::{DI_NORMAL, DestroyIcon, DrawIconEx, HICON};
 use windows::core::PCWSTR;
@@ -28,8 +29,46 @@ use windows::core::PCWSTR;
 use crate::icon::IconImage;
 use crate::windows_impl::{ComApartment, to_wide};
 
-/// 아이콘 얻기의 차례.
-static TURN: Mutex<()> = Mutex::new(());
+/// 아이콘 얻기의 차례(잡혀 있으면 참).
+static TURN: Mutex<bool> = Mutex::new(false);
+/// 차례가 풀렸다는 알림.
+static TURN_FREE: Condvar = Condvar::new();
+
+/// 차례를 기다리는 가장 긴 시간. 가상 폴더 항목(끊긴 네트워크 드라이브·휴대폰)의 아이콘 얻기는 셸 안에서 오래 멈출 수
+/// 있고, 그 호출은 시간 제한을 넘으면 버려진 채 차례를 쥐고 있다. 그래도 다른 아이콘이 영영 멈추지 않게 이만큼
+/// 기다린 뒤에는 차례 없이 부른다(드물게 동시 호출로 실패하면 그 아이콘만 없다). 보통 아이콘 하나는 수 ms라 넉넉하다.
+const TURN_WAIT: Duration = Duration::from_secs(2);
+
+/// 잡은 차례. 버리면 푼다(잡지 못했으면 아무것도 하지 않음).
+struct Turn(bool);
+
+impl Turn {
+    fn take() -> Turn {
+        let deadline = Instant::now() + TURN_WAIT;
+        let mut busy = TURN.lock().unwrap_or_else(|e| e.into_inner());
+        while *busy {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Turn(false);
+            }
+            busy = TURN_FREE
+                .wait_timeout(busy, left)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+        *busy = true;
+        Turn(true)
+    }
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        if self.0 {
+            *TURN.lock().unwrap_or_else(|e| e.into_inner()) = false;
+            TURN_FREE.notify_one();
+        }
+    }
+}
 
 /// 그릴 수 있는 가장 큰 크기(시스템 아이콘 목록의 가장 큰 그림 256).
 const MAX_SIZE: u32 = 256;
@@ -62,6 +101,38 @@ pub(crate) fn file_icon(path: &Path, size: u32) -> Option<IconImage> {
     )
 }
 
+/// 셸 항목(절대 PIDL 바이트, 형식은 부른 쪽이 확인함)의 아이콘.
+pub(crate) fn shell_item_icon(id: &[u8], size: u32) -> Option<IconImage> {
+    if size == 0 || size > MAX_SIZE {
+        return None;
+    }
+    // PIDL을 8바이트 정렬된 메모리에 옮긴다.
+    let mut aligned = vec![0u64; id.len().div_ceil(8)];
+    // SAFETY: aligned는 id.len()바이트 이상이고 id와 겹치지 않는다.
+    unsafe {
+        std::ptr::copy_nonoverlapping(id.as_ptr(), aligned.as_mut_ptr().cast::<u8>(), id.len())
+    };
+    let _turn = Turn::take();
+    let _com = ComApartment::enter().ok();
+    let mut info = SHFILEINFOW::default();
+    // SAFETY: SHGFI_PIDL이면 첫 인자는 PIDL 주소다. aligned는 호출 동안 살아 있는 올바른 PIDL이고 info는 호출 동안
+    // 살아 있는 SHFILEINFOW다. SHGFI_SYSICONINDEX는 아이콘 핸들을 만들지 않으므로 풀 것이 없다.
+    let found = unsafe {
+        SHGetFileInfoW(
+            PCWSTR(aligned.as_ptr().cast::<u16>()),
+            FILE_FLAGS_AND_ATTRIBUTES(0),
+            Some(&mut info),
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_PIDL | SHGFI_SYSICONINDEX,
+        )
+    };
+    if found == 0 {
+        return None;
+    }
+    let icon = OwnedIcon(list_icon(info.iIcon, size)?);
+    render(icon.0, size)
+}
+
 fn icon_of(
     name: &OsStr,
     attributes: FILE_FLAGS_AND_ATTRIBUTES,
@@ -73,7 +144,7 @@ fn icon_of(
     }
     // 시스템 아이콘 목록을 여러 스레드가 동시에 처음 만들거나 읽으면 셸이 실패를 돌려준다(여러 스레드에서 부른
     // 시험에서 봄). 프로세스 안의 아이콘 얻기를 하나씩 한다. 앱은 아이콘 일꾼 스레드 하나에서만 부르므로 늦어지지 않는다.
-    let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+    let _turn = Turn::take();
     // 셸 호출은 COM이 초기화된 스레드를 바란다. 이미 다른 아파트로 초기화된 스레드면 그대로 부른다.
     let _com = ComApartment::enter().ok();
     let index = icon_index(name, attributes, flags)?;

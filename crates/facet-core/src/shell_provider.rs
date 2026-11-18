@@ -41,6 +41,7 @@ pub use facet_win::shell_folder::ShellEntry;
 use facet_win::shell_folder::{self, ShellFolderError};
 use facet_win::shell_thread::{CallError, ShellThread};
 
+use crate::icons::{self, IconImage, IconKey};
 use crate::provider::{Candidate, PathSegment, Provider, ResolveError, Resolved};
 use crate::watch::{Watch, WatchError, WatchEvent};
 use crate::{
@@ -399,6 +400,47 @@ pub(crate) fn child_path(location: &Location, name: &OsStr) -> Option<PathBuf> {
         .get(name)?
         .file_system_path()
         .map(Path::to_path_buf)
+}
+
+/// 가상 폴더 `location` 안 항목 `item`의 아이콘 키(#358). 휴지통 항목은 원래 이름의 형식으로 나눠 쓰는 키(폴더는
+/// 폴더 키, 파일은 확장자 키: 원래 자리에 파일이 없으므로 파일 하나의 고유 아이콘은 쓰지 않음)이고, 내 PC·장치의
+/// 항목은 열거하며 알아 둔 위치로 정한다: 드라이브는 그 루트의 [`IconKey::Drive`], 실제 경로가 없는 항목(휴대폰)은
+/// 그 셸 항목의 [`IconKey::ShellItem`]이다. 모르는 항목은 형식 키다. 셸을 부르지 않는다.
+pub(crate) fn icon_key(location: &Location, item: &Item) -> IconKey {
+    let Some(shell) = location.shell_location() else {
+        return icons::type_key(item);
+    };
+    if shell.folder() == VirtualFolder::RecycleBin {
+        return icons::type_key(item);
+    }
+    let known = known();
+    let child = known
+        .children
+        .get(shell.id())
+        .and_then(|children| children.get(&item.name));
+    match child {
+        Some(child) => match (child.file_system_path(), child.shell_location()) {
+            (Some(path), _) if is_drive_root(path) => IconKey::Drive(path.to_path_buf()),
+            (_, Some(shell)) => IconKey::ShellItem(shell.id().to_vec()),
+            _ => icons::type_key(item),
+        },
+        None => icons::type_key(item),
+    }
+}
+
+/// 가상 폴더 항목의 아이콘([`IconKey::Drive`]·[`IconKey::ShellItem`])을 얻는다. 끊긴 네트워크 드라이브·응답 없는
+/// 휴대폰에서 셸이 오래 멈출 수 있어 셸 스레드에서 셸 호출 시간 제한([`CALL_TIMEOUT`])을 두고 얻는다. 넘거나 얻지
+/// 못하면 `None`(화면은 아이콘 없이 그림)이다. 아이콘 캐시의 일꾼 스레드에서 불린다.
+pub(crate) fn item_icon(key: &IconKey, size: u32) -> Option<IconImage> {
+    let key = key.clone();
+    shell_thread()
+        .call(call_timeout(), move || match &key {
+            IconKey::Drive(root) => facet_win::icon::file_icon(root, size),
+            IconKey::ShellItem(id) => facet_win::icon::shell_item_icon(id, size),
+            _ => None,
+        })
+        .ok()
+        .flatten()
 }
 
 /// 가상 폴더 하나를 읽은 것: 항목들과, 휴지통이면 항목마다(같은 차례) 휴지통 정보.
