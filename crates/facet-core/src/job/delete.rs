@@ -192,7 +192,8 @@ impl<'e, 'a> Deleter<'e, 'a> {
     /// 이미 없거나 건너뜀) `true`, 취소로 그만뒀으면 `false`.
     fn remove(&mut self, path: &Path, remove: fn(&Path) -> FileOpResult<()>) -> bool {
         loop {
-            let kind = match remove(path) {
+            // 도우미의 미리보기 처리기가 잡고 있으면 내리고 한 번 다시 시도한다(#342).
+            let kind = match crate::shell_helper::retry_held(path, || remove(path)) {
                 Ok(()) => {
                     self.engine.summary.items_deleted += 1;
                     if let Some(root) = &mut self.root {

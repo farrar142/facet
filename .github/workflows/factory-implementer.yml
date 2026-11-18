@@ -326,6 +326,7 @@ jobs:
         run: |
           if [ "$MODE" = conflict ]; then
             git fetch origin main
+            echo "main=$(git rev-parse origin/main)" >> "$GITHUB_OUTPUT"
             if git merge --no-edit origin/main; then
               echo "::notice::main merges into the PR's branch cleanly now"
               echo "conflict=false" >> "$GITHUB_OUTPUT"
@@ -356,6 +357,7 @@ jobs:
             fi
           fi
           git fetch origin main
+          echo "main=$(git rev-parse origin/main)" >> "$GITHUB_OUTPUT"
           if git rebase origin/main; then
             echo "conflict=false" >> "$GITHUB_OUTPUT"
           else
@@ -378,12 +380,32 @@ jobs:
             You already implemented the ticket on branch ${{ env.BRANCH }}. Other tickets merged into
             main meanwhile, and merging origin/main left conflicts (see `git status`).
             Resolve every conflict so that both your ticket's behaviour and main's changes survive.
-            Never drop main's changes to make yours fit. Then run `cargo xtask ci` until it passes,
-            and finish with `git commit --no-edit`. Do not push.
+            Never drop main's changes to make yours fit. Then run `cargo xtask ci` until it passes.
+            Do not commit, abort the merge or push: the workflow stages your work and makes the
+            merge commit after you end, and fails the run if a conflict or a conflict marker is left.
           claude_args: >-
             --model ${{ steps.guard.outputs.model }}
             --max-turns 60
             --allowedTools "Bash,Read,Edit,Write,Glob,Grep"
+
+      # Make the merge commit the conflict agent was asked not to make (#434): it resolved the
+      # conflicts and ended without committing in runs 44389000388 and 44393130003 (#342). Fails when
+      # a path is still unmerged or a conflict marker is among the merge's added lines.
+      - name: Finish merge
+        id: finish
+        if: steps.guard.outputs.go == 'true' && steps.rebase.outputs.conflict == 'true'
+        run: bash .github/factory/merge-check.sh finish
+
+      # What the conflict agent said last and which commands it ran, in the run summary (#434).
+      # Only those: the full execution log stays off this public repository. Masked values (`***`)
+      # and token shapes are taken out. Before "Record cost (conflicts)", which moves the file away.
+      - name: Conflict agent summary
+        if: always() && steps.guard.outputs.go == 'true' && steps.rebase.outputs.conflict == 'true'
+        continue-on-error: true
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/factory/agent-summary.sh "$RUNNER_TEMP/claude-execution-output.json" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Record cost (conflicts)
         if: always() && steps.guard.outputs.go == 'true' && steps.rebase.outputs.conflict == 'true'
@@ -398,6 +420,16 @@ jobs:
           if [ "$(git rev-list --count origin/main..HEAD)" -eq 0 ]; then
             echo "::error::the agent made no commits"; exit 1
           fi
+
+      # The branch must carry the main the rebase step fetched, with no merge or rebase left
+      # half-done (#434): a conflict-mode run whose agent ended without merging passed "Require
+      # commits" on the ticket's old commits, pushed nothing new, and went to Verify, which sent it
+      # back for the same conflict until the limit ran out (#342, runs 44389000388 and 44393130003).
+      # Counted as a code failure with the reason in the comment, without the checks, push or Verify.
+      - name: Require main merged
+        id: merged
+        if: steps.guard.outputs.go == 'true'
+        run: bash .github/factory/merge-check.sh check "${{ steps.rebase.outputs.main }}"
 
       # Commits that touch `.github/workflows/` cannot be pushed (GITHUB_TOKEN has no `workflows`
       # permission): hand the ticket to a person now, before the checks. No failure is counted and
@@ -483,14 +515,22 @@ jobs:
             # A fresh implementation starts from main and replaces an earlier attempt's branch.
             pushargs=(--force origin "$BRANCH")
           fi
-          if ! git push "${pushargs[@]}" 2> .factory/push.log; then
+          if git push "${pushargs[@]}" 2> .factory/push.log; then
             cat .factory/push.log
-            # A refused workflow file (a fix may have added one) is for a person, not a failure to
-            # count or retry (#389).
-            if bash .github/factory/workflow-guard.sh push-failed "$N" .factory/push.log; then exit 0; fi
-            exit 1
+          else
+            cat .factory/push.log
+            # A refused workflow file is for a person, not a failure to count or retry (#389), unless
+            # main changed one during this run and the branch touches none: then catch up with main
+            # (conflict mode merges, else rebase) and push once more (#417). The PR keeps `$sha` as
+            # the checked commit: the caught-up head was not checked, so Verify runs `cargo xtask ci`.
+            rc=0
+            bash .github/factory/workflow-guard.sh push-retry "$N" .factory/push.log "$MODE" "${pushargs[@]}" || rc=$?
+            case $rc in
+              0) ;;
+              3) exit 0 ;;
+              *) exit 1 ;;
+            esac
           fi
-          cat .factory/push.log
           body=.factory/pr-body.md
           run="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           if [ "$MODE" = conflict ]; then
@@ -538,8 +578,15 @@ jobs:
       # the last `<!-- factory-reset -->` comment count; record-failure.sh does it all (#410).
       - name: Record failure
         if: failure() && steps.guard.outputs.go == 'true'
+        env:
+          FAILURE_REASON: ${{ steps.finish.outputs.reason || steps.merged.outputs.reason }}
         run: |
-          if [ "${{ steps.checks.outcome }}" = failure ]; then what=code; else what=infra; fi
+          if [ "${{ steps.checks.outcome }}" = failure ] || [ "${{ steps.merged.outcome }}" = failure ] \
+             || [ "${{ steps.finish.outcome }}" = failure ]; then
+            what=code
+          else
+            what=infra
+          fi
           # No commits (#414): a comment the agent left on the ticket since this run started is its
           # reason for stopping; record-failure.sh then hands the ticket to a person without counting.
           started=

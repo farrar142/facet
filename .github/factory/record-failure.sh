@@ -15,7 +15,8 @@
 # failure, limit 2; `<!-- factory-implementer-infra-failed -->` for anything else, limit 3), counts the
 # markers after the last reset, takes `in-progress` off, and either puts `ready-for-agent` back or, at
 # the limit, hands the ticket to a person through hand-to-human.sh.
-# Environment: REPO, GH_TOKEN.
+# Environment: REPO, GH_TOKEN; FAILURE_REASON (optional): a line added to the failure comment, e.g.
+# merge-check.sh's 「충돌을 풀지 않고 끝남」 (#434).
 set -u
 : "${REPO:?REPO is not set}"
 here=$(cd "$(dirname "$0")" && pwd)
@@ -58,7 +59,9 @@ $said"
 fi
 
 gh api "repos/$REPO/issues/$n/comments" -f "body=$marker
-Implementer run failed ($what): $url" > /dev/null \
+Implementer run failed ($what): $url${FAILURE_REASON:+
+
+$FAILURE_REASON}" > /dev/null \
   || echo "::warning::record-failure: could not comment on #$n"
 fails=$(since_reset | jq --arg m "$marker" '[.[] | select(contains($m))] | length' | tr -d '\r') || fails=1
 gh api -X DELETE "repos/$REPO/issues/$n/labels/in-progress" > /dev/null 2>&1 || true

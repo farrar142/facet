@@ -6,11 +6,14 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 
 /// 이 크레이트가 말하는 프로토콜 버전.
-pub const PROTOCOL_VERSION: u16 = 1;
+///
+/// 2(#342): 미리보기 요청·자리 바꾸기·내리기와 그 응답을 더했다. 옛 도우미와 섞일 일이 없어(도우미는 앱과 함께 배포)
+/// 낮은 버전은 받지 않는다.
+pub const PROTOCOL_VERSION: u16 = 2;
 /// 받아들이는 가장 낮은 버전.
-pub const MIN_SUPPORTED_VERSION: u16 = 1;
+pub const MIN_SUPPORTED_VERSION: u16 = 2;
 /// 받아들이는 가장 높은 버전.
-pub const MAX_SUPPORTED_VERSION: u16 = 1;
+pub const MAX_SUPPORTED_VERSION: u16 = 2;
 /// 프레임 본문의 최대 길이(16MiB: 아이콘 그림이 든 큰 메뉴도 들어가고, 깨진 머리가 큰 메모리를 잡게 하지 않는 값).
 pub const MAX_FRAME_LEN: u32 = 16 * 1024 * 1024;
 /// 하위 메뉴 중첩의 최대 깊이(깨진 입력이 스택을 넘치게 하지 않게).
@@ -62,6 +65,32 @@ pub enum Request {
         id: u64,
         path: PathBuf,
     },
+    /// 미리보기(#342): `path`를 셸 미리보기 처리기로 그려 `host` 창의 그 자리에 붙인다. 앞선 미리보기는 내린다.
+    /// 답은 [`Response::PreviewShowing`]·[`Response::NoPreviewHandler`]·[`Response::Error`].
+    Preview {
+        id: u64,
+        path: PathBuf,
+        host: PreviewHost,
+    },
+    /// 미리보기 자리 바꾸기(#342). 답은 [`Response::Done`].
+    MovePreview {
+        id: u64,
+        host: PreviewHost,
+    },
+    /// 미리보기 내리기(#342): 처리기를 내리고 잡고 있던 파일을 놓는다. 답은 [`Response::Done`].
+    UnloadPreview {
+        id: u64,
+    },
+}
+
+/// 미리보기 처리기 창을 붙일 자리(#342): 붙일 창의 핸들 값과 그 안의 화면 자리(물리 픽셀).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreviewHost {
+    pub parent: u64,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// 도우미의 응답.
@@ -86,6 +115,14 @@ pub enum Response {
         id: u64,
         kind: ErrorKind,
         message: String,
+    },
+    /// 미리보기 처리기가 그리기 시작했다(#342).
+    PreviewShowing {
+        id: u64,
+    },
+    /// 그 파일의 미리보기 처리기가 없다(#342).
+    NoPreviewHandler {
+        id: u64,
     },
 }
 
@@ -256,6 +293,13 @@ impl Writer {
             self.path(p);
         }
     }
+    fn host(&mut self, h: &PreviewHost) {
+        self.u64(h.parent);
+        self.u32(h.x as u32);
+        self.u32(h.y as u32);
+        self.u32(h.width);
+        self.u32(h.height);
+    }
     fn target(&mut self, t: &MenuTarget) {
         match t {
             MenuTarget::Items(ps) => {
@@ -374,6 +418,15 @@ impl Reader<'_> {
         }
         Ok(out)
     }
+    fn host(&mut self) -> Result<PreviewHost, DecodeError> {
+        Ok(PreviewHost {
+            parent: self.u64()?,
+            x: self.u32()? as i32,
+            y: self.u32()? as i32,
+            width: self.u32()?,
+            height: self.u32()?,
+        })
+    }
     fn target(&mut self) -> Result<MenuTarget, DecodeError> {
         match self.u8()? {
             0 => Ok(MenuTarget::Items(self.paths()?)),
@@ -478,6 +531,21 @@ impl Message for Request {
                 w.u64(*id);
                 w.path(path);
             }
+            Request::Preview { id, path, host } => {
+                w.u8(6);
+                w.u64(*id);
+                w.path(path);
+                w.host(host);
+            }
+            Request::MovePreview { id, host } => {
+                w.u8(7);
+                w.u64(*id);
+                w.host(host);
+            }
+            Request::UnloadPreview { id } => {
+                w.u8(8);
+                w.u64(*id);
+            }
         }
         w.0
     }
@@ -508,6 +576,16 @@ impl Message for Request {
                 id: r.u64()?,
                 path: r.path()?,
             },
+            6 => Request::Preview {
+                id: r.u64()?,
+                path: r.path()?,
+                host: r.host()?,
+            },
+            7 => Request::MovePreview {
+                id: r.u64()?,
+                host: r.host()?,
+            },
+            8 => Request::UnloadPreview { id: r.u64()? },
             t => return Err(DecodeError::UnknownTag(t)),
         };
         r.finish()?;
@@ -550,6 +628,14 @@ impl Message for Response {
                 });
                 w.text(message);
             }
+            Response::PreviewShowing { id } => {
+                w.u8(5);
+                w.u64(*id);
+            }
+            Response::NoPreviewHandler { id } => {
+                w.u8(6);
+                w.u64(*id);
+            }
         }
         w.0
     }
@@ -577,6 +663,8 @@ impl Message for Response {
                 },
                 message: r.text()?,
             },
+            5 => Response::PreviewShowing { id: r.u64()? },
+            6 => Response::NoPreviewHandler { id: r.u64()? },
             t => return Err(DecodeError::UnknownTag(t)),
         };
         r.finish()?;

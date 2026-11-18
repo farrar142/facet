@@ -43,15 +43,27 @@
 //!   없으면 만듦, 쓰지 못해도 돈다), 같은 확장으로 [`SAME_EXTENSION_CRASHES`]번 죽으면
 //!   [`ShellHelper::crashing_extension`]으로 알린다. 세기와 알림은 기록 파일과 상관없다. 확장을 막지는 않는다.
 //!
+//! # 미리보기(#342)
+//!
+//! - [`ShellHelper::preview`]가 파일 하나의 미리보기를 도우미에 맡긴다. 결과는 [`Reply::PreviewShowing`]·
+//!   [`Reply::NoPreviewHandler`]이고, 쓴 때부터 [`SHELL_PREVIEW_TIMEOUT`](3초) 안에 답이 없으면 [`RequestError::TimedOut`]으로
+//!   끝나며 그 도우미를 끝낸다(붙잡힌 처리기 뒤에 다음 요청이 줄 서지 않게, 다음 요청 때 새로 띄운다. 죽음으로 세지 않음).
+//! - [`ShellHelper::move_preview`]·[`ShellHelper::unload_preview`]는 자리 바꾸기·내리기다.
+//! - 미리보기를 그리던 도우미가 끝나면(죽음, 멈춰서 끝냄) 붙인 처리기 창도 사라진다: 깨우기를 부르고
+//!   [`Inner::take_preview_lost`]가 한 번 참을 돌려준다(#343). 미리보기를 그리는 도우미는 쉬어도 끝내지 않는다.
+//! - 잡힌 파일: 이름바꾸기·삭제·이동 엔진이 공유 위반으로 실패하면 [`release_held_preview`]로 그 파일(또는 그 아래)을
+//!   미리 보고 있는 도우미의 미리보기를 내리고(답을 기다림) 한 번 다시 시도한다([`retry_held`]). 그래서 이 프로세스의
+//!   도우미 관리를 모두 약한 참조로 기억해 둔다.
+//!
 //! 화면 문장은 없다(ADR-0007).
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -59,10 +71,12 @@ use facet_shell_protocol::{
     MAX_SUPPORTED_VERSION, MIN_SUPPORTED_VERSION, MenuItem, MenuTarget, PROTOCOL_VERSION, Request,
     Response, read_message, write_message,
 };
+use facet_win::file_ops::{FileOpErrorKind, FileOpResult};
 use facet_win::pipe_client::private::PrivatePipe;
 use facet_win::pipe_client::{PipeCloser, PipeReader, PipeWriter};
 
 use crate::menu::MenuKind;
+use crate::preview::{PreviewHost, SHELL_PREVIEW_TIMEOUT};
 
 /// 응답 대기 시간(2초).
 ///
@@ -173,6 +187,21 @@ struct Pending {
     deadline: Option<Instant>,
     /// 쓴 연결(도우미)의 번호. 쓰기 전이면 0.
     session: u64,
+    /// 이 요청만의 대기 시간(`None`이면 [`HelperOptions::reply_timeout`]).
+    timeout: Option<Duration>,
+    /// 시간이 지나면 그 도우미를 끝낸다(붙잡힌 미리보기 처리기, #342).
+    end_on_timeout: bool,
+}
+
+impl Pending {
+    fn new() -> Pending {
+        Pending {
+            deadline: None,
+            session: 0,
+            timeout: None,
+            end_on_timeout: false,
+        }
+    }
 }
 
 /// 부르는 쪽과 일꾼이 함께 보는 상태. 한 잠금 아래에서 기다리는 요청과 쌓인 사건을 함께 바꾸므로, 놓은 메뉴의 결과가
@@ -188,6 +217,14 @@ struct State {
     resting_until: Option<Instant>,
     /// 같은 확장으로 [`SAME_EXTENSION_CRASHES`]번 넘게 죽게 한 확장(마지막에 그렇게 된 것).
     crashing: Option<CrashedExtension>,
+    /// 결과를 사건 대신 받을 곳(기다리는 부르기, #342).
+    waiters: HashMap<u64, Sender<Result<Reply, RequestError>>>,
+    /// 마지막으로 맡긴 미리보기의 파일(내리면 `None`, #342).
+    preview_path: Option<PathBuf>,
+    /// 마지막 미리보기 요청을 쓴 도우미의 번호(#343).
+    preview_session: Option<u64>,
+    /// 미리보기를 맡긴 도우미가 끝나 붙인 창이 사라졌다(#343, [`Inner::take_preview_lost`]가 지움).
+    preview_lost: bool,
 }
 
 struct Shared {
@@ -208,11 +245,23 @@ impl Shared {
             if state.pending.remove(&id).is_none() {
                 return;
             }
+            if let Some(waiter) = state.waiters.remove(&id) {
+                let _ = waiter.send(result);
+                return;
+            }
             state.events.push_back(HelperEvent::Reply {
                 id: RequestId(id),
                 result,
             });
         }
+        self.ready.notify_all();
+        let waker = self.waker.lock().ok().and_then(|w| w.clone());
+        if let Some(waker) = waker {
+            waker();
+        }
+    }
+
+    fn wake(&self) {
         self.ready.notify_all();
         let waker = self.waker.lock().ok().and_then(|w| w.clone());
         if let Some(waker) = waker {
@@ -245,9 +294,24 @@ enum Inbox {
 
 /// 도우미 관리. 앱 전체에 하나를 둔다. 버리면 일꾼이 도우미를 끝낸다(기다리지 않는다).
 pub struct ShellHelper {
+    inner: Arc<Inner>,
+}
+
+/// 도우미 관리의 몸통. 잡힌 파일 놓기([`release_held_preview`])가 약한 참조로 다른 스레드에서 쓴다.
+pub struct Inner {
     inbox: Sender<Inbox>,
     shared: Arc<Shared>,
     next_id: AtomicU64,
+}
+
+/// 이 프로세스의 도우미 관리들(잡힌 파일 놓기가 본다).
+static HELPERS: Mutex<Vec<Weak<Inner>>> = Mutex::new(Vec::new());
+
+impl std::ops::Deref for ShellHelper {
+    type Target = Inner;
+    fn deref(&self) -> &Inner {
+        &self.inner
+    }
 }
 
 impl ShellHelper {
@@ -273,13 +337,20 @@ impl ShellHelper {
         let _ = thread::Builder::new()
             .name("facet-shell-helper".into())
             .spawn(move || worker.run());
-        ShellHelper {
+        let inner = Arc::new(Inner {
             inbox,
             shared,
             next_id: AtomicU64::new(0),
-        }
+        });
+        let mut helpers = HELPERS.lock().unwrap_or_else(|e| e.into_inner());
+        helpers.retain(|weak| weak.strong_count() > 0);
+        helpers.push(Arc::downgrade(&inner));
+        drop(helpers);
+        ShellHelper { inner }
     }
+}
 
+impl Inner {
     /// 사건을 보낼 때마다 부를 깨우기(이벤트 루프 깨우기). 일꾼 스레드에서 불린다.
     pub fn set_waker(&self, waker: impl Fn() + Send + Sync + 'static) {
         if let Ok(mut slot) = self.shared.waker.lock() {
@@ -303,13 +374,7 @@ impl ShellHelper {
         let id = self.next();
         {
             let mut state = self.shared.lock();
-            state.pending.insert(
-                id,
-                Pending {
-                    deadline: None,
-                    session: 0,
-                },
-            );
+            state.pending.insert(id, Pending::new());
             state.menus.insert(id, target.clone());
         }
         self.send(id, Request::Menu { id, target });
@@ -322,13 +387,7 @@ impl ShellHelper {
         let id = self.next();
         let target = {
             let mut state = self.shared.lock();
-            state.pending.insert(
-                id,
-                Pending {
-                    deadline: None,
-                    session: 0,
-                },
-            );
+            state.pending.insert(id, Pending::new());
             state.menus.get(&menu.0).cloned()
         };
         match target {
@@ -415,23 +474,126 @@ impl ShellHelper {
 
     /// 메뉴와 상관없는 요청 하나를 기다리는 요청으로 적고 보낸다.
     fn request(&self, make: impl FnOnce(u64) -> Request) -> RequestId {
+        self.request_with(Pending::new(), make)
+    }
+
+    fn request_with(&self, pending: Pending, make: impl FnOnce(u64) -> Request) -> RequestId {
         let id = self.next();
-        self.shared.lock().pending.insert(
-            id,
-            Pending {
-                deadline: None,
-                session: 0,
-            },
-        );
+        self.shared.lock().pending.insert(id, pending);
         self.send(id, make(id));
         RequestId(id)
+    }
+
+    /// 미리보기 요청(#342): 도우미가 `path`를 미리보기 처리기로 그려 `host`에 붙인다(앞선 미리보기는 내림). 결과는
+    /// [`Reply::PreviewShowing`]·[`Reply::NoPreviewHandler`]이고, [`SHELL_PREVIEW_TIMEOUT`] 안에 답이 없으면
+    /// [`RequestError::TimedOut`]이며 그 도우미를 끝낸다.
+    pub fn preview(&self, path: PathBuf, host: PreviewHost) -> RequestId {
+        self.shared.lock().preview_path = Some(path.clone());
+        let pending = Pending {
+            timeout: Some(SHELL_PREVIEW_TIMEOUT),
+            end_on_timeout: true,
+            ..Pending::new()
+        };
+        self.request_with(pending, |id| Request::Preview {
+            id,
+            path,
+            host: protocol_host(host),
+        })
+    }
+
+    /// 미리보기 자리 바꾸기(#342). 결과는 [`Reply::Done`].
+    pub fn move_preview(&self, host: PreviewHost) -> RequestId {
+        self.request(|id| Request::MovePreview {
+            id,
+            host: protocol_host(host),
+        })
+    }
+
+    /// 미리보기 내리기(#342): 처리기를 내리고 잡고 있던 파일을 놓는다. 결과는 [`Reply::Done`].
+    pub fn unload_preview(&self) -> RequestId {
+        self.shared.lock().preview_path = None;
+        self.request(|id| Request::UnloadPreview { id })
+    }
+
+    /// 맡긴 미리보기를 그리던 도우미가 끝나(죽음·멈춤으로 끝냄) 붙인 처리기 창이 사라졌는가(#343). 한 번 알리면
+    /// 지운다. 그렇게 되면 깨우기를 부른다. 다음 미리보기 요청은 새 도우미를 띄운다.
+    pub fn take_preview_lost(&self) -> bool {
+        std::mem::take(&mut self.shared.lock().preview_lost)
+    }
+
+    /// `path`(또는 그 아래)를 미리 보고 있으면 내리고 답을 기다린다(많아야 [`SHELL_PREVIEW_TIMEOUT`]). 내렸으면 `true`.
+    fn release_preview_under(&self, path: &Path) -> bool {
+        let id = self.next();
+        let (tx, rx) = mpsc::channel();
+        {
+            let mut state = self.shared.lock();
+            if !state
+                .preview_path
+                .as_deref()
+                .is_some_and(|held| is_under(held, path))
+            {
+                return false;
+            }
+            state.preview_path = None;
+            state.pending.insert(
+                id,
+                Pending {
+                    timeout: Some(SHELL_PREVIEW_TIMEOUT),
+                    ..Pending::new()
+                },
+            );
+            state.waiters.insert(id, tx);
+        }
+        self.send(id, Request::UnloadPreview { id });
+        // 일꾼이 마감에 끝내므로 여유를 조금 더 둔다.
+        matches!(
+            rx.recv_timeout(SHELL_PREVIEW_TIMEOUT + Duration::from_secs(1)),
+            Ok(Ok(Reply::Done))
+        )
     }
 }
 
 impl Drop for ShellHelper {
     fn drop(&mut self) {
-        let _ = self.inbox.send(Inbox::Shutdown);
+        let _ = self.inner.inbox.send(Inbox::Shutdown);
     }
+}
+
+/// 이 프로세스의 도우미 가운데 `path`(또는 그 아래 파일)를 미리 보고 있는 것의 미리보기를 내리고 답을 기다린다(#342,
+/// 많아야 [`SHELL_PREVIEW_TIMEOUT`]). 내린 것이 있으면 `true`. 파일 작업 일꾼 스레드에서 부른다(UI 스레드에서 부르지
+/// 않는다).
+pub fn release_held_preview(path: &Path) -> bool {
+    let helpers: Vec<Arc<Inner>> = HELPERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter_map(Weak::upgrade)
+        .collect();
+    let mut released = false;
+    for helper in helpers {
+        released |= helper.release_preview_under(path);
+    }
+    released
+}
+
+/// 파일 연산 `op`을 하고, 공유 위반(잠김)으로 실패하면 도우미가 잡은 미리보기를 내린 뒤 한 번 다시 시도한다(#342).
+/// 내린 미리보기가 없으면 다시 시도하지 않는다.
+pub fn retry_held<T>(path: &Path, mut op: impl FnMut() -> FileOpResult<T>) -> FileOpResult<T> {
+    match op() {
+        Err(error) if error.kind() == FileOpErrorKind::Locked && release_held_preview(path) => op(),
+        result => result,
+    }
+}
+
+/// `child`가 `parent`이거나 그 아래인가(대소문자 무시, 이름 조각 단위).
+fn is_under(child: &Path, parent: &Path) -> bool {
+    let fold = |p: &Path| -> Vec<String> {
+        p.components()
+            .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+            .collect()
+    };
+    let (child, parent) = (fold(child), fold(parent));
+    !parent.is_empty() && child.starts_with(&parent)
 }
 
 /// 떠 있는 도우미 하나와 그 연결.
@@ -582,7 +744,7 @@ impl Worker {
                 None => Some(self.inbox.recv().unwrap_or(Inbox::Shutdown)),
             };
             match message {
-                Some(Inbox::Send { id, request }) => self.send(id, request),
+                Some(Inbox::Send { id, request }) => self.send_request(id, request),
                 Some(Inbox::Response { session, response }) => {
                     if self.helper.as_ref().is_some_and(|h| h.session == session) {
                         self.receive(response);
@@ -635,19 +797,24 @@ impl Worker {
         }
     }
 
-    /// 마감이 지난 요청을 시간 초과로 끝낸다.
-    fn expire(&self) {
+    /// 마감이 지난 요청을 시간 초과로 끝낸다. 붙잡힌 미리보기 요청이면 그 도우미도 끝낸다(#342).
+    fn expire(&mut self) {
         let now = Instant::now();
-        let expired: Vec<u64> = self
+        let expired: Vec<(u64, u64, bool)> = self
             .shared
             .lock()
             .pending
             .iter()
             .filter(|(_, p)| p.deadline.is_some_and(|d| d <= now))
-            .map(|(id, _)| *id)
+            .map(|(id, p)| (*id, p.session, p.end_on_timeout))
             .collect();
-        for id in expired {
+        let mut end = false;
+        for (id, session, end_on_timeout) in expired {
             self.shared.finish(id, Err(RequestError::TimedOut));
+            end |= end_on_timeout && self.helper.as_ref().is_some_and(|h| h.session == session);
+        }
+        if end {
+            self.end_helper(Ending::Ended);
         }
     }
 
@@ -658,6 +825,15 @@ impl Worker {
             return;
         };
         let session = helper.session;
+        let lost = {
+            let mut state = self.shared.lock();
+            let lost = state.preview_path.is_some() && state.preview_session == Some(session);
+            if lost {
+                state.preview_path = None;
+                state.preview_lost = true;
+            }
+            lost
+        };
         match ending {
             Ending::Ended => helper.end(),
             Ending::Lost => {
@@ -668,6 +844,9 @@ impl Worker {
             }
         }
         self.shared.fail_session(session);
+        if lost {
+            self.shared.wake();
+        }
     }
 
     /// 죽음 하나를 센다: 연달아 죽음이면 쉬기 시작하고, 확장을 알면 기록하고 세어 알린다.
@@ -737,6 +916,13 @@ impl Worker {
         if helper.outstanding > 0 {
             return;
         }
+        // 미리보기를 그리고 있는 도우미는 쉬어도 끝내지 않는다(끝내면 붙인 창이 사라진다, #343).
+        {
+            let state = self.shared.lock();
+            if state.preview_path.is_some() && state.preview_session == Some(helper.session) {
+                return;
+            }
+        }
         let elapsed = helper.last_activity.elapsed();
         let retire = if elapsed < idle.saturating_sub(margin) {
             false
@@ -750,7 +936,7 @@ impl Worker {
         }
     }
 
-    fn send(&mut self, id: u64, request: Request) {
+    fn send_request(&mut self, id: u64, request: Request) {
         if !self.shared.lock().pending.contains_key(&id) {
             return; // 그 사이 놓았다.
         }
@@ -775,10 +961,14 @@ impl Worker {
             let mut state = self.shared.lock();
             match state.pending.get_mut(&id) {
                 Some(pending) => {
-                    pending.deadline = Some(Instant::now() + self.options.reply_timeout);
+                    let timeout = pending.timeout.unwrap_or(self.options.reply_timeout);
+                    pending.deadline = Some(Instant::now() + timeout);
                     pending.session = helper.session;
                 }
                 None => return,
+            }
+            if matches!(request, Request::Preview { .. }) {
+                state.preview_session = Some(helper.session);
             }
         }
         if matches!(
@@ -802,6 +992,10 @@ impl Worker {
         match response {
             Response::Menu { id, items } => self.shared.finish(id, Ok(Reply::Menu(items))),
             Response::Done { id } => self.shared.finish(id, Ok(Reply::Done)),
+            Response::PreviewShowing { id } => self.shared.finish(id, Ok(Reply::PreviewShowing)),
+            Response::NoPreviewHandler { id } => {
+                self.shared.finish(id, Ok(Reply::NoPreviewHandler))
+            }
             Response::Error { id, message, .. } => {
                 self.shared.finish(id, Err(RequestError::Failed(message)))
             }
@@ -987,6 +1181,20 @@ pub enum Reply {
     Menu(Vec<MenuItem>),
     /// 항목 실행이 끝났다.
     Done,
+    /// 미리보기 처리기가 그리기 시작했다(#342).
+    PreviewShowing,
+    /// 그 파일의 미리보기 처리기가 없다(#342).
+    NoPreviewHandler,
+}
+
+fn protocol_host(host: PreviewHost) -> facet_shell_protocol::PreviewHost {
+    facet_shell_protocol::PreviewHost {
+        parent: host.parent,
+        x: host.x,
+        y: host.y,
+        width: host.width,
+        height: host.height,
+    }
 }
 
 /// 요청이 결과 없이 끝난 까닭.
@@ -1087,6 +1295,29 @@ mod tests {
             crash_line(time, &info),
             "2026-11-18 09:05:07\t{A}\tC:\\x.dll\tName\n"
         );
+    }
+
+    #[test]
+    fn 잡힌_파일은_그_파일과_그_위_폴더로_찾는다() {
+        let held = Path::new(r"C:\Data\Docs\a.pdf");
+        assert!(is_under(held, Path::new(r"C:\Data\Docs\a.pdf")));
+        assert!(is_under(held, Path::new(r"c:\data\DOCS")));
+        assert!(!is_under(held, Path::new(r"C:\Data\Doc")));
+        assert!(!is_under(held, Path::new(r"C:\Data\Docs\a.pdf.bak")));
+        assert!(!is_under(held, Path::new("")));
+    }
+
+    #[test]
+    fn 내린_미리보기가_없으면_다시_시도하지_않는다() {
+        use facet_win::file_ops::FileOpError;
+        let mut calls = 0;
+        let result: FileOpResult<()> =
+            retry_held(Path::new(r"C:\no-helper-holds-this\x.txt"), || {
+                calls += 1;
+                Err(FileOpError::new(FileOpErrorKind::Locked, Some(32)))
+            });
+        assert_eq!(result.unwrap_err().kind(), FileOpErrorKind::Locked);
+        assert_eq!(calls, 1);
     }
 
     #[test]
