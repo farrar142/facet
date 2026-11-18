@@ -188,7 +188,6 @@ fn restore_into_conflict(
 }
 
 #[test]
-#[ignore = "#353"]
 fn restore_puts_the_file_back_and_removes_it_from_the_recycle_bin() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("하위").join("되살릴 파일.txt");
@@ -211,7 +210,6 @@ fn restore_puts_the_file_back_and_removes_it_from_the_recycle_bin() {
 }
 
 #[test]
-#[ignore = "#353"]
 fn skip_keeps_the_existing_file_and_the_recycled_item() {
     let dir = TempDir::new().unwrap();
     let mut bin = Bin::default();
@@ -231,7 +229,6 @@ fn skip_keeps_the_existing_file_and_the_recycled_item() {
 }
 
 #[test]
-#[ignore = "#353"]
 fn keep_both_restores_under_a_numbered_name() {
     let dir = TempDir::new().unwrap();
     let mut bin = Bin::default();
@@ -251,7 +248,6 @@ fn keep_both_restores_under_a_numbered_name() {
 }
 
 #[test]
-#[ignore = "#353"]
 fn restore_is_disabled_when_nothing_is_chosen_in_the_recycle_bin() {
     let dir = TempDir::new().unwrap();
     let mut app = app_at(dir.path());
@@ -277,7 +273,6 @@ fn restore_is_disabled_when_nothing_is_chosen_in_the_recycle_bin() {
 }
 
 #[test]
-#[ignore = "#353"]
 fn restore_is_not_allowed_outside_the_recycle_bin() {
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("보통 파일.txt"), "a").unwrap();

@@ -35,6 +35,7 @@ mod copy;
 mod delete;
 mod moving;
 mod recycle;
+mod restore;
 mod revert;
 
 pub(crate) use revert::RevertJob;
@@ -90,7 +91,7 @@ pub enum JobKind {
     Recycle,
     /// **일괄 이름 바꾸기**([`JobQueue::batch_rename`]). 차례를 기다리지 않고 곧바로 시작한다.
     BatchRename,
-    /// #353: 휴지통에서 복원.
+    /// **휴지통 복원**([`JobQueue::restore`]). 차례를 기다리지 않고 곧바로 시작한다.
     Restore,
 }
 
@@ -468,6 +469,7 @@ enum Job {
     Delete(delete::DeleteJob),
     Recycle(recycle::RecycleJob),
     BatchRename(batch_rename::BatchRenameJob),
+    Restore(restore::RestoreJob),
 }
 
 impl Job {
@@ -480,6 +482,7 @@ impl Job {
             Job::Delete(job) => job.root_count(),
             Job::Recycle(job) => job.root_count(),
             Job::BatchRename(job) => job.root_count(),
+            Job::Restore(job) => job.root_count(),
         }
     }
 
@@ -492,6 +495,7 @@ impl Job {
             Job::Delete(job) => job.run(context),
             Job::Recycle(job) => job.run(context),
             Job::BatchRename(job) => job.run(context),
+            Job::Restore(job) => job.run(context),
         }
     }
 }
@@ -1035,6 +1039,18 @@ impl JobQueue {
     pub fn recycle(&mut self, sources: Vec<PathBuf>) -> Result<JobId, DeleteRejection> {
         let job = recycle::RecycleJob::prepare(sources)?;
         Ok(self.start_at_once(Job::Recycle(job)))
+    }
+
+    /// 휴지통 항목들을 원래 자리로 **복원**하는 작업을 넣고 차례를 기다리지 않고 곧바로 시작한다. 항목이 없으면
+    /// 작업을 만들지 않는다([`DeleteRejection::NoSources`]). 원래 자리에 같은 이름이 있으면 이름 충돌로 묻는다
+    /// ([`JobEvent::Conflict`]): 건너뛰기는 항목을 휴지통에 남기고, 둘 다 유지는 「이름 (2)」로 복원하고, 덮어쓰기는
+    /// 원래 자리의 항목을 휴지통으로 보낸 뒤 복원한다. 셸 복원은 작업 스레드에서 부른다.
+    pub fn restore(
+        &mut self,
+        items: Vec<facet_win::recycle::RecycledItem>,
+    ) -> Result<JobId, DeleteRejection> {
+        let job = restore::RestoreJob::prepare(items)?;
+        Ok(self.start_at_once(Job::Restore(job)))
     }
 
     /// 휴지통 삭제 작업을 넣어 곧바로 시작하고([`JobQueue::recycle`]와 같다) 그 작업이 한 일을 적을 곳을 함께

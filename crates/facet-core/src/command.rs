@@ -465,6 +465,7 @@ impl CommandId {
             CommandId::DeletePermanently => capabilities.delete_permanently,
             CommandId::Delete => capabilities.recycle || capabilities.delete_permanently,
             CommandId::Properties => capabilities.properties,
+            CommandId::Restore => capabilities.restore,
             _ => true,
         }
     }
@@ -525,7 +526,9 @@ impl CommandId {
             CommandId::OpenWith | CommandId::Properties => todo!("#321"),
 
             CommandId::OpenRecycleBin => true,
-            CommandId::Restore => todo!("#353"),
+            CommandId::Restore => {
+                tab.selected_items().next().is_some() || tab.cursor_item().is_some()
+            }
             CommandId::EmptyRecycleBin => todo!("#354"),
             CommandId::TogglePreview => true,
             CommandId::Refresh

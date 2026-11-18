@@ -88,7 +88,7 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::OpenWith | CommandId::Properties => todo!("#321"),
         CommandId::OpenThisPc => "내 PC 열기",
         CommandId::OpenRecycleBin => "휴지통 열기",
-        CommandId::Restore => todo!("#353"),
+        CommandId::Restore => "복원",
         CommandId::EmptyRecycleBin => todo!("#354"),
         CommandId::TogglePreview => "미리보기 영역",
     }
