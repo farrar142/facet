@@ -24,8 +24,9 @@ env:
 
 # PR: lint·test·bench를 Windows job 셋으로 나란히 돌리고(`cargo xtask ci --only …`), 벤치마크는 PR이 바꾼
 # 파일에 닿는 것만 고른다. 공장 스크립트 시험은 공장 파일이 바뀐 PR에서만 ubuntu job으로 돈다.
-# main push·수동 실행: Windows job 하나가 `cargo xtask ci --full`(공장 스크립트 시험은 ubuntu job 몫)로 모두 돌고
-# rust-cache를 저장한다. PR job들은 같은 캐시(shared-key)를 읽기만 한다.
+# main push·수동 실행: Windows job 하나가 lint·test만 돌고(`cargo xtask ci --only lint,test`, 공장 스크립트 시험은
+# ubuntu job 몫) rust-cache(shared-key ci)를 저장한다. 전체 벤치마크는 bench.yml이 1시간마다, main에 새 커밋이 있을
+# 때만 돌고(#366) 릴리스 빌드 캐시(shared-key bench)를 저장한다. PR job들은 그 캐시들을 읽기만 한다.
 # 공장(Verify·Implementer)은 인자 없는 `cargo xtask ci` 한 번으로 같은 판정을 받는다(xtask/src/ci_select.rs).
 jobs:
   changes:
@@ -88,9 +89,10 @@ jobs:
         with:
           fetch-depth: 2
       - run: rustup show
+      # 릴리스 빌드 캐시는 bench.yml의 bench job이 저장한다.
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci
+          shared-key: bench
           save-if: false
       - run: cargo xtask ci --only bench --base HEAD^1
 
@@ -107,4 +109,4 @@ jobs:
         with:
           shared-key: ci
 
-      - run: cargo xtask ci --full --only lint,test,bench
+      - run: cargo xtask ci --only lint,test
