@@ -155,6 +155,10 @@ pub enum CommandId {
     GridView(GridSize),
     /// #330: 썸네일 캐시를 비운다.
     ClearThumbnailCache,
+    /// #321: 연결 프로그램(`open-with`).
+    OpenWith,
+    /// #321: 속성(`properties`, Alt+Enter).
+    Properties,
 }
 
 impl CommandId {
@@ -285,6 +289,8 @@ impl CommandId {
             CommandId::GridView(GridSize::Large) => "grid-view-large",
             CommandId::GridView(GridSize::ExtraLarge) => "grid-view-extra-large",
             CommandId::ClearThumbnailCache => "clear-thumbnail-cache",
+            CommandId::OpenWith => "open-with",
+            CommandId::Properties => "properties",
         }
     }
 
@@ -408,6 +414,7 @@ impl CommandId {
             CommandId::Cut => const { &[key(letter('X')).ctrl()] },
             CommandId::Paste => const { &[key(letter('V')).ctrl()] },
             CommandId::CopyPath => const { &[key(letter('C')).ctrl().shift()] },
+            CommandId::OpenWith | CommandId::Properties => &[], // #321
         }
     }
 
@@ -463,6 +470,7 @@ impl CommandId {
             CommandId::InstantUnderFolder => tab.instant_base().is_some(),
             CommandId::DetailsView | CommandId::GridView(_) => todo!("#327"),
             CommandId::ClearThumbnailCache => todo!("#330"),
+            CommandId::OpenWith | CommandId::Properties => todo!("#321"),
             CommandId::Refresh
             | CommandId::EditAddress
             | CommandId::ToggleHidden

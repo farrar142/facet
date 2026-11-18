@@ -89,6 +89,9 @@ fn name(command: CommandId) -> &'static str {
         CommandId::DetailsView => "자세히 보기",
         CommandId::GridView(_) => "그리드 보기",
         CommandId::ClearThumbnailCache => "썸네일 캐시 비우기",
+        // 오른쪽 메뉴의 자체 항목(자세한 확인은 tests/spec_shell_helper_menu_layout.rs).
+        CommandId::OpenWith => "연결 프로그램",
+        CommandId::Properties => "속성",
     }
 }
 

@@ -21,6 +21,8 @@ facet-indexer = { path = "../facet-indexer" }
 facet-win.workspace = true
 # 질의 문법 해석(`query_syntax.rs`)의 결과가 질의 프로토콜의 조건 트리다.
 facet-protocol.workspace = true
+# 셸 확장 도우미 관리(`shell_helper.rs`)가 도우미 프로토콜의 메시지를 쓴다.
+facet-shell-protocol.workspace = true
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 # 세션 파일(사람이 읽을 수 있는 JSON, `session.rs`).
 serde = { version = "1.0.229", features = ["derive"] }

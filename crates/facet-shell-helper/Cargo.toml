@@ -1,0 +1,23 @@
+[package]
+name = "facet-shell-helper"
+description = "facet 셸 확장 도우미 실행 파일: 셸 확장을 UI 프로세스 대신 싣는다(ADR-0006)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "facet-shell-helper"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+facet-shell-protocol.workspace = true
+
+[dev-dependencies]
+facet-core.workspace = true
+facet-shell-protocol.workspace = true
+tempfile = "3.27.0"

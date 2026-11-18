@@ -464,6 +464,8 @@ pub enum Update {
         id: SubfoldersId,
         list: Option<Result<Subfolders, SubfoldersError>>,
     },
+    /// #322: 열린 셸 메뉴의 셸 자리가 바뀌었다.
+    ShellMenu(crate::shell_helper::ShellMenuId),
     /// #330: 썸네일 요청([`App::request_thumbnails`])의 결과.
     Thumbnail {
         path: PathBuf,
@@ -1681,6 +1683,36 @@ impl App {
         todo!("#330")
     }
 
+    /// #321: 셸 확장 도우미 관리를 켠다(도우미는 첫 요청 때 뜬다).
+    pub fn enable_shell_helper(&mut self, _options: crate::shell_helper::HelperOptions) {
+        todo!("#321")
+    }
+
+    /// #321: 켠 셸 확장 도우미 관리.
+    pub fn shell_helper(&self) -> Option<&crate::shell_helper::ShellHelper> {
+        todo!("#321")
+    }
+
+    /// #322: 오른쪽 메뉴의 셸 항목 자리를 연다(도우미에 셸 메뉴를 요청한다).
+    pub fn open_shell_menu(&mut self, _kind: MenuKind) -> Option<crate::shell_helper::ShellMenuId> {
+        todo!("#322")
+    }
+
+    /// #322: 열린 셸 메뉴.
+    pub fn shell_menu(&self) -> Option<&crate::shell_helper::ShellMenu> {
+        todo!("#322")
+    }
+
+    /// #322: 열린 셸 메뉴를 닫는다.
+    pub fn close_shell_menu(&mut self) {
+        todo!("#322")
+    }
+
+    /// #322: 열린 셸 메뉴의 셸 항목을 실행한다.
+    pub fn invoke_shell_item(&mut self, _item: u32) -> bool {
+        todo!("#322")
+    }
+
     /// 인덱서 서비스 연결을 띄운다([`IndexerClient::start`], 곧바로 돌아오고 파이프는 뒤에서 연다). 앱(화면)이 시작한 뒤 한 번
     /// 부른다: 코어는 시험이 진짜 서비스에 붙지 않게 스스로 띄우지 않는다. 연결이 없으면 즉시 검색은 「서비스 없음」이다
     /// ([`crate::instant_search::InstantStatus::unavailable`]). 이미 띄웠으면 아무것도 하지 않는다. 연결 사건은 같은 깨우기로
@@ -2484,6 +2516,7 @@ impl App {
         }
         let navigation = match command {
             CommandId::Open => return self.open_cursor_item(),
+            CommandId::OpenWith | CommandId::Properties => todo!("#321"),
             CommandId::Back => Navigation::Back,
             CommandId::Forward => Navigation::Forward,
             CommandId::Up => Navigation::Up,

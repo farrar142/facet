@@ -1,0 +1,11 @@
+[package]
+name = "facet-shell-protocol"
+description = "facet 셸 확장 도우미 프로토콜: UI 프로세스와 도우미가 주고받는 메시지, 이진 형식, 길이 접두 프레임, 버전 인사"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

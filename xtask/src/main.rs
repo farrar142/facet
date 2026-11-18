@@ -1,8 +1,12 @@
 //! 저장소 작업 명령. `cargo xtask <명령>`으로 부른다.
 //!
-//! - `ci`: 형식 검사 → lint(경고를 오류로) → 빌드 → 테스트 → 공장 스크립트 시험 → 실제 볼륨 테스트 → 코어 벤치마크
-//!   → 인덱스 벤치마크 → MFT 파싱 벤치마크 → 세션 읽기·해석 벤치마크 → 클립보드 형식·오른쪽 메뉴·일괄 이름 바꾸기 미리 보기·필터·실시간 탐색 벤치마크 → 복사 벤치마크 → 삭제 벤치마크. CI와 로컬이 같은 명령을 쓴다. 실제 볼륨 테스트는 관리자일 때만 시험 VHD를
-//!   만들어 돌린다.
+//! - `ci [--full] [--bench 이름,…] [--base 기준] [--only 부분,…]`: 형식 검사 → lint(경고를 오류로) → 빌드 → 테스트
+//!   → 공장 스크립트 시험 → 실제 볼륨 테스트 → 벤치마크. CI·공장·로컬이 같은 명령을 쓴다. 실제 볼륨 테스트는 관리자일
+//!   때만 시험 VHD를 만들어 돌린다. 인자 없이 부르면 기준(기본 `origin/main`)과의 merge-base에서 바뀐 파일로 고른다:
+//!   공장 스크립트 시험은 `.github/factory/`·`.github/workflows/factory-*`가 바뀌었을 때만, 벤치마크는 바뀐 파일이
+//!   닿는 것만(`ci_select`의 경로 표, 공통 파일이면 모두, Rust 코드가 바뀌지 않았으면 없음). 고른 벤치마크와 까닭은
+//!   한 줄로 출력한다. `--full`은 지금까지처럼 모두 돌리고(main push), `--bench`는 이름으로 더하며, `--only`는
+//!   `lint`·`test`·`factory`·`bench` 가운데 일부만 돌린다(CI가 job을 나눠 나란히 돌릴 때).
 //! - `test-folder`: 시험 폴더를 만든다(`facet-bench make-folder`).
 //! - `bench`: 벤치마크만 돌린다(`facet-bench list`·`facet-bench index`·`facet-bench mft`·`facet-bench session`·
 //!   `facet-bench copy`·`facet-bench delete`, 릴리스 빌드).
@@ -21,6 +25,7 @@
 //! `COPY_THROUGHPUT_LIMIT`·`COPY_SMALL_LIMIT`, `crates/facet-bench/src/delete.rs`의 `DELETE_LIMIT`·
 //! `UNDO_TARGET_LIMIT`, `crates/facet-bench/src/lib.rs`의 `BATCH_RENAME_JOB_LIMIT`에 있다.
 
+mod ci_select;
 mod dist;
 mod mft_fixture;
 mod vhd;
@@ -33,9 +38,17 @@ const USAGE: &str = "\
 사용법: cargo xtask <명령>
 
 명령:
-  ci                             형식 검사, lint(경고를 오류로), 빌드, 테스트, 공장 스크립트 시험(bash가 없으면 건너뜀), 실제 볼륨 테스트,
-                                 코어 벤치마크, 인덱스 벤치마크, MFT 파싱 벤치마크, 세션 읽기·해석 벤치마크, 복사 벤치마크, 삭제 벤치마크를 차례로 돌린다. 실제 볼륨 테스트는
-                                 관리자일 때만 시험 VHD를 만들어 돌리고, 아니면 건너뛴다고 출력한다
+  ci [--full] [--bench 이름,…] [--base 기준] [--only 부분,…]
+                                 형식 검사, lint(경고를 오류로), 빌드, 테스트, 공장 스크립트 시험(bash가 없으면 건너뜀), 실제 볼륨 테스트,
+                                 벤치마크를 차례로 돌린다. 실제 볼륨 테스트는 관리자일 때만 시험 VHD를 만들어 돌리고, 아니면 건너뛴다고
+                                 출력한다. 기준(기본 origin/main)과의 merge-base에서 바뀐 파일로 고른다: 공장 스크립트 시험은
+                                 .github/factory/·.github/workflows/factory-*가 바뀌었을 때만, 벤치마크는 바뀐 파일이 닿는 것만
+                                 (Cargo.lock·xtask/·crates/facet-bench/ 등 공통 파일이면 모두, Rust 코드가 안 바뀌었으면 없음).
+                                 --full: 공장 스크립트 시험과 벤치마크를 모두 돌린다
+                                 --bench 이름,…: 그 벤치마크를 더 돌린다(list, index, mft, session, clipboard, menu, batch-rename,
+                                 filter, query-syntax, search, content, copy, delete, batch-rename-run)
+                                 --base 기준: 바뀐 파일을 잴 기준(git 리비전)
+                                 --only 부분,…: lint(형식 검사·lint), test(빌드·테스트·실제 볼륨 테스트), factory, bench 가운데 일부만
   test-folder [경로] [--count N]  N개(기본 100000) 항목이 든 시험 폴더를 만든다.
                                  경로를 빼면 임시 폴더의 facet-test-folders/items-N
   bench                          10만 항목 시험 폴더를 만들거나 확인하고 코어 목록 읽기·읽기+정렬·정렬 바꾸기를 잰 뒤,
@@ -75,7 +88,7 @@ const BENCH_COUNT: &str = "100000";
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("ci") => run_ci(),
+        Some("ci") => run_ci(&args[1..]),
         Some("bench") => run_steps("bench", &bench_steps()),
         Some("test-folder") => match test_folder_step(&args[1..]) {
             Ok(step) => run_steps("test-folder", &[step]),
@@ -134,15 +147,141 @@ fn step(name: &'static str, args: &[&str]) -> Step {
     }
 }
 
-/// `ci`: 앞 단계들 → 공장 스크립트 시험 → 실제 볼륨 테스트 → 코어 벤치마크 → 인덱스 벤치마크.
-fn run_ci() -> ExitCode {
-    if run_steps("ci", &ci_steps()) != ExitCode::SUCCESS
-        || factory_script_tests() != ExitCode::SUCCESS
-        || real_volume_tests() != ExitCode::SUCCESS
-    {
+/// `ci [--full] [--bench 이름,…] [--base 기준] [--only 부분,…]`: 형식 검사 → lint → 빌드 → 테스트 → 공장 스크립트
+/// 시험(바뀌었을 때만) → 실제 볼륨 테스트 → 벤치마크(바뀐 곳에 닿는 것만). `--full`이면 공장 스크립트 시험과
+/// 벤치마크를 모두 돌린다. 고르는 판단은 `ci_select`.
+fn run_ci(rest: &[String]) -> ExitCode {
+    let options = match ci_select::CiOptions::parse(rest) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("xtask ci: {e}\n\n{USAGE}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let parts = options.parts;
+    let mut steps = Vec::new();
+    if parts.lint {
+        steps.extend(lint_steps());
+    }
+    if parts.test {
+        steps.extend(build_test_steps());
+    }
+    if run_steps("ci", &steps) != ExitCode::SUCCESS {
         return ExitCode::FAILURE;
     }
-    run_steps("ci", &bench_steps())
+    // 바뀐 파일은 공장 스크립트 시험이나 벤치마크를 고를 때만 모은다. 모으지 못하면 모두 돌린다.
+    let changed = if options.full || !(parts.factory || parts.bench) {
+        None
+    } else {
+        match changed_files(&options.base) {
+            Ok(files) => Some(files),
+            Err(e) => {
+                println!(
+                    "\n=== xtask ci: {}와 견준 바뀐 파일을 모으지 못해 모두 돌림: {e} ===",
+                    options.base
+                );
+                None
+            }
+        }
+    };
+    if parts.factory {
+        let run = match &changed {
+            None => true,
+            Some(files) => ci_select::touches_factory(files),
+        };
+        if !run {
+            println!(
+                "\n=== xtask ci: 공장 스크립트 시험: .github/factory/·.github/workflows/factory-*가 바뀌지 않아 건너뜀 ==="
+            );
+        } else if factory_script_tests() != ExitCode::SUCCESS {
+            return ExitCode::FAILURE;
+        }
+    }
+    if parts.test && real_volume_tests() != ExitCode::SUCCESS {
+        return ExitCode::FAILURE;
+    }
+    if !parts.bench {
+        println!("\nxtask ci: 모든 단계 통과");
+        return ExitCode::SUCCESS;
+    }
+    let (names, why) = match &changed {
+        None => (
+            ci_select::BENCHES.to_vec(),
+            if options.full {
+                "--full".to_owned()
+            } else {
+                "바뀐 파일을 모르므로 모두".to_owned()
+            },
+        ),
+        Some(files) => {
+            let selection = ci_select::select_benches(files);
+            let mut names = selection.benches;
+            let mut why = Vec::new();
+            if !selection.reasons.is_empty() {
+                why.push(selection.reasons.join(", "));
+            }
+            if !options.benches.is_empty() {
+                why.push(format!("--bench {}", options.benches.join(",")));
+            }
+            for b in &options.benches {
+                if !names.contains(b) {
+                    names.push(*b);
+                }
+            }
+            names.sort_by_key(|n| ci_select::BENCHES.iter().position(|b| b == n));
+            if why.is_empty() {
+                why.push(format!(
+                    "{}와 견준 바뀐 파일 {}개 가운데 벤치마크에 닿는 것 없음",
+                    options.base,
+                    files.len()
+                ));
+            }
+            (names, why.join("; "))
+        }
+    };
+    if names.is_empty() {
+        println!("\n=== xtask ci: 벤치마크 0개 고름 ({why}) ===");
+        println!("\nxtask ci: 모든 단계 통과");
+        return ExitCode::SUCCESS;
+    }
+    println!(
+        "\n=== xtask ci: 벤치마크 {}개 고름: {} ({why}) ===",
+        names.len(),
+        names.join(", ")
+    );
+    run_steps("ci", &bench_steps_named(&names))
+}
+
+/// `base`와 `HEAD`의 merge-base에서 지금 작업 트리까지 바뀐 파일(커밋하지 않은 변경과 무시하지 않는 새 파일 포함),
+/// 작업 공간 루트 기준 `/` 구분 경로.
+fn changed_files(base: &str) -> Result<Vec<String>, String> {
+    let git = |args: &[&str]| -> Result<String, String> {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(workspace_root())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| format!("git을 실행하지 못함: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "git {}: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let merge_base = git(&["merge-base", base, "HEAD"])?;
+    let merge_base = merge_base.trim();
+    let mut files: Vec<String> = git(&["diff", "--name-only", "--no-renames", merge_base])?
+        .lines()
+        .chain(git(&["ls-files", "--others", "--exclude-standard"])?.lines())
+        .map(str::to_owned)
+        .filter(|l| !l.is_empty())
+        .collect();
+    files.sort();
+    files.dedup();
+    Ok(files)
 }
 
 /// 공장 스크립트 시험: `bash .github/factory/test.sh`(가짜 `gh`로 공장의 셸 스크립트를 시험한다,
@@ -248,7 +387,8 @@ xtask ci: 시험 VHD를 만들지 못함: {e}"
     run_steps("ci", &[test])
 }
 
-fn ci_steps() -> Vec<Step> {
+/// 형식 검사와 lint.
+fn lint_steps() -> Vec<Step> {
     vec![
         step("형식 검사", &["fmt", "--all", "--check"]),
         step(
@@ -263,6 +403,13 @@ fn ci_steps() -> Vec<Step> {
                 "warnings",
             ],
         ),
+    ]
+}
+
+/// 빌드와 테스트. `build --all-targets`가 테스트 실행 파일까지 만들어 `test`는 컴파일 없이 돈다(같은 dev
+/// 프로필·feature라 산출물을 함께 쓴다). clippy는 `check` 산출물(rmeta)이라 빌드와 나눠 쓰지 못한다.
+fn build_test_steps() -> Vec<Step> {
+    vec![
         step(
             "빌드",
             &["build", "--workspace", "--all-targets", "--locked"],
@@ -310,22 +457,31 @@ fn other_volume_dir() -> Option<PathBuf> {
 }
 
 fn bench_steps() -> Vec<Step> {
-    vec![
-        bench_step(),
-        index_bench_step(),
-        mft_bench_step(),
-        session_bench_step(),
-        clipboard_bench_step(),
-        menu_bench_step(),
-        batch_rename_bench_step(),
-        filter_bench_step(),
-        query_syntax_bench_step(),
-        search_bench_step(),
-        content_bench_step(),
-        copy_bench_step(),
-        delete_bench_step(),
-        batch_rename_run_bench_step(),
-    ]
+    bench_steps_named(&ci_select::BENCHES)
+}
+
+/// 이름(`ci_select::BENCHES`)으로 고른 벤치마크 단계, 넘긴 차례대로.
+fn bench_steps_named(names: &[&str]) -> Vec<Step> {
+    names
+        .iter()
+        .map(|name| match *name {
+            "list" => bench_step(),
+            "index" => index_bench_step(),
+            "mft" => mft_bench_step(),
+            "session" => session_bench_step(),
+            "clipboard" => clipboard_bench_step(),
+            "menu" => menu_bench_step(),
+            "batch-rename" => batch_rename_bench_step(),
+            "filter" => filter_bench_step(),
+            "query-syntax" => query_syntax_bench_step(),
+            "search" => search_bench_step(),
+            "content" => content_bench_step(),
+            "copy" => copy_bench_step(),
+            "delete" => delete_bench_step(),
+            "batch-rename-run" => batch_rename_run_bench_step(),
+            other => unreachable!("ci_select::BENCHES에 없는 벤치마크: {other}"),
+        })
+        .collect()
 }
 
 /// 릴리스 빌드한 `facet-bench`를 `cargo run`으로 부르는 인자.

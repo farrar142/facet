@@ -80,6 +80,7 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::InstantUnderFolder => "현재 폴더 아래만",
         CommandId::DetailsView | CommandId::GridView(_) => todo!("#327"),
         CommandId::ClearThumbnailCache => todo!("#330"),
+        CommandId::OpenWith | CommandId::Properties => todo!("#321"),
     }
 }
 
