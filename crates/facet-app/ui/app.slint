@@ -13,6 +13,9 @@ export struct Row {
     // 파일 종류별 아이콘(코어 캐시에서 얻은 것). 없으면 `has-icon`이 거짓이고 내장 아이콘을 그린다.
     has-icon: bool,
     icon: image,
+    // 그리드 칸의 썸네일(코어가 UI 밖에서 만든 것). 없으면 `has-thumb`가 거짓이고 종류별 아이콘을 그린다.
+    has-thumb: bool,
+    thumb: image,
     modified: string,
     kind: string,
     size: string,
@@ -2044,10 +2047,24 @@ component PanelView inherits Rectangle {
                                 width: root.grid-side;
                                 height: root.grid-side;
                                 opacity: cell.cut ? 0.45 : 1.0;
-                                ItemIcon {
+                                if cell.has-thumb: Rectangle {
+                                    // 투명한 그림이 바탕과 구분되게 밝은 회색 바탕과 테두리 위에 그린다.
+                                    background: #d9d9d9;
+                                    border-width: 1px;
+                                    border-color: #a0a0a0;
+                                    Image {
+                                        width: parent.width;
+                                        height: parent.height;
+                                        source: cell.thumb;
+                                        image-fit: contain;
+                                    }
+                                }
+                                if !cell.has-thumb: ItemIcon {
                                     x: (parent.width - 16px) / 2;
                                     y: (parent.height - 16px) / 2;
                                     folder: cell.folder;
+                                    has-icon: cell.has-icon;
+                                    icon: cell.icon;
                                     transform-scale: root.grid-side / 24px;
                                 }
                             }

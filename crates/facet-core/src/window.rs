@@ -55,12 +55,12 @@
 //! ([`Update::Search`]). 탭이 다른 곳으로 가거나 닫히면(창 닫기 포함) 탭이 피드를 버려 탐색이 멈춘다. facet이 한
 //! 작업(이름바꾸기, 삭제·휴지통 삭제·이동, 그 실행취소·다시 실행)은 끝날 때 모든 검색 결과 탭에 반영한다.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -95,8 +95,11 @@ use crate::tab::{
     ChangeOutcome, ClosedTab, CompletionId, CompletionResult, FilterResult, InstantReply,
     Navigation, ReadOutcome, ReadRequest, ReadResult, Retarget, Tab,
 };
-use crate::thumbnail::{Thumbnail, ThumbnailError};
-use crate::thumbnail_cache::CacheLimits;
+use crate::thumbnail::{
+    DecodeLimits, Thumbnail, ThumbnailError, ThumbnailKey, ThumbnailPlan, make_thumbnail_with, plan,
+};
+use crate::thumbnail_cache::{CacheLimits, ThumbnailCache};
+use crate::thumbnail_queue::{ThumbnailQueue, worker_count};
 use crate::view::GridSpans;
 use crate::watch::ChangeBatch;
 use crate::work_area::WorkArea;
@@ -407,6 +410,13 @@ enum Message {
         id: SubfoldersId,
         list: Result<Subfolders, SubfoldersError>,
     },
+    Thumbnail {
+        tab: TabId,
+        path: PathBuf,
+        side: u32,
+        result: Result<Arc<Thumbnail>, ThumbnailError>,
+        from_cache: bool,
+    },
     Edited {
         tab: TabId,
         result: Result<Edited, EditError>,
@@ -502,8 +512,134 @@ pub struct ThumbnailOptions {
 
 impl ThumbnailOptions {
     /// #330: 그 캐시 폴더와 기본 상한·작업자 수의 설정.
-    pub fn new(_cache_dir: impl Into<PathBuf>) -> ThumbnailOptions {
-        todo!("#330")
+    pub fn new(cache_dir: impl Into<PathBuf>) -> ThumbnailOptions {
+        ThumbnailOptions {
+            cache_dir: cache_dir.into(),
+            limits: CacheLimits::default(),
+            workers: worker_count(thread::available_parallelism().map_or(2, |n| n.get())),
+        }
+    }
+}
+
+/// 썸네일 작업자들이 나눠 쓰는 것.
+struct ThumbShared {
+    options: ThumbnailOptions,
+    /// 처음 쓸 때 연다(작업자 스레드에서). 열지 못하면 캐시 없이 만든다.
+    cache: OnceLock<Option<Arc<ThumbnailCache>>>,
+    /// 캐시에서 꺼낸 결과의 키(결과를 넘길 때 `from_cache`가 되고 지운다).
+    hits: Mutex<HashSet<ThumbnailKey>>,
+    /// 온라인 전용이라 캐시에서만 쓰는 키.
+    cache_only: Mutex<HashSet<ThumbnailKey>>,
+    /// 캐시를 비우는 중이면 참. 작업자는 끝날 때까지 기다린다.
+    clearing: (Mutex<bool>, Condvar),
+    puts: std::sync::atomic::AtomicUsize,
+}
+
+/// 캐시에 몇 번 넣을 때마다 상한을 정리한다(작업자 스레드에서).
+const THUMBNAIL_TRIM_EVERY: usize = 64;
+
+impl ThumbShared {
+    fn cache(&self) -> Option<&Arc<ThumbnailCache>> {
+        self.cache
+            .get_or_init(|| {
+                ThumbnailCache::open(&self.options.cache_dir, self.options.limits)
+                    .ok()
+                    .map(Arc::new)
+            })
+            .as_ref()
+    }
+
+    fn make(
+        &self,
+        key: &ThumbnailKey,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<Thumbnail, ThumbnailError> {
+        {
+            let (lock, cvar) = &self.clearing;
+            let mut clearing = lock.lock().unwrap_or_else(|e| e.into_inner());
+            while *clearing {
+                clearing = cvar.wait(clearing).unwrap_or_else(|e| e.into_inner());
+            }
+        }
+        let cache = self.cache();
+        if let Some(found) = cache.and_then(|c| c.get(key)) {
+            self.hits
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(key.clone());
+            return Ok((*found).clone());
+        }
+        if self
+            .cache_only
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(key)
+        {
+            return Err(ThumbnailError::Unsupported);
+        }
+        let thumbnail = make_thumbnail_with(&key.path, key.side, &DecodeLimits::default(), cancel)?;
+        if let Some(cache) = cache {
+            let _ = cache.put(key, Arc::new(thumbnail.clone()));
+            let puts = self.puts.fetch_add(1, Ordering::Relaxed) + 1;
+            if puts.is_multiple_of(THUMBNAIL_TRIM_EVERY) {
+                let _ = cache.trim();
+            }
+        }
+        Ok(thumbnail)
+    }
+}
+
+/// 켠 썸네일: 요청 대기열과 탭마다 마지막으로 요청한 범위.
+struct Thumbs {
+    shared: Arc<ThumbShared>,
+    queue: Arc<ThumbnailQueue>,
+    last: HashMap<TabId, GridSpans>,
+}
+
+impl Thumbs {
+    fn new(options: ThumbnailOptions, outbox: &Outbox) -> Thumbs {
+        let shared = Arc::new(ThumbShared {
+            options,
+            cache: OnceLock::new(),
+            hits: Mutex::default(),
+            cache_only: Mutex::default(),
+            clearing: (Mutex::new(false), Condvar::new()),
+            puts: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let queue = Self::queue(&shared, outbox);
+        Thumbs {
+            shared,
+            queue,
+            last: HashMap::new(),
+        }
+    }
+
+    fn queue(shared: &Arc<ThumbShared>, outbox: &Outbox) -> Arc<ThumbnailQueue> {
+        let maker = Arc::clone(shared);
+        let queue = Arc::new(ThumbnailQueue::new(shared.options.workers, move |k, c| {
+            maker.make(k, c)
+        }));
+        let weak: Weak<ThumbnailQueue> = Arc::downgrade(&queue);
+        let shared = Arc::clone(shared);
+        let outbox = outbox.clone();
+        queue.set_waker(move || {
+            let Some(queue) = weak.upgrade() else { return };
+            for done in queue.poll() {
+                let from_cache = shared
+                    .hits
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&done.key);
+                outbox.send(Message::Thumbnail {
+                    tab: TabId(done.owner),
+                    path: done.key.path,
+                    side: done.key.side,
+                    result: done.result,
+                    from_cache,
+                });
+            }
+        });
+        queue
     }
 }
 
@@ -843,6 +979,8 @@ pub struct App {
     batch_preview: Arc<AtomicU64>,
     /// 하위 폴더 목록·맨 앞 목록 요청 번호(#303).
     subfolders: Arc<AtomicU64>,
+    /// 썸네일([`App::enable_thumbnails`]). 켜지 않았으면 `None`.
+    thumbnails: Option<Thumbs>,
     outbox: Outbox,
     receiver: Receiver<Message>,
 }
@@ -1055,6 +1193,7 @@ impl App {
             follow_wake: None,
             batch_preview: Arc::default(),
             subfolders: Arc::default(),
+            thumbnails: None,
             outbox: Outbox {
                 sender,
                 waker: Arc::default(),
@@ -1135,6 +1274,11 @@ impl App {
             return false;
         };
         let window = self.remove_window(w);
+        for panel in &window.panels {
+            for (tab, _) in &panel.tabs {
+                self.forget_thumbnails(*tab);
+            }
+        }
         let active = (window.active, window.panels[window.active].active);
         let mut last = None;
         let mut tabs = Vec::new();
@@ -1366,6 +1510,7 @@ impl App {
     pub fn close_tab(&mut self, id: TabId) -> Option<Closed> {
         let (w, p, t) = self.find(id)?;
         let (tab, closed) = self.take_tab(w, p, t);
+        self.forget_thumbnails(id);
         self.remember_closed(tab);
         Some(closed)
     }
@@ -1698,13 +1843,100 @@ impl App {
     }
 
     /// #330: 썸네일을 켠다(곧바로 돌아옴, 캐시는 처음 쓸 때 연다).
-    pub fn enable_thumbnails(&mut self, _options: ThumbnailOptions) {
-        todo!("#330")
+    pub fn enable_thumbnails(&mut self, options: ThumbnailOptions) {
+        self.thumbnails = Some(Thumbs::new(options, &self.outbox));
     }
 
     /// #330: 그 탭 목록의 순번 범위의 썸네일을 요청한다(크기는 탭의 칸 크기).
-    pub fn request_thumbnails(&mut self, _tab: TabId, _spans: GridSpans) {
-        todo!("#330")
+    pub fn request_thumbnails(&mut self, tab: TabId, spans: GridSpans) {
+        let Some(thumbs) = &mut self.thumbnails else {
+            return;
+        };
+        let Some((_, found)) = self
+            .windows
+            .iter()
+            .flat_map(|w| w.panels.iter())
+            .flat_map(|p| p.tabs.iter())
+            .find(|(id, _)| *id == tab)
+        else {
+            return;
+        };
+        let side = found.view().grid_size.thumbnail_side();
+        // 목록에 이미 있는 이름·크기·수정 시각으로 키를 만든다: 파일 시스템을 부르지 않는다.
+        let key_of = |index: usize| -> Option<ThumbnailKey> {
+            let item = found.get(index)?;
+            let kind = plan(item);
+            if kind == ThumbnailPlan::IconOnly {
+                return None;
+            }
+            let key = ThumbnailKey {
+                path: found.item_path(index)?,
+                side,
+                modified: item.modified,
+                file_size: item.size,
+            };
+            let mut only = thumbs
+                .shared
+                .cache_only
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if kind == ThumbnailPlan::CacheOnly {
+                only.insert(key.clone());
+            } else {
+                only.remove(&key);
+            }
+            Some(key)
+        };
+        let visible: Vec<ThumbnailKey> = spans.visible.clone().filter_map(key_of).collect();
+        let nearby: Vec<ThumbnailKey> = spans
+            .nearby
+            .clone()
+            .filter(|i| !spans.visible.contains(i))
+            .filter_map(key_of)
+            .collect();
+        thumbs.queue.want(tab.0, visible, nearby);
+        thumbs.last.insert(tab, spans);
+    }
+
+    /// 그 탭의 썸네일 요청을 모두 취소한다.
+    fn forget_thumbnails(&mut self, tab: TabId) {
+        if let Some(thumbs) = &mut self.thumbnails {
+            thumbs.queue.forget(tab.0);
+            thumbs.last.remove(&tab);
+        }
+    }
+
+    /// 「썸네일 캐시 비우기」: 메모리·디스크 캐시와 실패 기억을 비우고 보이는 칸을 다시 요청한다.
+    /// 디스크는 뒤 스레드에서 비우고 작업자는 끝날 때까지 기다린다.
+    fn clear_thumbnail_cache(&mut self) {
+        let Some(thumbs) = &mut self.thumbnails else {
+            return;
+        };
+        let shared = Arc::clone(&thumbs.shared);
+        *shared.clearing.0.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        let background = Arc::clone(&shared);
+        thread::Builder::new()
+            .name("facet-thumbnail-clear".into())
+            .spawn(move || {
+                if let Some(cache) = background.cache() {
+                    let _ = cache.clear();
+                }
+                let (lock, cvar) = &background.clearing;
+                *lock.lock().unwrap_or_else(|e| e.into_inner()) = false;
+                cvar.notify_all();
+            })
+            .expect("썸네일 캐시 비우기 스레드를 만들지 못했다");
+        // 새 대기열: 옛 대기열의 요청은 취소되고 실패 기억은 사라진다.
+        shared
+            .hits
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        thumbs.queue = Thumbs::queue(&shared, &self.outbox);
+        let last = std::mem::take(&mut thumbs.last);
+        for (tab, spans) in last {
+            self.request_thumbnails(tab, spans);
+        }
     }
 
     /// #321: 셸 확장 도우미 관리를 켠다(도우미는 첫 요청 때 뜬다).
@@ -2229,6 +2461,8 @@ impl App {
                     None => ReadOutcome::Stale,
                 };
                 if outcome == ReadOutcome::Committed {
+                    // 목록이 바뀌었다: 그 탭의 요청을 모두 취소한다. 화면이 다시 요청한다.
+                    self.forget_thumbnails(id);
                     self.start_tab_search(id);
                     self.start_instant(id);
                 }
@@ -2246,6 +2480,21 @@ impl App {
                 }
                 (id, Update::Changes(outcome))
             }
+            Message::Thumbnail {
+                tab,
+                path,
+                side,
+                result,
+                from_cache,
+            } => (
+                tab,
+                Update::Thumbnail {
+                    path,
+                    side,
+                    result,
+                    from_cache,
+                },
+            ),
             Message::Opened { tab: id, result } => {
                 let opened = result.is_ok();
                 if let Some(tab) = self.tab_mut(id) {
@@ -2704,7 +2953,10 @@ impl App {
                 self.active_tab_mut().set_view(view);
                 return Execution::Done;
             }
-            CommandId::ClearThumbnailCache => todo!("#330"),
+            CommandId::ClearThumbnailCache => {
+                self.clear_thumbnail_cache();
+                return Execution::Done;
+            }
             CommandId::InstantUnderFolder => {
                 let id = self.active_tab_id();
                 let tab = self.active_tab_mut();

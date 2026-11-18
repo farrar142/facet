@@ -173,7 +173,7 @@ pub enum CommandId {
 
 impl CommandId {
     /// 모든 명령. 명령 팔레트는 검색어가 없으면 이 순서로 보인다.
-    pub const ALL: [CommandId; 61] = [
+    pub const ALL: [CommandId; 62] = [
         CommandId::Open,
         CommandId::Back,
         CommandId::Forward,
@@ -235,6 +235,7 @@ impl CommandId {
         CommandId::GridView(GridSize::Medium),
         CommandId::GridView(GridSize::Large),
         CommandId::GridView(GridSize::ExtraLarge),
+        CommandId::ClearThumbnailCache,
     ];
 
     /// 바뀌지 않는 ID 글자. 화면 문장이 아니다.
@@ -516,7 +517,7 @@ impl CommandId {
             CommandId::StopSearch => tab.search().is_some_and(|status| status.running),
             CommandId::InstantUnderFolder => tab.instant_base().is_some(),
             CommandId::DetailsView | CommandId::GridView(_) => true,
-            CommandId::ClearThumbnailCache => todo!("#330"),
+            CommandId::ClearThumbnailCache => true,
             CommandId::OpenWith | CommandId::Properties => todo!("#321"),
             CommandId::OpenThisPc => todo!("#350"),
             CommandId::OpenRecycleBin => todo!("#352"),

@@ -418,6 +418,13 @@ pub enum ThumbnailPlan {
 }
 
 /// #330: 항목마다 계획을 정한다.
-pub fn plan(_item: &Item) -> ThumbnailPlan {
-    todo!("#330")
+pub fn plan(item: &Item) -> ThumbnailPlan {
+    if item.is_folder || !is_decodable(&item.name) {
+        ThumbnailPlan::IconOnly
+    } else if item.attributes.online_only {
+        // 내용을 읽으면 내려받기가 일어나므로 캐시에 있는 것만 쓴다.
+        ThumbnailPlan::CacheOnly
+    } else {
+        ThumbnailPlan::Decode
+    }
 }
