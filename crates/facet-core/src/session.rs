@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 use crate::Location;
 use crate::details::{Column, Direction, Sort};
 use crate::placement::{Placement, Rect};
-use crate::view::View;
+use crate::view::{GridSize, View, ViewMode};
 
 /// 세션 파일의 형식 버전. 형식을 바꾸면 올린다. 이 버전이 아닌 파일은 깨진 파일처럼 옆에 남긴다.
 pub const FORMAT_VERSION: u64 = 1;
@@ -431,6 +431,35 @@ struct PanelV1 {
 struct TabV1 {
     location: LocationV1,
     sort: SortV1,
+    /// #327: 앞선 버전 1 파일에는 없다(자세히 보기·보통).
+    #[serde(default)]
+    view: ViewV1,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct ViewV1 {
+    #[serde(default)]
+    mode: ViewModeV1,
+    #[serde(default)]
+    grid_size: GridSizeV1,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+enum ViewModeV1 {
+    #[default]
+    Details,
+    Grid,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+enum GridSizeV1 {
+    Small,
+    #[default]
+    Medium,
+    Large,
+    ExtraLarge,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -534,6 +563,18 @@ impl TabV1 {
         };
         TabV1 {
             location,
+            view: ViewV1 {
+                mode: match tab.view.mode {
+                    ViewMode::Details => ViewModeV1::Details,
+                    ViewMode::Grid => ViewModeV1::Grid,
+                },
+                grid_size: match tab.view.grid_size {
+                    GridSize::Small => GridSizeV1::Small,
+                    GridSize::Medium => GridSizeV1::Medium,
+                    GridSize::Large => GridSizeV1::Large,
+                    GridSize::ExtraLarge => GridSizeV1::ExtraLarge,
+                },
+            },
             sort: SortV1 {
                 column: match tab.sort.column {
                     Column::Name => ColumnV1::Name,
@@ -572,7 +613,18 @@ impl TabV1 {
                     DirectionV1::Descending => Direction::Descending,
                 },
             },
-            view: View::default(), // #327
+            view: View {
+                mode: match self.view.mode {
+                    ViewModeV1::Details => ViewMode::Details,
+                    ViewModeV1::Grid => ViewMode::Grid,
+                },
+                grid_size: match self.view.grid_size {
+                    GridSizeV1::Small => GridSize::Small,
+                    GridSizeV1::Medium => GridSize::Medium,
+                    GridSizeV1::Large => GridSize::Large,
+                    GridSizeV1::ExtraLarge => GridSize::ExtraLarge,
+                },
+            },
         }
     }
 }

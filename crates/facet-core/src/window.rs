@@ -97,7 +97,7 @@ use crate::tab::{
 };
 use crate::thumbnail::{Thumbnail, ThumbnailError};
 use crate::thumbnail_cache::CacheLimits;
-use crate::view::{GridSpans, View};
+use crate::view::GridSpans;
 use crate::watch::ChangeBatch;
 use crate::work_area::WorkArea;
 use crate::{Candidate, Location, provider_for};
@@ -924,6 +924,7 @@ impl App {
                     .into_iter()
                     .map(|saved| {
                         let mut tab = Tab::new(saved.location, saved.sort, self.show_hidden);
+                        tab.set_view(saved.view);
                         tab.hide();
                         (self.new_tab_id(), tab)
                     })
@@ -982,7 +983,7 @@ impl App {
                                 // 검색 결과 위치는 검색한 폴더로 남는다.
                                 location: tab.location().for_session(),
                                 sort: tab.sort(),
-                                view: View::default(), // #327
+                                view: tab.view(),
                             })
                             .collect(),
                         active_tab: panel.active,
@@ -2676,7 +2677,18 @@ impl App {
             CommandId::Filter => return Execution::Filter,
             CommandId::Search => return Execution::Search,
             CommandId::ContentSearch => return Execution::ContentSearch,
-            CommandId::DetailsView | CommandId::GridView(_) => todo!("#327"),
+            CommandId::DetailsView | CommandId::GridView(_) => {
+                let mut view = self.active_tab().view();
+                match command {
+                    CommandId::GridView(size) => {
+                        view.mode = crate::view::ViewMode::Grid;
+                        view.grid_size = size;
+                    }
+                    _ => view.mode = crate::view::ViewMode::Details,
+                }
+                self.active_tab_mut().set_view(view);
+                return Execution::Done;
+            }
             CommandId::ClearThumbnailCache => todo!("#330"),
             CommandId::InstantUnderFolder => {
                 let id = self.active_tab_id();

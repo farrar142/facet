@@ -674,3 +674,25 @@ fn 다른_위치로_가면_사각형_선택이_끝난다() {
     );
     assert!(!tab.is_marquee_active());
 }
+
+#[test]
+fn 그리드_사각형_선택은_덮은_칸의_번호만_고르고_끄는_쪽_칸에_커서를_둔다() {
+    let dir = basic();
+    let mut tab = tab_at(dir.path());
+    tab.select_only(0);
+    // Ctrl: 끌기 전 선택(d)에 더한다. 이어지지 않은 번호 1·3(a, c)과 목록 밖 번호 9는 버린다.
+    tab.begin_marquee(true);
+    tab.marquee_select_items([1, 3, 9], Some(3));
+    assert_eq!(selected(&tab), ["d", "a.txt", "c.txt"]);
+    assert_eq!(tab.cursor(), Some(3));
+    // 사각형이 줄면 끌기 전 선택과 지금 덮은 칸만 남는다.
+    tab.marquee_select_items([4], Some(4));
+    assert_eq!(selected(&tab), ["d", "e.txt"]);
+    assert_eq!(tab.cursor(), Some(4));
+    // 덮은 칸이 없으면 커서는 그대로다.
+    tab.marquee_select_items([], None);
+    assert_eq!(selected(&tab), ["d"]);
+    assert_eq!(tab.cursor(), Some(4));
+    tab.end_marquee();
+    assert!(!tab.is_marquee_active());
+}
