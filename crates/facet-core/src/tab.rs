@@ -2572,6 +2572,13 @@ impl Tab {
             .collect()
     }
 
+    /// 휴지통 위치의 모든 항목의 휴지통 안 경로(`$R...`, 필터로 가려진 것도 포함). 휴지통 비우기가 쓴다.
+    pub fn all_recycled_paths(&self) -> Vec<PathBuf> {
+        (0..self.list.len())
+            .filter_map(|i| self.list.recycled_path(i).map(Path::to_path_buf))
+            .collect()
+    }
+
     /// 커서 항목의 번호.
     pub fn cursor(&self) -> Option<usize> {
         self.cursor.as_ref().map(|(_, index)| *index)

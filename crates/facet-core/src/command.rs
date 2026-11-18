@@ -466,6 +466,7 @@ impl CommandId {
             CommandId::Delete => capabilities.recycle || capabilities.delete_permanently,
             CommandId::Properties => capabilities.properties,
             CommandId::Restore => capabilities.restore,
+            CommandId::EmptyRecycleBin => capabilities.empty,
             _ => true,
         }
     }
@@ -500,13 +501,17 @@ impl CommandId {
             | CommandId::MoveToOtherPanel
             | CommandId::CopyTo
             | CommandId::MoveTo
-            | CommandId::Delete
-            | CommandId::DeletePermanently
             | CommandId::Copy
             | CommandId::Cut => has_sources(tab),
             // 붙여넣을 곳(현재 폴더)이 실제 폴더여야 한다. 클립보드에 파일이 있는지는 앱 상태다. 검색 결과 위치에서는
             // 붙여넣을 폴더가 없어 꺼진다.
             CommandId::Paste => tab.location().file_system_path().is_some(),
+            // 휴지통 안에서도 고른 항목(없으면 커서 항목)을 영구 삭제할 수 있다.
+            CommandId::Delete | CommandId::DeletePermanently => {
+                has_sources(tab)
+                    || (in_recycle_bin(tab)
+                        && (tab.selected_items().next().is_some() || tab.cursor_item().is_some()))
+            }
             CommandId::CopyPath => has_real_items(tab),
             CommandId::Rename => has_real_items(tab) && tab.cursor_item().is_some(),
             CommandId::BatchRename => has_real_items(tab) && tab.selected_count() >= 2,
@@ -529,7 +534,8 @@ impl CommandId {
             CommandId::Restore => {
                 tab.selected_items().next().is_some() || tab.cursor_item().is_some()
             }
-            CommandId::EmptyRecycleBin => todo!("#354"),
+            // 휴지통 위치인지는 되는 일([`CommandId::is_allowed_by`])이 본다.
+            CommandId::EmptyRecycleBin => true,
             CommandId::TogglePreview => true,
             CommandId::Refresh
             | CommandId::EditAddress
@@ -638,6 +644,11 @@ impl CommandState for Window {
 /// 검색 결과 위치).
 fn has_sources(tab: &Tab) -> bool {
     has_real_items(tab) && (tab.selected_items().next().is_some() || tab.cursor_item().is_some())
+}
+
+/// 탭 위치가 휴지통인가(항목을 영구 삭제할 수 있다).
+fn in_recycle_bin(tab: &Tab) -> bool {
+    tab.location().virtual_folder() == Some(crate::location::VirtualFolder::RecycleBin)
 }
 
 /// 탭의 항목이 실제 파일 시스템 항목인가: 위치가 실제 폴더이거나 검색 결과 위치다(결과 항목은 제 폴더 경로가 있다).

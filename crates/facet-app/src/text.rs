@@ -89,7 +89,7 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::OpenThisPc => "내 PC 열기",
         CommandId::OpenRecycleBin => "휴지통 열기",
         CommandId::Restore => "복원",
-        CommandId::EmptyRecycleBin => todo!("#354"),
+        CommandId::EmptyRecycleBin => "휴지통 비우기",
         CommandId::TogglePreview => "미리보기 영역",
     }
 }
