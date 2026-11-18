@@ -168,7 +168,6 @@ const BLOCKED: [CommandId; 10] = [
 ];
 
 #[test]
-#[ignore = "#352"]
 fn recycle_bin_location_is_made_without_the_shell() {
     let recycle_bin = Location::recycle_bin();
     assert_eq!(recycle_bin, Location::recycle_bin());
@@ -181,7 +180,6 @@ fn recycle_bin_location_is_made_without_the_shell() {
 }
 
 #[test]
-#[ignore = "#352"]
 fn a_recycled_file_shows_its_name_original_location_date_and_size() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("지운 파일.txt");
@@ -217,7 +215,6 @@ fn a_recycled_file_shows_its_name_original_location_date_and_size() {
 }
 
 #[test]
-#[ignore = "#352"]
 fn address_names_go_to_the_recycle_bin() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("주소로 찾기.txt");
@@ -236,7 +233,6 @@ fn address_names_go_to_the_recycle_bin() {
 }
 
 #[test]
-#[ignore = "#352"]
 fn recycle_bins_of_other_volumes_show_in_the_same_list() {
     let Some(other) = std::env::var_os("FACET_TEST_OTHER_VOLUME_DIR") else {
         println!("건너뜀(다른 볼륨): FACET_TEST_OTHER_VOLUME_DIR이 없습니다");
@@ -263,7 +259,6 @@ fn recycle_bins_of_other_volumes_show_in_the_same_list() {
 }
 
 #[test]
-#[ignore = "#352"]
 fn sorting_by_original_location_and_date_deleted() {
     let dir = TempDir::new().unwrap();
     let first = dir.path().join("가").join("같은 이름.txt");
@@ -310,7 +305,6 @@ fn sorting_by_original_location_and_date_deleted() {
 }
 
 #[test]
-#[ignore = "#352"]
 fn the_recycle_bin_can_restore_empty_and_delete_permanently_only() {
     let dir = TempDir::new().unwrap();
     let mut app = app_at(dir.path());
@@ -328,7 +322,6 @@ fn the_recycle_bin_can_restore_empty_and_delete_permanently_only() {
 }
 
 #[test]
-#[ignore = "#352"]
 fn blocked_commands_are_not_allowed_here_and_change_nothing() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("막힌 명령.txt");
@@ -390,7 +383,6 @@ fn blocked_commands_are_not_allowed_here_and_change_nothing() {
 }
 
 #[test]
-#[ignore = "#352"]
 fn the_item_menu_keeps_its_order_and_disables_blocked_rows() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("메뉴.txt");
@@ -426,7 +418,6 @@ fn the_item_menu_keeps_its_order_and_disables_blocked_rows() {
 }
 
 #[test]
-#[ignore = "#352"]
 fn recycled_items_are_not_drag_sources() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("끌기.txt");
@@ -443,7 +434,6 @@ fn recycled_items_are_not_drag_sources() {
 }
 
 #[test]
-#[ignore = "#352"]
 fn a_recycle_bin_tab_comes_back_from_the_session() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("세션.txt");

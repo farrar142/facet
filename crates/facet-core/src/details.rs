@@ -16,8 +16,11 @@ use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::sync::Arc;
 
+use std::path::PathBuf;
+
 use crate::Item;
 use crate::file_list::format_modified_local;
+use crate::shell_provider::RecycledEntry;
 
 /// 자세히 보기의 열.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -39,9 +42,9 @@ pub enum Column {
     TotalSize,
     /// #351: 내 PC 드라이브의 남은 공간.
     FreeSpace,
-    /// #352: 휴지통 항목의 원래 위치.
+    /// 원래 위치: 휴지통 항목이 지우기 전에 든 폴더(휴지통에만 뜻이 있다). 휴지통 항목이 아니면 이름 순서다.
     OriginalLocation,
-    /// #352: 휴지통 항목의 지운 날짜.
+    /// 지운 날짜: 휴지통 항목을 지운 시각(휴지통에만 뜻이 있다). 휴지통 항목이 아니면 이름 순서다.
     DateDeleted,
 }
 
@@ -241,6 +244,18 @@ struct Entry {
     folder: Option<Folder>,
     /// 내용 검색 결과 항목이면 첫 일치 줄과 일치 수.
     hit: Option<Hit>,
+    /// 휴지통 항목이면 그 정보.
+    recycled: Option<Box<Recycled>>,
+}
+
+/// 휴지통 항목의 정보와 정렬·선택에 쓰는 값.
+#[derive(Debug, Clone)]
+struct Recycled {
+    entry: RecycledEntry,
+    /// 휴지통 안 경로(`$R...`): 같은 이름의 휴지통 항목을 가르는 선택 열쇠.
+    key: PathBuf,
+    /// 원래 폴더 경로의 자연 정렬 키(원래 위치 열 정렬).
+    folder_key: Vec<u8>,
 }
 
 /// 내용 검색 결과 항목의 일치: 첫 일치 줄과 일치 수.
@@ -266,7 +281,31 @@ impl Entry {
             extension,
             folder,
             hit: None,
+            recycled: None,
         }
+    }
+
+    fn recycled(item: Item, entry: RecycledEntry, key: PathBuf) -> Self {
+        let folder_key = entry
+            .original
+            .parent()
+            .map(|folder| natural_key(&folder.to_string_lossy()))
+            .unwrap_or_default();
+        let mut this = Self::new(item);
+        this.recycled = Some(Box::new(Recycled {
+            entry,
+            key,
+            folder_key,
+        }));
+        this
+    }
+
+    fn original_folder_key(&self) -> Option<&[u8]> {
+        self.recycled.as_ref().map(|r| r.folder_key.as_slice())
+    }
+
+    fn date_deleted(&self) -> Option<std::time::SystemTime> {
+        self.recycled.as_ref().map(|r| r.entry.deleted)
     }
 
     fn match_count(&self) -> u64 {
@@ -277,8 +316,11 @@ impl Entry {
         self.folder.as_ref().map(|folder| &*folder.key)
     }
 
-    /// 선택·커서가 이 항목을 기억하는 열쇠: 폴더 목록이면 이름, 검색 결과면 전체 경로.
+    /// 선택·커서가 이 항목을 기억하는 열쇠: 폴더 목록이면 이름, 검색 결과면 전체 경로, 휴지통 항목이면 휴지통 안 경로.
     fn selection_key(&self) -> Cow<'_, OsStr> {
+        if let Some(recycled) = &self.recycled {
+            return Cow::Borrowed(recycled.key.as_os_str());
+        }
         match &self.folder {
             None => Cow::Borrowed(self.item.name.as_os_str()),
             Some(folder) => Cow::Owned(folder.path.join(&self.item.name).into_os_string()),
@@ -287,6 +329,9 @@ impl Entry {
 
     /// 열쇠가 이 항목의 것인가. 경로를 만들지 않고 비교한다.
     fn has_key(&self, key: &OsStr) -> bool {
+        if let Some(recycled) = &self.recycled {
+            return recycled.key.as_os_str() == key;
+        }
         match &self.folder {
             None => self.item.name == key,
             Some(folder) => {
@@ -329,7 +374,8 @@ fn compare_entries(a: &Entry, b: &Entry, sort: Sort) -> Ordering {
         Column::Location => a.folder_key().cmp(&b.folder_key()),
         Column::Matches => a.match_count().cmp(&b.match_count()),
         Column::TotalSize | Column::FreeSpace => todo!("#351"),
-        Column::OriginalLocation | Column::DateDeleted => todo!("#352"),
+        Column::OriginalLocation => a.original_folder_key().cmp(&b.original_folder_key()),
+        Column::DateDeleted => a.date_deleted().cmp(&b.date_deleted()),
     };
     directed(key).then_with(|| a.compare_names(b))
 }
@@ -352,6 +398,36 @@ impl DetailsList {
         };
         list.resort();
         list
+    }
+
+    /// 휴지통의 목록: `items`와 같은 차례로 항목마다 휴지통 정보와 휴지통 안 경로(선택 열쇠, 모르면 `None`)를 받아
+    /// `sort`대로 정렬한다. `recycled`가 짧으면 남은 항목은 휴지통 정보가 없다.
+    pub(crate) fn with_recycled(
+        items: Vec<Item>,
+        recycled: Vec<Option<(RecycledEntry, PathBuf)>>,
+        sort: Sort,
+    ) -> Self {
+        let mut recycled = recycled.into_iter();
+        let mut list = DetailsList {
+            entries: items
+                .into_iter()
+                .map(|item| match recycled.next().flatten() {
+                    Some((entry, key)) => Entry::recycled(item, entry, key),
+                    None => Entry::new(item),
+                })
+                .collect(),
+            sort,
+        };
+        list.resort();
+        list
+    }
+
+    /// `index`번째 항목의 휴지통 정보(원래 경로·지운 시각). 휴지통 항목이 아니면 `None`이다.
+    pub fn recycled(&self, index: usize) -> Option<&RecycledEntry> {
+        self.entries
+            .get(index)
+            .and_then(|e| e.recycled.as_deref())
+            .map(|recycled| &recycled.entry)
     }
 
     /// 지금 정렬 기준.

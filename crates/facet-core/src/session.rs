@@ -512,6 +512,10 @@ enum ColumnV1 {
     Modified,
     Type,
     Size,
+    /// 휴지통의 원래 위치. 휴지통 탭을 되살리려고 더한 변형이라 형식 버전을 올리지 않았다(앞선 파일도 그대로 읽힌다).
+    OriginalLocation,
+    /// 휴지통의 지운 날짜(위와 같다).
+    DateDeleted,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -653,7 +657,8 @@ impl TabV1 {
                     // 버전을 올리지 않으려고 열을 더하지 않는다).
                     Column::Location | Column::Matches => ColumnV1::Name,
                     Column::TotalSize | Column::FreeSpace => todo!("#351"),
-                    Column::OriginalLocation | Column::DateDeleted => todo!("#352"),
+                    Column::OriginalLocation => ColumnV1::OriginalLocation,
+                    Column::DateDeleted => ColumnV1::DateDeleted,
                 },
                 direction: match tab.sort.direction {
                     Direction::Ascending => DirectionV1::Ascending,
@@ -687,6 +692,8 @@ impl TabV1 {
                     ColumnV1::Modified => Column::Modified,
                     ColumnV1::Type => Column::Type,
                     ColumnV1::Size => Column::Size,
+                    ColumnV1::OriginalLocation => Column::OriginalLocation,
+                    ColumnV1::DateDeleted => Column::DateDeleted,
                 },
                 direction: match self.sort.direction {
                     DirectionV1::Ascending => Direction::Ascending,

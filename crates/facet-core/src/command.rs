@@ -161,7 +161,7 @@ pub enum CommandId {
     Properties,
     /// 내 PC 열기(`open-this-pc`): 활성 탭을 내 PC로 옮긴다(보통 이동, 기록에 남음). 기본 단축키는 없고 늘 켜진다.
     OpenThisPc,
-    /// #352: 휴지통 열기(`open-recycle-bin`).
+    /// 휴지통 열기(`open-recycle-bin`): 활성 탭을 휴지통으로 옮긴다(보통 이동, 기록에 남음). 기본 단축키는 없고 늘 켜진다.
     OpenRecycleBin,
     /// #353: 복원(`restore`).
     Restore,
@@ -173,7 +173,7 @@ pub enum CommandId {
 
 impl CommandId {
     /// 모든 명령. 명령 팔레트는 검색어가 없으면 이 순서로 보인다.
-    pub const ALL: [CommandId; 64] = [
+    pub const ALL: [CommandId; 65] = [
         CommandId::Open,
         CommandId::Back,
         CommandId::Forward,
@@ -237,6 +237,7 @@ impl CommandId {
         CommandId::GridView(GridSize::Large),
         CommandId::GridView(GridSize::ExtraLarge),
         CommandId::OpenThisPc,
+        CommandId::OpenRecycleBin,
         CommandId::ClearThumbnailCache,
     ];
 
@@ -322,9 +323,9 @@ impl CommandId {
         CommandId::ALL.into_iter().find(|c| c.as_str() == id)
     }
 
-    /// 그 열로 정렬하는 명령.
-    pub fn sort_by(column: Column) -> CommandId {
-        match column {
+    /// 그 열로 정렬하는 명령. 정렬 명령이 없는 열(휴지통의 원래 위치·지운 날짜: 머리글로만 정렬한다)은 `None`이다.
+    pub fn sort_by(column: Column) -> Option<CommandId> {
+        Some(match column {
             Column::Name => CommandId::SortByName,
             Column::Modified => CommandId::SortByModified,
             Column::Type => CommandId::SortByType,
@@ -332,8 +333,8 @@ impl CommandId {
             Column::Location => CommandId::SortByLocation,
             Column::Matches => CommandId::SortByMatches,
             Column::TotalSize | Column::FreeSpace => todo!("#351"),
-            Column::OriginalLocation | Column::DateDeleted => todo!("#352"),
-        }
+            Column::OriginalLocation | Column::DateDeleted => return None,
+        })
     }
 
     /// 정렬 명령이면 그 열.
@@ -523,7 +524,7 @@ impl CommandId {
             CommandId::ClearThumbnailCache => true,
             CommandId::OpenWith | CommandId::Properties => todo!("#321"),
 
-            CommandId::OpenRecycleBin => todo!("#352"),
+            CommandId::OpenRecycleBin => true,
             CommandId::Restore => todo!("#353"),
             CommandId::EmptyRecycleBin => todo!("#354"),
             CommandId::TogglePreview => true,

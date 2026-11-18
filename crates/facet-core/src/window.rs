@@ -3119,7 +3119,7 @@ impl App {
             CommandId::Open => return self.open_cursor_item(),
             CommandId::OpenWith | CommandId::Properties => todo!("#321"),
             CommandId::OpenThisPc => Navigation::Go(Location::this_pc()),
-            CommandId::OpenRecycleBin => todo!("#352"),
+            CommandId::OpenRecycleBin => Navigation::Go(Location::recycle_bin()),
             CommandId::Restore => todo!("#353"),
             CommandId::EmptyRecycleBin => todo!("#354"),
             CommandId::TogglePreview => {
@@ -3752,8 +3752,16 @@ impl App {
     }
 
     /// 항목을 끌 때 끄는 항목: 활성 탭의 선택(목록 순서), 없으면 커서 항목 하나의 경로. 위치가 실제 폴더가 아니거나
-    /// 둘 다 없으면 `None`. 앱은 항목 위에서 누를 때 그 항목이 선택에 들게 한 뒤 부른다. 이미 가진 목록만 본다.
+    /// 둘 다 없으면 `None`. 위치의 되는 일이 복사해 오기도 이동도 아니면(휴지통) 끌기 원본이 되지 않아 `None`이다. 앱은
+    /// 항목 위에서 누를 때 그 항목이 선택에 들게 한 뒤 부른다. 이미 가진 목록만 본다.
     pub fn drag_sources(&self) -> Option<Vec<PathBuf>> {
+        if !self.has_windows() {
+            return None;
+        }
+        let capabilities = self.active_tab().capabilities();
+        if !capabilities.copy_from && !capabilities.move_items {
+            return None;
+        }
         self.selected_sources()
     }
 
