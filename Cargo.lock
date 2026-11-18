@@ -1198,6 +1198,7 @@ dependencies = [
  "facet-index",
  "facet-indexer",
  "facet-protocol",
+ "facet-shell-protocol",
  "facet-win",
  "tempfile",
 ]

@@ -46,7 +46,7 @@ const USAGE: &str = "\
                                  (Cargo.lock·xtask/·crates/facet-bench/ 등 공통 파일이면 모두, Rust 코드가 안 바뀌었으면 없음).
                                  --full: 공장 스크립트 시험과 벤치마크를 모두 돌린다
                                  --bench 이름,…: 그 벤치마크를 더 돌린다(list, index, mft, session, clipboard, menu, batch-rename,
-                                 filter, query-syntax, search, content, copy, delete, batch-rename-run, thumbnail-decode)
+                                 filter, query-syntax, search, content, copy, delete, batch-rename-run, thumbnail-decode, shell-helper)
                                  --base 기준: 바뀐 파일을 잴 기준(git 리비전)
                                  --only 부분,…: lint(형식 검사·lint), test(빌드·테스트·실제 볼륨 테스트), factory, bench 가운데 일부만
   test-folder [경로] [--count N]  N개(기본 100000) 항목이 든 시험 폴더를 만든다.
@@ -464,22 +464,23 @@ fn bench_steps() -> Vec<Step> {
 fn bench_steps_named(names: &[&str]) -> Vec<Step> {
     names
         .iter()
-        .map(|name| match *name {
-            "list" => bench_step(),
-            "index" => index_bench_step(),
-            "mft" => mft_bench_step(),
-            "session" => session_bench_step(),
-            "clipboard" => clipboard_bench_step(),
-            "menu" => menu_bench_step(),
-            "batch-rename" => batch_rename_bench_step(),
-            "filter" => filter_bench_step(),
-            "query-syntax" => query_syntax_bench_step(),
-            "search" => search_bench_step(),
-            "content" => content_bench_step(),
-            "copy" => copy_bench_step(),
-            "delete" => delete_bench_step(),
-            "batch-rename-run" => batch_rename_run_bench_step(),
-            "thumbnail-decode" => thumbnail_decode_bench_step(),
+        .flat_map(|name| match *name {
+            "list" => vec![bench_step()],
+            "index" => vec![index_bench_step()],
+            "mft" => vec![mft_bench_step()],
+            "session" => vec![session_bench_step()],
+            "clipboard" => vec![clipboard_bench_step()],
+            "menu" => vec![menu_bench_step()],
+            "batch-rename" => vec![batch_rename_bench_step()],
+            "filter" => vec![filter_bench_step()],
+            "query-syntax" => vec![query_syntax_bench_step()],
+            "search" => vec![search_bench_step()],
+            "content" => vec![content_bench_step()],
+            "copy" => vec![copy_bench_step()],
+            "delete" => vec![delete_bench_step()],
+            "batch-rename-run" => vec![batch_rename_run_bench_step()],
+            "thumbnail-decode" => vec![thumbnail_decode_bench_step()],
+            "shell-helper" => vec![shell_helper_build_step(), shell_helper_bench_step()],
             other => unreachable!("ci_select::BENCHES에 없는 벤치마크: {other}"),
         })
         .collect()
@@ -649,6 +650,35 @@ fn thumbnail_decode_bench_step() -> Step {
     Step {
         name: "썸네일 디코딩 벤치마크",
         args: facet_bench("thumbnail-decode"),
+        env: Vec::new(),
+    }
+}
+
+/// 도우미 실행 파일을 `facet-bench`와 같은 프로필(release)로 빌드해 그 옆(`target/release`)에 둔다.
+fn shell_helper_build_step() -> Step {
+    Step {
+        name: "셸 확장 도우미 빌드",
+        args: [
+            "build",
+            "--release",
+            "--locked",
+            "--quiet",
+            "-p",
+            "facet-shell-helper",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect(),
+        env: Vec::new(),
+    }
+}
+
+/// 시험용 모드 셸 확장 도우미의 메뉴 요청 왕복 시간을 잰다. 도우미 실행 파일은 `facet-bench`와 함께
+/// 같은 프로필로 빌드해 그 옆의 것을 쓴다(`bench_step`이 먼저 빌드한 `facet-bench`와 같은 폴더).
+fn shell_helper_bench_step() -> Step {
+    Step {
+        name: "셸 확장 도우미 왕복 벤치마크",
+        args: facet_bench("shell-helper"),
         env: Vec::new(),
     }
 }
