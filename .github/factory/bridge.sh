@@ -23,8 +23,14 @@
 #
 # It sends each comment it has not sent before:
 #
-#   agent-mail send --to <recipient> --task facet-factory --idempotency-key facet-factory-<comment id>
-#     --subject … --body …
+#   agent-mail send --to <recipient> --task <name>-factory --idempotency-key <name>-factory-<comment id>
+#     --subject "[<name> 공장] …" --body …
+#
+# <name> is the name part of FACTORY_REPO (owner/name), so one copy of this script serves any repository's
+# factory: run one cron line per repository with its own FACTORY_REPO and BRIDGE_TO_COORD (#380). With
+# FACTORY_REPO unset it is farrar142/facet and the task, keys, subject and state file are exactly what they
+# were before (facet-factory, facet-factory-<id>, [facet 공장], …/facet-factory-bridge/sent); changing them
+# would send every old marker again.
 #
 # The recipient depends on the kind (owner's decision 2026-11-18): a question goes to the boss
 # (BRIDGE_TO_BOSS), because only the owner decides it; every other kind (budget-spec, budget-daily, human,
@@ -37,7 +43,8 @@
 # now without sending anything (run once when installing, so old markers do not all arrive at once).
 #
 # Environment:
-#   FACTORY_REPO          owner/name (default farrar142/facet); gh must be logged in
+#   FACTORY_REPO          owner/name (default farrar142/facet); gh must be logged in. Its name part names
+#                         the task, the idempotency keys, the subject prefix and the state folder
 #   BRIDGE_TO_BOSS        recipient of questions (default sandcorp/boss)
 #   BRIDGE_TO_COORD       recipient of every other kind (default facet/coordinator)
 #   BRIDGE_TO             removed (it sent every kind to one place) and ignored: a warning is printed when
@@ -46,19 +53,21 @@
 #   AGENT_MAIL_PROFILE    agent-mail credential profile (default automation); the profile knows the server
 #   BRIDGE_LOOKBACK_DAYS  how far back to read comments (default 14)
 #   BRIDGE_SINCE          ISO 8601 time to read from instead (tests)
-#   XDG_STATE_HOME        the state file is $XDG_STATE_HOME/facet-factory-bridge/sent (default under
-#                         ~/.local/state), one comment id per line
+#   BRIDGE_STATE_DIR      folder of the state file `sent` (one comment id per line); default
+#                         $XDG_STATE_HOME/<name>-factory-bridge
+#   XDG_STATE_HOME        default ~/.local/state
 #
 # Exits 1 when a send failed (the others are still sent). Needs bash, gh, jq and agent-mail.
 set -u
 REPO=${FACTORY_REPO:-farrar142/facet}
+NAME=${REPO##*/}
 TO_BOSS=${BRIDGE_TO_BOSS:-sandcorp/boss}
 TO_COORD=${BRIDGE_TO_COORD:-facet/coordinator}
 if [ -n "${BRIDGE_TO:-}" ]; then
   echo "bridge: BRIDGE_TO is ignored; use BRIDGE_TO_BOSS (questions) and BRIDGE_TO_COORD (the rest)" >&2
 fi
 export AGENT_MAIL_PROFILE=${AGENT_MAIL_PROFILE:-automation}
-STATE_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/facet-factory-bridge
+STATE_DIR=${BRIDGE_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/$NAME-factory-bridge}
 SENT=$STATE_DIR/sent
 
 seed=false
@@ -180,8 +189,8 @@ $body
 할 일: $todo"
   to=$TO_COORD
   [ "$kind" = question ] && to=$TO_BOSS
-  if agent-mail send --to "$to" --task facet-factory --idempotency-key "facet-factory-$id" \
-    --subject "[facet 공장] $label: #$n $title" --body "$text" > /dev/null; then
+  if agent-mail send --to "$to" --task "$NAME-factory" --idempotency-key "$NAME-factory-$id" \
+    --subject "[$NAME 공장] $label: #$n $title" --body "$text" > /dev/null; then
     remember "$id"
     echo "bridge: sent $kind #$n to $to (comment $id)"
   else
