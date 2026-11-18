@@ -180,6 +180,8 @@ const TABLE: &[(&str, &[&str])] = &[
     ("crates/facet-win/src/shell_dialog.rs", &[]),
     ("crates/facet-win/src/shell_thread.rs", &[]),
     ("crates/facet-win/src/shell_folder.rs", &[]),
+    ("crates/facet-win/src/shell_menu.rs", &[]),
+    ("crates/facet-win/src/windows_shell_menu.rs", &[]),
     ("crates/facet-win/src/windows_shell_folder.rs", &[]),
     ("crates/facet-win/src/windows_shell_thread.rs", &[]),
     ("crates/facet-win/src/shell_transfer.rs", &[]),

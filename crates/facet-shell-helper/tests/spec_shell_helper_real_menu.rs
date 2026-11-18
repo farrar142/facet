@@ -99,7 +99,6 @@ fn is_alive(pid: u32) -> bool {
 }
 
 #[test]
-#[ignore = "#323"]
 fn a_file_menu_has_an_enabled_command_and_the_send_to_submenu() {
     let dir = TempDir::new().unwrap();
     let a = file(dir.path(), "보고서.txt");
@@ -115,7 +114,6 @@ fn a_file_menu_has_an_enabled_command_and_the_send_to_submenu() {
 }
 
 #[test]
-#[ignore = "#323"]
 fn several_files_get_the_send_to_submenu_too() {
     let dir = TempDir::new().unwrap();
     let a = file(dir.path(), "a.txt");
@@ -133,7 +131,6 @@ fn several_files_get_the_send_to_submenu_too() {
 }
 
 #[test]
-#[ignore = "#323"]
 fn the_folder_background_menu_has_an_enabled_command() {
     let dir = TempDir::new().unwrap();
     file(dir.path(), "a.txt");
@@ -144,7 +141,6 @@ fn the_folder_background_menu_has_an_enabled_command() {
 }
 
 #[test]
-#[ignore = "#323"]
 fn a_missing_file_fails_without_ending_the_helper() {
     let dir = TempDir::new().unwrap();
     let a = file(dir.path(), "a.txt");

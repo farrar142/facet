@@ -59,6 +59,19 @@ pub fn allow_foreground(pid: u32) {
     let _ = pid;
 }
 
+/// 이 스레드의 메시지를 돌리며 이 프로세스의 보이는 창이 `appear` 안에 나타나면 모두 사라질 때까지 기다린다(셸 메뉴
+/// 항목 실행 뒤, [`crate::shell_menu::pump_while_windows`]).
+#[cfg(windows)]
+pub(crate) fn wait_for_windows(appear: Duration) {
+    imp::wait_for_windows(appear);
+}
+
+/// 이 스레드에 쌓인 창 메시지를 모두 돌린다.
+#[cfg(windows)]
+pub(crate) fn pump_messages() {
+    imp::pump_messages();
+}
+
 #[cfg(windows)]
 mod imp {
     use std::io;
@@ -122,7 +135,7 @@ mod imp {
             unsafe { array.BindToHandler(None, &BHID_DataObject) }.map_err(|e| os_error(&e))?;
         // SAFETY: data는 살아 있는 데이터 개체다. 셸이 대화상자를 따로 띄우고 곧바로 돌아온다.
         unsafe { SHMultiFileProperties(&data, 0) }.map_err(|e| os_error(&e))?;
-        wait_for_dialog();
+        wait_for_windows(APPEAR_TIMEOUT);
         drop(data);
         Ok(())
     }
@@ -163,9 +176,9 @@ mod imp {
     }
 
     /// 이 스레드의 메시지를 돌리며 이 프로세스의 보이는 창이 나타났다 모두 사라질 때까지 기다린다. 처음 나타난 창은
-    /// 앞으로 가져온다. [`APPEAR_TIMEOUT`] 안에 나타나지 않으면 그만둔다.
-    fn wait_for_dialog() {
-        let deadline = Instant::now() + APPEAR_TIMEOUT;
+    /// 앞으로 가져온다. `appear` 안에 나타나지 않으면 그만둔다.
+    pub(crate) fn wait_for_windows(appear: std::time::Duration) {
+        let deadline = Instant::now() + appear;
         let mut seen = false;
         loop {
             pump_messages();
@@ -183,7 +196,7 @@ mod imp {
         }
     }
 
-    fn pump_messages() {
+    pub(crate) fn pump_messages() {
         let mut msg = MSG::default();
         // SAFETY: msg는 이 함수의 지역 칸이고, 이 스레드의 메시지만 꺼내 돌린다.
         while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {

@@ -42,6 +42,9 @@
 //!   `IFileOperation`으로 넣기·폴더 만들기·영구 삭제). COM STA 스레드에서만 부른다. Windows가 아니면 「지원하지 않음」이다.
 //! - [`shell_dialog`]: Windows 속성 대화상자와 「연결 프로그램」 대화상자(셸 확장 도우미만 부름, 닫힐 때까지 기다림)와
 //!   포그라운드 권한 넘기기. Windows가 아니면 「지원하지 않음」이다.
+//! - [`shell_menu`]: 셸 오른쪽 메뉴(`IContextMenu`)를 만들어 항목 트리(글자·아이콘·켜짐·하위 메뉴)로 읽고 고른 항목을
+//!   실행한다. 셸 확장을 이 프로세스에 실으므로 **셸 확장 도우미만** 부른다(ADR-0006). 죽게 한 확장을 공유 상태에 적는
+//!   처리되지 않은 예외 거르개. Windows가 아니면 메뉴를 만들 수 없다.
 //! - [`shell_copy`]: **측정 전용** 셸 복사(`IFileOperation`, 전용 스레드의 COM, 대화 없음). 탐색기 비교 측정만 부르고
 //!   앱은 부르지 않는다. Windows가 아니면 「지원하지 않음」이다.
 
@@ -64,6 +67,7 @@ pub mod recycle;
 pub mod shell_copy;
 pub mod shell_dialog;
 pub mod shell_folder;
+pub mod shell_menu;
 pub mod shell_thread;
 pub mod shell_transfer;
 pub mod single_instance;
@@ -94,6 +98,8 @@ mod windows_screen;
 mod windows_shell_copy;
 #[cfg(windows)]
 mod windows_shell_folder;
+#[cfg(windows)]
+mod windows_shell_menu;
 #[cfg(windows)]
 mod windows_shell_thread;
 #[cfg(windows)]
