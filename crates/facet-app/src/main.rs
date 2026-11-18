@@ -784,6 +784,9 @@ fn connect(ui: &AppWindow, w: WindowId) {
     ui.on_panel_pressed(move |index| with_view(w, |view| view.panel_pressed(index)));
     ui.on_split_dragged(move |ratio| with_view(w, |view| view.split_dragged(ratio)));
     ui.on_split_reset(move || with_view(w, View::split_reset));
+    ui.on_preview_width_dragged(move |width| {
+        with_view(w, |view| view.preview_width_dragged(width))
+    });
     ui.on_row_pressed(move |row, ctrl, shift| {
         with_view(w, |view| {
             view.row_pressed(row, Pick::for_click(ctrl, shift))
@@ -1343,6 +1346,8 @@ struct View {
     rename: RefCell<Option<Rename>>,
     /// 새 폴더를 만들라고 넘기고 결과를 기다리는 탭. 결과가 오면 만든 폴더의 행에 이름 입력란을 연다.
     new_folder_tab: Cell<Option<TabId>>,
+    /// 미리보기 영역에 마지막으로 옮긴 내용. 같으면 다시 만들지 않는다(큰 텍스트를 매번 줄로 나누지 않으려고).
+    preview_shown: RefCell<Option<facet_core::preview::PreviewContent>>,
     /// 주소창을 고쳐 쓰는 중이면 그 상태. 화면의 `address-editing`과 함께 바뀐다.
     address: RefCell<Option<AddressEdit>>,
     /// 필터 입력란이 열려 있으면 그 탭과 그때의 위치. 다른 탭·위치가 되면 입력란을 닫는다(코어는 위치를 바꾸면 필터를
@@ -1470,6 +1475,7 @@ impl View {
             panels,
             rename: RefCell::default(),
             new_folder_tab: Cell::new(None),
+            preview_shown: RefCell::new(None),
             address: RefCell::default(),
             candidates,
             palette: RefCell::default(),
@@ -1844,6 +1850,13 @@ impl View {
                 }
                 continue;
             }
+            if let Update::Preview(window) = update {
+                // 변경 따라가기·읽기가 끝나 영역의 내용이 바뀌었다: 그 창의 영역만 다시 그린다.
+                if *window == self.window {
+                    self.render_preview();
+                }
+                continue;
+            }
             if let Update::Subfolders { id, list } = update {
                 // 하위 폴더 목록은 요청 번호로 열린 › 메뉴가 기다리던 것인지 가른다(탭과 상관없음).
                 self.receive_subfolders(*id, list.clone());
@@ -1989,6 +2002,9 @@ impl View {
     fn render(&self) {
         let ui = &self.ui;
         self.sync_filter_bar();
+        // 선택·커서·활성 탭·패널이 바뀐 뒤 미리보기 영역을 맞춘다(입력 처리는 모두 여기로 끝난다).
+        self.app.borrow_mut().sync_preview();
+        self.render_preview();
         {
             let app = self.app.borrow();
             let Some(window) = app.window(self.window) else {
@@ -2213,6 +2229,119 @@ impl View {
             window.set_split_ratio(ratio);
         }
         self.render();
+    }
+
+    /// 미리보기 영역 경계를 끌었다: 코어가 한도 안으로 자른 폭을 그린다.
+    fn preview_width_dragged(&self, width: f32) {
+        if let Some(window) = self.app.borrow_mut().window_mut(self.window) {
+            window.set_preview_width(width);
+        }
+        self.render_preview();
+    }
+
+    /// 코어의 미리보기 내용(`App::preview`)을 영역에 옮긴다. 파일은 읽지 않는다.
+    fn render_preview(&self) {
+        use facet_core::preview::{PreviewBody, PreviewContent, TEXT_HEAD_LIMIT};
+        let ui = &self.ui;
+        let app = self.app.borrow();
+        let Some(window) = app.window(self.window) else {
+            return;
+        };
+        let pane = window.preview_pane();
+        ui.set_preview_visible(pane.visible);
+        ui.set_preview_width(pane.width);
+        let content = app.preview(self.window);
+        let mut shown = self.preview_shown.borrow_mut();
+        if shown.as_ref() == content {
+            return;
+        }
+        *shown = content.cloned();
+        let Some(content) = shown.as_ref() else {
+            return;
+        };
+        let (mut kind, mut message, mut name) = (0, String::new(), String::new());
+        let mut rows = Vec::new();
+        let mut lines: Vec<SharedString> = Vec::new();
+        let mut note = String::new();
+        let mut picture = slint::Image::default();
+        let (mut folder, mut icon) = (false, None);
+        match content {
+            PreviewContent::Nothing => message = text::preview_nothing_text(),
+            PreviewContent::Many { count, total_size } => {
+                message = format!(
+                    "{}\n{}",
+                    text::preview_many_text(*count),
+                    text::preview_total_size_text(*total_size)
+                );
+            }
+            PreviewContent::Item { path, item, body } => {
+                kind = 1;
+                name = item.name.to_string_lossy().into_owned();
+                folder = item.is_folder;
+                icon = path
+                    .parent()
+                    .and_then(|dir| icons::icon(dir, item, self.panels[0].rows.icon_size.get()));
+                let mut row = |label: &str, value: String| {
+                    rows.push(PreviewRow {
+                        label: label.into(),
+                        value: value.into(),
+                    })
+                };
+                row(
+                    text::preview_label_type(),
+                    text::file_type_text(&details::file_type(item)),
+                );
+                match body {
+                    PreviewBody::Folder { count } => row(
+                        text::preview_label_items(),
+                        text::preview_folder_count_text(*count),
+                    ),
+                    _ if !item.is_folder => row(
+                        text::preview_label_size(),
+                        file_list::format_size(item.size),
+                    ),
+                    _ => {}
+                }
+                row(
+                    text::preview_label_modified(),
+                    file_list::format_modified_local(item.modified),
+                );
+                match body {
+                    PreviewBody::Loading => message = text::preview_loading_text(),
+                    PreviewBody::Text(preview) => {
+                        kind = 2;
+                        lines = preview.text.lines().map(SharedString::from).collect();
+                        if preview.truncated {
+                            note = text::preview_truncated_text(TEXT_HEAD_LIMIT);
+                        }
+                    }
+                    PreviewBody::Image { image, .. } => {
+                        kind = 3;
+                        picture = slint::Image::from_rgba8(slint::SharedPixelBuffer::<
+                            slint::Rgba8Pixel,
+                        >::clone_from_slice(
+                            &image.rgba,
+                            image.width,
+                            image.height,
+                        ));
+                    }
+                    PreviewBody::Unavailable(problem) => {
+                        message = text::preview_problem_text(*problem).unwrap_or_default();
+                    }
+                    PreviewBody::Folder { .. } | PreviewBody::Shell(_) | PreviewBody::Info => {}
+                }
+            }
+        }
+        ui.set_preview_kind(kind);
+        ui.set_preview_message(message.into());
+        ui.set_preview_name(name.into());
+        ui.set_preview_rows(ModelRc::from(Rc::new(VecModel::from(rows))));
+        ui.set_preview_folder(folder);
+        ui.set_preview_has_icon(icon.is_some());
+        ui.set_preview_icon(icon.unwrap_or_default());
+        ui.set_preview_lines(ModelRc::from(Rc::new(VecModel::from(lines))));
+        ui.set_preview_note(note.into());
+        ui.set_preview_picture(picture);
     }
 
     /// 패널 사이 경계를 두 번 눌렀다: 반반으로 맞춘다.

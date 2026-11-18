@@ -771,6 +771,75 @@ pub fn os_error_detail(message: &str, code: i32) -> String {
     format!("{message} (0x{code:08X})")
 }
 
+/// 미리보기 영역: 선택이 없을 때의 안내.
+pub fn preview_nothing_text() -> String {
+    "미리 볼 항목을 고르세요".to_owned()
+}
+
+/// 미리보기 영역: 정보 줄의 이름표.
+pub fn preview_label_type() -> &'static str {
+    "유형"
+}
+
+/// 미리보기 영역: 정보 줄의 이름표.
+pub fn preview_label_size() -> &'static str {
+    "크기"
+}
+
+/// 미리보기 영역: 정보 줄의 이름표.
+pub fn preview_label_modified() -> &'static str {
+    "수정한 날짜"
+}
+
+/// 미리보기 영역: 정보 줄의 이름표.
+pub fn preview_label_items() -> &'static str {
+    "항목"
+}
+
+/// 미리보기 영역: 폴더의 항목 수. `None`이면 아직 세는 중이다.
+pub fn preview_folder_count_text(count: Option<u64>) -> String {
+    match count {
+        Some(count) => format!("{count}개"),
+        None => "세는 중".to_owned(),
+    }
+}
+
+/// 미리보기 영역: 여러 항목을 골랐을 때의 제목.
+pub fn preview_many_text(count: usize) -> String {
+    format!("{count}개 선택")
+}
+
+/// 미리보기 영역: 여러 항목의 크기 합.
+pub fn preview_total_size_text(total: u64) -> String {
+    format!("크기 합 {}", facet_core::file_list::format_size(total))
+}
+
+/// 미리보기 영역: 텍스트가 앞부분만 보일 때(바이트 한도를 KB로).
+pub fn preview_truncated_text(limit_bytes: usize) -> String {
+    format!("앞 {}KB만 보임", limit_bytes / 1024)
+}
+
+/// 미리보기 영역: 내용을 읽는 중.
+pub fn preview_loading_text() -> String {
+    "불러오는 중".to_owned()
+}
+
+/// 미리보기 영역: 보지 않은 이유. 정보만 보이는 까닭(`NotText`·`Unsupported`)은 `None`이다.
+pub fn preview_problem_text(problem: facet_core::preview::PreviewProblem) -> Option<String> {
+    use facet_core::preview::PreviewProblem as P;
+    let text = match problem {
+        P::OnlineOnly => "온라인 전용 항목이라 내려받지 않음",
+        P::Missing => "항목이 사라짐",
+        P::Locked => "다른 프로그램이 쓰고 있어 볼 수 없음",
+        P::AccessDenied => "권한이 없어 볼 수 없음",
+        P::Corrupt => "파일이 깨져 볼 수 없음",
+        P::TooLarge => "너무 커서 보지 않음",
+        P::NotText | P::Unsupported => return None,
+        P::Failed | P::ShellFailed | P::Io(_) => "미리 보지 못함",
+    };
+    Some(text.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
