@@ -87,6 +87,10 @@ use crate::launch::LaunchTarget;
 use crate::live_search::{LiveSearch, StartError};
 use crate::menu::{self, Menu, MenuContext, MenuKind};
 use crate::placement::Placement;
+use crate::preview::{
+    PREVIEW_WIDTH_MAX, PREVIEW_WIDTH_MIN, PreviewBody, PreviewContent, PreviewPane, PreviewRequest,
+    Previewer, load_preview,
+};
 use crate::query_syntax::{self, ParseError, Parsed, Today};
 use crate::search_results::PathChange;
 use crate::selection::Pick;
@@ -259,6 +263,8 @@ pub struct Window {
     split_ratio: f32,
     /// 화면 자리·크기·최대화. 앱이 창을 띄우고 옮길 때마다 알린다. 아직 모르면 `None`이다.
     placement: Option<Placement>,
+    /// #339: 미리보기 영역(켜짐·폭).
+    preview: PreviewPane,
 }
 
 impl Window {
@@ -269,6 +275,7 @@ impl Window {
             active: 0,
             split_ratio: SPLIT_RATIO_DEFAULT,
             placement: None,
+            preview: PreviewPane::default(),
         }
     }
 
@@ -335,18 +342,21 @@ impl Window {
     }
 
     /// #339: 창의 미리보기 영역(켜짐·폭).
-    pub fn preview_pane(&self) -> crate::preview::PreviewPane {
-        todo!("#339")
+    pub fn preview_pane(&self) -> PreviewPane {
+        self.preview
     }
 
     /// #339: 미리보기 영역을 켜고 끈다.
-    pub fn set_preview_visible(&mut self, _visible: bool) {
-        todo!("#339")
+    pub fn set_preview_visible(&mut self, visible: bool) {
+        self.preview.visible = visible;
     }
 
     /// #339: 미리보기 영역의 폭을 정한다(자른 폭을 돌려줌).
-    pub fn set_preview_width(&mut self, _width: f32) -> f32 {
-        todo!("#339")
+    pub fn set_preview_width(&mut self, width: f32) -> f32 {
+        if !width.is_nan() {
+            self.preview.width = width.clamp(PREVIEW_WIDTH_MIN, PREVIEW_WIDTH_MAX);
+        }
+        self.preview.width
     }
 
     /// 창의 화면 자리·크기·최대화(가상 화면 기준 물리 픽셀, [`crate::placement`]). 세션에 남고, 되살린 창은 이
@@ -401,6 +411,10 @@ enum Message {
         id: BatchPreviewId,
         preview: Option<Preview>,
     },
+    /// #339: 그 창의 미리보기 요청을 낼 때가 됐을 수 있다.
+    PreviewDue(WindowId),
+    /// #339: 그 창의 미리보기 요청기에 결과가 왔다.
+    PreviewReady(WindowId),
     /// 하위 폴더 목록 일꾼의 결과(#303).
     Subfolders {
         tab: TabId,
@@ -843,9 +857,26 @@ pub struct App {
     batch_preview: Arc<AtomicU64>,
     /// 하위 폴더 목록·맨 앞 목록 요청 번호(#303).
     subfolders: Arc<AtomicU64>,
+    /// #339: 창마다 미리보기 영역의 내용과 요청기.
+    previews: HashMap<WindowId, PreviewState>,
+    /// #339: 다음 [`App::poll`]이 [`Update::Preview`]로 알릴 창(변경 따라가기가 내용을 바꿨다).
+    preview_notes: Vec<WindowId>,
     outbox: Outbox,
     receiver: Receiver<Message>,
 }
+
+/// #339: 창 하나의 미리보기 영역 상태.
+struct PreviewState {
+    previewer: Previewer,
+    content: Option<PreviewContent>,
+    /// 지금 미리 보는 항목(경로와 요청한 항목).
+    key: Option<(PathBuf, crate::Item)>,
+    /// 미리 보던 항목이 지워졌다: 사용자가 다른 항목을 고를 때까지 「없음」 표시를 남긴다.
+    gone: bool,
+}
+
+/// #339: 미리보기 본문의 긴 변(물리 픽셀)의 기본값.
+const PREVIEW_IMAGE_SIDE: u32 = 512;
 
 impl std::fmt::Debug for App {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -944,6 +975,7 @@ impl App {
             restored.active = active_panel;
             restored.set_split_ratio(window.split_ratio);
             restored.placement = window.placement;
+            restored.preview = window.preview;
             if w <= session.active_window {
                 active = Some(self.windows.len());
             }
@@ -992,7 +1024,7 @@ impl App {
                 active_panel: window.active,
                 split_ratio: window.split_ratio,
                 placement: window.placement,
-                preview: Default::default(), // #339
+                preview: window.preview,
             })
             .collect();
         Some(Session {
@@ -1055,6 +1087,8 @@ impl App {
             follow_wake: None,
             batch_preview: Arc::default(),
             subfolders: Arc::default(),
+            previews: HashMap::new(),
+            preview_notes: Vec::new(),
             outbox: Outbox {
                 sender,
                 waker: Arc::default(),
@@ -1121,7 +1155,12 @@ impl App {
     fn push_window_with(&mut self, tab_id: TabId, tab: Tab) -> WindowId {
         let id = WindowId(self.next_window);
         self.next_window += 1;
-        self.windows.push(Window::new(id, Panel::new(tab_id, tab)));
+        let mut window = Window::new(id, Panel::new(tab_id, tab));
+        // #339: 새 창은 활성 창의 미리보기 영역(켜짐·폭)을 물려받는다.
+        if let Some(active) = self.windows.get(self.active) {
+            window.preview = active.preview;
+        }
+        self.windows.push(window);
         self.active = self.windows.len() - 1;
         id
     }
@@ -1155,6 +1194,7 @@ impl App {
     /// `w`번째 창을 목록에서 빼고 활성 창 번호를 맞춘다.
     fn remove_window(&mut self, w: usize) -> Window {
         let window = self.windows.remove(w);
+        self.previews.remove(&window.id);
         if self.active > w || (self.active == w && self.active > 0) {
             self.active -= 1;
         }
@@ -1651,6 +1691,9 @@ impl App {
         updates.extend(self.pump_indexer());
         updates.extend(self.pump_demoted());
         self.pump_follow();
+        for window in std::mem::take(&mut self.preview_notes) {
+            updates.push((self.window_tab_id(window), Update::Preview(window)));
+        }
         for id in std::mem::take(&mut self.changed_results) {
             if !updates.contains(&(id, Update::Search)) {
                 updates.push((id, Update::Search));
@@ -1718,13 +1761,213 @@ impl App {
     }
 
     /// #339: 그 창의 미리보기 영역 내용(꺼져 있으면 `None`).
-    pub fn preview(&self, _window: WindowId) -> Option<&crate::preview::PreviewContent> {
-        todo!("#339")
+    pub fn preview(&self, window: WindowId) -> Option<&PreviewContent> {
+        self.previews.get(&window)?.content.as_ref()
     }
 
     /// #339: 선택·활성 탭·패널·창이 바뀐 뒤 미리보기 영역을 맞춘다.
     pub fn sync_preview(&mut self) {
-        todo!("#339")
+        let ids: Vec<WindowId> = self.windows.iter().map(|w| w.id).collect();
+        for id in ids {
+            self.sync_preview_window(id);
+        }
+    }
+
+    fn preview_state(&mut self, window: WindowId) -> &mut PreviewState {
+        let outbox = self.outbox.clone();
+        self.previews.entry(window).or_insert_with(|| {
+            let previewer =
+                Previewer::new(|request, cancel| load_preview(request, cancel, &|_| false));
+            previewer.set_waker(move || outbox.send(Message::PreviewReady(window)));
+            PreviewState {
+                previewer,
+                content: None,
+                key: None,
+                gone: false,
+            }
+        })
+    }
+
+    fn sync_preview_window(&mut self, id: WindowId) {
+        let Some(window) = self.windows.iter().find(|w| w.id == id) else {
+            return;
+        };
+        if !window.preview.visible {
+            self.previews.remove(&id);
+            return;
+        }
+        let tab = window.active_panel().active_tab();
+        let count = tab.selected_count();
+        let single = if count == 1 {
+            tab.selected_paths()
+                .into_iter()
+                .next()
+                .zip(tab.selected_items().next().cloned())
+        } else {
+            None
+        };
+        let total: u64 = if count > 1 {
+            tab.selected_items()
+                .filter(|item| !item.is_folder)
+                .map(|item| item.size)
+                .sum()
+        } else {
+            0
+        };
+        let show_hidden = tab.show_hidden();
+        let now = Instant::now();
+        let state = self.preview_state(id);
+        match (count, single) {
+            (0, _) => {
+                // 지워진 항목의 표시는 사용자가 다른 항목을 고를 때까지 남는다.
+                if state.gone {
+                    return;
+                }
+                state.previewer.request(None, now);
+                state.key = None;
+                state.content = Some(PreviewContent::Nothing);
+            }
+            (1, Some((path, item))) => {
+                state.gone = false;
+                if state.key.as_ref() == Some(&(path.clone(), item.clone())) {
+                    return;
+                }
+                state.key = Some((path.clone(), item.clone()));
+                state.content = Some(PreviewContent::Item {
+                    path: path.clone(),
+                    item: item.clone(),
+                    body: PreviewBody::Loading,
+                });
+                state.previewer.request(
+                    Some(PreviewRequest {
+                        path,
+                        item,
+                        show_hidden,
+                        image_side: PREVIEW_IMAGE_SIDE,
+                    }),
+                    now,
+                );
+                self.schedule_preview(id);
+            }
+            _ => {
+                state.gone = false;
+                state.previewer.request(None, now);
+                state.key = None;
+                state.content = Some(PreviewContent::Many {
+                    count,
+                    total_size: total,
+                });
+            }
+        }
+    }
+
+    /// 요청을 낼 때(기다림이 끝나는 때)에 앱을 깨운다.
+    fn schedule_preview(&self, window: WindowId) {
+        let outbox = self.outbox.clone();
+        let _ = thread::Builder::new()
+            .name("facet-preview-wake".into())
+            .spawn(move || {
+                thread::sleep(crate::preview::PREVIEW_DELAY);
+                outbox.send(Message::PreviewDue(window));
+            });
+    }
+
+    /// 창의 활성 탭 번호(미리보기 알림을 실을 탭).
+    fn window_tab_id(&self, window: WindowId) -> TabId {
+        self.windows
+            .iter()
+            .find(|w| w.id == window)
+            .map_or(TabId(0), |w| w.active_panel().active_tab_id())
+    }
+
+    /// 탭 `id`의 묶은 변경이 반영된 뒤, 그 탭에서 미리 보는 항목이 바뀌었거나 지워졌는지 본다.
+    fn follow_preview(&mut self, id: TabId) {
+        let now = Instant::now();
+        let mut changes = Vec::new();
+        for window in &self.windows {
+            if !window.preview.visible || window.active_panel().active_tab_id() != id {
+                continue;
+            }
+            let Some(state) = self.previews.get(&window.id) else {
+                continue;
+            };
+            let Some((path, item)) = &state.key else {
+                continue;
+            };
+            let tab = window.active_panel().active_tab();
+            if tab.location().file_system_path() != path.parent() {
+                continue;
+            }
+            match tab.items().find(|i| i.name == item.name) {
+                None => changes.push((window.id, path.clone(), None, tab.show_hidden())),
+                Some(found) if found != item => changes.push((
+                    window.id,
+                    path.clone(),
+                    Some(found.clone()),
+                    tab.show_hidden(),
+                )),
+                Some(_) => {}
+            }
+        }
+        for (window, path, found, show_hidden) in changes {
+            let state = self.preview_state(window);
+            match found {
+                None => {
+                    let Some((_, item)) = state.key.take() else {
+                        continue;
+                    };
+                    state.previewer.request(None, now);
+                    state.gone = true;
+                    state.content = Some(PreviewContent::Item {
+                        path,
+                        item,
+                        body: PreviewBody::Unavailable(crate::preview::PreviewProblem::Missing),
+                    });
+                }
+                Some(item) => {
+                    let body = match state.content.take() {
+                        Some(PreviewContent::Item { body, .. }) => body,
+                        _ => PreviewBody::Loading,
+                    };
+                    state.key = Some((path.clone(), item.clone()));
+                    state.content = Some(PreviewContent::Item {
+                        path: path.clone(),
+                        item: item.clone(),
+                        body,
+                    });
+                    state.previewer.request(
+                        Some(PreviewRequest {
+                            path,
+                            item,
+                            show_hidden,
+                            image_side: PREVIEW_IMAGE_SIDE,
+                        }),
+                        now,
+                    );
+                    self.schedule_preview(window);
+                }
+            }
+            self.preview_notes.push(window);
+        }
+    }
+
+    /// 그 창의 미리보기 요청기가 낼 때가 됐으면 내고, 온 결과를 내용에 넣는다.
+    fn deliver_preview(&mut self, window: WindowId, due: bool) {
+        let Some(state) = self.previews.get_mut(&window) else {
+            return;
+        };
+        if due {
+            state.previewer.tick(Instant::now());
+        }
+        for done in state.previewer.poll() {
+            if state.key.as_ref() == Some(&(done.request.path.clone(), done.request.item.clone())) {
+                state.content = Some(PreviewContent::Item {
+                    path: done.request.path,
+                    item: done.request.item,
+                    body: done.body,
+                });
+            }
+        }
     }
 
     /// #341: 그 창 미리보기 영역의 긴 변(물리 픽셀).
@@ -2244,6 +2487,7 @@ impl App {
                 {
                     self.spawn_read(id, request);
                 }
+                self.follow_preview(id);
                 (id, Update::Changes(outcome))
             }
             Message::Opened { tab: id, result } => {
@@ -2307,6 +2551,14 @@ impl App {
                 let latest = self.batch_preview.load(Ordering::SeqCst) == id.0;
                 let preview = preview.filter(|_| latest);
                 (tab, Update::BatchPreview { id, preview })
+            }
+            Message::PreviewDue(window) => {
+                self.deliver_preview(window, true);
+                (self.window_tab_id(window), Update::Preview(window))
+            }
+            Message::PreviewReady(window) => {
+                self.deliver_preview(window, false);
+                (self.window_tab_id(window), Update::Preview(window))
             }
             Message::Subfolders { tab, id, list } => {
                 // 받기 전에 뒤 요청이 왔으면 목록을 버린다: 마지막 요청의 결과만 담는다.
@@ -2592,7 +2844,13 @@ impl App {
             CommandId::OpenRecycleBin => todo!("#352"),
             CommandId::Restore => todo!("#353"),
             CommandId::EmptyRecycleBin => todo!("#354"),
-            CommandId::TogglePreview => todo!("#339"),
+            CommandId::TogglePreview => {
+                let window = self.active_window_mut();
+                let visible = !window.preview.visible;
+                window.set_preview_visible(visible);
+                self.sync_preview();
+                return Execution::Done;
+            }
             CommandId::Back => Navigation::Back,
             CommandId::Forward => Navigation::Forward,
             CommandId::Up => Navigation::Up,

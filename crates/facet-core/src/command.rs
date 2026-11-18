@@ -173,7 +173,7 @@ pub enum CommandId {
 
 impl CommandId {
     /// 모든 명령. 명령 팔레트는 검색어가 없으면 이 순서로 보인다.
-    pub const ALL: [CommandId; 61] = [
+    pub const ALL: [CommandId; 62] = [
         CommandId::Open,
         CommandId::Back,
         CommandId::Forward,
@@ -206,6 +206,7 @@ impl CommandId {
         CommandId::TogglePanelSplit,
         CommandId::SwitchPanel,
         CommandId::NewWindow,
+        CommandId::TogglePreview,
         CommandId::CopyToOtherPanel,
         CommandId::MoveToOtherPanel,
         CommandId::CopyTo,
@@ -441,7 +442,7 @@ impl CommandId {
             CommandId::OpenRecycleBin => &[],                   // #352
             CommandId::Restore => &[],                          // #353
             CommandId::EmptyRecycleBin => &[],                  // #354
-            CommandId::TogglePreview => &[],                    // #339
+            CommandId::TogglePreview => const { &[key(letter('P')).alt()] },
         }
     }
 
@@ -522,7 +523,7 @@ impl CommandId {
             CommandId::OpenRecycleBin => todo!("#352"),
             CommandId::Restore => todo!("#353"),
             CommandId::EmptyRecycleBin => todo!("#354"),
-            CommandId::TogglePreview => todo!("#339"),
+            CommandId::TogglePreview => true,
             CommandId::Refresh
             | CommandId::EditAddress
             | CommandId::ToggleHidden
