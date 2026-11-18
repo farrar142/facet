@@ -63,7 +63,6 @@ fn 디코딩_측정은_회차마다_재고_남긴_것이_없다() {
 }
 
 #[test]
-#[ignore = "#328"]
 fn 캐시_읽기_상한은_기준의_10배이고_1천_건이다() {
     assert_eq!(THUMBNAIL_CACHE_READ_COUNT, 1_000);
     assert_eq!(THUMBNAIL_CACHE_READ_LIMIT, THUMBNAIL_CACHE_READ_TARGET * 10);
@@ -71,7 +70,6 @@ fn 캐시_읽기_상한은_기준의_10배이고_1천_건이다() {
 }
 
 #[test]
-#[ignore = "#328"]
 fn 캐시_읽기_중앙값이_상한을_넘으면_수치를_담아_실패한다() {
     let m = sample();
     assert!(check_thumbnail_cache_read_limit(&m, ms(200)).is_ok());
@@ -83,7 +81,6 @@ fn 캐시_읽기_중앙값이_상한을_넘으면_수치를_담아_실패한다(
 }
 
 #[test]
-#[ignore = "#328"]
 fn 캐시_읽기_측정은_건수와_회차가_맞고_남긴_것이_없다() {
     let root = TempDir::new().unwrap();
     let m = measure_thumbnail_cache_read(root.path(), 20, 2).expect("측정한다");
