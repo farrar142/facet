@@ -2435,21 +2435,45 @@ impl App {
     /// 셸 확장 도우미의 사건을 한 번 받아 미리보기(#342)와 열린 셸 메뉴(#322)에 나눠 넣는다. 둘이 같은 도우미의 사건을
     /// 함께 쓰므로 받기는 여기 한 곳에서만 한다.
     fn pump_shell_helper(&mut self) -> Vec<(TabId, Update)> {
-        let events = self
+        let (events, lost) = self
             .shell_helper
             .as_ref()
-            .map(|helper| helper.poll())
+            .map(|helper| (helper.poll(), helper.take_preview_lost()))
             .unwrap_or_default();
-        if events.is_empty() {
+        if events.is_empty() && !lost {
             return Vec::new();
         }
-        let (changed, rest) = self.deliver_shell_replies(events);
+        let (mut changed, rest) = self.deliver_shell_replies(events);
+        if lost {
+            changed.extend(self.lose_shell_previews());
+            changed.dedup();
+        }
         let mut updates: Vec<(TabId, Update)> = changed
             .into_iter()
             .map(|window| (self.window_tab_id(window), Update::Preview(window)))
             .collect();
         updates.extend(self.pump_shell_menu(rest));
         updates
+    }
+
+    /// #343: 미리보기를 그리던 도우미가 끝나 붙인 창이 사라졌다. 도우미가 그리던 미리보기를 「미리보기를 불러오지
+    /// 못함」으로 바꾸고 바뀐 창들을 돌려준다. 다음 선택은 새 도우미에 맡긴다.
+    fn lose_shell_previews(&mut self) -> Vec<WindowId> {
+        let mut changed = Vec::new();
+        for (&window, state) in &mut self.previews {
+            if !state.shell_active {
+                continue;
+            }
+            state.shell = None;
+            state.shell_active = false;
+            if let Some(PreviewContent::Item { body, .. }) = &mut state.content
+                && matches!(body, PreviewBody::Shell(_))
+            {
+                *body = PreviewBody::Unavailable(crate::preview::PreviewProblem::ShellFailed);
+                changed.push(window);
+            }
+        }
+        changed
     }
 
     /// #342: 도우미의 답을 그 미리보기에 넣는다. 지금 항목에 맡긴 요청의 답만 넣고 앞선 항목의 늦은 답은 버린다. 바뀐
