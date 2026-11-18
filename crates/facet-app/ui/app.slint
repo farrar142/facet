@@ -1958,7 +1958,7 @@ component PanelView inherits Rectangle {
                 height: floor(parent.height / root.grid-cell-height) * root.grid-cell-height;
                 vertical-scrollbar-policy: always-off;
                 horizontal-scrollbar-policy: always-off;
-                changed viewport-y => {
+                changed content-y => {
                     root.scrolled();
                 }
                 for line in ceil(root.rows.length / root.grid-columns): Rectangle {
@@ -2267,7 +2267,7 @@ component PanelView inherits Rectangle {
                 height: floor((parent.height - (parent.h-bar ? parent.bar : 0px)) / root.row-height) * root.row-height;
                 vertical-scrollbar-policy: always-off;
                 horizontal-scrollbar-policy: always-off;
-                changed viewport-y => {
+                changed content-y => {
                     root.scrolled();
                 }
                 content-height: parent.content-height;
@@ -2752,11 +2752,24 @@ component CrumbMenuView inherits Rectangle {
     drop-shadow-color: #00000060;
     // 메뉴 안을 누르면 바깥 누르기로 닫히지 않게 받는다.
     TouchArea { }
+    if list.content-height > list.height: ScrollBar {
+        x: list.x + list.width;
+        y: list.y;
+        width: ScrollBarMetrics.thickness;
+        height: list.height;
+        total: list.content-height;
+        visible-length: list.height;
+        offset: -list.content-y;
+        moved(offset) => {
+            list.content-y = -offset;
+        }
+    }
     list := ListView {
         x: 0px;
         y: 4px;
-        width: parent.width;
+        width: parent.width - (self.content-height > self.height ? ScrollBarMetrics.thickness : 0px);
         height: parent.height - 8px;
+        vertical-scrollbar-policy: always-off;
         for row[i] in root.rows: Rectangle {
             height: 28px;
             Rectangle {
@@ -3790,10 +3803,23 @@ export component AppWindow inherits Window {
             border-color: Palette.border;
             drop-shadow-blur: 6px;
             drop-shadow-color: #00000040;
+            if candidate-list.content-height > candidate-list.height: ScrollBar {
+                x: candidate-list.x + candidate-list.width;
+                y: candidate-list.y;
+                width: ScrollBarMetrics.thickness;
+                height: candidate-list.height;
+                total: candidate-list.content-height;
+                visible-length: candidate-list.height;
+                offset: -candidate-list.content-y;
+                moved(offset) => {
+                    candidate-list.content-y = -offset;
+                }
+            }
             candidate-list := ListView {
                 x: 1px;
                 y: 1px;
-                width: parent.width - 2px;
+                width: parent.width - 2px - (self.content-height > self.height ? ScrollBarMetrics.thickness : 0px);
+                vertical-scrollbar-policy: always-off;
                 height: parent.height - 2px;
                 for candidate[i] in root.candidates: Rectangle {
                     height: root.candidate-row-height;
@@ -3897,11 +3923,24 @@ export component AppWindow inherits Window {
                 vertical-alignment: center;
                 color: Palette.foreground.transparentize(40%);
             }
-            ListView {
+            if palette-list.content-height > palette-list.height: ScrollBar {
+                x: palette-list.x + palette-list.width;
+                y: palette-list.y;
+                width: ScrollBarMetrics.thickness;
+                height: palette-list.height;
+                total: palette-list.content-height;
+                visible-length: palette-list.height;
+                offset: -palette-list.content-y;
+                moved(offset) => {
+                    palette-list.content-y = -offset;
+                }
+            }
+            palette-list := ListView {
                 x: 1px;
                 y: 44px;
-                width: parent.width - 2px;
+                width: parent.width - 2px - (self.content-height > self.height ? ScrollBarMetrics.thickness : 0px);
                 height: min(root.palette-rows.length, 10) * 28px;
+                vertical-scrollbar-policy: always-off;
                 for entry[i] in root.palette-rows: Rectangle {
                     height: 28px;
                     background: i == root.palette-highlight ? Palette.selection-background
@@ -4039,10 +4078,23 @@ export component AppWindow inherits Window {
                     : root.target-transfer-problem == TransferProblem.into-itself ? @tr("폴더를 그 폴더 자신으로 보낼 수 없습니다: {}", root.target-transfer-problem-path)
                     : @tr("대상 위치가 원본 폴더 안에 있습니다: {}", root.target-transfer-problem-path);
             }
-            ListView {
+            if target-list.content-height > target-list.height: ScrollBar {
+                x: target-list.x + target-list.width;
+                y: target-list.y;
+                width: ScrollBarMetrics.thickness;
+                height: target-list.height;
+                total: target-list.content-height;
+                visible-length: target-list.height;
+                offset: -target-list.content-y;
+                moved(offset) => {
+                    target-list.content-y = -offset;
+                }
+            }
+            target-list := ListView {
                 x: 1px;
                 y: 70px + (root.target-has-problem ? 24px : 0px);
-                width: parent.width - 2px;
+                width: parent.width - 2px - (self.content-height > self.height ? ScrollBarMetrics.thickness : 0px);
+                vertical-scrollbar-policy: always-off;
                 height: min(root.target-rows.length, 11) * 28px;
                 for entry[i] in root.target-rows: Rectangle {
                     height: 28px;
@@ -4116,11 +4168,24 @@ export component AppWindow inherits Window {
                 vertical-alignment: center;
                 color: Palette.foreground.transparentize(40%);
             }
-            ListView {
+            if history-list.content-height > history-list.height: ScrollBar {
+                x: history-list.x + history-list.width;
+                y: history-list.y;
+                width: ScrollBarMetrics.thickness;
+                height: history-list.height;
+                total: history-list.content-height;
+                visible-length: history-list.height;
+                offset: -history-list.content-y;
+                moved(offset) => {
+                    history-list.content-y = -offset;
+                }
+            }
+            history-list := ListView {
                 x: 0px;
                 y: 40px;
-                width: parent.width;
+                width: parent.width - (self.content-height > self.height ? ScrollBarMetrics.thickness : 0px);
                 height: parent.height - 44px;
+                vertical-scrollbar-policy: always-off;
                 for row in root.history-rows: Rectangle {
                     height: 44px;
                     VerticalLayout {
@@ -4354,10 +4419,23 @@ export component AppWindow inherits Window {
                     clicked => { root.batch-preset-delete(); }
                 }
             }
-            ListView {
+            if preset-list.content-height > preset-list.height: ScrollBar {
+                x: preset-list.x + preset-list.width;
+                y: preset-list.y;
+                width: ScrollBarMetrics.thickness;
+                height: preset-list.height;
+                total: preset-list.content-height;
+                visible-length: preset-list.height;
+                offset: -preset-list.content-y;
+                moved(offset) => {
+                    preset-list.content-y = -offset;
+                }
+            }
+            preset-list := ListView {
                 x: 14px;
                 y: 336px;
-                width: parent.width - 28px;
+                width: parent.width - 28px - (self.content-height > self.height ? ScrollBarMetrics.thickness : 0px);
+                vertical-scrollbar-policy: always-off;
                 height: 60px;
                 for preset[i] in root.batch-presets: Rectangle {
                     height: 20px;
@@ -4377,10 +4455,23 @@ export component AppWindow inherits Window {
                     }
                 }
             }
-            ListView {
+            if batch-list.content-height > batch-list.height: ScrollBar {
+                x: batch-list.x + batch-list.width;
+                y: batch-list.y;
+                width: ScrollBarMetrics.thickness;
+                height: batch-list.height;
+                total: batch-list.content-height;
+                visible-length: batch-list.height;
+                offset: -batch-list.content-y;
+                moved(offset) => {
+                    batch-list.content-y = -offset;
+                }
+            }
+            batch-list := ListView {
                 x: 1px;
                 y: 400px;
-                width: parent.width - 2px;
+                width: parent.width - 2px - (self.content-height > self.height ? ScrollBarMetrics.thickness : 0px);
+                vertical-scrollbar-policy: always-off;
                 height: parent.height - 400px - 74px;
                 for row in root.batch-rows: Rectangle {
                     height: row.kind == BatchRowKind.problem ? 44px : 26px;
