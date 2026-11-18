@@ -460,8 +460,10 @@ fn 시작_위치를_정하지_않으면_홈_폴더를_연다() {
     assert_eq!(app.active_tab().location(), &loc(&home));
 }
 
+/// 드라이브 루트에서 위로는 내 PC로 간다(#350). 파일 시스템 공급자의 드라이브 루트에는 여전히 상위가 없다(탭이 잇는다).
+#[cfg(windows)]
 #[test]
-fn 드라이브_루트에서는_위로가_꺼진다() {
+fn 드라이브_루트에서_위로는_내_pc다() {
     let dir = tree();
     let root = dir
         .path()
@@ -469,10 +471,36 @@ fn 드라이브_루트에서는_위로가_꺼진다() {
         .last()
         .expect("루트가 있다")
         .to_path_buf();
+    assert!(
+        facet_core::provider_for(&loc(&root))
+            .parent(&loc(&root))
+            .is_none()
+    );
     let mut tab = Tab::new(loc(&root), Sort::default(), false);
+    assert!(tab.can_go_up());
+    assert!(tab.navigate(Navigation::Up).is_some());
+    assert_eq!(tab.pending_location(), Some(&Location::this_pc()));
+    let mut this_pc = Tab::new(Location::this_pc(), Sort::default(), false);
+    assert!(!this_pc.can_go_up());
+    assert!(this_pc.navigate(Navigation::Up).is_none());
+}
+
+/// 네트워크 공유 루트(UNC)는 드라이브 루트가 아니라 그대로 상위가 없다.
+#[test]
+fn 네트워크_공유_루트에서는_위로가_꺼진다() {
+    let root = Path::new(r"\\server\share\");
+    let mut tab = Tab::new(loc(root), Sort::default(), false);
     assert!(!tab.can_go_up());
     assert!(tab.navigate(Navigation::Up).is_none());
     assert!(tab.pending_location().is_none());
+}
+
+#[cfg(not(windows))]
+#[test]
+fn 루트에서는_위로가_꺼진다() {
+    let mut tab = Tab::new(loc(Path::new("/")), Sort::default(), false);
+    assert!(!tab.can_go_up());
+    assert!(tab.navigate(Navigation::Up).is_none());
 }
 
 #[test]

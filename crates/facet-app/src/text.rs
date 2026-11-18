@@ -86,12 +86,17 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::GridView(GridSize::ExtraLarge) => "그리드 보기: 아주 크게",
         CommandId::ClearThumbnailCache => todo!("#330"),
         CommandId::OpenWith | CommandId::Properties => todo!("#321"),
-        CommandId::OpenThisPc => todo!("#350"),
+        CommandId::OpenThisPc => "내 PC 열기",
         CommandId::OpenRecycleBin => todo!("#352"),
         CommandId::Restore => todo!("#353"),
         CommandId::EmptyRecycleBin => todo!("#354"),
         CommandId::TogglePreview => todo!("#339"),
     }
+}
+
+/// 가상 폴더(내 PC 등)의 목록을 흘려 받는 동안 목록 위에 보일 글자: 지금까지 읽은 항목 수.
+pub fn loading_text(count: usize) -> String {
+    format!("불러오는 중 · {count}개")
 }
 
 /// 새 폴더의 처음 이름(바탕 이름). 있으면 코어가 「새 폴더 (2)」처럼 번호를 붙인다.

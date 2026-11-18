@@ -368,6 +368,12 @@ enum Message {
         tab: TabId,
         result: Box<ReadResult>,
     },
+    /// 가상 폴더의 열거가 요청 `id`에서 지금까지 `count`개를 읽었다.
+    Loading {
+        tab: TabId,
+        id: crate::tab::RequestId,
+        count: usize,
+    },
     Changes {
         tab: TabId,
         batch: ChangeBatch,
@@ -447,6 +453,8 @@ impl Outbox {
 pub enum Update {
     /// 읽기 결과.
     Read(ReadOutcome),
+    /// 가상 폴더의 목록을 흘려 받는 중: 지금까지 읽은 항목 수가 바뀌었다([`Tab::loading`]).
+    Loading(usize),
     /// 묶은 변경. [`ChangeOutcome::Reload`]였으면 앱이 이미 다시 읽기를 시작했다.
     Changes(ChangeOutcome),
     /// 기본 프로그램으로 열기의 결과: 열었는가. 열지 못했으면 그 탭의 [`Tab::open_error`]에 까닭이 있다.
@@ -1626,10 +1634,15 @@ impl App {
     fn spawn_read(&self, tab: TabId, request: ReadRequest) {
         let outbox = self.outbox.clone();
         let changes = self.outbox.clone();
+        let loading = self.outbox.clone();
+        let id = request.id();
         let read = move || {
-            let result = request.run_watched(move |batch| {
-                changes.send(Message::Changes { tab, batch });
-            });
+            let result = request.run_streaming(
+                move |batch| {
+                    changes.send(Message::Changes { tab, batch });
+                },
+                move |count| loading.send(Message::Loading { tab, id, count }),
+            );
             outbox.send(Message::Read {
                 tab,
                 result: Box::new(result),
@@ -2234,6 +2247,22 @@ impl App {
                 }
                 (id, Update::Read(outcome))
             }
+            Message::Loading {
+                tab: id,
+                id: request,
+                count,
+            } => {
+                let noted = self
+                    .tab_mut(id)
+                    .is_some_and(|tab| tab.note_loading(request, count));
+                // 이미 결과가 왔거나 다른 곳으로 갔으면 늦은 수다: 읽기 결과로 알린 것과 같게 버린다.
+                let update = if noted {
+                    Update::Loading(count)
+                } else {
+                    Update::Read(ReadOutcome::Stale)
+                };
+                (id, update)
+            }
             Message::Changes { tab: id, batch } => {
                 let Some(tab) = self.tab_mut(id) else {
                     return (id, Update::Changes(ChangeOutcome::Stale));
@@ -2588,7 +2617,7 @@ impl App {
         let navigation = match command {
             CommandId::Open => return self.open_cursor_item(),
             CommandId::OpenWith | CommandId::Properties => todo!("#321"),
-            CommandId::OpenThisPc => todo!("#350"),
+            CommandId::OpenThisPc => Navigation::Go(Location::this_pc()),
             CommandId::OpenRecycleBin => todo!("#352"),
             CommandId::Restore => todo!("#353"),
             CommandId::EmptyRecycleBin => todo!("#354"),
@@ -2847,9 +2876,14 @@ impl App {
         };
         let path = tab.cursor_path();
         if item.is_folder {
-            // 검색 결과 항목은 제 폴더 안에 있으므로 전체 경로로 간다.
-            let navigation = match (&path, tab.location().is_search_results()) {
-                (Some(path), true) => Navigation::Go(Location::file_system(path)),
+            // 검색 결과 항목은 제 폴더 안에 있으므로 전체 경로로 간다. 가상 폴더의 항목은 실제 경로가 있으면(드라이브)
+            // 파일 시스템 공급자의 그 위치로, 없으면 그 항목의 가상 폴더로 간다.
+            let navigation = match (&path, tab.location()) {
+                (Some(path), location)
+                    if location.is_search_results() || location.virtual_folder().is_some() =>
+                {
+                    Navigation::Go(Location::file_system(path))
+                }
                 _ => Navigation::Open(item.name.clone()),
             };
             self.navigate(navigation);

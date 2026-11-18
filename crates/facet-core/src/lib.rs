@@ -46,7 +46,9 @@ pub mod work_area;
 
 pub use facet_win::OpenError;
 pub use file_system::FileSystemProvider;
-pub use location::{Attributes, Item, ListError, Location, SearchKind, SearchScope, VirtualFolder};
+pub use location::{
+    Attributes, Item, ListError, Location, SearchKind, SearchScope, ShellLocation, VirtualFolder,
+};
 pub use provider::{
     Candidate, Capabilities, PathSegment, Provider, ResolveError, Resolved, provider_for,
 };

@@ -159,7 +159,7 @@ pub enum CommandId {
     OpenWith,
     /// #321: 속성(`properties`, Alt+Enter).
     Properties,
-    /// #350: 내 PC 열기(`open-this-pc`).
+    /// 내 PC 열기(`open-this-pc`): 활성 탭을 내 PC로 옮긴다(보통 이동, 기록에 남음). 기본 단축키는 없고 늘 켜진다.
     OpenThisPc,
     /// #352: 휴지통 열기(`open-recycle-bin`).
     OpenRecycleBin,
@@ -173,7 +173,7 @@ pub enum CommandId {
 
 impl CommandId {
     /// 모든 명령. 명령 팔레트는 검색어가 없으면 이 순서로 보인다.
-    pub const ALL: [CommandId; 61] = [
+    pub const ALL: [CommandId; 62] = [
         CommandId::Open,
         CommandId::Back,
         CommandId::Forward,
@@ -235,6 +235,7 @@ impl CommandId {
         CommandId::GridView(GridSize::Medium),
         CommandId::GridView(GridSize::Large),
         CommandId::GridView(GridSize::ExtraLarge),
+        CommandId::OpenThisPc,
     ];
 
     /// 바뀌지 않는 ID 글자. 화면 문장이 아니다.
@@ -437,11 +438,11 @@ impl CommandId {
             CommandId::Paste => const { &[key(letter('V')).ctrl()] },
             CommandId::CopyPath => const { &[key(letter('C')).ctrl().shift()] },
             CommandId::OpenWith | CommandId::Properties => &[], // #321
-            CommandId::OpenThisPc => &[],                       // #350
-            CommandId::OpenRecycleBin => &[],                   // #352
-            CommandId::Restore => &[],                          // #353
-            CommandId::EmptyRecycleBin => &[],                  // #354
-            CommandId::TogglePreview => &[],                    // #339
+            CommandId::OpenThisPc => &[],
+            CommandId::OpenRecycleBin => &[],  // #352
+            CommandId::Restore => &[],         // #353
+            CommandId::EmptyRecycleBin => &[], // #354
+            CommandId::TogglePreview => &[],   // #339
         }
     }
 
@@ -468,7 +469,8 @@ impl CommandId {
     /// 탭 상태에서 지금 실행할 수 있는가.
     ///
     /// - 열기·커서 항목 선택 토글: 커서 항목이 있을 때.
-    /// - 뒤로·앞으로: 그쪽 기록이 있을 때. 위로: 상위 위치가 있을 때(드라이브 루트에서 꺼진다).
+    /// - 뒤로·앞으로: 그쪽 기록이 있을 때. 위로: 상위 위치가 있을 때(드라이브 루트에서는 내 PC로 가고, 내 PC·네트워크
+    ///   공유 루트에서 꺼진다).
     /// - 모두 선택: 보이는 항목이 있을 때.
     /// - 새 탭에서 열기: 커서 항목이 폴더일 때.
     /// - 이름 바꾸기: 커서 항목이 있고 탭 위치가 실제 폴더일 때. 새 폴더: 탭 위치가 실제 폴더일 때.
@@ -518,7 +520,7 @@ impl CommandId {
             CommandId::DetailsView | CommandId::GridView(_) => true,
             CommandId::ClearThumbnailCache => todo!("#330"),
             CommandId::OpenWith | CommandId::Properties => todo!("#321"),
-            CommandId::OpenThisPc => todo!("#350"),
+
             CommandId::OpenRecycleBin => todo!("#352"),
             CommandId::Restore => todo!("#353"),
             CommandId::EmptyRecycleBin => todo!("#354"),
@@ -546,7 +548,8 @@ impl CommandId {
             | CommandId::ShowHistory
             | CommandId::Filter
             | CommandId::Search
-            | CommandId::ContentSearch => true,
+            | CommandId::ContentSearch
+            | CommandId::OpenThisPc => true,
         }
     }
 

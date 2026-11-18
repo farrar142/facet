@@ -2026,6 +2026,11 @@ impl View {
                 address_problem_value: address_problem_value.into(),
                 address_problem_detail: address_problem_detail.into(),
                 reading: tab.is_reading(now),
+                loading_text: tab
+                    .loading()
+                    .map(text::loading_text)
+                    .unwrap_or_default()
+                    .into(),
                 list_problem,
                 list_problem_location: list_problem_location.into(),
                 list_problem_detail: list_problem_detail.into(),

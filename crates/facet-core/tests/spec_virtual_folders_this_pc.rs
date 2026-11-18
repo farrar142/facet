@@ -74,7 +74,6 @@ fn open_this_pc(dir: &TempDir) -> App {
 }
 
 #[test]
-#[ignore = "#350"]
 fn this_pc_location_is_made_without_the_shell() {
     let this_pc = Location::this_pc();
     assert_eq!(this_pc, Location::this_pc());
@@ -85,7 +84,6 @@ fn this_pc_location_is_made_without_the_shell() {
 }
 
 #[test]
-#[ignore = "#350"]
 fn the_command_opens_this_pc_with_the_system_drive() {
     let dir = TempDir::new().unwrap();
     let app = open_this_pc(&dir);
@@ -100,7 +98,6 @@ fn the_command_opens_this_pc_with_the_system_drive() {
 }
 
 #[test]
-#[ignore = "#350"]
 fn address_names_go_to_this_pc() {
     let dir = TempDir::new().unwrap();
     for text in ["내 PC", "shell:MyComputerFolder"] {
@@ -112,7 +109,6 @@ fn address_names_go_to_this_pc() {
 }
 
 #[test]
-#[ignore = "#350"]
 fn opening_a_drive_goes_to_the_file_system_root() {
     let dir = TempDir::new().unwrap();
     let mut app = open_this_pc(&dir);
@@ -135,7 +131,6 @@ fn opening_a_drive_goes_to_the_file_system_root() {
 }
 
 #[test]
-#[ignore = "#350"]
 fn up_from_a_drive_root_is_this_pc() {
     let root = Location::file_system(system_root());
     let mut app = app_at(root.clone());
@@ -154,7 +149,6 @@ fn up_from_a_drive_root_is_this_pc() {
 }
 
 #[test]
-#[ignore = "#350"]
 fn this_pc_has_one_path_segment() {
     let this_pc = Location::this_pc();
     let segments = provider_for(&this_pc).segments(&this_pc);
@@ -164,7 +158,6 @@ fn this_pc_has_one_path_segment() {
 }
 
 #[test]
-#[ignore = "#350"]
 fn this_pc_can_only_open() {
     let dir = TempDir::new().unwrap();
     let app = open_this_pc(&dir);
@@ -178,7 +171,6 @@ fn this_pc_can_only_open() {
 }
 
 #[test]
-#[ignore = "#350"]
 fn a_this_pc_tab_comes_back_from_the_session() {
     let dir = TempDir::new().unwrap();
     let app = open_this_pc(&dir);

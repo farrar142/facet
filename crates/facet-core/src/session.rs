@@ -32,10 +32,10 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::Location;
 use crate::details::{Column, Direction, Sort};
 use crate::placement::{Placement, Rect};
 use crate::view::{GridSize, View, ViewMode};
+use crate::{Location, VirtualFolder};
 
 /// 세션 파일의 형식 버전. 형식을 바꾸면 올린다. 이 버전이 아닌 파일은 깨진 파일처럼 옆에 남긴다.
 pub const FORMAT_VERSION: u64 = 1;
@@ -467,6 +467,17 @@ enum GridSizeV1 {
 enum LocationV1 {
     /// 실제 폴더의 경로. UTF-16 짝이 맞지 않는 경로는 대체 문자로 바꿔 쓴다(되살리면 사라진 위치처럼 상위로 열린다).
     FileSystem(String),
+    /// 가상 폴더(내 PC 등): 종류와 셸 항목 식별자(PIDL) 바이트의 16진 글자. 형식 버전을 올리지 않고 더한 변형이라 앞선
+    /// 파일도 그대로 읽힌다.
+    Shell { folder: FolderV1, id: String },
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum FolderV1 {
+    ThisPc,
+    RecycleBin,
+    Device,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -550,6 +561,17 @@ impl FileV1 {
     }
 }
 
+/// 16진 글자(두 글자가 한 바이트)를 바이트로. 형식이 틀리면 `None`이다.
+fn parse_hex(text: &str) -> Option<Vec<u8>> {
+    if !text.is_ascii() || !text.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&text[at..at + 2], 16).ok())
+        .collect()
+}
+
 impl TabV1 {
     fn from_tab(tab: &TabSession) -> Self {
         // 검색 결과 위치는 검색한 폴더로 남긴다(결과는 탐색 시점의 것이라 남기지 않는다).
@@ -560,6 +582,18 @@ impl TabV1 {
             Location::SearchResults(scope) => {
                 LocationV1::FileSystem(scope.folder.to_string_lossy().into_owned())
             }
+            Location::Shell(shell) => LocationV1::Shell {
+                folder: match shell.folder() {
+                    VirtualFolder::ThisPc => FolderV1::ThisPc,
+                    VirtualFolder::RecycleBin => FolderV1::RecycleBin,
+                    VirtualFolder::Device => FolderV1::Device,
+                },
+                id: shell
+                    .id()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
+            },
         };
         TabV1 {
             location,
@@ -598,6 +632,18 @@ impl TabV1 {
     fn into_tab(self) -> TabSession {
         let location = match self.location {
             LocationV1::FileSystem(path) => Location::file_system(path),
+            LocationV1::Shell { folder, id } => {
+                let folder = match folder {
+                    FolderV1::ThisPc => VirtualFolder::ThisPc,
+                    FolderV1::RecycleBin => VirtualFolder::RecycleBin,
+                    FolderV1::Device => VirtualFolder::Device,
+                };
+                match parse_hex(&id).filter(|id| facet_win::shell_folder::is_valid_id(id)) {
+                    Some(id) => Location::shell(folder, id),
+                    // 식별자가 깨졌으면 그 탭은 사용자 홈 폴더로 연다.
+                    None => crate::window::home_location(),
+                }
+            }
         };
         TabSession {
             location,

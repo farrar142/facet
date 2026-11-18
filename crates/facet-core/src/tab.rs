@@ -28,6 +28,7 @@ use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::details::{DetailsList, Sort};
@@ -92,6 +93,30 @@ pub struct ReadRequest {
     sort: Sort,
     /// 위치가 사라졌으면 가장 가까운 남은 상위(없으면 홈)를 읽는가([`Tab::reload`]).
     climb: bool,
+    /// 탭이 이 요청을 더 기다리지 않으면 선다(다른 곳으로 감·탭을 닫음). 가상 폴더의 열거가 보고 그만둔다.
+    cancel: CancelFlag,
+}
+
+/// 읽기 요청의 그만두기 표지. 요청의 같음에는 들지 않는다.
+#[derive(Debug, Clone, Default)]
+struct CancelFlag(Arc<AtomicBool>);
+
+impl PartialEq for CancelFlag {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for CancelFlag {}
+
+/// 기다리는 요청이 버려지면(다른 요청이 대신함·결과를 받음·탭을 닫음) 그 요청의 그만두기 표지를 세운다.
+#[derive(Debug)]
+struct CancelOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
 }
 
 impl ReadRequest {
@@ -108,7 +133,7 @@ impl ReadRequest {
     /// 위치의 항목 목록을 공급자로 읽고 요청의 정렬로 정렬한다. 끝날 때까지 막으므로 UI 스레드에서
     /// 부르지 않는다. 변경 감시는 걸지 않는다(탭의 [`Tab::auto_refresh`]는 [`AutoRefresh::NotWatched`]).
     pub fn run(&self) -> ReadResult {
-        self.read(None)
+        self.read(None, None)
     }
 
     /// [`ReadRequest::run`]처럼 읽되, 읽기 전에 위치의 변경 감시를 건다. 묶은 변경은 묶기 스레드에서
@@ -116,20 +141,42 @@ impl ReadRequest {
     ///
     /// 감시를 걸 수 없어도 읽기는 한다. 그러면 탭은 「자동 새로 고침 안 됨」([`AutoRefresh::Off`])이다.
     pub fn run_watched(&self, sink: impl Fn(ChangeBatch) + Send + Sync + 'static) -> ReadResult {
-        self.read(Some(Arc::new(sink)))
+        self.read(Some(Arc::new(sink)), None)
     }
 
-    fn read(&self, sink: Option<ChangeSink>) -> ReadResult {
+    /// [`ReadRequest::run_watched`]처럼 읽되, 가상 폴더(셸 공급자)의 목록을 흘려 받는 동안 묶음마다 지금까지 읽은 항목
+    /// 수를 `progress`로 알린다(읽기 스레드·셸 스레드에서). 그 수를 [`Tab::note_loading`]에 넘긴다. 다른 위치는
+    /// `progress`를 부르지 않는다. 탭이 이 요청을 더 기다리지 않으면 가상 폴더의 열거를 그만둔다.
+    pub fn run_streaming(
+        &self,
+        sink: impl Fn(ChangeBatch) + Send + Sync + 'static,
+        progress: impl Fn(usize) + Send + Sync + 'static,
+    ) -> ReadResult {
+        self.read(Some(Arc::new(sink)), Some(Arc::new(progress)))
+    }
+
+    fn read(
+        &self,
+        sink: Option<ChangeSink>,
+        progress: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+    ) -> ReadResult {
         // 감시를 먼저 건다: 읽는 사이의 변경도 놓치지 않는다.
         let attempt = |location: &Location| {
-            // 검색 결과 위치는 탐색 시점의 것이라 감시하지 않는다.
+            // 검색 결과 위치는 탐색 시점의 것이라 감시하지 않는다. 가상 폴더는 아직 감시하지 않는다.
             let watch = sink
                 .as_ref()
-                .filter(|_| !location.is_search_results())
+                .filter(|_| !location.is_search_results() && location.virtual_folder().is_none())
                 .map(|sink| watch::start(location, self.id, Arc::clone(sink)));
-            let list = provider_for(location)
-                .list(location)
-                .map(|items| DetailsList::new(items, self.sort));
+            let items = if location.virtual_folder().is_some() {
+                crate::shell_provider::list_streaming(
+                    location,
+                    progress.clone(),
+                    Arc::clone(&self.cancel.0),
+                )
+            } else {
+                provider_for(location).list(location)
+            };
+            let list = items.map(|items| DetailsList::new(items, self.sort));
             (list, watch)
         };
         let result = |location: Location, (list, watch), relocation| ReadResult {
@@ -423,7 +470,7 @@ enum Kind {
 }
 
 /// 기다리는 읽기 요청.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct Pending {
     id: RequestId,
     location: Location,
@@ -431,6 +478,12 @@ struct Pending {
     started: Instant,
     /// 위로 갈 때 방금 있던 폴더의 이름. 확정되면 그 항목을 선택하고 커서를 둔다.
     reselect: Option<OsString>,
+    /// 드라이브 루트에서 위로(내 PC) 갈 때 방금 있던 드라이브의 경로. 확정되면 그 드라이브 항목을 선택하고 커서를 둔다.
+    reselect_path: Option<PathBuf>,
+    /// 가상 폴더의 목록을 흘려 받는 중이면 지금까지 읽은 항목 수.
+    loaded: Option<usize>,
+    /// 이 요청을 버리면 그 읽기의 그만두기 표지를 세운다.
+    _cancel: CancelOnDrop,
 }
 
 /// 닫은 탭에서 되살릴 것: 위치, 뒤로·앞으로 기록, 정렬, 닫을 때의 선택·커서·스크롤. 목록은 담지 않는다
@@ -708,11 +761,22 @@ impl Tab {
         !self.forward.is_empty()
     }
 
-    /// 위로 갈 수 있는가. 드라이브 루트처럼 상위 위치가 없으면 꺼진다.
+    /// 위로 갈 수 있는가. 상위 위치가 없으면(내 PC, 네트워크 공유 루트) 꺼진다. 드라이브 루트에서는 내 PC로 간다.
     pub fn can_go_up(&self) -> bool {
+        self.up_target().is_some()
+    }
+
+    /// 위로 가면 갈 곳: 공급자의 상위 위치. 파일 시스템 공급자의 드라이브 루트(`C:\`)에는 상위가 없지만 탭은 내 PC로
+    /// 잇는다.
+    fn up_target(&self) -> Option<Location> {
         provider_for(&self.location)
             .parent(&self.location)
-            .is_some()
+            .or_else(|| {
+                self.location
+                    .file_system_path()
+                    .filter(|path| crate::shell_provider::is_drive_root(path))
+                    .map(|_| Location::this_pc())
+            })
     }
 
     /// 지금 정렬.
@@ -813,13 +877,14 @@ impl Tab {
     pub fn navigate(&mut self, navigation: Navigation) -> Option<ReadRequest> {
         let provider = provider_for(&self.location);
         let mut reselect = None;
+        let going_up = navigation == Navigation::Up;
         let (location, kind) = match navigation {
             Navigation::Go(location) => (location, Kind::New),
             Navigation::Open(name) => (provider.child(&self.location, &name), Kind::New),
             Navigation::Back => (self.back.last()?.clone(), Kind::Back),
             Navigation::Forward => (self.forward.last()?.clone(), Kind::Forward),
             Navigation::Up => {
-                let parent = provider.parent(&self.location)?;
+                let parent = self.up_target()?;
                 reselect = self
                     .location
                     .file_system_path()
@@ -832,7 +897,17 @@ impl Tab {
         self.address_error = None;
         self.relocation = None;
         self.open_error = None;
-        Some(self.request(location, kind, reselect))
+        // 드라이브 루트에서 내 PC로 올라가면 그 드라이브 항목을 고른다.
+        let reselect_path = if going_up && location.virtual_folder().is_some() {
+            self.location.file_system_path().map(Path::to_path_buf)
+        } else {
+            None
+        };
+        let request = self.request(location, kind, reselect);
+        if let Some(pending) = &mut self.pending {
+            pending.reselect_path = reselect_path;
+        }
+        Some(request)
     }
 
     fn request(
@@ -844,18 +919,24 @@ impl Tab {
         let id = RequestId(self.next_id);
         self.next_id += 1;
         self.error = None;
+        let cancel = CancelFlag::default();
+        // 앞서 기다리던 요청은 여기서 버려져 그 읽기의 그만두기 표지가 선다.
         self.pending = Some(Pending {
             id,
             location: location.clone(),
             kind,
             started: Instant::now(),
             reselect,
+            reselect_path: None,
+            loaded: location.virtual_folder().map(|_| 0),
+            _cancel: CancelOnDrop(Arc::clone(&cancel.0)),
         });
         ReadRequest {
             id,
             location,
             sort: self.sort,
             climb: kind == Kind::Reload,
+            cancel,
         }
     }
 
@@ -1012,6 +1093,7 @@ impl Tab {
         };
         let mut restored = None;
         let reselect = pending.reselect.filter(|_| pending.kind == Kind::New);
+        let reselect_path = pending.reselect_path.filter(|_| pending.kind == Kind::New);
         let moved = read_location != self.location;
         match pending.kind {
             Kind::New if pending.location != self.location => {
@@ -1112,6 +1194,12 @@ impl Tab {
         self.reindex();
         if let Some(name) = reselect
             && let Some(index) = self.position_of(&name)
+        {
+            self.select_only(index);
+        }
+        if let Some(path) = reselect_path
+            && let Some(index) =
+                (0..self.len()).find(|&i| self.item_path(i).as_deref() == Some(path.as_path()))
         {
             self.select_only(index);
         }
@@ -1241,8 +1329,12 @@ impl Tab {
         }
     }
 
-    /// 보이는 항목 `index`의 전체 경로([`Tab::folder_of`] 안의 이름). 실제 파일 시스템 항목이 아니면 `None`이다.
+    /// 보이는 항목 `index`의 전체 경로([`Tab::folder_of`] 안의 이름). 가상 폴더의 항목은 실제 경로를 가진 것(내 PC의
+    /// 드라이브)만 그 경로다. 실제 파일 시스템 항목이 아니면 `None`이다.
     pub fn item_path(&self, index: usize) -> Option<PathBuf> {
+        if self.location.virtual_folder().is_some() {
+            return crate::shell_provider::child_path(&self.location, &self.get(index)?.name);
+        }
         Some(self.folder_of(index)?.join(&self.get(index)?.name))
     }
 
@@ -2430,9 +2522,22 @@ impl Tab {
         crate::provider_for(self.location()).capabilities(self.location())
     }
 
-    /// #350: 셸 공급자 위치의 목록을 흘려 받는 중이면 지금까지 읽은 항목 수.
+    /// 셸 공급자 위치(가상 폴더)의 목록을 흘려 받는 중이면 지금까지 읽은 항목 수(화면은 「불러오는 중 · N개」), 아니면
+    /// `None`이다. 다 읽으면(결과를 받으면) `None`이다.
     pub fn loading(&self) -> Option<usize> {
-        todo!("#350")
+        self.pending.as_ref().and_then(|pending| pending.loaded)
+    }
+
+    /// 요청 `id`의 가상 폴더 열거가 지금까지 `count`개를 읽었다([`ReadRequest::run_streaming`]). 기다리는 요청이고 수가
+    /// 바뀌었으면 `true`다.
+    pub fn note_loading(&mut self, id: RequestId, count: usize) -> bool {
+        match &mut self.pending {
+            Some(pending) if pending.id == id && pending.loaded.is_some_and(|n| n < count) => {
+                pending.loaded = Some(count);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// #351: 보이는 항목 `index`가 내 PC의 드라이브면 그 용량.

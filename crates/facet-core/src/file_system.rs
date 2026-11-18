@@ -126,7 +126,14 @@ impl Provider for FileSystemProvider {
     ///
     /// 앞뒤 공백과 감싼 큰따옴표를 걷고 `%NAME%`을 환경 변수 값으로 펼친다. 끝 구분자는 있어도 없어도
     /// 같다. 전체 경로여야 한다. 폴더면 그 폴더로, 파일이면 파일을 열지 않고 그 폴더로 가서 파일을 고르게 한다.
+    /// 가상 폴더의 이름(`내 PC`·`shell:MyComputerFolder`)이면 그 위치다.
     fn resolve(&self, text: &str) -> Result<Resolved, ResolveError> {
+        if let Some(location) = crate::shell_provider::resolve_alias(text) {
+            return Ok(Resolved {
+                location,
+                select: None,
+            });
+        }
         resolve_path(parse_address(text)?)
     }
 
@@ -278,10 +285,12 @@ pub(crate) fn make_item(
 }
 
 /// 공급자가 받은 위치의 경로. 파일 시스템 공급자는 실제 폴더만 받지만, 잘못 넘어온 검색 결과 위치는 검색한 폴더로 본다.
+/// 잘못 넘어온 가상 폴더 위치는 빈 경로다(읽으면 실패한다).
 fn path_of(location: &Location) -> &Path {
     match location {
         Location::FileSystem(path) => path,
         Location::SearchResults(scope) => &scope.folder,
+        Location::Shell(_) => Path::new(""),
     }
 }
 

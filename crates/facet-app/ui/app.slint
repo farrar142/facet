@@ -90,6 +90,8 @@ export struct PanelData {
     address-problem-detail: string,
     // 「읽는 중」을 드러내는가. 코어가 읽기를 시작하고 100ms가 지나면 참이다.
     reading: bool,
+    // 가상 폴더(내 PC 등)의 목록을 흘려 받는 중이면 「불러오는 중 · N개」(앱의 text), 아니면 빈 글자. 「읽는 중」 대신 보인다.
+    loading-text: string,
     // 마지막 이동(또는 새로 고침)이 실패한 까닭과 그 위치·자세한 내용. 탭은 원래 위치에 남는다.
     list-problem: Problem,
     list-problem-location: string,
@@ -2601,7 +2603,7 @@ component PanelView inherits Rectangle {
             if root.data.reading: Rectangle {
                 background: Palette.background.transparentize(30%);
                 Text {
-                    text: @tr("읽는 중…");
+                    text: root.data.loading-text != "" ? root.data.loading-text : @tr("읽는 중…");
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }
