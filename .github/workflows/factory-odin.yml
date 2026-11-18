@@ -6,7 +6,9 @@
 # and the glossary, fixes what it can (test files, ticket bodies, the todo!("#<ticket>") stubs that make
 # the tests compile) and asks (needs-decision) when the fix would change scope or a user-visible choice.
 # The workflow then runs `cargo fmt --all --check` and `cargo clippy --all-targets -- -D warnings`
-# (the ignored tests only compile: this is the compile check). A failure goes back to the agent once in
+# (the ignored tests only compile: this is the compile check), then the acceptance probe (#414,
+# .github/factory/acceptance-probe.sh: the spec PR's ignored tests run once and must fail on an
+# assertion or a todo! stub, not on a compile error, another panic, or pass). A failure goes back to the agent once in
 # the same run; a second failure hands the spec to a human. On a pass the workflow pushes the fixes,
 # squash-merges the spec PR, labels the spec's open tickets ready-for-agent and dispatches the first
 # one (.github/factory/odin.sh).
@@ -257,6 +259,10 @@ jobs:
             cargo fmt --all --check 2>&1 | tee .factory/check.log || r=1
             cargo clippy --all-targets -- -D warnings 2>&1 | tee -a .factory/check.log || r=1
           fi
+          echo "; bash .github/factory/acceptance-probe.sh origin/$BASE" >> .factory/check-command
+          if [ $r -eq 0 ]; then
+            bash .github/factory/acceptance-probe.sh "origin/$BASE" 2>&1 | tee -a .factory/check.log || r=1
+          fi
           exit $r
 
       - name: Fix the failed checks
@@ -275,6 +281,8 @@ jobs:
             the checks in .factory/check-command, and they failed.
             Their output is in .factory/check.log (search it for "error", "warning", "FAILED", "panicked" and
             "Diff in" instead of reading it whole). Follow .github/factory/odin.md, section "Make it build".
+            A line "acceptance-probe FAILED" means an acceptance test is not red for the right reason: see
+            .github/factory/odin.md, "Acceptance probe" (the cargo output is in .factory/probe-cargo.log).
             Fix the cause (format with `cargo fmt --all`; fix the test files, the todo! stubs or a conflict you
             resolved wrongly; never weaken what a test asserts and never drop ${{ env.BASE }}'s changes), check with the
             failing command, and add what you fixed to .factory/odin-report.md.
@@ -304,6 +312,9 @@ jobs:
           else
             cargo fmt --all --check 2>&1 | tee .factory/check.log || r=1
             cargo clippy --all-targets -- -D warnings 2>&1 | tee -a .factory/check.log || r=1
+          fi
+          if [ $r -eq 0 ]; then
+            bash .github/factory/acceptance-probe.sh "origin/$BASE" 2>&1 | tee -a .factory/check.log || r=1
           fi
           exit $r
 
@@ -357,7 +368,7 @@ jobs:
               echo "### 고칠 기회를 한 번 준 뒤에도 검사 실패: \`$(cat .factory/check-command 2>/dev/null)\`"
               echo
               echo '```'
-              grep -E '^(error|warning)|Diff in|-->|FAILED|panicked' .factory/check.log 2>/dev/null | head -n 60
+              grep -E '^(error|warning)|Diff in|-->|FAILED|panicked|acceptance-probe' .factory/check.log 2>/dev/null | head -n 60
               echo '```'
               echo
               if [ "$CONFLICT" = true ]; then echo "$BASE와 충돌을 푼 파일:"; echo; files; echo; fi

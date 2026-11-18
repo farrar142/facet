@@ -67,5 +67,28 @@ eq "no failure marker" 0 "$(count '<!-- factory-implementer-failed -->')"
 eq "human marker" 1 "$(count '<!-- factory-human -->')"
 eq "quotes the block" true "$(jq '.[-1].body | contains("ADR-0003과 부딪힌다.")' "$FAKE_GH/comments-7.json" | tr -d '\r')"
 
+say_at() { # say_at <time> <body>: a comment on #7 at that time
+  jq --arg b "$2" --arg t "$1" '. + [{id: (length + 1), created_at: $t, body: $b, user: {login: "github-actions[bot]"}}]'     "$FAKE_GH/comments-7.json" | tr -d '' > "$FAKE_GH/c" && mv "$FAKE_GH/c" "$FAKE_GH/comments-7.json"
+}
+
+setup "no commits and a reason comment since the run started go to a person at once (#414)"
+say_at 2026-11-17T00:30:00Z '이전 run의 이야기'
+say_at 2026-11-17T02:10:00Z '<!-- factory-implementer-infra-failed -->
+marker, not a reason'
+say_at 2026-11-17T02:05:00Z '.github/workflows/ci.yml에 단계를 하나 더해야 한다.'
+bash "$script" 7 infra https://example.invalid/run/1 2026-11-17T02:00:00Z > /dev/null 2>&1
+eq labels ready-for-human "$(labels)"
+eq "no failure marker" 0 "$(count '<!-- factory-implementer-infra-failed -->')"
+eq "human marker" 1 "$(count '<!-- factory-human -->')"
+eq "quotes the reason" true "$(jq '.[-1].body | contains("ci.yml에 단계를")' "$FAKE_GH/comments-7.json" | tr -d '')"
+eq "not the older comment" false "$(jq '.[-1].body | contains("이전 run")' "$FAKE_GH/comments-7.json" | tr -d '')"
+
+setup "no commits without a comment since the run started counts a failure (#414)"
+say_at 2026-11-17T00:30:00Z '이전 run의 이야기'
+bash "$script" 7 infra https://example.invalid/run/1 2026-11-17T02:00:00Z > /dev/null 2>&1
+eq labels ready-for-agent "$(labels)"
+eq "failure marker" 1 "$(count '<!-- factory-implementer-infra-failed -->')"
+eq "no human marker" 0 "$(count '<!-- factory-human -->')"
+
 echo "record-failure.sh: $passes passed, $fails failed"
 [ "$fails" -eq 0 ]

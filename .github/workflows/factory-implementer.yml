@@ -392,6 +392,7 @@ jobs:
       # No commits means nothing to check: fail here instead of after the 4-minute checks
       # (runs 43909075691, 43922416562). Counts as an infrastructure failure, as before.
       - name: Require commits
+        id: commits
         if: steps.guard.outputs.go == 'true'
         run: |
           if [ "$(git rev-list --count origin/main..HEAD)" -eq 0 ]; then
@@ -539,7 +540,13 @@ jobs:
         if: failure() && steps.guard.outputs.go == 'true'
         run: |
           if [ "${{ steps.checks.outcome }}" = failure ]; then what=code; else what=infra; fi
-          bash .github/factory/record-failure.sh "$N" "$what" "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          # No commits (#414): a comment the agent left on the ticket since this run started is its
+          # reason for stopping; record-failure.sh then hands the ticket to a person without counting.
+          started=
+          if [ "${{ steps.commits.outcome }}" = failure ]; then
+            started=$(gh api "repos/$REPO/actions/runs/${{ github.run_id }}" --jq .run_started_at) || started=
+          fi
+          bash .github/factory/record-failure.sh "$N" "$what" "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" $started
 
       # Refill the tracks (#286): this run's track is free once it ends (dispatch-next.sh does not
       # count the run calling it), so the next ticket waits in the track's group for this run only.
