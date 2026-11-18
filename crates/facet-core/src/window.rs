@@ -95,6 +95,7 @@ use crate::query_syntax::{self, ParseError, Parsed, Today};
 use crate::search_results::PathChange;
 use crate::selection::Pick;
 use crate::session::{PanelSession, Session, TabSession, WindowSession};
+use crate::shell_helper::{HelperOptions, ShellHelper};
 use crate::tab::{
     ChangeOutcome, ClosedTab, CompletionId, CompletionResult, FilterResult, InstantReply,
     Navigation, ReadOutcome, ReadRequest, ReadResult, Retarget, Tab,
@@ -1012,6 +1013,9 @@ pub struct App {
     changed_results: Vec<TabId>,
     /// 인덱서 서비스 연결([`App::enable_indexer`]). 즉시 검색이 쓴다. 아직이면 `None`이고 즉시 검색은 「서비스 없음」이다.
     indexer: Option<IndexerClient>,
+    /// 셸 확장 도우미 관리([`App::enable_shell_helper`], #321). 켜지 않았는데 「속성」·「연결 프로그램」을 실행하면 기본
+    /// 설정(실행 파일 옆의 도우미)으로 켠다. 켜도 도우미는 첫 요청 때 뜬다.
+    shell_helper: Option<ShellHelper>,
     /// 즉시 검색 결과의 인덱스 변경 확인([`App::poll`])을 깨우도록 잡아 둔 시각. 잡지 않았으면 `None`이다.
     follow_wake: Option<Instant>,
     /// 마지막 일괄 이름 바꾸기 미리 보기 요청의 번호([`App::request_batch_rename_preview`]). 일꾼이 보고 앞선 요청의
@@ -1250,6 +1254,7 @@ impl App {
             cut_pastes: HashMap::new(),
             changed_results: Vec::new(),
             indexer: None,
+            shell_helper: None,
             follow_wake: None,
             batch_preview: Arc::default(),
             subfolders: Arc::default(),
@@ -2035,14 +2040,48 @@ impl App {
         }
     }
 
-    /// #321: 셸 확장 도우미 관리를 켠다(도우미는 첫 요청 때 뜬다).
-    pub fn enable_shell_helper(&mut self, _options: crate::shell_helper::HelperOptions) {
-        todo!("#321")
+    /// 셸 확장 도우미 관리를 켠다(#321). 곧바로 돌아오고 도우미는 띄우지 않는다(첫 요청 때 뜬다). 이미 켰으면 새
+    /// 설정으로 바꾼다(앞선 관리는 버려 그 도우미가 끝난다).
+    pub fn enable_shell_helper(&mut self, options: HelperOptions) {
+        self.shell_helper = Some(ShellHelper::start(options));
     }
 
-    /// #321: 켠 셸 확장 도우미 관리.
-    pub fn shell_helper(&self) -> Option<&crate::shell_helper::ShellHelper> {
-        todo!("#321")
+    /// 켠 셸 확장 도우미 관리. 켜지 않았으면 `None`.
+    pub fn shell_helper(&self) -> Option<&ShellHelper> {
+        self.shell_helper.as_ref()
+    }
+
+    /// 셸 확장 도우미 관리. 켜지 않았으면 기본 설정으로 켠다.
+    fn shell_helper_or_default(&mut self) -> &ShellHelper {
+        self.shell_helper.get_or_insert_with(|| {
+            ShellHelper::start(HelperOptions::new(crate::shell_helper::default_program()))
+        })
+    }
+
+    /// 「속성」(#321): 고른 항목(목록 순서)의 속성, 고른 항목이 없으면 현재 폴더의 속성을 셸 확장 도우미가 띄운다. 결과는
+    /// 기다리지 않는다(도우미가 띄우자마자 답하고, 대화상자는 도우미가 다룬다).
+    fn show_properties(&mut self) -> Execution {
+        let tab = self.active_tab();
+        let mut paths = tab.selected_paths();
+        if paths.is_empty()
+            && let Some(folder) = tab.location().file_system_path()
+        {
+            paths.push(folder.to_path_buf());
+        }
+        if paths.is_empty() {
+            return Execution::Disabled;
+        }
+        self.shell_helper_or_default().properties(paths);
+        Execution::Done
+    }
+
+    /// 「연결 프로그램」(#321): 커서 파일의 프로그램 고르기 대화상자를 셸 확장 도우미가 띄운다.
+    fn open_with_cursor(&mut self) -> Execution {
+        let Some(path) = self.active_tab().cursor_path() else {
+            return Execution::Disabled;
+        };
+        self.shell_helper_or_default().open_with(path);
+        Execution::Done
     }
 
     /// #339: 그 창의 미리보기 영역 내용(꺼져 있으면 `None`).
@@ -3283,7 +3322,8 @@ impl App {
         }
         let navigation = match command {
             CommandId::Open => return self.open_cursor_item(),
-            CommandId::OpenWith | CommandId::Properties => todo!("#321"),
+            CommandId::OpenWith => return self.open_with_cursor(),
+            CommandId::Properties => return self.show_properties(),
             CommandId::OpenThisPc => Navigation::Go(Location::this_pc()),
             CommandId::OpenRecycleBin => Navigation::Go(Location::recycle_bin()),
             CommandId::Restore => {

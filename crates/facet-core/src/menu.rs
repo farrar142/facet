@@ -118,8 +118,9 @@ impl Menu {
 }
 
 /// 항목 메뉴의 고정 순서. 구분선은 `None`이다.
-const ITEM_LAYOUT: [Option<CommandId>; 16] = [
+const ITEM_LAYOUT: [Option<CommandId>; 19] = [
     Some(CommandId::Open),
+    Some(CommandId::OpenWith),
     Some(CommandId::OpenInNewTab),
     None,
     Some(CommandId::Cut),
@@ -134,8 +135,10 @@ const ITEM_LAYOUT: [Option<CommandId>; 16] = [
     None,
     Some(CommandId::Rename),
     Some(CommandId::BatchRename),
-    // 셸 항목은 이 아래에 구분선을 두고 붙인다(S9).
     Some(CommandId::Delete),
+    None,
+    // 셸 항목은 이 아래에 구분선을 두고 붙인다(S9).
+    Some(CommandId::Properties),
 ];
 
 /// 정렬 하위 메뉴의 고정 순서.
@@ -190,6 +193,8 @@ pub fn build(context: &MenuContext) -> Menu {
                 c(CommandId::TogglePanelSplit),
                 MenuEntry::Separator,
                 c(CommandId::CopyPath),
+                MenuEntry::Separator,
+                c(CommandId::Properties),
             ]
         }
     };
@@ -206,6 +211,12 @@ fn command(id: CommandId, c: &MenuContext) -> MenuCommand {
     let enabled = match id {
         CommandId::Open => c.has_cursor,
         CommandId::OpenInNewTab => c.cursor_is_folder,
+        CommandId::OpenWith => real_items && c.has_cursor && !c.cursor_is_folder,
+        // 항목 메뉴는 고른 항목의 속성, 빈 곳 메뉴(선택을 푼다)는 현재 폴더의 속성이다.
+        CommandId::Properties => match c.kind {
+            MenuKind::Item => real_items && c.selected_count > 0,
+            MenuKind::Background => c.location_is_folder,
+        },
         CommandId::Cut | CommandId::Copy | CommandId::CopyTo | CommandId::MoveTo => has_sources,
         CommandId::CopyToOtherPanel | CommandId::MoveToOtherPanel => {
             has_sources && (c.panel_count < 2 || c.opposite_is_folder)

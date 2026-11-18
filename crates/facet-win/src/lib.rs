@@ -40,6 +40,8 @@
 //!   COM STA 스레드([`shell_thread`])에서만 부른다. 셸 공급자(내 PC)가 쓴다. Windows가 아니면 「지원하지 않음」이다.
 //! - [`shell_transfer`]: 셸 항목(휴대폰 등 실제 경로가 없는 항목)과 PC 사이의 파일 전송(스트림으로 읽어 파일에 쓰기,
 //!   `IFileOperation`으로 넣기·폴더 만들기·영구 삭제). COM STA 스레드에서만 부른다. Windows가 아니면 「지원하지 않음」이다.
+//! - [`shell_dialog`]: Windows 속성 대화상자와 「연결 프로그램」 대화상자(셸 확장 도우미만 부름, 닫힐 때까지 기다림)와
+//!   포그라운드 권한 넘기기. Windows가 아니면 「지원하지 않음」이다.
 //! - [`shell_copy`]: **측정 전용** 셸 복사(`IFileOperation`, 전용 스레드의 COM, 대화 없음). 탐색기 비교 측정만 부르고
 //!   앱은 부르지 않는다. Windows가 아니면 「지원하지 않음」이다.
 
@@ -60,6 +62,7 @@ pub mod preview;
 pub mod process;
 pub mod recycle;
 pub mod shell_copy;
+pub mod shell_dialog;
 pub mod shell_folder;
 pub mod shell_thread;
 pub mod shell_transfer;

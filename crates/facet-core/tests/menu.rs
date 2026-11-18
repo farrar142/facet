@@ -66,6 +66,7 @@ fn item_menu_has_the_fixed_order() {
         ids(&menu),
         vec![
             Some(Open),
+            Some(OpenWith),
             Some(OpenInNewTab),
             None,
             Some(Cut),
@@ -81,6 +82,8 @@ fn item_menu_has_the_fixed_order() {
             Some(Rename),
             Some(BatchRename),
             Some(Delete),
+            None,
+            Some(Properties),
         ]
     );
 }
@@ -108,6 +111,8 @@ fn background_menu_has_the_fixed_order_and_a_sort_submenu() {
             Some(TogglePanelSplit),
             None,
             Some(CopyPath),
+            None,
+            Some(Properties),
         ]
     );
     let MenuEntry::Submenu(sort) = &menu.entries[8] else {

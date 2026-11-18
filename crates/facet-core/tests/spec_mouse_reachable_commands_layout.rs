@@ -99,7 +99,6 @@ fn default_background_rows() -> Vec<Row> {
 }
 
 #[test]
-#[ignore = "#321"]
 fn background_menu_has_the_new_fixed_order() {
     let menu = build(&context(MenuKind::Background));
     assert_eq!(menu.kind, MenuKind::Background);
@@ -246,7 +245,6 @@ fn new_rows_have_no_mark() {
 }
 
 #[test]
-#[ignore = "#321"]
 fn item_menu_is_unchanged_by_the_new_fields() {
     use CommandId::*;
     let mut c = context(MenuKind::Item);
