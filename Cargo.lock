@@ -1261,6 +1261,7 @@ version = "0.1.0"
 dependencies = [
  "facet-core",
  "facet-shell-protocol",
+ "facet-win",
  "tempfile",
 ]
 

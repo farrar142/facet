@@ -119,7 +119,6 @@ fn wait_until_gone(pid: u32) -> bool {
 }
 
 #[test]
-#[ignore = "#319"]
 fn the_helper_is_not_started_until_the_first_request() {
     let dir = TempDir::new().unwrap();
     let a = file(dir.path(), "a.txt");
@@ -137,7 +136,6 @@ fn the_helper_is_not_started_until_the_first_request() {
 }
 
 #[test]
-#[ignore = "#319"]
 fn menu_replies_carry_the_helpers_item_tree() {
     let dir = TempDir::new().unwrap();
     let a = file(dir.path(), "a.txt");
@@ -177,7 +175,6 @@ fn menu_replies_carry_the_helpers_item_tree() {
 }
 
 #[test]
-#[ignore = "#319"]
 fn invoking_an_item_runs_it_in_the_helper() {
     let dir = TempDir::new().unwrap();
     let a = file(dir.path(), "a.txt");
@@ -202,7 +199,6 @@ fn invoking_an_item_runs_it_in_the_helper() {
 }
 
 #[test]
-#[ignore = "#319"]
 fn a_reply_slower_than_the_timeout_fails_and_the_late_reply_is_dropped() {
     let dir = TempDir::new().unwrap();
     let late = file(dir.path(), "late-1500");
@@ -237,7 +233,6 @@ fn a_reply_slower_than_the_timeout_fails_and_the_late_reply_is_dropped() {
 }
 
 #[test]
-#[ignore = "#319"]
 fn releasing_a_menu_drops_its_pending_request() {
     let dir = TempDir::new().unwrap();
     let late = file(dir.path(), "late-800");
@@ -257,7 +252,6 @@ fn releasing_a_menu_drops_its_pending_request() {
 }
 
 #[test]
-#[ignore = "#319"]
 fn a_crash_fails_every_pending_request_and_the_next_request_starts_a_new_helper() {
     let dir = TempDir::new().unwrap();
     let a = file(dir.path(), "a.txt");
@@ -299,7 +293,6 @@ fn a_crash_fails_every_pending_request_and_the_next_request_starts_a_new_helper(
 }
 
 #[test]
-#[ignore = "#319"]
 fn a_helper_with_another_protocol_version_is_not_used() {
     let dir = TempDir::new().unwrap();
     let a = file(dir.path(), "a.txt");
@@ -312,7 +305,6 @@ fn a_helper_with_another_protocol_version_is_not_used() {
 }
 
 #[test]
-#[ignore = "#319"]
 fn the_default_reply_timeout_is_two_seconds() {
     assert_eq!(REPLY_TIMEOUT, Duration::from_secs(2));
     let options = HelperOptions::new(helper_program());

@@ -16,6 +16,8 @@ workspace = true
 
 [dependencies]
 facet-shell-protocol.workspace = true
+# 파이프 연결(겹친 입출력)과 뒤 티켓의 셸 호출(`unsafe`)은 안전 래퍼 크레이트에 둔다(ADR-0002).
+facet-win.workspace = true
 
 [dev-dependencies]
 facet-core.workspace = true
