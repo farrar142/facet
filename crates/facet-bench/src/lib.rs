@@ -1022,19 +1022,145 @@ pub fn check_batch_rename_limit(m: &BatchRenameMeasurement, limit: Duration) -> 
     Ok(())
 }
 
-/// #326: 4000×3000 JPEG 하나를 보통 크기로 축소 디코딩하는 시간의 로컬 기준.
-pub const THUMBNAIL_DECODE_TARGET: Duration = Duration::ZERO; // #326
-/// #326: CI가 실패시키는 디코딩 시간 상한(기준의 10배).
-pub const THUMBNAIL_DECODE_LIMIT: Duration = Duration::ZERO; // #326
+/// #326: 시험 JPEG의 가로.
+pub const THUMBNAIL_DECODE_WIDTH: u32 = 4000;
+/// #326: 시험 JPEG의 세로.
+pub const THUMBNAIL_DECODE_HEIGHT: u32 = 3000;
+/// #326: 시험에서 요청하는 썸네일의 한 변(보통 크기).
+pub const THUMBNAIL_DECODE_SIDE: u32 = 256;
+
+/// #326: 4000×3000 JPEG 하나를 보통 크기로 축소 디코딩하는 시간의 로컬 기준. 축소 디코딩(1/8)이라 원래 크기를 다 푸는
+/// 것보다 훨씬 빨라야 하고, 화면 가득 썸네일을 채울 때 파일 하나당 이 정도면 된다는 값이다.
+pub const THUMBNAIL_DECODE_TARGET: Duration = Duration::from_millis(50);
+/// #326: CI가 실패시키는 디코딩 시간 상한(기준의 10배, 공유 러너의 편차를 견디고 축소 없이 전부 푸는 실수만 잡는다).
+pub const THUMBNAIL_DECODE_LIMIT: Duration = Duration::from_millis(500);
 
 /// #326: 디코딩 중앙값이 `limit`을 넘으면 중앙값과 상한을 담은 메시지를 돌려준다.
-pub fn check_thumbnail_decode_limit(_m: &Measurement, _limit: Duration) -> Result<(), String> {
-    todo!("#326")
+pub fn check_thumbnail_decode_limit(m: &Measurement, limit: Duration) -> Result<(), String> {
+    if m.median() > limit {
+        return Err(format!(
+            "썸네일 디코딩 상한 초과: 중앙값 {:.1}ms > 상한 {}ms (최악 {:.1}ms)",
+            m.median().as_secs_f64() * 1000.0,
+            limit.as_millis(),
+            m.max().as_secs_f64() * 1000.0
+        ));
+    }
+    Ok(())
 }
 
-/// #326: `dir`에 시험 JPEG를 만들어 한 번 데우고 `runs`회 잰다.
-pub fn measure_thumbnail_decode(_dir: &Path, _runs: usize) -> Result<Measurement, String> {
-    todo!("#326")
+/// 8×8 덩어리마다 한 색인 기준선 JPEG(DC 계수만, 양자화 표 1)를 만든다. 덩어리 색은 자리마다 달라진다.
+fn bench_jpeg(width: u32, height: u32) -> Vec<u8> {
+    fn segment(out: &mut Vec<u8>, marker: u8, data: &[u8]) {
+        out.extend_from_slice(&[0xFF, marker]);
+        out.extend_from_slice(&((data.len() + 2) as u16).to_be_bytes());
+        out.extend_from_slice(data);
+    }
+    let mut out = vec![0xFF, 0xD8];
+    let mut dqt = vec![0u8];
+    dqt.extend_from_slice(&[1; 64]);
+    segment(&mut out, 0xDB, &dqt);
+    let mut sof = vec![8];
+    sof.extend_from_slice(&(height as u16).to_be_bytes());
+    sof.extend_from_slice(&(width as u16).to_be_bytes());
+    sof.push(3);
+    for id in 1..=3u8 {
+        sof.extend_from_slice(&[id, 0x11, 0]);
+    }
+    segment(&mut out, 0xC0, &sof);
+    let mut dht = vec![0x00];
+    let mut counts = [0u8; 16];
+    counts[3] = 12;
+    dht.extend_from_slice(&counts);
+    dht.extend(0..12u8);
+    dht.push(0x10);
+    let mut counts = [0u8; 16];
+    counts[0] = 1;
+    dht.extend_from_slice(&counts);
+    dht.push(0x00);
+    segment(&mut out, 0xC4, &dht);
+    segment(&mut out, 0xDA, &[3, 1, 0x00, 2, 0x00, 3, 0x00, 0, 63, 0]);
+
+    let (mut acc, mut used) = (0u32, 0u32);
+    let mut put = |out: &mut Vec<u8>, value: u32, bits: u32| {
+        for i in (0..bits).rev() {
+            acc = (acc << 1) | ((value >> i) & 1);
+            used += 1;
+            if used == 8 {
+                out.push(acc as u8);
+                if acc as u8 == 0xFF {
+                    out.push(0);
+                }
+                acc = 0;
+                used = 0;
+            }
+        }
+        used
+    };
+    let mut previous = [0i32; 3];
+    for by in 0..height / 8 {
+        for bx in 0..width / 8 {
+            let seed = bx.wrapping_mul(31).wrapping_add(by.wrapping_mul(17));
+            for (c, prev) in previous.iter_mut().enumerate() {
+                let dc = ((seed.wrapping_mul(7 + c as u32) % 200) as i32 - 100) * 4;
+                let diff = dc - *prev;
+                *prev = dc;
+                let size = 32 - diff.unsigned_abs().leading_zeros();
+                put(&mut out, size, 4);
+                if size > 0 {
+                    let mag = if diff >= 0 {
+                        diff as u32
+                    } else {
+                        ((diff - 1) as u32) & ((1 << size) - 1)
+                    };
+                    put(&mut out, mag, size);
+                }
+                put(&mut out, 0, 1);
+            }
+        }
+    }
+    let left = put(&mut out, 0, 0);
+    if left > 0 {
+        let pad = 8 - left;
+        put(&mut out, (1 << pad) - 1, pad);
+    }
+    out.extend_from_slice(&[0xFF, 0xD9]);
+    out
+}
+
+/// #326: `dir`에 시험 JPEG를 만들어 한 번 데우고 `runs`회 잰다. 끝나면(실패해도) 만든 파일을 지운다.
+pub fn measure_thumbnail_decode(dir: &Path, runs: usize) -> Result<Measurement, String> {
+    let path = dir.join("thumbnail-decode-bench.jpg");
+    std::fs::write(
+        &path,
+        bench_jpeg(THUMBNAIL_DECODE_WIDTH, THUMBNAIL_DECODE_HEIGHT),
+    )
+    .map_err(|e| format!("{}: {e}", path.display()))?;
+    let result = (|| {
+        let decode = || {
+            facet_core::thumbnail::make_thumbnail(&path, THUMBNAIL_DECODE_SIDE)
+                .map_err(|e| format!("썸네일 디코딩 실패: {e:?}"))
+        };
+        let warm = decode()?;
+        if warm.width.max(warm.height) != THUMBNAIL_DECODE_SIDE {
+            return Err(format!(
+                "썸네일 크기가 다릅니다: {}×{}",
+                warm.width, warm.height
+            ));
+        }
+        let mut times = Vec::with_capacity(runs);
+        for _ in 0..runs {
+            let start = Instant::now();
+            let t = decode()?;
+            times.push(start.elapsed());
+            std::hint::black_box(&t);
+        }
+        Ok(Measurement {
+            item_count: 1,
+            times,
+        })
+    })();
+    let _ = std::fs::remove_file(&path);
+    result
 }
 
 /// #328: 캐시 읽기 벤치마크의 건수.
