@@ -28,6 +28,9 @@ export struct Row {
     free: string,
     // 내 PC 드라이브의 사용량(0..1, 남은 공간이 적을수록 큼). 모르거나 드라이브가 아니면 음수라 막대를 그리지 않는다.
     usage: float,
+    // 휴지통 항목의 원래 위치(지우기 전에 든 폴더)와 지운 날짜(휴지통이 아니면 비어 있다).
+    original-location: string,
+    deleted: string,
     // 선택한 항목인가.
     selected: bool,
     // 커서 항목인가(키보드가 가리키는 항목. 선택과 다르다).
@@ -125,6 +128,8 @@ export struct PanelData {
     content-results: bool,
     // 내 PC인가: 수정한 날짜·크기 열 대신 「전체 크기」「남은 공간」 열을 보이고 이름 열에 사용량 막대를 그린다.
     this-pc: bool,
+    // 휴지통인가(「원래 위치」·「지운 날짜」 열을 보이고 「수정한 날짜」 열을 감춘다).
+    recycle-bin: bool,
     search-status: string,
     search-running: bool,
     // 즉시 검색 결과인가(범위 전환을 보인다), 「현재 폴더 아래만」이 켜졌는가.
@@ -1375,6 +1380,8 @@ component PanelView inherits Rectangle {
     in property <bool> edit-asking-extension;
     // 상태 줄 알림(Rust의 문장 모듈이 만든다).
     in property <string> notice;
+    // 끌 수 없는 항목(휴지통)을 끄는 중: 놓을 때까지 항목 위 커서가 금지 커서다.
+    in property <bool> drag-refused;
     in property <length> row-height;
     in-out property <length> name-width;
     in-out property <length> modified-width;
@@ -1384,11 +1391,16 @@ component PanelView inherits Rectangle {
     in-out property <length> matches-width;
     in-out property <length> total-width;
     in-out property <length> free-width;
-    // 열 너비의 합(있으면 위치·일치 열 포함, 내 PC면 수정한 날짜·크기 대신 전체 크기·남은 공간): 자세히 보기 내용의 폭.
+    in-out property <length> original-location-width;
+    in-out property <length> deleted-width;
+    // 열 너비의 합(있으면 위치·일치·원래 위치·지운 날짜 열 포함, 휴지통은 수정한 날짜 열 없음,
+    // 내 PC면 수정한 날짜·크기 대신 전체 크기·남은 공간): 자세히 보기 내용의 폭.
     // 목록보다 넓으면 가로 스크롤 막대가 생긴다.
     property <length> columns-width: root.name-width + root.type-width
-        + (root.data.this-pc ? root.total-width + root.free-width : root.modified-width + root.size-width)
-        + (root.data.results ? root.location-width : 0px) + (root.data.content-results ? root.matches-width : 0px);
+        + (root.data.this-pc ? root.total-width + root.free-width
+            : (root.data.recycle-bin ? 0px : root.modified-width) + root.size-width)
+        + (root.data.results ? root.location-width : 0px) + (root.data.content-results ? root.matches-width : 0px)
+        + (root.data.recycle-bin ? root.original-location-width + root.deleted-width : 0px);
     in-out property <length> content-y <=> list.content-y;
     // 가로로 넘긴 거리(0 이하, ListView의 `content-x`). 사각형 선택이 목록 내용 기준 자리를 셈한다.
     out property <length> content-x: list.content-x;
@@ -1903,7 +1915,29 @@ component PanelView inherits Rectangle {
                         root.focus-list();
                     }
                 }
-                if !root.data.this-pc: Header {
+                if root.data.recycle-bin: Header {
+                    text: @tr("원래 위치");
+                    column-width <=> root.original-location-width;
+                    sorted: root.data.sort-column == 6;
+                    descending: root.data.sort-descending;
+                    sort => {
+                        root.activate();
+                        root.sort-by(6);
+                        root.focus-list();
+                    }
+                }
+                if root.data.recycle-bin: Header {
+                    text: @tr("지운 날짜");
+                    column-width <=> root.deleted-width;
+                    sorted: root.data.sort-column == 7;
+                    descending: root.data.sort-descending;
+                    sort => {
+                        root.activate();
+                        root.sort-by(7);
+                        root.focus-list();
+                    }
+                }
+                if !root.data.recycle-bin && !root.data.this-pc: Header {
                     text: @tr("수정한 날짜");
                     column-width <=> root.modified-width;
                     sorted: root.data.sort-column == 1;
@@ -1941,11 +1975,11 @@ component PanelView inherits Rectangle {
                     text: @tr("전체 크기");
                     right-aligned: true;
                     column-width <=> root.total-width;
-                    sorted: root.data.sort-column == 6;
+                    sorted: root.data.sort-column == 8;
                     descending: root.data.sort-descending;
                     sort => {
                         root.activate();
-                        root.sort-by(6);
+                        root.sort-by(8);
                         root.focus-list();
                     }
                 }
@@ -1953,11 +1987,11 @@ component PanelView inherits Rectangle {
                     text: @tr("남은 공간");
                     right-aligned: true;
                     column-width <=> root.free-width;
-                    sorted: root.data.sort-column == 7;
+                    sorted: root.data.sort-column == 9;
                     descending: root.data.sort-descending;
                     sort => {
                         root.activate();
-                        root.sort-by(7);
+                        root.sort-by(9);
                         root.focus-list();
                     }
                 }
@@ -2125,6 +2159,7 @@ component PanelView inherits Rectangle {
                                 y: 2px;
                                 width: parent.width - 12px;
                                 height: parent.height - 4px;
+                                mouse-cursor: root.drag-refused ? MouseCursor.not-allowed : MouseCursor.default;
                                 scroll-event(event) => {
                                     // Ctrl+휠: 칸 크기를 한 단계씩. 휠을 한 칸 돌리면 한 단계다.
                                     if (event.modifiers.control && event.delta-y != 0) {
@@ -2365,6 +2400,7 @@ component PanelView inherits Rectangle {
                     }
                     // 입력란보다 아래에 둔다. 그래야 입력란 안을 누르면 입력란이 받는다.
                     TouchArea {
+                        mouse-cursor: root.drag-refused ? MouseCursor.not-allowed : MouseCursor.default;
                         pointer-event(event) => {
                             if (event.kind == PointerEventKind.down) {
                                 root.activate();
@@ -2493,7 +2529,21 @@ component PanelView inherits Rectangle {
                                 }
                             }
                         }
-                        if !root.data.this-pc: Text {
+                        if root.data.recycle-bin: Text {
+                            width: root.original-location-width;
+                            text: row.original-location;
+                            overflow: elide;
+                            vertical-alignment: center;
+                            color: row.selected ? Palette.selection-foreground : Palette.foreground;
+                        }
+                        if root.data.recycle-bin: Text {
+                            width: root.deleted-width;
+                            text: row.deleted;
+                            overflow: elide;
+                            vertical-alignment: center;
+                            color: row.selected ? Palette.selection-foreground : Palette.foreground;
+                        }
+                        if !root.data.recycle-bin && !root.data.this-pc: Text {
                             width: root.modified-width;
                             text: row.modified;
                             overflow: elide;
@@ -2914,6 +2964,8 @@ component PreviewView inherits Rectangle {
     in property <[string]> lines;
     in property <string> note;
     in property <image> picture;
+    // 흐린 자리(썸네일 캐시의 작은 그림)면 흐리게 그린다(#341).
+    in property <bool> placeholder;
     callback focus-list();
     background: Palette.background;
     border-width: 1px;
@@ -3022,6 +3074,14 @@ component PreviewView inherits Rectangle {
             }
         }
     }
+    // 투명한 부분이 바탕과 구분되게 회색 바탕을 깐다.
+    if root.kind == 3: Rectangle {
+        x: 12px;
+        y: 12px;
+        width: parent.width - 24px;
+        height: parent.height - 24px;
+        background: #80808040;
+    }
     if root.kind == 3: Image {
         x: 12px;
         y: 12px;
@@ -3029,6 +3089,7 @@ component PreviewView inherits Rectangle {
         height: parent.height - 24px;
         source: root.picture;
         image-fit: contain;
+        opacity: root.placeholder ? 0.45 : 1.0;
     }
 }
 
@@ -3164,6 +3225,8 @@ export component AppWindow inherits Window {
     in property <bool> edit-asking-extension;
     // 활성 패널의 상태 줄에 보일 알림(이름바꾸기·새 폴더가 실패한 까닭 등). Rust의 문장 모듈이 만든다.
     in property <string> notice;
+    // 끌 수 없는 항목(휴지통)을 끄는 중: 놓을 때까지 항목 위 커서가 금지 커서다.
+    in property <bool> drag-refused;
     out property <length> row-height: 24px;
     // 작업 영역: 작업 대기열의 작업들(모든 창에 같은 것). 작업이 없으면 자리를 차지하지 않는다.
     in property <[JobRow]> jobs;
@@ -3234,6 +3297,8 @@ export component AppWindow inherits Window {
     in-out property <length> matches-width: 320px;
     in-out property <length> total-width: 110px;
     in-out property <length> free-width: 110px;
+    in-out property <length> original-location-width: 240px;
+    in-out property <length> deleted-width: 140px;
 
     // 미리보기 영역(#340): 켜짐, 폭, 내용(코어 `App::preview`를 Rust가 옮긴 값).
     in property <bool> preview-visible;
@@ -3248,6 +3313,7 @@ export component AppWindow inherits Window {
     in property <[string]> preview-lines;
     in property <string> preview-note;
     in property <image> preview-picture;
+    in property <bool> preview-placeholder;
     // 영역 경계를 끌었다: 바라는 폭. Rust가 코어(`Window::set_preview_width`)로 한도 안으로 자른다.
     callback preview-width-dragged(length);
 
@@ -3601,6 +3667,7 @@ export component AppWindow inherits Window {
             edit-problem: root.edit-problem;
             edit-asking-extension: root.edit-asking-extension;
             notice: self.active ? root.notice : "";
+            drag-refused: root.drag-refused;
             row-height: root.row-height;
             name-width <=> root.name-width;
             modified-width <=> root.modified-width;
@@ -3610,6 +3677,8 @@ export component AppWindow inherits Window {
             matches-width <=> root.matches-width;
             total-width <=> root.total-width;
             free-width <=> root.free-width;
+            original-location-width <=> root.original-location-width;
+            deleted-width <=> root.deleted-width;
             activate => {
                 root.panel-pressed(0);
             }
@@ -3791,6 +3860,7 @@ export component AppWindow inherits Window {
             edit-problem: root.edit-problem;
             edit-asking-extension: root.edit-asking-extension;
             notice: self.active ? root.notice : "";
+            drag-refused: root.drag-refused;
             row-height: root.row-height;
             name-width <=> root.name-width;
             modified-width <=> root.modified-width;
@@ -3800,6 +3870,8 @@ export component AppWindow inherits Window {
             matches-width <=> root.matches-width;
             total-width <=> root.total-width;
             free-width <=> root.free-width;
+            original-location-width <=> root.original-location-width;
+            deleted-width <=> root.deleted-width;
             activate => {
                 root.panel-pressed(1);
             }
@@ -3958,6 +4030,7 @@ export component AppWindow inherits Window {
         lines: root.preview-lines;
         note: root.preview-note;
         picture: root.preview-picture;
+        placeholder: root.preview-placeholder;
         focus-list => {
             keys.focus();
         }

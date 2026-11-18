@@ -1,4 +1,4 @@
-//! **휴지통 삭제** 작업: 넘긴 원본을 셸의 휴지통 보내기([`recycle::recycle`])로 휴지통에 보낸다(ADR-0005에서 셸에
+//! **휴지통 삭제** 작업: 넘긴 원본을 셸의 휴지통 보내기([`facet_win::recycle::recycle`])로 휴지통에 보낸다(ADR-0005에서 셸에
 //! 맡기는 파일 작업). 작업 스레드에서 부르므로 UI 스레드는 셸을 기다리지 않는다.
 //!
 //! - 원본을 [`RECYCLE_CHUNK`]개씩 한 번의 셸 호출로 보낸다. **일시정지·취소는 셸 호출 사이**에서만 듣는다: 셸의
@@ -20,7 +20,7 @@ use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 
 use facet_win::file_ops::FileOpErrorKind;
-use facet_win::recycle::{self, RecycleOutcome};
+use facet_win::recycle::RecycleOutcome;
 
 use super::copy::{Copier, ErrorStep, conflict_item};
 use super::{Context, DeleteRejection, JournalSink, NotRecyclableAnswer, Summary};
@@ -98,7 +98,7 @@ impl Recycler<'_, '_> {
             // 보내기 전의 모습: 다시 실행이 「그 뒤 바뀌지 않았는지」 보는 데 쓴다.
             let stamps: Vec<Option<Stamp>> = chunk.iter().map(|path| Stamp::read(path)).collect();
             self.engine.reporter.current = chunk.first().cloned();
-            let results = recycle::recycle(&chunk);
+            let results = crate::shell_provider::recycle(&chunk);
             let mut again = Vec::new();
             let mut settled = false;
             for (position, (path, stamp)) in chunk.into_iter().zip(stamps).enumerate() {

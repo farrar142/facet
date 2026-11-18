@@ -36,6 +36,8 @@ pub struct ItemPress<T> {
     pub deferred: Option<(bool, bool)>,
     /// 누른 창 기준 점.
     pub pressed: Point,
+    /// 문턱을 넘게 끌었지만 위치가 끌기 원본을 막는다(휴지통): 놓을 때까지 금지 커서를 보이고 놓으면 아무것도 하지 않는다.
+    pub refused: bool,
 }
 
 impl<T> ItemPress<T> {
@@ -63,6 +65,7 @@ mod tests {
             button,
             deferred: None,
             pressed: Point { x: 100.0, y: 50.0 },
+            refused: false,
         }
     }
 

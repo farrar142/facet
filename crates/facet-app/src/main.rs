@@ -822,11 +822,17 @@ fn connect(ui: &AppWindow, w: WindowId) {
             3 => Column::Size,
             4 => Column::Location,
             5 => Column::Matches,
-            6 => Column::TotalSize,
-            7 => Column::FreeSpace,
+            6 => Column::OriginalLocation,
+            7 => Column::DateDeleted,
+            8 => Column::TotalSize,
+            9 => Column::FreeSpace,
             _ => Column::Name,
         };
-        with_view(w, |view| view.execute(CommandId::sort_by(column)));
+        with_view(w, |view| match CommandId::sort_by(column) {
+            Some(command) => view.execute(command),
+            // 휴지통의 원래 위치·지운 날짜는 정렬 명령 없이 머리글로만 정렬한다.
+            None => view.sort_by_header(column),
+        });
     });
     ui.on_mouse_history(move |forward| {
         let command = if forward {
@@ -2135,15 +2141,18 @@ impl View {
                     // 위치 열은 검색 결과 목록에만 있다(머리글은 아직 그리지 않는다).
                     Column::Location => 4,
                     Column::Matches => 5,
-                    Column::TotalSize => 6,
-                    Column::FreeSpace => 7,
-                    Column::OriginalLocation | Column::DateDeleted => todo!("#352"),
+                    Column::OriginalLocation => 6,
+                    Column::DateDeleted => 7,
+                    Column::TotalSize => 8,
+                    Column::FreeSpace => 9,
                 },
                 sort_descending: sort.direction == Direction::Descending,
                 item_count: count(status.item_count),
                 total_count: status.total_count.map_or(-1, count),
                 results: tab.location().is_search_results(),
                 this_pc: tab.location().virtual_folder() == Some(facet_core::VirtualFolder::ThisPc),
+                recycle_bin: tab.location().virtual_folder()
+                    == Some(facet_core::VirtualFolder::RecycleBin),
                 content_results: tab.location().search_scope().is_some_and(|scope| {
                     matches!(scope.kind, facet_core::SearchKind::Content { .. })
                 }),
@@ -2247,6 +2256,23 @@ impl View {
     fn render_preview(&self) {
         use facet_core::preview::{PreviewBody, PreviewContent, TEXT_HEAD_LIMIT};
         let ui = &self.ui;
+        // 영역의 긴 변(물리 픽셀)을 코어에 알린다: 이미지면 그 크기로 다시 요청한다.
+        {
+            let pane_width = self
+                .app
+                .borrow()
+                .window(self.window)
+                .map(|w| w.preview_pane().width);
+            if let Some(width) = pane_width {
+                let scale = ui.window().scale_factor();
+                let size = ui.window().size();
+                let long = (width - 24.0)
+                    .max(size.height as f32 / scale - 24.0)
+                    .max(1.0);
+                let side = (long * scale).round() as u32;
+                self.app.borrow_mut().set_preview_side(self.window, side);
+            }
+        }
         let app = self.app.borrow();
         let Some(window) = app.window(self.window) else {
             return;
@@ -2268,6 +2294,7 @@ impl View {
         let mut lines: Vec<SharedString> = Vec::new();
         let mut note = String::new();
         let mut picture = slint::Image::default();
+        let mut placeholder = false;
         let (mut folder, mut icon) = (false, None);
         match content {
             PreviewContent::Nothing => message = text::preview_nothing_text(),
@@ -2319,8 +2346,12 @@ impl View {
                             note = text::preview_truncated_text(TEXT_HEAD_LIMIT);
                         }
                     }
-                    PreviewBody::Image { image, .. } => {
+                    PreviewBody::Image {
+                        image,
+                        placeholder: blurred,
+                    } => {
                         kind = 3;
+                        placeholder = *blurred;
                         picture = slint::Image::from_rgba8(slint::SharedPixelBuffer::<
                             slint::Rgba8Pixel,
                         >::clone_from_slice(
@@ -2346,6 +2377,7 @@ impl View {
         ui.set_preview_lines(ModelRc::from(Rc::new(VecModel::from(lines))));
         ui.set_preview_note(note.into());
         ui.set_preview_picture(picture);
+        ui.set_preview_placeholder(placeholder);
     }
 
     /// 패널 사이 경계를 두 번 눌렀다: 반반으로 맞춘다.
@@ -2430,6 +2462,18 @@ impl View {
     }
 
     /// 명령을 활성 탭에서 실행한다.
+    /// 정렬 명령이 없는 열(휴지통의 원래 위치·지운 날짜)의 머리글을 눌렀다: 같은 열이면 방향을 뒤집고 다른 열이면 그
+    /// 열 오름차순으로 정렬한다.
+    fn sort_by_header(&self, column: Column) {
+        self.remember_scroll();
+        {
+            let mut app = self.app.borrow_mut();
+            let sort = command::sort_toggled(app.active_tab().sort(), column);
+            app.set_sort(sort);
+        }
+        self.render();
+    }
+
     fn execute(&self, command: CommandId) {
         self.remember_scroll();
         let before = self.app.borrow().active_tab_id();
@@ -5345,6 +5389,16 @@ impl Model for TabRows {
                 .drive(row)
                 .and_then(facet_core::shell_provider::DriveSpace::used_fraction)
                 .unwrap_or(-1.0),
+            // 휴지통 항목의 원래 위치(지우기 전에 든 폴더)와 지운 날짜.
+            original_location: tab
+                .recycled(row)
+                .and_then(|entry| entry.original.parent())
+                .map_or_else(SharedString::new, |folder| {
+                    folder.display().to_string().into()
+                }),
+            deleted: tab.recycled(row).map_or_else(SharedString::new, |entry| {
+                file_list::format_modified_local(entry.deleted).into()
+            }),
             selected: tab.is_selected(row),
             cursor: tab.cursor() == Some(row),
             cut: !marks.is_empty()
@@ -5672,6 +5726,7 @@ impl View {
             button,
             deferred,
             pressed: at,
+            refused: false,
         });
     }
 
@@ -5681,7 +5736,7 @@ impl View {
         let press = {
             let mut guard = self.item_press.borrow_mut();
             match guard.as_ref() {
-                Some(press) if press.crossed(at) => guard.take(),
+                Some(press) if !press.refused && press.crossed(at) => guard.take(),
                 _ => None,
             }
         };
@@ -5691,7 +5746,17 @@ impl View {
         if self.shown_tab_id(press.panel) != Some(press.tab) {
             return;
         }
-        let Some(sources) = self.app.borrow().drag_sources() else {
+        let sources = self.app.borrow().drag_sources();
+        let Some(sources) = sources else {
+            // 위치가 끌기 원본을 막으면(휴지통: 복사해 오기도 이동도 안 됨) 놓을 때까지 금지 커서를 보인다.
+            let capabilities = self.app.borrow().active_tab().capabilities();
+            if !capabilities.copy_from && !capabilities.move_items {
+                self.ui.set_drag_refused(true);
+                *self.item_press.borrow_mut() = Some(ItemPress {
+                    refused: true,
+                    ..press
+                });
+            }
             return;
         };
         let window = self.window;
@@ -5714,6 +5779,10 @@ impl View {
         let Some(press) = press else {
             return;
         };
+        if press.refused {
+            self.ui.set_drag_refused(false);
+            return;
+        }
         if self.shown_tab_id(press.panel) != Some(press.tab) {
             return;
         }
@@ -5734,6 +5803,7 @@ impl View {
     /// 창이 포커스를 잃었다: 누르기를 버린다.
     fn item_cancel(&self) {
         self.item_press.borrow_mut().take();
+        self.ui.set_drag_refused(false);
     }
 }
 

@@ -20,7 +20,7 @@ fn 사용량_몫은_쓴_공간의_비율이고_모르면_없다() {
 #[test]
 fn 용량_열마다_정렬_명령이_있고_팔레트에는_없다() {
     for column in [Column::TotalSize, Column::FreeSpace] {
-        let command = CommandId::sort_by(column);
+        let command = CommandId::sort_by(column).expect("용량 열의 정렬 명령");
         assert_eq!(command.sort_column(), Some(column));
         assert!(command.shortcuts().is_empty());
         assert!(!CommandId::ALL.contains(&command), "{command:?}");
