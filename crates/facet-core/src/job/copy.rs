@@ -1287,7 +1287,7 @@ impl<'a> Copier<'a> {
     /// - 휴지통이 없는 위치이거나 셸이 휴지통에 넣지 않으려 하면(휴지통보다 큰 파일, 휴지통을 끈 볼륨) S3처럼
     ///   바꿔치기(`file_ops::replace`, 읽기 전용 대상도)로 영구 덮어쓴다([`Replaced::Permanently`]).
     ///   `permanent_overwrite`가 꺼져 있으면(다시 실행) 덮어쓰지 않고 [`FileOutcome::Refused`]다.
-    fn place(&mut self, temp: &Path, target: &Path) -> FileOutcome {
+    pub(super) fn place(&mut self, temp: &Path, target: &Path) -> FileOutcome {
         if recycle::has_recycle_bin(target) {
             let Some(old) = Stamp::read(target) else {
                 // 그 사이 원래 대상이 사라졌다: 덮어쓸 것 없이 놓는다.

@@ -392,9 +392,18 @@ impl Provider for ShellProvider {
         Ok(None)
     }
 
-    /// 휴지통은 복원·비우기·영구 삭제만 되고, 그 밖의 가상 폴더는 열기만 된다.
+    /// 휴지통은 복원·비우기·영구 삭제만 되고, 휴대폰은 열기와 PC와의 복사·이동, 영구 삭제(휴지통이 없다)가 된다
+    /// (실행취소는 알리지 않는다: 휴대폰 쪽에 넣은 것을 되돌리려면 영구 삭제해야 하므로). 내 PC는 열기만 된다.
     fn capabilities(&self, location: &Location) -> Capabilities {
         match location.virtual_folder() {
+            Some(VirtualFolder::Device) => Capabilities {
+                open: true,
+                copy_from: true,
+                copy_into: true,
+                move_items: true,
+                delete_permanently: true,
+                ..Capabilities::default()
+            },
             Some(VirtualFolder::RecycleBin) => Capabilities {
                 restore: true,
                 empty: true,
@@ -757,12 +766,14 @@ pub(crate) fn list_streaming(
             }
         }
     };
+    let is_fake = fakes().contains_key(shell.id());
     let Collector {
         items,
         children,
         mut recycled,
         names,
         parsing,
+        device,
         ..
     } = collector;
     // 장치 바로 아래가 비어 있으면 잠겼거나 「파일 전송」이 아니다(저장소를 보여 주지 않는다).
@@ -797,7 +808,141 @@ pub(crate) fn list_streaming(
     };
     // 앞 열거의 표는 잠금 밖에서 버린다.
     drop(replaced);
+    if shell.folder() == VirtualFolder::Device && !is_fake {
+        remember_device_items(location, device);
+    }
     Ok(Listed { items, recycled })
+}
+
+/// 휴대폰 항목 경로의 머리. 휴대폰 항목은 실제 파일 시스템 경로가 없어, 복사·이동·삭제 작업(작업 대기열·작업 영역·작업
+/// 기록은 경로로 항목을 가리킨다)에는 이 아래에 장치·저장소·폴더·항목의 표시 이름을 이은 경로로 넘긴다
+/// ([`device_folder_path`]). 확장 길이 접두(`\\?\`) 뒤의 없는 장치 이름이라 파일 시스템 호출은 모두 「없음」으로
+/// 실패할 뿐 실제 파일에 닿지 않는다. 경로 → 셸 항목은 휴대폰 폴더를 읽을 때 적어 둔 표([`device_item`])로 찾는다.
+pub const DEVICE_PATH_ROOT: &str = r"\\?\facet-device";
+
+/// 휴대폰 항목 하나: 셸 항목 식별자와 장치가 준 정보.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceItem {
+    /// 셸 항목 식별자(PIDL 바이트).
+    pub id: Vec<u8>,
+    /// 폴더(저장소 포함)인가.
+    pub is_folder: bool,
+    /// 크기(바이트). 장치가 주지 않으면 없다.
+    pub size: Option<u64>,
+    /// 수정한 날짜. 장치가 주지 않으면 없다(이름 충돌의 「더 새것만 덮어쓰기」가 꺼진다).
+    pub modified: Option<SystemTime>,
+}
+
+/// `path`가 휴대폰 항목 경로([`DEVICE_PATH_ROOT`] 아래)인가.
+pub fn is_device_path(path: &Path) -> bool {
+    let text = path.as_os_str().to_string_lossy();
+    text.len() >= DEVICE_PATH_ROOT.len()
+        && text
+            .get(..DEVICE_PATH_ROOT.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(DEVICE_PATH_ROOT))
+}
+
+/// 화면에 보일 경로 글자: 휴대폰 항목 경로는 머리([`DEVICE_PATH_ROOT`])를 뗀 「장치\저장소\…」, 그 밖은 경로 그대로.
+pub fn display_path(path: &Path) -> String {
+    let text = path.display().to_string();
+    if is_device_path(path) {
+        text[DEVICE_PATH_ROOT.len()..]
+            .trim_start_matches('\\')
+            .to_owned()
+    } else {
+        text
+    }
+}
+
+/// 휴대폰 위치(장치·저장소·폴더)의 항목 경로: [`DEVICE_PATH_ROOT`] 아래에 장치부터 그 위치까지의 표시 이름. 휴대폰
+/// 위치가 아니면 `None`.
+pub fn device_folder_path(location: &Location) -> Option<PathBuf> {
+    if location.virtual_folder() != Some(VirtualFolder::Device) {
+        return None;
+    }
+    let mut path = PathBuf::from(format!("{DEVICE_PATH_ROOT}\\"));
+    for segment in ShellProvider.segments(location).into_iter().skip(1) {
+        let label: String = segment
+            .label
+            .chars()
+            .map(|c| if matches!(c, '\\' | '/') { '_' } else { c })
+            .collect();
+        path.push(label);
+    }
+    Some(path)
+}
+
+/// 복사·이동해 넣을 수 있는 폴더의 경로: 실제 폴더면 그 경로, 휴대폰 안 폴더(저장소 아래, 장치 자신은 아님)면 그 항목
+/// 경로([`device_folder_path`]). 그 밖은 `None`.
+pub fn transfer_folder(location: &Location) -> Option<PathBuf> {
+    if let Some(path) = location.file_system_path() {
+        return Some(path.to_path_buf());
+    }
+    let shell = location.shell_location()?;
+    if shell.folder() != VirtualFolder::Device || is_device_root(shell.id()) {
+        return None;
+    }
+    device_folder_path(location)
+}
+
+/// 휴대폰 안 폴더(장치 자신은 아님)인가.
+pub fn is_device_folder(location: &Location) -> bool {
+    location
+        .shell_location()
+        .is_some_and(|shell| shell.folder() == VirtualFolder::Device && !is_device_root(shell.id()))
+}
+
+/// 휴대폰 항목 경로의 셸 항목. 그 폴더를 읽은 적이 없으면 `None`.
+pub fn device_item(path: &Path) -> Option<DeviceItem> {
+    known().device_items.get(path).cloned()
+}
+
+/// 휴대폰 폴더 `location`을 읽은 항목들을 경로 표에 적는다(폴더 자신도).
+fn remember_device_items(location: &Location, items: Vec<(OsString, DeviceItem)>) {
+    let (Some(shell), Some(folder)) = (location.shell_location(), device_folder_path(location))
+    else {
+        return;
+    };
+    let mut known = known();
+    let id = known
+        .relinked
+        .get(shell.id())
+        .cloned()
+        .unwrap_or_else(|| shell.id().to_vec());
+    for (name, item) in items {
+        known.device_items.insert(folder.join(name), item);
+    }
+    known.device_items.insert(
+        folder,
+        DeviceItem {
+            id,
+            is_folder: true,
+            size: None,
+            modified: None,
+        },
+    );
+}
+
+/// 빠졌다 다시 꽂힌 휴대폰의 항목: 그 항목의 예전 해석 이름 `parsing`을 지금 내 PC의 같은 장치에 이어 새 식별자를 얻는다.
+/// 같은 장치가 없거나 그 항목을 찾지 못하면 `None`. 셸 스레드를 기다리므로 UI 스레드에서 부르지 않는다(작업 스레드).
+pub(crate) fn relink_device_item(parsing: &str) -> Option<Vec<u8>> {
+    let devices = this_pc_devices()?;
+    let parsing = devices
+        .iter()
+        .find_map(|(_, device)| relink_parsing_name(parsing, device))?;
+    shell_thread()
+        .call(call_timeout(), move || {
+            shell_folder::id_from_parsing_name(&parsing)
+        })
+        .ok()?
+        .ok()
+}
+
+/// 시험용: 셸 항목 식별자를 휴대폰 항목 경로 표에 적는다(러너에 휴대폰이 없어 임시 폴더의 셸 항목을 휴대폰 항목처럼
+/// 쓴다). 앱은 부르지 않는다.
+#[doc(hidden)]
+pub fn register_device_item(path: PathBuf, item: DeviceItem) {
+    known().device_items.insert(path, item);
 }
 
 /// 셸 스레드 호출의 실패.
@@ -954,6 +1099,8 @@ struct Collector {
     names: Vec<(Box<[u8]>, String)>,
     /// 가상 폴더인 항목의 식별자와 해석 이름(장치 식별자).
     parsing: Vec<(Box<[u8]>, String)>,
+    /// 휴대폰 폴더면 항목마다 이름과 셸 항목(복사·이동·삭제가 쓴다).
+    device: Vec<(OsString, DeviceItem)>,
 }
 
 impl Collector {
@@ -965,6 +1112,7 @@ impl Collector {
             recycled: Vec::new(),
             names: Vec::new(),
             parsing: Vec::new(),
+            device: Vec::new(),
         }
     }
 
@@ -1007,6 +1155,19 @@ impl Collector {
                 (0, SystemTime::UNIX_EPOCH)
             };
             let name = OsString::from(entry.name);
+            if self.folder == VirtualFolder::Device
+                && let Some(shell) = location.shell_location()
+            {
+                self.device.push((
+                    name.clone(),
+                    DeviceItem {
+                        id: shell.id().to_vec(),
+                        is_folder: entry.is_folder,
+                        size: entry.size,
+                        modified: entry.modified.map(filetime_to_system_time),
+                    },
+                ));
+            }
             self.children.insert(name.clone(), location);
             self.items.push(Item {
                 name,
@@ -1176,7 +1337,7 @@ pub(crate) fn parse_recycle_info(bytes: &[u8]) -> Option<RecycleInfo> {
 }
 
 /// `FILETIME`(1601-01-01부터 100ns 단위)을 시각으로.
-fn filetime_to_system_time(filetime: u64) -> SystemTime {
+pub(crate) fn filetime_to_system_time(filetime: u64) -> SystemTime {
     const UNIX_EPOCH_FILETIME: u64 = 116_444_736_000_000_000;
     match filetime.checked_sub(UNIX_EPOCH_FILETIME) {
         Some(since) => {
@@ -1247,6 +1408,8 @@ struct Known {
     parsing: HashMap<Box<[u8]>, String>,
     /// 다시 꽂힌 장치에 이은 휴대폰 위치: 탭의 위치 식별자 → 지금 읽는 식별자.
     relinked: HashMap<Box<[u8]>, Vec<u8>>,
+    /// 휴대폰 항목 경로([`device_folder_path`] 아래) → 그 셸 항목. 휴대폰 폴더를 읽을 때마다 그 폴더와 항목을 적는다.
+    device_items: HashMap<PathBuf, DeviceItem>,
 }
 
 fn known() -> MutexGuard<'static, Known> {

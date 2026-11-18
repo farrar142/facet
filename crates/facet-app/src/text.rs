@@ -256,6 +256,7 @@ pub fn clipboard_failure_text(failure: &ClipboardFailure) -> String {
                     source.display()
                 )
             }
+            CopyRejection::Unsupported => "휴대폰과는 PC와만 주고받을 수 있습니다".to_owned(),
         },
     }
 }
@@ -269,6 +270,7 @@ pub fn drop_rejected_text(rejection: &CopyRejection) -> String {
         CopyRejection::IntoItself(source) | CopyRejection::TargetInsideSource(source) => {
             format!("폴더를 그 안으로 놓을 수 없습니다: {}", source.display())
         }
+        CopyRejection::Unsupported => "휴대폰과는 PC와만 주고받을 수 있습니다".to_owned(),
     }
 }
 
@@ -436,6 +438,7 @@ pub fn not_undoable_text(reason: NotUndoable) -> String {
     match reason {
         NotUndoable::PermanentDelete => "되돌릴 수 없음: 영구 삭제".to_owned(),
         NotUndoable::Overwritten => "되돌릴 수 없음: 덮어씀".to_owned(),
+        NotUndoable::NotUndoableThere => "되돌릴 수 없음: 휴대폰 등 되돌릴 수 없는 위치".to_owned(),
     }
 }
 
@@ -444,6 +447,7 @@ pub fn undo_refused_text(record: &Record, reason: NotUndoable) -> String {
     let why = match reason {
         NotUndoable::PermanentDelete => "영구 삭제한 항목은 되살릴 수 없습니다",
         NotUndoable::Overwritten => "덮어쓴 파일은 되살릴 수 없습니다",
+        NotUndoable::NotUndoableThere => "휴대폰 등 그 위치에 넣은 작업은 되돌릴 수 없습니다",
     };
     format!("{}: 실행취소할 수 없습니다. {why}", operation_name(record))
 }
