@@ -176,7 +176,11 @@ fn new_rows_are_disabled_not_hidden_when_they_cannot_run() {
     c.can_go_up = false;
     c.can_undo = false;
     let menu = build(&c);
-    assert_eq!(rows(&menu), default_background_rows(), "꺼져도 자리는 그대로");
+    assert_eq!(
+        rows(&menu),
+        default_background_rows(),
+        "꺼져도 자리는 그대로"
+    );
     assert!(!enabled(&menu, CommandId::Back));
     assert!(!enabled(&menu, CommandId::Forward));
     assert!(!enabled(&menu, CommandId::Up));
