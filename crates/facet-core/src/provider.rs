@@ -48,13 +48,17 @@ pub trait Provider: Send + Sync {
     /// 다시 읽는 데 쓴다.
     fn item(&self, location: &Location, name: &OsStr) -> Result<Option<Item>, ListError>;
 
-    /// #348: `location`의 되는 일.
+    /// `location`의 되는 일. 기본값은 실제 폴더와 같다: 복원·비우기 말고 모두 된다.
     fn capabilities(&self, _location: &Location) -> Capabilities {
-        todo!("#348")
+        Capabilities {
+            restore: false,
+            empty: false,
+            ..Capabilities::ALL
+        }
     }
 }
 
-/// #348: 공급자가 위치마다 알리는 되는 일.
+/// 공급자가 위치마다 알리는 되는 일.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Capabilities {
     pub open: bool,
@@ -72,7 +76,7 @@ pub struct Capabilities {
 }
 
 impl Capabilities {
-    /// #348: 모든 되는 일이 켜진 값.
+    /// 모든 되는 일이 켜진 값.
     pub const ALL: Capabilities = Capabilities {
         open: true,
         copy_from: true,

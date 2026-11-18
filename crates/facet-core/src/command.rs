@@ -445,9 +445,24 @@ impl CommandId {
         }
     }
 
-    /// #348: 되는 일 `capabilities`가 이 명령을 막지 않는가.
-    pub fn is_allowed_by(self, _capabilities: &crate::Capabilities) -> bool {
-        todo!("#348")
+    /// 되는 일 `capabilities`가 이 명령을 막지 않는가. 되는 일에 묶이지 않은 명령은 늘 `true`다.
+    pub fn is_allowed_by(self, capabilities: &crate::Capabilities) -> bool {
+        match self {
+            CommandId::Open | CommandId::OpenInNewTab => capabilities.open,
+            CommandId::Copy | CommandId::CopyToOtherPanel | CommandId::CopyTo => {
+                capabilities.copy_from
+            }
+            CommandId::Cut | CommandId::MoveToOtherPanel | CommandId::MoveTo => {
+                capabilities.move_items
+            }
+            CommandId::Paste => capabilities.copy_into,
+            CommandId::Rename | CommandId::BatchRename => capabilities.rename,
+            CommandId::NewFolder => capabilities.new_folder,
+            CommandId::DeletePermanently => capabilities.delete_permanently,
+            CommandId::Delete => capabilities.recycle || capabilities.delete_permanently,
+            CommandId::Properties => capabilities.properties,
+            _ => true,
+        }
     }
 
     /// 탭 상태에서 지금 실행할 수 있는가.

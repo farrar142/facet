@@ -2425,9 +2425,9 @@ impl Tab {
         }
     }
 
-    /// #348: 이 탭 위치의 되는 일(공급자가 알린 값).
+    /// 이 탭 위치의 되는 일(공급자가 알린 값).
     pub fn capabilities(&self) -> crate::Capabilities {
-        todo!("#348")
+        crate::provider_for(self.location()).capabilities(self.location())
     }
 
     /// #350: 셸 공급자 위치의 목록을 흘려 받는 중이면 지금까지 읽은 항목 수.
