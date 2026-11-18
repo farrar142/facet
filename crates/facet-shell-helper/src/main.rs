@@ -13,7 +13,16 @@
 //! - **마지막으로 부른 확장**: `--crash-state <파일>`은 관리 쪽과 함께 보는 공유 상태다. 확장을 부르기 직전에 그
 //!   확장의 CLSID·DLL 경로·이름을 한 줄씩 적어 두면, 도우미가 죽었을 때 관리 쪽이 읽어 기록한다.
 //!
-//! 실제 셸 메뉴는 아직 부르지 않는다(뒤 티켓): 시험용 모드(`--fake`)가 아니면 메뉴·실행 요청에 오류로 답한다.
+//!
+//! # 실제 셸 메뉴(#323)
+//!
+//! 시험용 모드가 아니면 메뉴 요청은 COM STA 셸 스레드([`facet_win::shell_thread::ShellThread`])에서 대상의 셸 메뉴
+//! ([`facet_win::shell_menu::ShellMenu`])를 만들어 항목 트리로 답하고, 그 메뉴 객체를 그 스레드에 들고 있는다(다음 메뉴
+//! 요청이 오면 놓는다). 실행 요청은 들고 있던 메뉴(대상이 다르면 새로 만든 메뉴)로 그 항목을 실행한다: 셸 스레드를 그
+//! 실행에 넘기고(실행이 모달 창을 띄워도 다음 요청은 새 셸 스레드가 받음) [`INVOKE_ANSWER_WAIT`] 안에 실패하면 실패로,
+//! 아니면 완료로 답한다. 실행이 끝나고 그것이 띄운 창이 닫히면 메뉴 객체를 놓고 그 스레드는 끝난다. 대상이 없거나
+//! 권한이 없으면 죽지 않고 실패로 답한다. `--crash-state`가 있으면 처리되지 않은 예외로 죽을 때 그 주소가 든 확장 DLL을
+//! 적는다([`facet_win::shell_menu::record_crashes`]).
 //!
 //! # 속성·연결 프로그램(#321)
 //!
@@ -54,6 +63,9 @@ fn main() {
 }
 
 #[cfg(windows)]
+mod real_menu;
+
+#[cfg(windows)]
 mod helper {
     use std::ffi::OsString;
     use std::fs;
@@ -69,6 +81,9 @@ mod helper {
         answer_hello, read_message, write_message,
     };
     use facet_win::pipe_client;
+    use facet_win::shell_thread::{CallError, ShellThread};
+
+    use super::real_menu;
 
     /// 파이프에 청하는 권한: 읽기(`FILE_GENERIC_READ`)와 데이터 쓰기(`FILE_WRITE_DATA`).
     const PIPE_ACCESS: u32 = 0x0012_0089 | 0x0002;
@@ -150,6 +165,12 @@ mod helper {
         if let Some(parent) = args.parent {
             watch_parent(parent);
         }
+        if !args.fake
+            && let Some(state) = &args.crash_state
+        {
+            facet_win::shell_menu::record_crashes(state);
+        }
+        let shell = Shell::new();
         let activity = Activity::new();
         if let Some(idle) = args.idle_timeout {
             watch_idle(Arc::clone(&activity), idle);
@@ -166,7 +187,7 @@ mod helper {
                 return 0; // 끊김: UI가 끝났거나 도우미를 버렸다.
             };
             activity.begin();
-            let response = handle(&args, &activity, &mut preview, request);
+            let response = handle(&args, &shell, &activity, &mut preview, request);
             let written = response
                 .as_ref()
                 .is_none_or(|response| write_message(&mut writer, response).is_ok());
@@ -289,6 +310,7 @@ mod helper {
     /// 요청 하나에 답한다. `None`이면 답하지 않는다.
     fn handle(
         args: &Args,
+        shell: &Shell,
         activity: &Arc<Activity>,
         preview: &mut Preview,
         request: Request,
@@ -325,13 +347,108 @@ mod helper {
                 target,
                 command,
             } if args.fake => Some(fake_execute(id, &target, command)),
-            Request::Menu { id, .. }
-            | Request::Execute { id, .. }
-            | Request::DropMenu { id, .. } => Some(Response::Error {
+            Request::Menu { id, target } => Some(shell.menu(id, target)),
+            Request::Execute {
+                id,
+                target,
+                command,
+            } => Some(shell.execute(activity, id, target, command)),
+            Request::DropMenu { id, .. } => Some(Response::Error {
                 id,
                 kind: ErrorKind::Failed,
                 message: "not supported yet".into(),
             }),
+        }
+    }
+
+    /// 셸 메뉴를 만들 때 기다리는 가장 긴 시간.
+    ///
+    /// 근거: 보통 수십~수백 ms지만 처음 셸을 초기화하고 확장을 처음 실을 때(느린 CI 러너 포함) 몇 초 걸릴 수 있다. 정말로
+    /// 멈춘 확장은 관리 쪽의 멈춤 판정(`STALL_TIMEOUT`, 10초)이 이 도우미를 끝내므로 이 값은 그보다 넉넉한 안전망이다.
+    const BUILD_TIMEOUT: Duration = Duration::from_secs(60);
+    /// 셸 항목 실행이 실패를 알리기를 기다리는 시간. 넘으면(모달 창을 띄우는 등 아직 실행 중) 완료로 답한다.
+    ///
+    /// 근거: 관리 쪽 응답 시간 제한(`REPLY_TIMEOUT`, 2초)보다 짧아야 하고, 곧바로 실패하는 셸 항목(없는 대상 등)은 수십 ms
+    /// 안에 돌아온다.
+    pub(super) const INVOKE_ANSWER_WAIT: Duration = Duration::from_secs(1);
+
+    /// 실제 셸 메뉴를 다루는 셸 스레드(COM STA). 만든 메뉴 객체는 그 스레드에 있다([`real_menu`]).
+    struct Shell {
+        thread: std::sync::Mutex<ShellThread>,
+    }
+
+    impl Shell {
+        fn new() -> Shell {
+            Shell {
+                thread: std::sync::Mutex::new(ShellThread::new()),
+            }
+        }
+
+        fn menu(&self, id: u64, target: MenuTarget) -> Response {
+            let thread = self.thread.lock().unwrap_or_else(|p| p.into_inner());
+            match thread.call(BUILD_TIMEOUT, move || real_menu::build(&target)) {
+                Ok(Ok(items)) => Response::Menu { id, items },
+                Ok(Err(error)) => menu_error(id, error),
+                Err(error) => call_failed(id, error),
+            }
+        }
+
+        fn execute(
+            &self,
+            activity: &Arc<Activity>,
+            id: u64,
+            target: MenuTarget,
+            command: u32,
+        ) -> Response {
+            // 실행이 띄운 창이 떠 있는 동안은 쉬어도 끝나지 않는다.
+            let open = activity.dialog();
+            let (answer, answered) = std::sync::mpsc::channel();
+            let job = move || {
+                let _open = open;
+                real_menu::invoke(&target, command, &answer);
+            };
+            {
+                let mut thread = self.thread.lock().unwrap_or_else(|p| p.into_inner());
+                // 이 셸 스레드(들고 있던 메뉴 객체가 있는 곳)를 실행에 넘긴다: 기다리지 않고 맡긴 뒤 버린다(일이
+                // 끝나면 스레드도 끝남). 다음 요청은 새 셸 스레드가 받는다.
+                let _ = thread.call(Duration::ZERO, job);
+                *thread = ShellThread::new();
+            }
+            match answered.recv_timeout(INVOKE_ANSWER_WAIT) {
+                Ok(Ok(())) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    Response::Done { id }
+                }
+                Ok(Err(error)) => menu_error(id, error),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    call_failed(id, CallError::Failed)
+                }
+            }
+        }
+    }
+
+    fn menu_error(id: u64, error: facet_win::shell_menu::MenuError) -> Response {
+        use facet_win::shell_menu::MenuError;
+        let kind = match &error {
+            MenuError::NotFound(_) => ErrorKind::NotFound,
+            MenuError::UnknownCommand => ErrorKind::UnknownCommand,
+            MenuError::Failed(_) => ErrorKind::Failed,
+        };
+        Response::Error {
+            id,
+            kind,
+            message: error.to_string(),
+        }
+    }
+
+    fn call_failed(id: u64, error: CallError) -> Response {
+        let message = match error {
+            CallError::TimedOut => "shell timed out",
+            CallError::Failed => "shell call failed",
+        };
+        Response::Error {
+            id,
+            kind: ErrorKind::Failed,
+            message: message.into(),
         }
     }
 

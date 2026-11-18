@@ -301,7 +301,7 @@ fn render(icon: HICON, size: u32) -> Option<IconImage> {
 /// 검은 바탕·흰 바탕에 그린 BGRA 두 벌에서 곧은(premultiplied 아닌) RGBA를 되살린다.
 ///
 /// 검은 바탕 값은 `a·c`, 흰 바탕 값은 `a·c + (1 - a)·255`이므로 `a = 255 - (흰 - 검)`, `c = 검 / a`다.
-fn unblend(on_black: &[u8], on_white: &[u8]) -> Vec<u8> {
+pub(crate) fn unblend(on_black: &[u8], on_white: &[u8]) -> Vec<u8> {
     let mut rgba = Vec::with_capacity(on_black.len());
     for (b, w) in on_black
         .as_chunks::<4>()
