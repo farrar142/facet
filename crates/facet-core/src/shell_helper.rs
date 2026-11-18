@@ -1187,7 +1187,7 @@ pub struct CrashedExtension {
 
 /// #322: 열린 셸 메뉴의 번호.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ShellMenuId(u64);
+pub struct ShellMenuId(pub(crate) u64);
 
 /// #322: 열린 셸 메뉴.
 #[derive(Debug, Clone, PartialEq, Eq)]
