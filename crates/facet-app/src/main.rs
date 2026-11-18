@@ -77,6 +77,7 @@ use facet_core::placement::{self, Monitor, Rect, WindowState};
 use facet_core::selection::{CursorMove, Pick};
 use facet_core::session::{self, Loaded, SAVE_DELAY, Saver};
 use facet_core::tab::{AutoRefresh, Navigation, ReadOutcome, Relocation, Tab};
+use facet_core::view::{GridLayout, GridMove};
 use facet_core::window::{
     App, BatchPreviewId, ClipboardDone, DeletePlan, DeleteWarning, Execution, MAX_PANELS, Panel,
     TabDestination, TabId, TargetError, TransferPlan, Update, WindowId,
@@ -844,6 +845,11 @@ fn connect(ui: &AppWindow, w: WindowId) {
     });
     ui.on_search_edited(move |text| with_view(w, |view| view.search_edited(&text)));
     ui.on_search_under(move || with_view(w, |view| view.execute(CommandId::InstantUnderFolder)));
+    ui.on_grid_zoom(move |panel, steps| {
+        with_view(w, |view| {
+            view.grid_zoom(usize::try_from(panel).unwrap_or(0), steps);
+        })
+    });
     ui.on_scrolled(move |panel| {
         with_view(w, |view| {
             view.load_more_if_near_end(usize::try_from(panel).unwrap_or(0))
@@ -2027,6 +2033,13 @@ impl View {
                     && tab.instant().is_none_or(|status| status.demotion.is_some()),
                 instant: instant_text.is_some(),
                 instant_under: tab.instant_under(),
+                grid: tab.view().mode == facet_core::view::ViewMode::Grid,
+                grid_size: match tab.view().grid_size {
+                    facet_core::view::GridSize::Small => 0,
+                    facet_core::view::GridSize::Medium => 1,
+                    facet_core::view::GridSize::Large => 2,
+                    facet_core::view::GridSize::ExtraLarge => 3,
+                },
                 selected_count: count(status.selected_count),
                 selected_size: selected_size.into(),
             },
@@ -2134,6 +2147,31 @@ impl View {
         }
         if alt {
             return false;
+        }
+        // #327: 그리드 보기의 화살표는 2차원으로 움직인다(탐색기처럼).
+        if self.app.borrow().active_tab().view().mode == facet_core::view::ViewMode::Grid {
+            let grid_move = match key {
+                Key::Left => Some(GridMove::Left),
+                Key::Right => Some(GridMove::Right),
+                Key::Up => Some(GridMove::Up),
+                Key::Down => Some(GridMove::Down),
+                _ => None,
+            };
+            if let Some(grid_move) = grid_move {
+                let layout = GridLayout {
+                    columns: self.grid_columns(self.active_panel()),
+                };
+                let index = self.app.borrow_mut().active_tab_mut().move_grid_cursor(
+                    grid_move,
+                    layout,
+                    Pick::for_cursor_key(ctrl, shift),
+                );
+                self.render();
+                if let Some(index) = index {
+                    self.show_row(index);
+                }
+                return true;
+            }
         }
         let movement = match key {
             Key::Up => CursorMove::Up,
@@ -4057,15 +4095,41 @@ impl View {
         self.execute(CommandId::Open);
     }
 
-    /// 활성 패널 한 쪽의 행 수.
+    /// 활성 패널 한 쪽의 행 수(그리드 보기면 한 화면의 칸 수).
     fn page_rows(&self) -> usize {
         let ui = &self.ui;
+        let panel = self.active_panel();
+        if self.app.borrow().active_tab().view().mode == facet_core::view::ViewMode::Grid {
+            let height = PanelUi::of(ui, panel).grid_cell_height();
+            if height > 0.0 {
+                let lines = (PanelUi::of(ui, panel).grid_view_height() / height) as usize;
+                return (lines * self.grid_columns(panel)).max(1);
+            }
+            return 1;
+        }
         let row_height = ui.get_row_height();
         if row_height > 0.0 {
-            (PanelUi::of(ui, self.active_panel()).view_height() / row_height) as usize
+            (PanelUi::of(ui, panel).view_height() / row_height) as usize
         } else {
             1
         }
+    }
+
+    /// #327: 그리드 보기의 열 수(창 폭이 정한다, 적어도 한 열).
+    fn grid_columns(&self, panel: usize) -> usize {
+        usize::try_from(PanelUi::of(&self.ui, panel).grid_columns())
+            .unwrap_or(1)
+            .max(1)
+    }
+
+    /// #327: Ctrl+휠: 그 패널의 활성 탭 칸 크기를 `steps`단계 바꾼다.
+    fn grid_zoom(&self, panel: usize, steps: i32) {
+        {
+            let mut app = self.app.borrow_mut();
+            app.activate_panel(panel);
+            app.active_tab_mut().zoom_grid(steps);
+        }
+        self.render();
     }
 
     /// 패널마다 맨 위에 보이는 행 번호를 그 패널의 보이는 탭에 알린다.
@@ -4116,6 +4180,18 @@ impl View {
     fn show_row(&self, index: usize) {
         let ui = &self.ui;
         let list = PanelUi::of(ui, self.active_panel());
+        if self.app.borrow().active_tab().view().mode == facet_core::view::ViewMode::Grid {
+            let line = index / self.grid_columns(self.active_panel());
+            let height = list.grid_cell_height();
+            let offset = file_list::scroll_to_show(
+                line,
+                height,
+                -list.grid_content_y(),
+                list.grid_view_height(),
+            );
+            list.set_grid_content_y(-offset);
+            return;
+        }
         let offset = file_list::scroll_to_show(
             index,
             ui.get_row_height(),
@@ -4467,6 +4543,46 @@ impl<'a> PanelUi<'a> {
             self.ui.get_right_view_height()
         } else {
             self.ui.get_left_view_height()
+        }
+    }
+
+    fn grid_content_y(&self) -> f32 {
+        if self.right {
+            self.ui.get_right_grid_content_y()
+        } else {
+            self.ui.get_left_grid_content_y()
+        }
+    }
+
+    fn set_grid_content_y(&self, y: f32) {
+        if self.right {
+            self.ui.set_right_grid_content_y(y);
+        } else {
+            self.ui.set_left_grid_content_y(y);
+        }
+    }
+
+    fn grid_view_height(&self) -> f32 {
+        if self.right {
+            self.ui.get_right_grid_view_height()
+        } else {
+            self.ui.get_left_grid_view_height()
+        }
+    }
+
+    fn grid_cell_height(&self) -> f32 {
+        if self.right {
+            self.ui.get_right_grid_cell_height()
+        } else {
+            self.ui.get_left_grid_cell_height()
+        }
+    }
+
+    fn grid_columns(&self) -> i32 {
+        if self.right {
+            self.ui.get_right_grid_columns()
+        } else {
+            self.ui.get_left_grid_columns()
         }
     }
 
