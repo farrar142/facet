@@ -1568,9 +1568,39 @@ impl View {
         *self.delete.borrow_mut() = Some(plan);
     }
 
+    /// 휴지통 비우기 확인 줄을 연다: 모든 드라이브의 휴지통을 비우며 실행취소할 수 없다는 경고. 아직 아무것도 지우지
+    /// 않는다.
+    fn open_empty_recycle_bin(&self) {
+        self.close_rename();
+        self.close_address_edit();
+        self.close_transfer();
+        let ui = &self.ui;
+        ui.set_confirm_delete(DeleteConfirm::EmptyBin);
+        ui.set_confirm_name(SharedString::new());
+        ui.set_confirm_items(0);
+        ui.set_confirm_problem(TransferProblem::None);
+        ui.set_confirm_problem_path(SharedString::new());
+        ui.set_confirm_open(true);
+    }
+
     /// 확인 줄의 Enter: 작업을 대기열에 넣고 확인 줄을 닫는다. 시작 전에 막히면 작업을 만들지 않고 까닭을 보인다(다음
     /// Enter·Esc로 닫는다).
     fn accept_transfer(&self) {
+        if self.ui.get_confirm_delete() == DeleteConfirm::EmptyBin {
+            if self.ui.get_confirm_problem() != TransferProblem::None {
+                self.close_transfer();
+                return;
+            }
+            let started = self.app.borrow_mut().empty_recycle_bin();
+            if started.is_some() {
+                self.close_transfer();
+                refresh_jobs();
+            } else {
+                self.ui
+                    .set_confirm_problem(TransferProblem::NothingToDelete);
+            }
+            return;
+        }
         let delete = self.delete.borrow().clone();
         if let Some(plan) = delete {
             if self.ui.get_confirm_problem() != TransferProblem::None {
@@ -2607,7 +2637,7 @@ impl View {
             Execution::ConfirmDelete(warning) => self.open_delete(warning),
             Execution::ItemMissing => self.show_missing_item(),
             Execution::NotAllowedHere => self.ui.set_notice(text::NOT_ALLOWED_HERE.into()),
-            Execution::ConfirmEmptyRecycleBin => todo!("#354"),
+            Execution::ConfirmEmptyRecycleBin => self.open_empty_recycle_bin(),
             Execution::UndoRefused(_) | Execution::Disabled | Execution::WindowClosed => {}
         }
     }

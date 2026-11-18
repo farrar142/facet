@@ -327,7 +327,7 @@ export enum TransferProblem { none, no-sources, target-missing, target-not-folde
 
 // 삭제 확인 줄의 까닭(코어의 `DeleteWarning`): 확인 줄이 복사·이동이면 none, 영구 삭제(Shift+Delete), 휴지통이 없는 위치의
 // 삭제(Delete).
-export enum DeleteConfirm { none, permanent, no-recycle-bin }
+export enum DeleteConfirm { none, permanent, no-recycle-bin, empty-bin }
 
 // 작은 단추: 진행 표시와 확인 줄에 쓴다. 눌러도 키보드 입력을 가져가지 않는다(창이 목록으로 돌린다).
 component SmallButton inherits Rectangle {
@@ -4058,6 +4058,8 @@ export component AppWindow inherits Window {
                     ? (root.confirm-name != ""
                         ? @tr("「{}」을(를) 영구 삭제합니다. 실행취소할 수 없습니다. Enter로 삭제, Esc로 취소", root.confirm-name)
                         : @tr("{}개 항목을 영구 삭제합니다. 실행취소할 수 없습니다. Enter로 삭제, Esc로 취소", root.confirm-items))
+                    : root.confirm-problem == TransferProblem.none && root.confirm-delete == DeleteConfirm.empty-bin
+                    ? @tr("모든 드라이브의 휴지통을 비웁니다. 실행취소할 수 없습니다. Enter로 비우기, Esc로 취소")
                     : root.confirm-problem == TransferProblem.none && root.confirm-delete == DeleteConfirm.no-recycle-bin
                     ? (root.confirm-name != ""
                         ? @tr("휴지통이 없는 위치라 「{}」이(가) 영구 삭제되며 실행취소할 수 없습니다. Enter로 삭제, Esc로 취소", root.confirm-name)
@@ -4080,7 +4082,7 @@ export component AppWindow inherits Window {
             if root.confirm-problem == TransferProblem.none: VerticalLayout {
                 alignment: center;
                 SmallButton {
-                    text: root.confirm-delete == DeleteConfirm.none ? @tr("시작") : @tr("삭제");
+                    text: root.confirm-delete == DeleteConfirm.none ? @tr("시작") : root.confirm-delete == DeleteConfirm.empty-bin ? @tr("비우기") : @tr("삭제");
                     clicked => {
                         root.confirm-accept();
                         keys.focus();
