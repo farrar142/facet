@@ -79,6 +79,7 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::StopSearch => "검색 중지",
         CommandId::InstantUnderFolder => "현재 폴더 아래만",
         CommandId::OpenWith | CommandId::Properties => todo!("#321"),
+        CommandId::TogglePreview => todo!("#339"),
     }
 }
 

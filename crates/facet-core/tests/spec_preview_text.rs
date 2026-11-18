@@ -1,5 +1,5 @@
 // target: crates/facet-core/tests/spec_preview_text.rs
-// AC: #336: 인코딩 추정(BOM UTF-8·UTF-16LE/BE, BOM 없는 UTF-8 한글·UTF-16LE/BE, CP949, Windows-1252), 빈 파일과 바이너리, 256KB 경계의 반쪽 글자와 잘림 표시·한도와 같은 크기·큰 파일, 없는 파일·잠긴 파일, 읽는 동안 이름바꾸기·지우기
+// AC: #336: 인코딩 추정(BOM UTF-8·UTF-16LE/BE, BOM 없는 UTF-8 한글·UTF-16LE/BE(ASCII만 담은 UTF-16 포함), CP949, Windows-1252), 빈 파일과 바이너리, 256KB 경계의 반쪽 글자와 잘림 표시·한도와 같은 크기·큰 파일, 없는 파일·잠긴 파일, 읽는 동안 이름바꾸기·지우기
 //! 미리보기의 텍스트 읽기(`facet_core::preview`의 `detect_encoding`·`decode_text`·`read_text_head`)를 임시 폴더의 실제
 //! 파일로 확인한다: 인코딩 추정 순서(BOM → UTF-8 → UTF-16 → CP949 → Windows-1252)와 글자, 바이너리 거르기, 앞부분만
 //! 읽을 때 반쪽 글자를 버리고 잘림을 알리는 것, 이유 값. 잠긴 파일과 「읽는 동안 이름바꾸기·지우기」는 Windows에서만 돈다.
@@ -86,6 +86,16 @@ fn utf8_korean_without_a_bom_is_utf8() {
 #[ignore = "#336"]
 fn utf16_without_a_bom_is_found_from_the_nul_pattern() {
     let text = "line 1: 로그 시작\r\nline 2: ok\r\n".repeat(20);
+    assert_reads(&utf16le(&text), TextEncoding::Utf16Le, &text);
+    assert_reads(&utf16be(&text), TextEncoding::Utf16Be, &text);
+}
+
+#[test]
+#[ignore = "#336"]
+fn ascii_only_utf16_without_a_bom_is_utf16_not_utf8_with_nuls() {
+    // ASCII만 담은 UTF-16은 NUL이 섞인 올바른 UTF-8 바이트이기도 하다. NUL 모양이 UTF-8 검사보다 먼저다.
+    let text = "plain ascii text\r\nsecond line\r\n".repeat(20);
+    assert!(std::str::from_utf8(&utf16le(&text)).is_ok());
     assert_reads(&utf16le(&text), TextEncoding::Utf16Le, &text);
     assert_reads(&utf16be(&text), TextEncoding::Utf16Be, &text);
 }

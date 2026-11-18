@@ -152,6 +152,8 @@ pub enum CommandId {
     OpenWith,
     /// #321: 속성(`properties`, Alt+Enter).
     Properties,
+    /// #339: 미리보기 영역 켜고 끄기(`toggle-preview`, Alt+P).
+    TogglePreview,
 }
 
 impl CommandId {
@@ -278,6 +280,7 @@ impl CommandId {
             CommandId::InstantUnderFolder => "instant-under-folder",
             CommandId::OpenWith => "open-with",
             CommandId::Properties => "properties",
+            CommandId::TogglePreview => "toggle-preview",
         }
     }
 
@@ -394,6 +397,7 @@ impl CommandId {
             CommandId::Paste => const { &[key(letter('V')).ctrl()] },
             CommandId::CopyPath => const { &[key(letter('C')).ctrl().shift()] },
             CommandId::OpenWith | CommandId::Properties => &[], // #321
+            CommandId::TogglePreview => &[],                    // #339
         }
     }
 
@@ -448,6 +452,7 @@ impl CommandId {
             CommandId::StopSearch => tab.search().is_some_and(|status| status.running),
             CommandId::InstantUnderFolder => tab.instant_base().is_some(),
             CommandId::OpenWith | CommandId::Properties => todo!("#321"),
+            CommandId::TogglePreview => todo!("#339"),
             CommandId::Refresh
             | CommandId::EditAddress
             | CommandId::ToggleHidden

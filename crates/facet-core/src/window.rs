@@ -331,6 +331,21 @@ impl Window {
         self.split_ratio = SPLIT_RATIO_DEFAULT;
     }
 
+    /// #339: 창의 미리보기 영역(켜짐·폭).
+    pub fn preview_pane(&self) -> crate::preview::PreviewPane {
+        todo!("#339")
+    }
+
+    /// #339: 미리보기 영역을 켜고 끈다.
+    pub fn set_preview_visible(&mut self, _visible: bool) {
+        todo!("#339")
+    }
+
+    /// #339: 미리보기 영역의 폭을 정한다(자른 폭을 돌려줌).
+    pub fn set_preview_width(&mut self, _width: f32) -> f32 {
+        todo!("#339")
+    }
+
     /// 창의 화면 자리·크기·최대화(가상 화면 기준 물리 픽셀, [`crate::placement`]). 세션에 남고, 되살린 창은 이
     /// 자리로 뜬다. 앱이 아직 알리지 않았으면(띄우기 전) `None`이다.
     pub fn placement(&self) -> Option<Placement> {
@@ -463,6 +478,8 @@ pub enum Update {
     },
     /// #322: 열린 셸 메뉴의 셸 자리가 바뀌었다.
     ShellMenu(crate::shell_helper::ShellMenuId),
+    /// #339: 그 창의 미리보기 영역 내용이 바뀌었다.
+    Preview(WindowId),
 }
 
 /// #303: 하위 폴더 목록·맨 앞 목록 요청의 번호.
@@ -943,6 +960,7 @@ impl App {
                 active_panel: window.active,
                 split_ratio: window.split_ratio,
                 placement: window.placement,
+                preview: Default::default(), // #339
             })
             .collect();
         Some(Session {
@@ -1655,6 +1673,38 @@ impl App {
     /// #321: 켠 셸 확장 도우미 관리.
     pub fn shell_helper(&self) -> Option<&crate::shell_helper::ShellHelper> {
         todo!("#321")
+    }
+
+    /// #339: 그 창의 미리보기 영역 내용(꺼져 있으면 `None`).
+    pub fn preview(&self, _window: WindowId) -> Option<&crate::preview::PreviewContent> {
+        todo!("#339")
+    }
+
+    /// #339: 선택·활성 탭·패널·창이 바뀐 뒤 미리보기 영역을 맞춘다.
+    pub fn sync_preview(&mut self) {
+        todo!("#339")
+    }
+
+    /// #341: 그 창 미리보기 영역의 긴 변(물리 픽셀).
+    pub fn set_preview_side(&mut self, _window: WindowId, _side: u32) {
+        todo!("#341")
+    }
+
+    /// #342: 그 창 미리보기 영역의 자리(처리기 창을 붙일 곳).
+    pub fn set_preview_host(
+        &mut self,
+        _window: WindowId,
+        _host: Option<crate::preview::PreviewHost>,
+    ) {
+        todo!("#342")
+    }
+
+    /// #342: 셸 미리보기 처리기 조회를 바꾼다(점 없는 소문자 확장자).
+    pub fn set_preview_handler_lookup(
+        &mut self,
+        _lookup: impl Fn(&str) -> bool + Send + Sync + 'static,
+    ) {
+        todo!("#342")
     }
 
     /// #322: 오른쪽 메뉴의 셸 항목 자리를 연다(도우미에 셸 메뉴를 요청한다).
@@ -2481,6 +2531,7 @@ impl App {
         let navigation = match command {
             CommandId::Open => return self.open_cursor_item(),
             CommandId::OpenWith | CommandId::Properties => todo!("#321"),
+            CommandId::TogglePreview => todo!("#339"),
             CommandId::Back => Navigation::Back,
             CommandId::Forward => Navigation::Forward,
             CommandId::Up => Navigation::Up,

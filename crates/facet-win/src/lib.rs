@@ -43,6 +43,7 @@ pub mod drag_source;
 pub mod drop_target;
 pub mod file_ops;
 pub mod pipe_client;
+pub mod preview;
 pub mod recycle;
 pub mod shell_copy;
 pub mod single_instance;

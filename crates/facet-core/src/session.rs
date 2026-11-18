@@ -65,6 +65,8 @@ pub struct WindowSession {
     pub split_ratio: f32,
     /// 창의 화면 자리·크기·최대화. 모르면(아직 띄우지 않은 창) `None`이다.
     pub placement: Option<Placement>,
+    /// #339: 미리보기 영역(켜짐·폭).
+    pub preview: crate::preview::PreviewPane,
 }
 
 /// 패널 하나: 탭들과 활성 탭.
@@ -498,6 +500,7 @@ impl FileV1 {
                 .windows
                 .into_iter()
                 .map(|window| WindowSession {
+                    preview: Default::default(), // #339
                     placement: PlacementV1::read(window.placement),
                     split_ratio: window.split_ratio,
                     active_panel: window.active_panel,

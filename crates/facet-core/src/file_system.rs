@@ -331,6 +331,7 @@ fn attributes(_name: &std::ffi::OsStr, metadata: &Metadata) -> Attributes {
         hidden: bits & FILE_ATTRIBUTE_HIDDEN != 0,
         system: bits & FILE_ATTRIBUTE_SYSTEM != 0,
         read_only: bits & FILE_ATTRIBUTE_READONLY != 0,
+        online_only: false, // #325
     }
 }
 
@@ -341,5 +342,6 @@ fn attributes(name: &std::ffi::OsStr, metadata: &Metadata) -> Attributes {
         hidden: name.as_encoded_bytes().starts_with(b"."),
         system: false,
         read_only: metadata.permissions().readonly(),
+        online_only: false, // #325
     }
 }
