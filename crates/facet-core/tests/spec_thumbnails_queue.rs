@@ -131,7 +131,6 @@ fn names(done: &[ThumbnailDone]) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "#329"]
 fn 보이는_요청이_먼저_들어온_근처_요청보다_먼저_시작한다() {
     let (queue, log) = make_queue(1);
     queue.want(1, vec![key("gate")], vec![key("n1"), key("n2")]);
@@ -152,7 +151,6 @@ fn 보이는_요청이_먼저_들어온_근처_요청보다_먼저_시작한다(
 }
 
 #[test]
-#[ignore = "#329"]
 fn 같은_무리_안에서는_넘긴_차례로_만든다() {
     let (queue, log) = make_queue(1);
     queue.want(1, vec![key("gate")], vec![]);
@@ -168,7 +166,6 @@ fn 같은_무리_안에서는_넘긴_차례로_만든다() {
 }
 
 #[test]
-#[ignore = "#329"]
 fn 빠진_요청은_시작_전이면_만들지_않고_만드는_중이면_취소되며_결과를_내지_않는다() {
     let (queue, log) = make_queue(1);
     queue.want(1, vec![key("gate")], vec![key("p1"), key("p2")]);
@@ -183,7 +180,6 @@ fn 빠진_요청은_시작_전이면_만들지_않고_만드는_중이면_취소
 }
 
 #[test]
-#[ignore = "#329"]
 fn 주인을_잊으면_그_주인의_요청만_모두_취소된다() {
     let (queue, log) = make_queue(1);
     queue.want(1, vec![key("gate")], vec![key("p1"), key("p2")]);
@@ -206,7 +202,6 @@ fn 주인을_잊으면_그_주인의_요청만_모두_취소된다() {
 }
 
 #[test]
-#[ignore = "#329"]
 fn 만드는_함수가_패닉하면_panicked_실패로_오고_뒤_요청도_만든다() {
     let (queue, log) = make_queue(1);
     queue.want(1, vec![key("panic1"), key("after1")], vec![key("after2")]);
@@ -227,7 +222,6 @@ fn 만드는_함수가_패닉하면_panicked_실패로_오고_뒤_요청도_만�
 }
 
 #[test]
-#[ignore = "#329"]
 fn 실패한_키는_다시_만들지_않고_같은_실패가_곧바로_온다() {
     let (queue, log) = make_queue(1);
     queue.want(1, vec![key("bad1")], vec![]);
@@ -256,7 +250,6 @@ fn 실패한_키는_다시_만들지_않고_같은_실패가_곧바로_온다() 
 }
 
 #[test]
-#[ignore = "#329"]
 fn 취소된_키는_다시_원하면_다시_만든다() {
     let (queue, log) = make_queue(1);
     queue.want(1, vec![key("gate")], vec![]);
@@ -271,7 +264,6 @@ fn 취소된_키는_다시_원하면_다시_만든다() {
 }
 
 #[test]
-#[ignore = "#329"]
 fn 계속_원하는_동안_이미_낸_결과는_다시_만들지_않는다() {
     let (queue, log) = make_queue(1);
     queue.want(1, vec![key("a")], vec![key("b")]);
@@ -284,7 +276,6 @@ fn 계속_원하는_동안_이미_낸_결과는_다시_만들지_않는다() {
 }
 
 #[test]
-#[ignore = "#329"]
 fn 작업자_수만큼_나란히_만든다() {
     let (queue, log) = make_queue(2);
     queue.want(1, vec![key("gate1"), key("gate2"), key("gate3")], vec![]);
@@ -311,7 +302,6 @@ fn 작업자_수만큼_나란히_만든다() {
 }
 
 #[test]
-#[ignore = "#329"]
 fn 작업자_수는_코어_수_빼기_하나이고_1에서_8_사이다() {
     assert_eq!(MAX_WORKERS, 8);
     for (cores, workers) in [(1, 1), (2, 1), (4, 3), (8, 7), (9, 8), (16, 8), (64, 8)] {
@@ -320,7 +310,6 @@ fn 작업자_수는_코어_수_빼기_하나이고_1에서_8_사이다() {
 }
 
 #[test]
-#[ignore = "#329"]
 fn 결과가_오면_깨우기를_부른다() {
     let (queue, _log) = make_queue(1);
     let woken = Arc::new(AtomicUsize::new(0));
@@ -336,7 +325,6 @@ fn 결과가_오면_깨우기를_부른다() {
 }
 
 #[test]
-#[ignore = "#329"]
 fn 원하기와_잊기는_부르는_스레드를_기다리게_하지_않는다() {
     let (queue, log) = make_queue(1);
     queue.want(1, vec![key("gate")], vec![]);

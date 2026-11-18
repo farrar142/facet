@@ -99,6 +99,7 @@ const TABLE: &[(&str, &[&str])] = &[
     ("crates/facet-core/src/placement.rs", &["session"]),
     ("crates/facet-core/src/clipboard.rs", &["clipboard"]),
     ("crates/facet-core/src/thumbnail.rs", &["thumbnail-decode"]),
+    ("crates/facet-core/src/thumbnail_queue.rs", &[]),
     ("crates/facet-core/src/query_syntax.rs", &["query-syntax"]),
     ("crates/facet-core/src/live_search.rs", &["search"]),
     ("crates/facet-core/src/condition_match.rs", &["search"]),
