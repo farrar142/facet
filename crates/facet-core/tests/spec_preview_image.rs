@@ -94,7 +94,6 @@ fn near(a: u32, b: u32) -> bool {
 }
 
 #[test]
-#[ignore = "#341"]
 fn an_image_is_scaled_to_the_requested_side_keeping_its_ratio() {
     let dir = TempDir::new().unwrap();
     let path = write(dir.path(), "사진.bmp", &bmp(400, 200));
@@ -118,7 +117,6 @@ fn an_image_is_scaled_to_the_requested_side_keeping_its_ratio() {
 }
 
 #[test]
-#[ignore = "#341"]
 fn a_small_image_is_not_enlarged() {
     let dir = TempDir::new().unwrap();
     let path = write(dir.path(), "small.BMP", &bmp(40, 20));
@@ -128,7 +126,6 @@ fn a_small_image_is_not_enlarged() {
 }
 
 #[test]
-#[ignore = "#341"]
 fn broken_and_empty_images_are_corrupt_without_panicking() {
     let dir = TempDir::new().unwrap();
     let mut cut = bmp(64, 64);
@@ -185,7 +182,6 @@ fn wait_image_side(app: &mut App, side: u32) -> Thumbnail {
 }
 
 #[test]
-#[ignore = "#341"]
 fn the_app_previews_an_image_at_the_pane_size_and_follows_size_changes() {
     let dir = TempDir::new().unwrap();
     write(dir.path(), "사진.bmp", &bmp(400, 200));

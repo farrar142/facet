@@ -2252,6 +2252,23 @@ impl View {
     fn render_preview(&self) {
         use facet_core::preview::{PreviewBody, PreviewContent, TEXT_HEAD_LIMIT};
         let ui = &self.ui;
+        // 영역의 긴 변(물리 픽셀)을 코어에 알린다: 이미지면 그 크기로 다시 요청한다.
+        {
+            let pane_width = self
+                .app
+                .borrow()
+                .window(self.window)
+                .map(|w| w.preview_pane().width);
+            if let Some(width) = pane_width {
+                let scale = ui.window().scale_factor();
+                let size = ui.window().size();
+                let long = (width - 24.0)
+                    .max(size.height as f32 / scale - 24.0)
+                    .max(1.0);
+                let side = (long * scale).round() as u32;
+                self.app.borrow_mut().set_preview_side(self.window, side);
+            }
+        }
         let app = self.app.borrow();
         let Some(window) = app.window(self.window) else {
             return;
@@ -2273,6 +2290,7 @@ impl View {
         let mut lines: Vec<SharedString> = Vec::new();
         let mut note = String::new();
         let mut picture = slint::Image::default();
+        let mut placeholder = false;
         let (mut folder, mut icon) = (false, None);
         match content {
             PreviewContent::Nothing => message = text::preview_nothing_text(),
@@ -2324,8 +2342,12 @@ impl View {
                             note = text::preview_truncated_text(TEXT_HEAD_LIMIT);
                         }
                     }
-                    PreviewBody::Image { image, .. } => {
+                    PreviewBody::Image {
+                        image,
+                        placeholder: blurred,
+                    } => {
                         kind = 3;
+                        placeholder = *blurred;
                         picture = slint::Image::from_rgba8(slint::SharedPixelBuffer::<
                             slint::Rgba8Pixel,
                         >::clone_from_slice(
@@ -2351,6 +2373,7 @@ impl View {
         ui.set_preview_lines(ModelRc::from(Rc::new(VecModel::from(lines))));
         ui.set_preview_note(note.into());
         ui.set_preview_picture(picture);
+        ui.set_preview_placeholder(placeholder);
     }
 
     /// 패널 사이 경계를 두 번 눌렀다: 반반으로 맞춘다.
