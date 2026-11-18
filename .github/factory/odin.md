@@ -49,7 +49,16 @@ Stubs are the only change outside `crates/*/tests/spec_*.rs` you make. Then chec
 - `cargo fmt --all` (then `cargo fmt --all --check` must be clean);
 - `cargo clippy --all-targets -- -D warnings` must be clean. Read only the diagnostics (search the output for `error` and `warning`).
 
-The workflow runs both again after you. If they still fail you get their log in the same run and one more chance; a second failure hands the spec to a person.
+### Acceptance probe
+
+After fmt and clippy the workflow runs `bash .github/factory/acceptance-probe.sh origin/main` (#414): every test this spec PR adds or changes under `#[ignore = "#<ticket>"]` runs once with `--ignored`, and each must be red **for the right reason**, so that the ticket can turn it green:
+
+- right: an assertion fails (`assert!`, `assert_eq!`, `assert_ne!`, `panic!` on a line of the test file), or a ticket stub panics (`todo!`, `unimplemented!`);
+- wrong: the test file does not compile, cargo reports no result for the test, the test already passes (it asserts nothing the ticket builds — also a test that skips itself on the runner, e.g. returns early without a condition), or another panic (`unwrap`/`expect` on a missing fixture, an I/O error, an index out of range).
+
+Run it yourself before you finish (it builds the touched crates' tests). For a wrong one fix the test, not the assertion's meaning: create the fixture the test needs, reach the stub before anything can fail, replace `unwrap()` of the code under test with an assertion on the result, or make a test that passes today assert the new behaviour. It runs on Windows, as the tests do.
+
+The workflow runs all three again after you. If they still fail you get their log in the same run and one more chance; a second failure hands the spec to a person.
 
 ## 5. Report
 

@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # Records a failed Implementer run on its ticket (factory-implementer.yml, "Record failure"; #410).
 #
-#   record-failure.sh <ticket> <code|infra> <run url>
+#   record-failure.sh <ticket> <code|infra> <run url> [<run started at>]
 #
+# The fourth argument (ISO 8601 UTC, the run's start) says the run made no commits (#414). Then a
+# comment on the ticket made since that time, not a factory marker (a body starting with `<!--`), is
+# the agent saying why it stopped without the blocked marker (implementer.md §4: a workflow file, a
+# decision it cannot make): the ticket goes to a person at once with that comment as the reason, and
+# no failure is counted. Without such a comment the failure is counted as below.
 # A ticket whose run left a comment starting with `<!-- factory-implementer-blocked -->` after the last
 # `<!-- factory-reset -->` (implementer.md §4: the agent cannot go on without a person) goes to a person
 # at once through hand-to-human.sh, with that comment as the reason; no failure is counted.
@@ -14,12 +19,13 @@
 set -u
 : "${REPO:?REPO is not set}"
 here=$(cd "$(dirname "$0")" && pwd)
-[ $# -eq 3 ] || { echo 'usage: record-failure.sh <ticket> <code|infra> <run url>' >&2; exit 2; }
-n=$1 kind=$2 url=$3
+usage() { echo 'usage: record-failure.sh <ticket> <code|infra> <run url> [<run started at>]' >&2; exit 2; }
+[ $# -eq 3 ] || [ $# -eq 4 ] || usage
+n=$1 kind=$2 url=$3 started=${4:-}
 case "$kind" in
   code) marker='<!-- factory-implementer-failed -->' limit=2 what=code ;;
   infra) marker='<!-- factory-implementer-infra-failed -->' limit=3 what=infrastructure ;;
-  *) echo 'usage: record-failure.sh <ticket> <code|infra> <run url>' >&2; exit 2 ;;
+  *) usage ;;
 esac
 BLOCKED='<!-- factory-implementer-blocked -->'
 
@@ -38,6 +44,17 @@ if [ -n "$blocked" ]; then
 
 ${blocked#"$BLOCKED"}"
   exit $?
+fi
+
+if [ -n "$started" ]; then
+  said=$(gh api "repos/$REPO/issues/$n/comments?per_page=100" --paginate     | jq -rs --arg t "$started" '[.[][] | select(.created_at >= $t and (.body | startswith("<!--") | not)) | .body] | last // empty'     | tr -d '') || said=
+  if [ -n "$said" ]; then
+    gh api -X DELETE "repos/$REPO/issues/$n/labels/in-progress" > /dev/null 2>&1 || true
+    bash "$here/hand-to-human.sh" "$n" "Implementer가 커밋 없이 멈추며 까닭을 남겼다($url). 사람이 아래를 정한 뒤 티켓을 공장에 돌려준다.
+
+$said"
+    exit $?
+  fi
 fi
 
 gh api "repos/$REPO/issues/$n/comments" -f "body=$marker
