@@ -478,16 +478,12 @@ impl<'a> Runner<'a> {
         }
     }
 
-    /// 원본 항목을 찾을 수 없다: 「원본 없음」으로 묻는다(다시 시도해도 표는 그대로라 건너뛰기·취소만 뜻이 있다).
+    /// 원본 항목을 찾을 수 없다(휴대폰 폴더를 읽은 표에 없음): 「원본 없음」으로 묻는다. 다시 시도는 다시 묻는다(그
+    /// 사이 휴대폰 폴더를 다시 읽어도 이 작업의 원본은 바뀌지 않는다).
     fn missing(&mut self, label: &Path) {
         loop {
             match self.on_error(label, FileOpErrorKind::SourceMissing) {
-                ErrorStep::Retry => {
-                    if shell_provider::device_item(label).is_some() {
-                        // 그 사이 휴대폰 폴더를 다시 읽어 표에 생겼다: 다음 작업에서 다룬다(드묾).
-                    }
-                    continue;
-                }
+                ErrorStep::Retry => {}
                 ErrorStep::Skip => {
                     self.item_done();
                     return;

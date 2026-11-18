@@ -4049,7 +4049,10 @@ impl App {
             OperationKind::Copy
         };
         self.journals.insert(id, (kind, journal));
-        push_recent(&mut self.recent_targets, plan.target.clone());
+        // 휴대폰 폴더는 글자로 다시 고를 수 없어(주소창 해석이 없다) 최근 대상에 넣지 않는다.
+        if !crate::shell_provider::is_device_path(&plan.target) {
+            push_recent(&mut self.recent_targets, plan.target.clone());
+        }
         self.work_area
             .add(id, plan.kind, plan.target.clone(), plan.sources.len());
         // 넣자마자 온 대기 사건을 바로 반영한다.
