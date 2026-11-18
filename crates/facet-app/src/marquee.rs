@@ -8,7 +8,7 @@
 
 use crate::tab_drag::{DRAG_THRESHOLD, Point};
 
-/// 목록이 놓인 자리: 보이는 영역의 창 기준 왼쪽 위와 크기(스크롤 막대 제외), 넘긴 거리(0 이상), 행 높이, 행 수.
+/// 목록이 놓인 자리: 보이는 영역의 창 기준 왼쪽 위와 크기, 세로·가로로 넘긴 거리(0 이상), 행 높이, 행 수.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct List {
     pub left: f32,
@@ -16,6 +16,7 @@ pub struct List {
     pub width: f32,
     pub height: f32,
     pub scroll: f32,
+    pub scroll_x: f32,
     pub row_height: f32,
     pub rows: usize,
 }
@@ -76,7 +77,7 @@ impl<T> Marquee<T> {
             shift,
             pressed: at,
             start: (
-                (at.x - list.left).clamp(0.0, list.width.max(0.0)),
+                (at.x - list.left).clamp(0.0, list.width.max(0.0)) + list.scroll_x,
                 (at.y - list.top).clamp(0.0, list.height.max(0.0)) + list.scroll,
             ),
             current: at,
@@ -103,7 +104,7 @@ impl<T> Marquee<T> {
     /// 끄는 점의 목록 내용 기준 자리. 보이는 영역 밖이면 보이는 영역 끝으로 자른다(그 너머는 넘겨서 보인다).
     fn end(&self, list: &List) -> (f32, f32) {
         (
-            (self.current.x - list.left).clamp(0.0, list.width.max(0.0)),
+            (self.current.x - list.left).clamp(0.0, list.width.max(0.0)) + list.scroll_x,
             (self.current.y - list.top).clamp(0.0, list.height.max(0.0)) + list.scroll,
         )
     }
@@ -181,9 +182,31 @@ mod tests {
         width: 400.0,
         height: 240.0,
         scroll: 0.0,
+        scroll_x: 0.0,
         row_height: 24.0,
         rows: 100,
     };
+
+    #[test]
+    fn 가로로_넘긴_목록에서_사각형은_내용_기준이고_행은_그대로다() {
+        // 가로로 300 넘긴 목록: 창 x 150은 내용 x 350이다. 시작점은 내용 기준으로 남아, 끄는 동안 가로로 더
+        // 넘어가도 시작한 자리에 붙어 있다.
+        let scrolled = List {
+            scroll_x: 300.0,
+            ..LIST
+        };
+        let mut marquee = pressed(150.0, 60.0, &scrolled);
+        marquee.moved(at(250.0, 110.0));
+        let rect = marquee.rect(&scrolled);
+        assert_eq!((rect.x, rect.width), (350.0, 100.0));
+        assert_eq!(marquee.rows(&scrolled), marquee.rows(&LIST));
+        let further = List {
+            scroll_x: 340.0,
+            ..LIST
+        };
+        let rect = marquee.rect(&further);
+        assert_eq!((rect.x, rect.width), (350.0, 140.0));
+    }
 
     #[test]
     fn 끝까지_넘기면_빈_곳_한_행이_보인다() {
