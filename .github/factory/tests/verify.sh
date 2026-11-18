@@ -320,6 +320,14 @@ prior old
 bash "$verify" sendback 7 40 "$tmp/reason.md" acceptance > /dev/null
 eq "an old one and an acceptance failure" ready-for-human "$(labels_of 7)"
 
+setup a-reset-forgets-earlier-sendbacks
+prior acceptance
+jq '. + [{id: 9, created_at: "2026-11-17T02:00:00Z", body: "<!-- factory-reset -->\n티켓을 고쳤다."}]' \
+  "$FAKE_GH/comments-7.json" | tr -d '\r' > "$FAKE_GH/c.json" && mv "$FAKE_GH/c.json" "$FAKE_GH/comments-7.json"
+bash "$verify" sendback 7 40 "$tmp/reason.md" acceptance > /dev/null
+eq "one acceptance failure after the reset" ready-for-agent "$(labels_of 7)"
+eq "no human marker after the reset" 0 "$(count_marker 7 '<!-- factory-human -->')"
+
 setup pass
 jq -n '[{id: 1, event: "pull_request", head_branch: "agent/issue-7", triggering_actor: {login: "github-actions[bot]"}, jobs: 0}]' | tr -d '' > "$FAKE_GH/runs.json"
 printf 'AC-1: 충족 — spec_demo_a::seven_does_it\n' > "$tmp/report.md"
