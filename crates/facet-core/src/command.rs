@@ -373,7 +373,8 @@ impl CommandId {
         CommandId::ALL.into_iter().find(|c| c.as_str() == id)
     }
 
-    /// 그 열로 정렬하는 명령. 정렬 명령이 없는 열(휴지통의 원래 위치·지운 날짜: 머리글로만 정렬한다)은 `None`이다.
+    /// 그 열로 정렬하는 명령. 정렬 명령이 없는 열(휴지통의 원래 위치·지운 날짜, zip의 압축된 크기: 머리글로만 정렬한다)은
+    /// `None`이다.
     pub fn sort_by(column: Column) -> Option<CommandId> {
         Some(match column {
             Column::Name => CommandId::SortByName,
@@ -384,9 +385,9 @@ impl CommandId {
             Column::Matches => CommandId::SortByMatches,
             Column::TotalSize => CommandId::SortByTotalSize,
             Column::FreeSpace => CommandId::SortByFreeSpace,
-            Column::OriginalLocation | Column::DateDeleted => return None,
+            // 압축된 크기 열도 머리글로만 정렬한다(zip 위치에만 있다).
+            Column::OriginalLocation | Column::DateDeleted | Column::CompressedSize => return None,
             Column::SyncState => todo!("#451"),
-            Column::CompressedSize => todo!("#423"),
         })
     }
 

@@ -179,6 +179,15 @@ impl ReadRequest {
                     Arc::clone(&self.cancel.0),
                 )
                 .map(|listed| DetailsList::with_recycled(listed.items, listed.recycled, self.sort))
+            } else if location.zip_location().is_some() {
+                crate::zip_provider::list_detailed(location).map(|listing| {
+                    DetailsList::with_compressed(
+                        listing.items,
+                        listing.compressed,
+                        listing.notes,
+                        self.sort,
+                    )
+                })
             } else {
                 provider_for(location)
                     .list(location)
@@ -218,6 +227,7 @@ impl ReadRequest {
                     | ListError::NotResponding { .. }
                     | ListError::Disconnected { .. }
                     | ListError::DeviceNotReady { .. }
+                    | ListError::BrokenArchive { .. }
             )
         );
         if !(self.climb && vanished) {
@@ -937,11 +947,18 @@ impl Tab {
             Navigation::Forward => (self.forward.last()?.clone(), Kind::Forward),
             Navigation::Up => {
                 let parent = self.up_target()?;
-                reselect = self
-                    .location
-                    .file_system_path()
-                    .and_then(|path| path.file_name())
-                    .map(OsStr::to_os_string);
+                // 방금 있던 폴더를 고른다. zip 루트에서 올라가면 그 zip 파일, zip 안 폴더면 그 폴더 이름이다.
+                reselect = match self.location.zip_location() {
+                    Some(zip) if zip.inner().is_empty() => {
+                        zip.archive().file_name().map(OsStr::to_os_string)
+                    }
+                    Some(zip) => zip.inner().rsplit('\\').next().map(OsString::from),
+                    None => self
+                        .location
+                        .file_system_path()
+                        .and_then(|path| path.file_name())
+                        .map(OsStr::to_os_string),
+                };
                 (parent, Kind::New)
             }
             Navigation::Refresh => (self.location.clone(), Kind::Refresh),
@@ -1416,6 +1433,10 @@ impl Tab {
     pub fn item_path(&self, index: usize) -> Option<PathBuf> {
         if self.location.virtual_folder().is_some() {
             return crate::shell_provider::child_path(&self.location, &self.get(index)?.name);
+        }
+        // zip 위치의 항목 경로는 zip 파일 경로 뒤에 zip 안 경로를 이은 것이다.
+        if let Some(zip) = self.location.zip_location() {
+            return Some(zip.path().join(&self.get(index)?.name));
         }
         Some(self.folder_of(index)?.join(&self.get(index)?.name))
     }
@@ -2667,14 +2688,15 @@ impl Tab {
         self.list.recycled(self.list_index(index)?)
     }
 
-    /// #423: zip 위치의 보이는 항목 `index`면 그 압축된 크기.
-    pub fn compressed_size(&self, _index: usize) -> Option<u64> {
-        todo!("#423")
+    /// zip 위치의 보이는 항목 `index`면 그 압축된 크기(폴더는 0). 다른 위치·목록 밖이면 `None`이다.
+    pub fn compressed_size(&self, index: usize) -> Option<u64> {
+        self.list.compressed_size(self.list_index(index)?)
     }
 
-    /// #423: zip 위치면 그 zip의 같은 이름 수와 손상 여부.
+    /// zip 위치면 그 zip의 같은 이름 수(가려진 기록 수)와 손상 여부. 다른 위치나 아직 읽지 못했으면 `None`이다.
     pub fn archive_notes(&self) -> Option<crate::zip_provider::ArchiveNotes> {
-        todo!("#423")
+        self.location.zip_location()?;
+        self.list.archive_notes()
     }
 
     /// 보이는 항목 `index`의 아이콘 캐시 키, 목록 밖이면 `None`. 실제 폴더·검색 결과 항목은

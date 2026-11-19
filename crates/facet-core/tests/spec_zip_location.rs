@@ -108,7 +108,6 @@ fn open_item(app: &mut App, name: &str) -> Execution {
 }
 
 #[test]
-#[ignore = "#423"]
 fn the_provider_lists_the_zip_root_and_subfolders() {
     let f = fixture();
     let root = zip_loc(&f.zip, "");
@@ -133,7 +132,6 @@ fn the_provider_lists_the_zip_root_and_subfolders() {
 }
 
 #[test]
-#[ignore = "#423"]
 fn zip_locations_have_segments_parents_and_children() {
     let f = fixture();
     let year = zip_loc(&f.zip, r"문서\2024");
@@ -185,7 +183,6 @@ fn zip_locations_have_segments_parents_and_children() {
 }
 
 #[test]
-#[ignore = "#423"]
 fn typing_a_path_inside_a_zip_goes_there() {
     let f = fixture();
     let mut app = app_at(Location::file_system(f.dir.path()));
@@ -212,7 +209,6 @@ fn typing_a_path_inside_a_zip_goes_there() {
 }
 
 #[test]
-#[ignore = "#423"]
 fn opening_a_zip_file_and_moving_around_works_like_folders() {
     let f = fixture();
     // zip 파일로 알아보지 못하면 열기가 기본 프로그램으로 넘어가므로 먼저 확인한다.
@@ -256,7 +252,6 @@ fn opening_a_zip_file_and_moving_around_works_like_folders() {
 }
 
 #[test]
-#[ignore = "#423"]
 fn item_paths_join_the_zip_path_and_the_inner_path() {
     let f = fixture();
     let app = app_at(zip_loc(&f.zip, "문서"));
@@ -268,7 +263,6 @@ fn item_paths_join_the_zip_path_and_the_inner_path() {
 }
 
 #[test]
-#[ignore = "#423"]
 fn compressed_sizes_are_shown_and_sortable() {
     let f = fixture();
     let mut app = app_at(zip_loc(&f.zip, "문서"));
@@ -309,7 +303,6 @@ fn compressed_sizes_are_shown_and_sortable() {
 }
 
 #[test]
-#[ignore = "#423"]
 fn the_filter_works_inside_a_zip() {
     let f = fixture();
     let mut app = app_at(zip_loc(&f.zip, "문서"));
@@ -326,7 +319,6 @@ fn the_filter_works_inside_a_zip() {
 }
 
 #[test]
-#[ignore = "#423"]
 fn only_zip_files_with_the_signature_open_as_locations() {
     let f = fixture();
     let dir = f.dir.path();
@@ -351,7 +343,6 @@ fn only_zip_files_with_the_signature_open_as_locations() {
 }
 
 #[test]
-#[ignore = "#423"]
 fn a_zip_that_cannot_be_read_is_a_list_error() {
     let f = fixture();
     let broken = f.dir.path().join("깨짐.zip");
@@ -378,7 +369,6 @@ fn a_zip_that_cannot_be_read_is_a_list_error() {
 }
 
 #[test]
-#[ignore = "#423"]
 fn damage_and_duplicate_names_are_reported() {
     let dir = TempDir::new().unwrap();
     let mut bytes = zip_support::build(&[
@@ -427,7 +417,6 @@ const BLOCKED: [CommandId; 8] = [
 ];
 
 #[test]
-#[ignore = "#423"]
 fn writing_commands_are_off_inside_a_zip() {
     let f = fixture();
     let mut app = app_at(zip_loc(&f.zip, "문서"));
@@ -463,7 +452,6 @@ fn writing_commands_are_off_inside_a_zip() {
 }
 
 #[test]
-#[ignore = "#423"]
 fn a_zip_inside_a_zip_is_not_opened() {
     let f = fixture();
     let mut app = app_at(zip_loc(&f.zip, ""));
@@ -477,7 +465,6 @@ fn a_zip_inside_a_zip_is_not_opened() {
 }
 
 #[test]
-#[ignore = "#423"]
 fn zip_locations_survive_the_session() {
     let f = fixture();
     let app = app_at(zip_loc(&f.zip, r"문서\2024"));

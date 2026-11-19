@@ -22,6 +22,7 @@ use crate::Item;
 use crate::file_list::format_modified_local;
 use crate::shell_provider::DriveSpace;
 use crate::shell_provider::RecycledEntry;
+use crate::zip_provider::ArchiveNotes;
 
 /// 자세히 보기의 열.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -49,7 +50,7 @@ pub enum Column {
     DateDeleted,
     /// #451: 동기화 상태.
     SyncState,
-    /// #423: 압축된 크기(zip 위치에만 뜻이 있다).
+    /// 압축된 크기(zip 위치에만 뜻이 있다).
     CompressedSize,
 }
 
@@ -253,6 +254,8 @@ struct Entry {
     drive: Option<DriveSpace>,
     /// 휴지통 항목이면 그 정보.
     recycled: Option<Box<Recycled>>,
+    /// zip 위치의 항목이면 압축된 크기(폴더는 0).
+    compressed: Option<u64>,
 }
 
 /// 휴지통 항목의 정보와 정렬·선택에 쓰는 값.
@@ -290,6 +293,7 @@ impl Entry {
             hit: None,
             drive: None,
             recycled: None,
+            compressed: None,
         }
     }
 
@@ -402,7 +406,9 @@ fn compare_entries(a: &Entry, b: &Entry, sort: Sort) -> Ordering {
         Column::OriginalLocation => a.original_folder_key().cmp(&b.original_folder_key()),
         Column::SyncState => todo!("#451"),
         Column::DateDeleted => a.date_deleted().cmp(&b.date_deleted()),
-        Column::CompressedSize => todo!("#423"),
+        // 압축된 크기를 모르는 항목(zip 위치가 아님)은 0으로 본다. 폴더는 가르지 않는다.
+        Column::CompressedSize if a.item.is_folder => Ordering::Equal,
+        Column::CompressedSize => a.compressed.unwrap_or(0).cmp(&b.compressed.unwrap_or(0)),
     };
     directed(key).then_with(|| a.compare_names(b))
 }
@@ -414,6 +420,8 @@ fn compare_entries(a: &Entry, b: &Entry, sort: Sort) -> Ordering {
 pub struct DetailsList {
     entries: Vec<Entry>,
     sort: Sort,
+    /// zip 위치의 목록이면 같은 이름·손상 상태.
+    archive_notes: Option<ArchiveNotes>,
 }
 
 impl DetailsList {
@@ -422,6 +430,7 @@ impl DetailsList {
         let mut list = DetailsList {
             entries: items.into_iter().map(Entry::new).collect(),
             sort,
+            archive_notes: None,
         };
         list.resort();
         list
@@ -444,9 +453,44 @@ impl DetailsList {
                 })
                 .collect(),
             sort,
+            archive_notes: None,
         };
         list.resort();
         list
+    }
+
+    /// zip 위치의 목록: `items`와 같은 차례로 항목마다 압축된 크기를 받아 `sort`대로 정렬하고 상태 `notes`를 든다.
+    pub(crate) fn with_compressed(
+        items: Vec<Item>,
+        compressed: Vec<u64>,
+        notes: ArchiveNotes,
+        sort: Sort,
+    ) -> Self {
+        let mut compressed = compressed.into_iter();
+        let mut list = DetailsList {
+            entries: items
+                .into_iter()
+                .map(|item| {
+                    let mut entry = Entry::new(item);
+                    entry.compressed = compressed.next();
+                    entry
+                })
+                .collect(),
+            sort,
+            archive_notes: Some(notes),
+        };
+        list.resort();
+        list
+    }
+
+    /// `index`번째 항목의 압축된 크기. zip 위치의 항목이 아니면 `None`이다.
+    pub fn compressed_size(&self, index: usize) -> Option<u64> {
+        self.entries.get(index).and_then(|e| e.compressed)
+    }
+
+    /// zip 위치의 목록이면 같은 이름·손상 상태.
+    pub fn archive_notes(&self) -> Option<ArchiveNotes> {
+        self.archive_notes
     }
 
     /// `index`번째 항목의 휴지통 정보(원래 경로·지운 시각). 휴지통 항목이 아니면 `None`이다.

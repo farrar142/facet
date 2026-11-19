@@ -361,6 +361,36 @@ pub fn missing_item_text(path: &std::path::Path) -> String {
 /// 위치의 되는 일이 막은 명령을 실행했을 때 상태 줄 글자.
 pub const NOT_ALLOWED_HERE: &str = "이 위치에서는 할 수 없음";
 
+/// zip 위치의 되는 일이 막은 명령의 까닭(상태 줄·오른쪽 메뉴·명령 팔레트).
+pub const NOT_SUPPORTED_IN_ZIP: &str = "zip 안에서는 지원하지 않음";
+
+/// 위치 `location`의 되는 일이 막은 명령의 까닭: zip 안이면 [`NOT_SUPPORTED_IN_ZIP`], 아니면 [`NOT_ALLOWED_HERE`].
+pub fn not_allowed_text(location: &facet_core::Location) -> &'static str {
+    if location.zip_location().is_some() {
+        NOT_SUPPORTED_IN_ZIP
+    } else {
+        NOT_ALLOWED_HERE
+    }
+}
+
+/// zip 안의 zip을 열려고 했을 때 상태 줄 글자.
+pub const NESTED_ZIP: &str = "zip 안의 zip은 열 수 없음, 먼저 꺼내기";
+
+/// zip 위치의 상태 줄 글자: 같은 이름이 있으면 그 수, 손상됐으면 그 사실. 둘 다 없으면 빈 글자.
+pub fn archive_notes_text(notes: facet_core::zip_provider::ArchiveNotes) -> String {
+    let mut parts = Vec::new();
+    if notes.duplicates > 0 {
+        parts.push(format!(
+            "같은 이름 {}개는 뒤에 나온 것만 보임",
+            notes.duplicates
+        ));
+    }
+    if notes.damaged {
+        parts.push("zip이 손상되어 읽을 수 있는 항목만 보임".to_string());
+    }
+    parts.join(" · ")
+}
+
 /// 주소창 › 펼침 메뉴의 「읽는 중」 줄(#306).
 pub const CRUMB_LOADING: &str = "읽는 중…";
 
