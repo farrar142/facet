@@ -131,7 +131,26 @@ mod thumbs;
 
 slint::include_modules!();
 
+/// `facet --version`: 버전 줄 한 줄만 쓰고 끝난다(창·단일 실행·세션을 건드리지 않음).
+fn print_version() {
+    let dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+        .unwrap_or_default();
+    println!(
+        "{}",
+        facet_core::build::version_line(
+            facet_core::build::channel(),
+            facet_core::build::install_kind(&dir)
+        )
+    );
+}
+
 fn main() -> Result<(), slint::PlatformError> {
+    if std::env::args_os().nth(1).is_some_and(|a| a == "--version") {
+        print_version();
+        return Ok(());
+    }
     let launch = instance::this_launch();
     // 단일 실행: 이미 떠 있는 facet이 있으면 인자를 넘기고 끝난다. 주인 확인은 뮤텍스 하나라 기다리지 않는다.
     // 측정 모드는 끼지 않는다(잴 때마다 띄운 프로세스가 스스로 창을 연다).

@@ -786,10 +786,22 @@ fn run_dist(label: &str) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let build = step(
+    // 채널은 빌드 때 환경 변수로 넣는다(`v*` label이면 정식).
+    let mut build = step(
         "release 빌드",
-        &["build", "--release", "--locked", "-p", "facet-app"],
+        &[
+            "build",
+            "--release",
+            "--locked",
+            "-p",
+            "facet-app",
+            "-p",
+            "facet-shell-helper",
+        ],
     );
+    build
+        .env
+        .push(("FACET_CHANNEL", dist::channel_for_label(label).into()));
     if run_steps("dist", &[build]) != ExitCode::SUCCESS {
         return ExitCode::FAILURE;
     }
@@ -801,6 +813,12 @@ fn run_dist(label: &str) -> ExitCode {
             source: target_dir
                 .join("release")
                 .join(format!("facet{}", env::consts::EXE_SUFFIX)),
+        },
+        dist::Entry {
+            name: "facet-shell-helper.exe",
+            source: target_dir
+                .join("release")
+                .join(format!("facet-shell-helper{}", env::consts::EXE_SUFFIX)),
         },
         dist::Entry {
             name: "LICENSE",

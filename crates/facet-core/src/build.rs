@@ -18,7 +18,10 @@ pub enum Channel {
 impl Channel {
     /// #468: `"stable"`·`"nightly"`.
     pub fn name(self) -> &'static str {
-        todo!("#468")
+        match self {
+            Channel::Stable => "stable",
+            Channel::Nightly => "nightly",
+        }
     }
 }
 
@@ -32,21 +35,31 @@ pub enum InstallKind {
 impl InstallKind {
     /// #468: `"installed"`·`"portable"`.
     pub fn name(self) -> &'static str {
-        todo!("#468")
+        match self {
+            InstallKind::Installed => "installed",
+            InstallKind::Portable => "portable",
+        }
     }
 }
 
 /// #468: 빌드 때 `FACET_CHANNEL`로 정한 채널.
 pub fn channel() -> Channel {
-    todo!("#468")
+    match option_env!("FACET_CHANNEL") {
+        Some("stable") => Channel::Stable,
+        _ => Channel::Nightly,
+    }
 }
 
 /// #468: 실행 파일 폴더의 설치 표지로 정한 설치 종류.
-pub fn install_kind(_exe_dir: &Path) -> InstallKind {
-    todo!("#468")
+pub fn install_kind(exe_dir: &Path) -> InstallKind {
+    if exe_dir.join(INSTALL_MARKER).is_file() {
+        InstallKind::Installed
+    } else {
+        InstallKind::Portable
+    }
 }
 
 /// #468: `facet <버전> (<채널>, <설치 종류>)`.
-pub fn version_line(_channel: Channel, _kind: InstallKind) -> String {
-    todo!("#468")
+pub fn version_line(channel: Channel, kind: InstallKind) -> String {
+    format!("facet {VERSION} ({}, {})", channel.name(), kind.name())
 }
