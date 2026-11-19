@@ -4,7 +4,7 @@ set -u
 here=$(cd "$(dirname "$0")" && pwd)
 script="$here/../decompose.sh"
 workflow="$here/../../workflows/factory-decompose.yml"
-export PATH="$here/fake:$PATH"
+export PATH="$here/decompose-fake:$here/fake:$PATH"
 export REPO=owner/repo
 
 fails=0
@@ -42,10 +42,10 @@ has() { # has <what> <needle> <haystack>
   case "$3" in *"$2"*) ok ;; *) bad "$1: [$2] not in [$3]" ;; esac
 }
 
-# issue <n> <labels comma-separated> [title]
+# issue <n> <labels comma-separated> [title] [body]
 issue() {
-  jq -n --argjson n "$1" --arg l "$2" --arg t "${3:-Ticket $1}" \
-    '{number: $n, state: "open", title: $t, body: "", labels: ($l | split(",") | map(select(. != "") | {name: .}))}' \
+  jq -n --argjson n "$1" --arg l "$2" --arg t "${3:-Ticket $1}" --arg b "${4:-}" \
+    '{number: $n, state: "open", title: $t, body: $b, labels: ($l | split(",") | map(select(. != "") | {name: .}))}' \
     | tr -d '\r' > "$FAKE_GH/issue-$1.json"
 }
 
@@ -230,6 +230,118 @@ issue 249 spec
 bash "$script" dispatch-odin 249 > "$tmp/log" 2>&1
 eq code 0 "$?"
 eq dispatches 1 "$(dispatches)"
+
+# --- budget --------------------------------------------------------------------------------
+
+body_of() { jq -r '.body' "$FAKE_GH/issue-$1.json" | tr -d '\r'; }
+budget() { bash "$script" budget "$1" > "$tmp/log" 2>&1; echo $? > "$tmp/code"; }
+edits() { grep -c "PATCH repos/owner/repo/issues/$1 --input" "$FAKE_GH/calls.log" 2> /dev/null || true; }
+# tickets <spec> <first number> <opus count> <sonnet count>: open sub-issues with those model labels
+tickets() {
+  local s=$1 n=$2 i list=()
+  for ((i = 0; i < $3; i++)); do issue "$n" model:opus; list+=("$n:open"); n=$((n + 1)); done
+  for ((i = 0; i < $4; i++)); do issue "$n" model:sonnet; list+=("$n:open"); n=$((n + 1)); done
+  subs "$s" "${list[@]}"
+}
+
+setup "budget: 2 opus + 9 sonnet tickets append one line above the \$60 default"
+issue 249 spec "압축 파일" "## 할 것
+
+- 하나"
+tickets 249 301 2 9
+budget 249
+eq code 0 "$(cat "$tmp/code")"
+# 30 + 2 x 10 + 9 x 3 = 77
+eq body "## 할 것
+
+- 하나
+
+예산: \$77" "$(body_of 249)"
+eq "budget lines" 1 "$(body_of 249 | grep -c '^예산:')"
+v=$(body_of 249 | sed -n 's/^예산: \$//p')
+eq "over the default" yes "$([ "${v:-0}" -gt 60 ] && echo yes || echo no)"
+
+setup "budget: unlabeled tickets count as sonnet, closed tickets count too"
+issue 249 spec "" "본문
+"
+issue 301 model:sonnet
+issue 302 ""
+issue 303 model:opus
+subs 249 301:open 302:open 303:closed
+budget 249
+# 30 + 1 x 10 + 2 x 3 = 46; a body ending in a newline gets one blank line, not two
+eq body "본문
+
+예산: \$46" "$(body_of 249)"
+
+setup "budget: prices come from the environment and round up to whole dollars"
+issue 249 spec
+tickets 249 301 1 2
+FACTORY_BUDGET_SPEC_USD=20.5 FACTORY_BUDGET_OPUS_USD=8.2 FACTORY_BUDGET_SONNET_USD=1.5 budget 249
+# 20.5 + 8.2 + 2 x 1.5 = 31.7 -> 32; an empty body becomes the line alone
+eq body "예산: \$32" "$(body_of 249)"
+
+setup "budget: a line a person wrote is left alone"
+issue 249 spec "" "## 할 것
+
+예산: \$80
+
+- 하나"
+tickets 249 301 2 9
+before=$(cat "$FAKE_GH/issue-249.json")
+budget 249
+eq code 0 "$(cat "$tmp/code")"
+eq "issue unchanged" "$before" "$(cat "$FAKE_GH/issue-249.json")"
+eq "body edits" 0 "$(edits 249)"
+has log "already has a budget line" "$(cat "$tmp/log")"
+
+setup "budget: running it twice writes one line"
+issue 249 spec "" "본문"
+tickets 249 301 1 1
+budget 249
+budget 249
+eq body "본문
+
+예산: \$43" "$(body_of 249)"
+eq "body edits" 1 "$(edits 249)"
+
+setup "budget: no tickets, no line"
+issue 249 spec "" "본문"
+budget 249
+eq body "본문" "$(body_of 249)"
+eq "body edits" 0 "$(edits 249)"
+
+setup "finish: a new spec gets its budget line before the spec PR"
+issue 249 spec "비용 장부" "본문"
+issue 301 model:sonnet
+issue 302 model:opus
+subs 249 301:open 302:open
+echo '// test' > "$FACTORY_ROOT/crates/facet-core/tests/spec_ledger_app.rs"
+finish 249 new
+eq result pr "$(out result)"
+eq body "본문
+
+예산: \$43" "$(body_of 249)"
+
+setup "finish: a question writes no budget line"
+issue 249 spec,needs-decision "" "본문"
+issue 301 model:sonnet
+subs 249 301:open
+finish 249 new
+eq result question "$(out result)"
+eq body "본문" "$(body_of 249)"
+
+setup "finish: a failed budget edit only warns and the spec PR still opens"
+issue 249 spec "" "본문"
+issue 301 model:sonnet
+subs 249 301:open
+echo '// test' > "$FACTORY_ROOT/crates/facet-core/tests/spec_a_b.rs"
+touch "$FAKE_GH/fail-body-edit"
+finish 249 new
+eq code 0 "$(cat "$tmp/code")"
+eq result pr "$(out result)"
+eq body "본문" "$(body_of 249)"
+has warning "could not write the budget line" "$(cat "$tmp/log")"
 
 # --- workflow wiring -----------------------------------------------------------------------
 
