@@ -540,6 +540,8 @@ pub enum Update {
         result: Result<Arc<Thumbnail>, ThumbnailError>,
         from_cache: bool,
     },
+    /// #461: 밖의 변경을 다시 읽어 적용했다.
+    Settings,
     /// #454: 셸 동기화 상태([`App::request_sync_states`])가 그 탭의 배지에 들어왔다.
     SyncStates,
 }
@@ -899,6 +901,8 @@ pub enum Execution {
     ChooseExtractTarget,
     /// #430: 「zip에 넣기…」 대상 선택 창을 연다.
     ChooseZipTarget,
+    /// #459: 화면이 정보 화면을 연다.
+    ShowAbout,
 }
 
 /// 경로의 항목이 디스크에 없는가(없음·경로 없음만. 권한 등 다른 오류는 있는 것으로 보아 여는 쪽에 맡긴다).
@@ -3696,6 +3700,8 @@ impl App {
             }
             CommandId::NewZip => todo!("#429"),
             CommandId::AddToZip => todo!("#430"),
+            CommandId::About => todo!("#459"),
+            CommandId::OpenSettings | CommandId::OpenSettingsFile => todo!("#462"),
             CommandId::TogglePreview => {
                 let window = self.active_window_mut();
                 let visible = !window.preview.visible;
@@ -5074,6 +5080,71 @@ impl App {
     /// 작업 대기열.
     pub fn jobs(&self) -> &JobQueue {
         &self.jobs
+    }
+
+    /// #461: 받은 설정을 적용한다.
+    pub fn set_settings(&mut self, _settings: crate::settings::Settings) {
+        todo!("#461")
+    }
+
+    /// #461: 적용 중인 설정.
+    pub fn settings(&self) -> &crate::settings::Settings {
+        todo!("#461")
+    }
+
+    /// #461: 설정 값을 바꾼다.
+    pub fn set_setting(
+        &mut self,
+        _key: &str,
+        _value: crate::settings::Value,
+    ) -> Result<crate::settings::Saved, crate::settings::ValueError> {
+        todo!("#461")
+    }
+
+    /// #461: 설정 값을 기본값으로 돌린다.
+    pub fn reset_setting(
+        &mut self,
+        _key: &str,
+    ) -> Result<crate::settings::Saved, crate::settings::ValueError> {
+        todo!("#461")
+    }
+
+    /// #461: 명령의 단축키를 바꾼다.
+    pub fn set_shortcuts(
+        &mut self,
+        _command: CommandId,
+        _shortcuts: Vec<crate::command::Shortcut>,
+    ) -> crate::settings::Saved {
+        todo!("#461")
+    }
+
+    /// #461: 명령의 단축키를 프리셋 기본으로.
+    pub fn reset_shortcuts(&mut self, _command: CommandId) -> crate::settings::Saved {
+        todo!("#461")
+    }
+
+    /// #461: 모든 단축키를 프리셋 기본으로.
+    pub fn reset_all_shortcuts(&mut self) -> crate::settings::Saved {
+        todo!("#461")
+    }
+
+    /// #461: 설정 폴더 감시를 시작한다.
+    pub fn watch_settings(&mut self) {
+        todo!("#461")
+    }
+
+    /// #461: 명령의 지금 단축키(첫 것이 대표).
+    pub fn shortcuts(&self, _command: CommandId) -> Vec<crate::command::Shortcut> {
+        todo!("#461")
+    }
+
+    /// #461: 포커스 문맥에서 키 하나를 명령으로.
+    pub fn find_shortcut(
+        &self,
+        _shortcut: crate::command::Shortcut,
+        _focus: crate::keymap::Context,
+    ) -> Option<CommandId> {
+        todo!("#461")
     }
 
     /// 숨김 항목을 보이는가. 앱 전체에 하나다.

@@ -101,6 +101,8 @@ pub fn command_name(command: CommandId) -> &'static str {
         }
         CommandId::NewZip => todo!("#429"),
         CommandId::AddToZip => todo!("#430"),
+        CommandId::About => todo!("#459"),
+        CommandId::OpenSettings | CommandId::OpenSettingsFile => todo!("#462"),
     }
 }
 
@@ -571,6 +573,7 @@ pub fn shortcut_text(shortcut: &Shortcut) -> String {
         Key::PageDown => "PageDown".to_owned(),
         // 한국어 배열에서는 같은 키가 「₩」로 보인다.
         Key::Backslash => "\\".to_owned(),
+        Key::Comma => todo!("#462"),
     };
     let mut text = String::new();
     for (on, name) in [

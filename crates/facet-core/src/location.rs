@@ -109,6 +109,16 @@ pub enum VirtualFolder {
 }
 
 impl Location {
+    /// #462: 설정 탭의 특별 위치(`facet:settings`).
+    pub fn settings() -> Location {
+        todo!("#462")
+    }
+
+    /// #462: 설정 위치인가.
+    pub fn is_settings(&self) -> bool {
+        todo!("#462")
+    }
+
     /// 「내 PC」 위치. 셸을 부르지 않고 만든다(식별자는 정해진 값이다).
     pub fn this_pc() -> Location {
         Location::shell(
