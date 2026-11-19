@@ -370,5 +370,49 @@ FACTORY_TRACKS=1 run --tickets-only
 eq "one" 61 "$(dispatched)"
 eq "track 1" 1 "$(tracks_of)"
 
+# --- deferred (#437) -------------------------------------------------------------------------
+
+setup "a deferred blocker is not a person's blocker; said once per pair"
+spec 50 spec; ledger; issue 72 ready-for-agent 1; issue 73 ready-for-human,deferred
+echo '[73]' > "$FAKE_GH/blocked-by-72.json"
+FACTORY_NOW=1795050000 run --tickets-only --candidates "72"
+eq code 0 "$(code)"
+eq "no daily stalled" "" "$(marked '<!-- factory-stalled 2026')"
+eq "deferred pair" "<!-- factory-stalled deferred-73-72 -->" "$(marked '<!-- factory-stalled deferred')"
+has "names both" "미룬 #73(deferred)이 #72을 막는다" "$(jq -r '.[-1].body' "$FAKE_GH/comments-900.json")"
+FACTORY_NOW=1795140000 run --tickets-only --candidates "72"
+eq "not again the next day" "<!-- factory-stalled deferred-73-72 -->" "$(marked '<!-- factory-stalled')"
+
+setup "a person's blocker and a deferred one: the daily marker names the person's only"
+spec 50 spec; ledger; issue 72 ready-for-agent 2; issue 73 ready-for-human; issue 74 deferred
+echo '[73, 74]' > "$FAKE_GH/blocked-by-72.json"
+FACTORY_NOW=1795050000 run --tickets-only --candidates "72"
+eq "both markers" "<!-- factory-stalled deferred-74-72 --> <!-- factory-stalled 2026-11-19 -->" "$(marked '<!-- factory-stalled')"
+daily=$(jq -r '.[] | select(.body | startswith("<!-- factory-stalled 2026")) | .body' "$FAKE_GH/comments-900.json")
+has "person's" "#73(ready-for-human)이 #72을 막는다" "$daily"
+lacks "not the deferred" "#74" "$daily"
+
+# subs <spec> <json>: the spec's sub-issues as the REST API returns them
+subs() { printf '%s' "$2" > "$FAKE_GH/sub-issues-$1.json"; }
+closed_comment() { grep '^issue close 50 ' "$FAKE_GH/calls.log" | sed 's/.*--comment //'; }
+
+setup "a spec whose only open tickets are deferred closes, naming them"
+ledger; spec 50 spec
+jq '.sub_issues_summary = {total: 4, completed: 2}' "$FAKE_GH/issue-50.json" | tr -d '\r' > "$FAKE_GH/x" && mv "$FAKE_GH/x" "$FAKE_GH/issue-50.json"
+subs 50 '[{"number": 61, "state": "closed", "labels": []}, {"number": 62, "state": "open", "labels": [{"name": "deferred"}]},
+  {"number": 63, "state": "closed", "labels": []}, {"number": 64, "state": "open", "labels": [{"name": "deferred"}, {"name": "ready-for-human"}]}]'
+FACTORY_SPEC_QUEUE="" run
+eq code 0 "$(code)"
+eq "closed" "closed" "$(jq -r .state "$FAKE_GH/issue-50.json" | tr -d '\r')"
+has "names the deferred" "Deferred, left open: #62 #64." "$(closed_comment)"
+
+setup "a spec with an open ticket that is not deferred stays open"
+ledger; spec 50 spec; issue 62 ready-for-agent
+subs 50 '[{"number": 61, "state": "open", "labels": [{"name": "deferred"}]}, {"number": 62, "state": "open", "labels": [{"name": "ready-for-agent"}]}]'
+FACTORY_SPEC_QUEUE="" run
+eq code 0 "$(code)"
+eq "not closed" "" "$(closed_comment)"
+eq "open" "open" "$(jq -r .state "$FAKE_GH/issue-50.json" | tr -d '\r')"
+
 echo "dispatch-next.sh: $passes passed, $fails failed"
 [ "$fails" -eq 0 ]

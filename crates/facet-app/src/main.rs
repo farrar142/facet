@@ -862,11 +862,12 @@ fn connect(ui: &AppWindow, w: WindowId) {
             7 => Column::DateDeleted,
             8 => Column::TotalSize,
             9 => Column::FreeSpace,
+            10 => Column::CompressedSize,
             _ => Column::Name,
         };
         with_view(w, |view| match CommandId::sort_by(column) {
             Some(command) => view.execute(command),
-            // 휴지통의 원래 위치·지운 날짜는 정렬 명령 없이 머리글로만 정렬한다.
+            // 휴지통의 원래 위치·지운 날짜, zip의 압축된 크기는 정렬 명령 없이 머리글로만 정렬한다.
             None => view.sort_by_header(column),
         });
     });
@@ -1256,14 +1257,16 @@ fn info_row(text: &str) -> CrumbRow {
     }
 }
 
-fn menu_row(command: &facet_core::menu::MenuCommand) -> MenuRow {
+/// 오른쪽 메뉴의 명령 줄. `blocked`가 그 명령을 막은 까닭을 주면(zip 안의 삭제 등) 단축키 자리에 그 까닭을 보인다.
+fn menu_row(
+    command: &facet_core::menu::MenuCommand,
+    blocked: &dyn Fn(CommandId) -> Option<&'static str>,
+) -> MenuRow {
     MenuRow {
         name: text::command_name(command.id).into(),
-        shortcut: command
-            .id
-            .shortcuts()
-            .first()
-            .map(text::shortcut_text)
+        shortcut: blocked(command.id)
+            .map(str::to_string)
+            .or_else(|| command.id.shortcuts().first().map(text::shortcut_text))
             .unwrap_or_default()
             .into(),
         enabled: command.enabled,
@@ -1307,13 +1310,16 @@ fn separator_row() -> MenuRow {
 }
 
 /// 오른쪽 메뉴의 줄들(자체 항목, 구분선 뒤 셸 항목 자리).
-fn menu_rows_of(menu: &ContextMenu) -> Vec<MenuRow> {
+fn menu_rows_of(
+    menu: &ContextMenu,
+    blocked: &dyn Fn(CommandId) -> Option<&'static str>,
+) -> Vec<MenuRow> {
     use context_menu::Line;
     use facet_shell_protocol::MenuItem;
     menu.lines()
         .iter()
         .map(|line| match line {
-            Line::Own(MenuEntry::Command(command)) => menu_row(command),
+            Line::Own(MenuEntry::Command(command)) => menu_row(command, blocked),
             Line::Own(MenuEntry::Submenu(sub)) => MenuRow {
                 name: text::submenu_name(sub.id).into(),
                 enabled: sub.enabled,
@@ -1350,7 +1356,7 @@ fn sub_rows_of(lines: &[context_menu::SubLine]) -> Vec<MenuRow> {
     lines
         .iter()
         .map(|line| match line {
-            SubLine::Own(command) => menu_row(command),
+            SubLine::Own(command) => menu_row(command, &|_| None),
             SubLine::Shell(command) => shell_command_row(command),
             SubLine::Separator => separator_row(),
         })
@@ -2374,7 +2380,7 @@ impl View {
                     Column::TotalSize => 8,
                     Column::FreeSpace => 9,
                     Column::SyncState => todo!("#451"),
-                    Column::CompressedSize => todo!("#423"),
+                    Column::CompressedSize => 10,
                 },
                 sort_descending: sort.direction == Direction::Descending,
                 item_count: count(status.item_count),
@@ -2383,6 +2389,12 @@ impl View {
                 this_pc: tab.location().virtual_folder() == Some(facet_core::VirtualFolder::ThisPc),
                 recycle_bin: tab.location().virtual_folder()
                     == Some(facet_core::VirtualFolder::RecycleBin),
+                zip: tab.location().zip_location().is_some(),
+                archive_notes: tab
+                    .archive_notes()
+                    .map(text::archive_notes_text)
+                    .unwrap_or_default()
+                    .into(),
                 content_results: tab.location().search_scope().is_some_and(|scope| {
                     matches!(scope.kind, facet_core::SearchKind::Content { .. })
                 }),
@@ -2782,9 +2794,12 @@ impl View {
             Execution::ContentSearch => self.begin_search(true),
             Execution::ConfirmDelete(warning) => self.open_delete(warning),
             Execution::ItemMissing => self.show_missing_item(),
-            Execution::NotAllowedHere => self.ui.set_notice(text::NOT_ALLOWED_HERE.into()),
+            Execution::NotAllowedHere => {
+                let notice = text::not_allowed_text(self.app.borrow().active_tab().location());
+                self.ui.set_notice(notice.into());
+            }
             Execution::ConfirmEmptyRecycleBin => self.open_empty_recycle_bin(),
-            Execution::NestedZip => todo!("#423"),
+            Execution::NestedZip => self.ui.set_notice(text::NESTED_ZIP.into()),
             Execution::ChooseExtractTarget => todo!("#427"),
             Execution::ChooseZipTarget => todo!("#430"),
             Execution::ShowAbout => self.ui.set_show_about(true),
@@ -2848,7 +2863,8 @@ impl View {
         self.ui.set_menu_y(y);
         self.ui.set_menu_width(context_menu::WIDTH);
         self.ui.set_menu_height(menu.height());
-        self.menu_rows.set_vec(menu_rows_of(&menu));
+        let rows = menu_rows_of(&menu, &|command| self.blocked_reason(command));
+        self.menu_rows.set_vec(rows);
         *self.context_menu.borrow_mut() = Some(menu);
         self.sync_menu();
         self.ui.set_menu_open(true);
@@ -2868,7 +2884,8 @@ impl View {
             };
             menu.set_shell(Some(shell));
             self.ui.set_menu_height(menu.height());
-            menu_rows_of(menu)
+            drop(app);
+            menu_rows_of(menu, &|command| self.blocked_reason(command))
         };
         self.menu_rows.set_vec(rows);
         self.sync_menu();
@@ -3921,6 +3938,18 @@ impl View {
         ui.set_palette_open(true);
     }
 
+    /// 활성 탭 위치의 되는 일이 `command`를 막았으면 그 까닭(zip 안이면 「zip 안에서는 지원하지 않음」). 실제 폴더처럼
+    /// 막지 않으면 `None`이다. 휴지통 같은 다른 위치는 지금처럼 꺼지기만 한다.
+    fn blocked_reason(&self, command: CommandId) -> Option<&'static str> {
+        let app = self.app.borrow();
+        if !app.has_windows() {
+            return None;
+        }
+        let tab = app.active_tab();
+        (tab.location().zip_location().is_some() && !command.is_allowed_by(&tab.capabilities()))
+            .then(|| text::not_allowed_text(tab.location()))
+    }
+
     fn close_palette(&self) {
         self.palette.borrow_mut().take();
         self.ui.set_palette_open(false);
@@ -3933,10 +3962,11 @@ impl View {
             .iter()
             .map(|entry| PaletteRow {
                 name: text::command_name(entry.command).into(),
-                shortcut: entry
-                    .shortcuts
-                    .first()
-                    .map(text::shortcut_text)
+                // 위치가 막은 명령(zip 안의 삭제 등)은 단축키 자리에 까닭을 보인다.
+                shortcut: self
+                    .blocked_reason(entry.command)
+                    .map(str::to_string)
+                    .or_else(|| entry.shortcuts.first().map(text::shortcut_text))
                     .unwrap_or_default()
                     .into(),
                 enabled: entry.enabled,
@@ -5536,7 +5566,7 @@ fn list_problem(error: &ListError) -> (Problem, String, String) {
         ListError::NotResponding { .. } => (Problem::NotResponding, location, String::new()),
         ListError::Disconnected { .. } => (Problem::Disconnected, location, String::new()),
         ListError::DeviceNotReady { .. } => (Problem::DeviceNotReady, location, String::new()),
-        ListError::BrokenArchive { .. } => todo!("#423"),
+        ListError::BrokenArchive { .. } => (Problem::BrokenArchive, location, String::new()),
     }
 }
 
@@ -5716,6 +5746,17 @@ impl Model for TabRows {
             deleted: tab.recycled(row).map_or_else(SharedString::new, |entry| {
                 file_list::format_modified_local(entry.deleted).into()
             }),
+            // zip 안 파일의 압축된 크기(폴더와 zip 위치가 아니면 비어 있다).
+            compressed: tab
+                .compressed_size(row)
+                .filter(|_| !item.is_folder)
+                .map_or_else(SharedString::new, |size| {
+                    details::size_text(&facet_core::Item {
+                        size,
+                        ..item.clone()
+                    })
+                    .into()
+                }),
             selected: tab.is_selected(row),
             cursor: tab.cursor() == Some(row),
             cut: !marks.is_empty()

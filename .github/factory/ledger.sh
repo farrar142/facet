@@ -31,12 +31,14 @@
 #                                     rebase-ci|push|review|merge-failed|cancelled|stopped, and on a
 #                                     conflict files=a,b: the files that conflicted with main, #307).
 #                                     impl-start also has mode=conflict when the run only resolves
-#                                     conflicts on the open PR (#307). Not a cost: the sums
+#                                     conflicts on the open PR (#307). handover (code=C: hand-to-human.sh,
+#                                     #437). Not a cost: the sums
 #                                     read only `<!-- ledger -->` comments.
 #   ledger.sh stats                   verify runs and the share sent back for a conflict (outcome
 #                                     conflict, rebase-ci or push), the Implementer wait per track,
 #                                     the Verify wait (count, mean, max) and the conflicts with main
-#                                     per file, most first (verify-end files=, #307), from the event
+#                                     per file, most first (verify-end files=, #307) and the hand-overs
+#                                     to a person per code (handover code=, #437), from the event
 #                                     comments
 #
 # Environment:
@@ -288,6 +290,7 @@ $line"; then
 #   the wait from `ready-for-agent` to the Implementer's start, per track: count, mean, max (seconds)
 #   the wait from the hand-over to Verify's start: count, mean, max (seconds)
 #   the files of the verify-end events (files=a,b: conflicts with main) per file, most first (#307)
+#   the hand-overs to a person (event=handover code=…, left by hand-to-human.sh) per code, most first (#437)
 stats() {
   local n; n=$(ledger_issue)
   [ -n "$n" ] || { echo "no open factory-ledger issue" >&2; return 1; }
@@ -304,6 +307,10 @@ stats() {
       ([$e[] | select(.event == "impl-start")] | group_by(.track // "1")[]
         | "implementer wait, track \(.[0].track // "1"): \(waits | summary)"),
       "verify wait: \([$e[] | select(.event == "verify-start")] | waits | summary)",
+      ([$e[] | select(.event == "handover") | .code // "other"] | group_by(.)
+        | map({code: .[0], n: length}) | sort_by(-.n, .code)
+        | if length == 0 then "hand-overs per code: none"
+          else "hand-overs per code: \(map(.n) | add) in all", (.[] | "  \(.n) \(.code)") end),
       ([$v[] | .files // empty | split(",")[] | select(. != "")] | group_by(.)
         | map({file: .[0], n: length}) | sort_by(-.n, .file)
         | if length == 0 then "conflicts per file: none"
