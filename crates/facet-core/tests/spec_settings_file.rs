@@ -32,7 +32,6 @@ fn fits(kind: Kind, value: Value) -> bool {
 }
 
 #[test]
-#[ignore = "#458"]
 fn every_definition_default_fits_its_own_kind_and_range() {
     let definitions = settings::definitions();
     assert!(!definitions.is_empty());
@@ -60,7 +59,6 @@ fn every_definition_default_fits_its_own_kind_and_range() {
 }
 
 #[test]
-#[ignore = "#458"]
 fn the_first_definitions_have_the_ticket_keys_categories_and_defaults() {
     let expected = [
         ("general.show_hidden", Category::General, Value::Bool(false)),
@@ -115,7 +113,6 @@ fn the_first_definitions_have_the_ticket_keys_categories_and_defaults() {
 }
 
 #[test]
-#[ignore = "#458"]
 fn a_missing_file_gives_defaults_and_creates_nothing() {
     let dir = TempDir::new().unwrap();
     let settings = Settings::load(dir.path());
@@ -145,7 +142,6 @@ fn a_missing_file_gives_defaults_and_creates_nothing() {
 }
 
 #[test]
-#[ignore = "#458"]
 fn defaults_never_write_a_file() {
     let mut settings = Settings::defaults();
     assert_eq!(settings.file_path(), None);
@@ -157,7 +153,6 @@ fn defaults_never_write_a_file() {
 }
 
 #[test]
-#[ignore = "#458"]
 fn values_in_the_file_are_applied_and_marked_modified() {
     let dir = TempDir::new().unwrap();
     write_file(
@@ -193,7 +188,6 @@ y = [\"가\", \"나\"]
 ";
 
 #[test]
-#[ignore = "#458"]
 fn changing_one_value_keeps_comments_order_and_unknown_keys() {
     let dir = TempDir::new().unwrap();
     write_file(dir.path(), COMMENTED);
@@ -229,7 +223,6 @@ fn changing_one_value_keeps_comments_order_and_unknown_keys() {
 }
 
 #[test]
-#[ignore = "#458"]
 fn a_new_key_goes_into_its_table_without_touching_the_rest() {
     let dir = TempDir::new().unwrap();
     write_file(dir.path(), COMMENTED);
@@ -256,7 +249,6 @@ fn a_new_key_goes_into_its_table_without_touching_the_rest() {
 }
 
 #[test]
-#[ignore = "#458"]
 fn resetting_or_setting_the_default_removes_the_key_from_the_file() {
     let dir = TempDir::new().unwrap();
     write_file(dir.path(), COMMENTED);
@@ -310,7 +302,6 @@ fn resetting_or_setting_the_default_removes_the_key_from_the_file() {
 }
 
 #[test]
-#[ignore = "#458"]
 fn the_first_change_creates_the_folder_and_file() {
     let dir = TempDir::new().unwrap();
     let folder = dir.path().join("facet");
@@ -346,7 +337,6 @@ fn the_first_change_creates_the_folder_and_file() {
 const BROKEN: &str = "[general]\nshow_hidden = true\n[view\nfont_size = 12\n";
 
 #[test]
-#[ignore = "#458"]
 fn a_syntax_error_gives_defaults_and_its_line_and_column() {
     let dir = TempDir::new().unwrap();
     write_file(dir.path(), BROKEN);
@@ -367,7 +357,6 @@ fn a_syntax_error_gives_defaults_and_its_line_and_column() {
 }
 
 #[test]
-#[ignore = "#458"]
 fn with_a_syntax_error_changes_apply_for_this_run_but_the_file_is_not_written() {
     let dir = TempDir::new().unwrap();
     write_file(dir.path(), BROKEN);
@@ -403,7 +392,6 @@ cache_limit_mb = 2048
 ";
 
 #[test]
-#[ignore = "#458"]
 fn a_wrong_value_falls_back_for_that_key_only() {
     let dir = TempDir::new().unwrap();
     write_file(dir.path(), WRONG_VALUES);
@@ -447,7 +435,6 @@ fn a_wrong_value_falls_back_for_that_key_only() {
 }
 
 #[test]
-#[ignore = "#458"]
 fn writing_another_key_leaves_the_wrong_values_in_the_file() {
     let dir = TempDir::new().unwrap();
     write_file(dir.path(), WRONG_VALUES);
@@ -469,7 +456,6 @@ fn writing_another_key_leaves_the_wrong_values_in_the_file() {
 }
 
 #[test]
-#[ignore = "#458"]
 fn values_outside_the_definition_are_refused_with_the_range() {
     let dir = TempDir::new().unwrap();
     let mut settings = Settings::load(dir.path());
@@ -509,7 +495,6 @@ fn values_outside_the_definition_are_refused_with_the_range() {
 
 #[cfg(windows)]
 #[test]
-#[ignore = "#458"]
 #[allow(clippy::permissions_set_readonly_false)]
 fn a_failed_write_keeps_the_value_in_memory_and_says_why() {
     let dir = TempDir::new().unwrap();
@@ -554,7 +539,6 @@ fn found(query: &str) -> Vec<&'static str> {
 }
 
 #[test]
-#[ignore = "#458"]
 fn search_matches_key_name_and_description_ignoring_case() {
     // 빈 검색어(공백뿐 포함)는 모두를 정의 순서로.
     let all: Vec<&str> = settings::definitions().iter().map(|d| d.key).collect();
