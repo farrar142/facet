@@ -734,10 +734,12 @@ fn has_sources(tab: &Tab) -> bool {
     has_real_items(tab) && (tab.selected_items().next().is_some() || tab.cursor_item().is_some())
 }
 
-/// 복사·이동·삭제할 원본이 있는가: [`has_sources`]이거나, 휴대폰 안 폴더에서 선택이나 커서 항목이 있다(휴대폰
-/// 항목은 PC와 주고받고 영구 삭제한다).
+/// 복사·이동·삭제할 원본이 있는가: [`has_sources`]이거나, 휴대폰 안 폴더나 zip 안 위치에서 선택이나 커서 항목이
+/// 있다(휴대폰 항목은 PC와 주고받고 영구 삭제한다, zip 안 항목은 꺼낸다. 이동은 되는 일이 막는다).
 fn has_transfer_sources(tab: &Tab) -> bool {
-    (has_real_items(tab) || crate::shell_provider::is_device_folder(tab.location()))
+    (has_real_items(tab)
+        || crate::shell_provider::is_device_folder(tab.location())
+        || tab.location().zip_location().is_some())
         && (tab.selected_items().next().is_some() || tab.cursor_item().is_some())
 }
 

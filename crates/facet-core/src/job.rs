@@ -54,6 +54,11 @@ pub use batch_rename::RenameItem;
 pub use facet_win::file_ops::FileOpErrorKind;
 pub use recycle::RECYCLE_CHUNK;
 
+/// 원본이 zip 항목 경로라 복사가 꺼내기([`JobQueue::copy`])가 되는가.
+pub fn is_extract(sources: &[PathBuf]) -> bool {
+    extract::involves_zip(sources)
+}
+
 /// 진행 사건 사이의 가장 짧은 간격. 작업마다 진행 사건은 초당 10번 이하다.
 pub const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
