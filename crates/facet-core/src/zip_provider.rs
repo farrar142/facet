@@ -81,7 +81,7 @@ struct CacheKey {
 static CACHE: Mutex<Vec<(CacheKey, Arc<Archive>)>> = Mutex::new(Vec::new());
 
 /// zip 파일을 연다(보관한 것이 있으면 그것). 파일 메타데이터를 한 번 읽는다.
-fn open_archive(path: &Path) -> Result<Arc<Archive>, ArchiveError> {
+pub(crate) fn open_archive(path: &Path) -> Result<Arc<Archive>, ArchiveError> {
     let metadata = std::fs::metadata(path).map_err(ArchiveError::Io)?;
     if metadata.is_dir() {
         return Err(ArchiveError::Io(std::io::Error::from(
@@ -210,7 +210,7 @@ pub(crate) fn resolve_in_zip(path: &Path) -> Option<Result<Resolved, ResolveErro
 }
 
 /// 경로를 zip 파일과 zip 안 경로로 가른다. 경로 자신이나 앞쪽 하나가 zip 파일이어야 한다.
-fn split_archive(path: &Path) -> Option<(PathBuf, String)> {
+pub(crate) fn split_archive(path: &Path) -> Option<(PathBuf, String)> {
     let mut rest: Vec<&OsStr> = Vec::new();
     let mut current = path;
     loop {

@@ -1373,6 +1373,7 @@ fn job_row(entry: &JobEntry) -> JobRow {
     JobRow {
         id: job_number(entry.id),
         kind: match entry.kind {
+            JobKind::Copy if entry.extract => JobType::Extract,
             JobKind::Copy => JobType::Copy,
             JobKind::Move => JobType::Move,
             JobKind::Undo => JobType::Undo,

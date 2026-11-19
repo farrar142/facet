@@ -144,6 +144,7 @@ pub fn error_reason(kind: FileOpErrorKind) -> ErrorReason {
         FileOpErrorKind::AccessDenied => ErrorReason::AccessDenied,
         FileOpErrorKind::DiskFull => ErrorReason::DiskFull,
         FileOpErrorKind::SourceMissing => ErrorReason::SourceMissing,
+        FileOpErrorKind::Corrupt => ErrorReason::Corrupt,
         _ => ErrorReason::Other,
     }
 }
