@@ -1578,6 +1578,8 @@ impl Tab {
                         results.status.progress.found = summary.found;
                         results.status.progress.folders_scanned = summary.folders_scanned;
                         results.status.progress.folders_skipped = summary.folders_skipped;
+                        results.status.progress.online_folders_skipped =
+                            summary.online_folders_skipped;
                         results.status.summary = Some(summary);
                     }
                 }
@@ -1604,7 +1606,7 @@ impl Tab {
                             found: progress.found,
                             folders_scanned: progress.folders_scanned,
                             folders_skipped: progress.folders_skipped,
-                            online_folders_skipped: 0, // #452
+                            online_folders_skipped: 0,
                         };
                         results.status.content = Some(ContentStatus {
                             skipped: progress.skipped,
@@ -1622,7 +1624,7 @@ impl Tab {
                             found: progress.found,
                             folders_scanned: progress.folders_scanned,
                             folders_skipped: progress.folders_skipped,
-                            online_folders_skipped: 0, // #452
+                            online_folders_skipped: 0,
                         };
                         results.status.content = Some(ContentStatus {
                             skipped: progress.skipped,
@@ -1633,7 +1635,7 @@ impl Tab {
                             found: progress.found,
                             folders_scanned: progress.folders_scanned,
                             folders_skipped: progress.folders_skipped,
-                            online_folders_skipped: 0, // #452
+                            online_folders_skipped: 0,
                             elapsed: summary.elapsed,
                             end: match summary.end {
                                 ContentEnd::Finished => SearchEnd::Finished,

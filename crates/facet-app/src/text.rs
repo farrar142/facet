@@ -659,10 +659,11 @@ pub fn elapsed_text(elapsed: std::time::Duration) -> String {
 /// 탐색 상태 줄 글자(목록 위 띠): 탐색 중이면 찾은 수·훑은 폴더 수, 끝나면 찾은 수·건너뛴 폴더 수·걸린 시간.
 pub fn search_line_text(line: crate::search_bar::Line) -> String {
     use crate::search_bar::Line;
-    let tail = |found: usize, skipped: usize, elapsed, files: Option<Skipped>| {
+    let tail = |found: usize, skipped: usize, elapsed, files: Option<Skipped>, online: usize| {
         format!(
-            "{found}개 찾음 · 건너뛴 폴더 {skipped}개 · {}{}",
+            "{found}개 찾음 · 건너뛴 폴더 {skipped}개 · {}{}{}",
             elapsed_text(elapsed),
+            online_folders_text(online),
             skipped_files_text(files)
         )
     };
@@ -671,8 +672,10 @@ pub fn search_line_text(line: crate::search_bar::Line) -> String {
             found,
             folders,
             files_skipped,
+            online_folders,
         } => format!(
-            "탐색 중… {found}개 찾음 · 폴더 {folders}개 훑음{}",
+            "탐색 중… {found}개 찾음 · 폴더 {folders}개 훑음{}{}",
+            online_folders_text(online_folders),
             skipped_files_text(files_skipped)
         ),
         Line::Finished {
@@ -680,13 +683,30 @@ pub fn search_line_text(line: crate::search_bar::Line) -> String {
             skipped,
             elapsed,
             files_skipped,
-        } => format!("탐색 끝 · {}", tail(found, skipped, elapsed, files_skipped)),
+            online_folders,
+        } => format!(
+            "탐색 끝 · {}",
+            tail(found, skipped, elapsed, files_skipped, online_folders)
+        ),
         Line::Stopped {
             found,
             skipped,
             elapsed,
             files_skipped,
-        } => format!("중지함 · {}", tail(found, skipped, elapsed, files_skipped)),
+            online_folders,
+        } => format!(
+            "중지함 · {}",
+            tail(found, skipped, elapsed, files_skipped, online_folders)
+        ),
+    }
+}
+
+/// 실시간 탐색이 내려가지 않은 펼쳐지지 않은 온라인 폴더 수(상태 줄 끝에 붙는다). 없으면 비어 있다.
+pub fn online_folders_text(count: usize) -> String {
+    if count == 0 {
+        String::new()
+    } else {
+        format!(" · 온라인 폴더 {count}개는 열지 않음")
     }
 }
 
@@ -979,7 +999,8 @@ mod tests {
             search_line_text(Line::Running {
                 found: 3,
                 folders: 9,
-                files_skipped: None
+                files_skipped: None,
+                online_folders: 0
             }),
             "탐색 중… 3개 찾음 · 폴더 9개 훑음"
         );
@@ -988,9 +1009,20 @@ mod tests {
                 found: 7,
                 skipped: 2,
                 elapsed: Duration::from_millis(1500),
-                files_skipped: None
+                files_skipped: None,
+                online_folders: 0
             }),
             "탐색 끝 · 7개 찾음 · 건너뛴 폴더 2개 · 1.5초"
+        );
+        assert_eq!(
+            search_line_text(Line::Finished {
+                found: 7,
+                skipped: 0,
+                elapsed: Duration::from_millis(1500),
+                files_skipped: None,
+                online_folders: 1
+            }),
+            "탐색 끝 · 7개 찾음 · 건너뛴 폴더 0개 · 1.5초 · 온라인 폴더 1개는 열지 않음"
         );
         let files = Skipped {
             binary: 2,
@@ -1003,7 +1035,8 @@ mod tests {
                 found: 1,
                 skipped: 0,
                 elapsed: Duration::from_millis(1500),
-                files_skipped: Some(files)
+                files_skipped: Some(files),
+                online_folders: 0
             }),
             "탐색 끝 · 1개 찾음 · 건너뛴 폴더 0개 · 1.5초 · 건너뛴 파일: 바이너리 2, 온라인 전용 1, 읽지 못함 3"
         );
