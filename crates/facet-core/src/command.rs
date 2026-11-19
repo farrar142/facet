@@ -210,7 +210,7 @@ pub enum DisabledReason {
 
 impl CommandId {
     /// 모든 명령. 명령 팔레트는 검색어가 없으면 이 순서로 보인다.
-    pub const ALL: [CommandId; 67] = [
+    pub const ALL: [CommandId; 70] = [
         CommandId::Open,
         CommandId::OpenWith,
         CommandId::Back,
@@ -249,6 +249,9 @@ impl CommandId {
         CommandId::MoveToOtherPanel,
         CommandId::CopyTo,
         CommandId::MoveTo,
+        CommandId::ExtractAllHere,
+        CommandId::ExtractToFolder,
+        CommandId::ExtractTo,
         CommandId::Rename,
         CommandId::BatchRename,
         CommandId::NewFolder,
@@ -618,9 +621,9 @@ impl CommandId {
             CommandId::TogglePreview => true,
             CommandId::KeepOnDevice | CommandId::FreeUpSpace => todo!("#455"),
             CommandId::DownloadForPreview => todo!("#456"),
-            CommandId::ExtractAllHere | CommandId::ExtractToFolder | CommandId::ExtractTo => {
-                todo!("#427")
-            }
+            CommandId::ExtractAllHere | CommandId::ExtractToFolder => zip_to_extract(tab).is_some(),
+            // 「꺼내기 위치…」: zip 위치면 고른 항목(없으면 zip 전체), 실제 폴더면 커서의 zip 파일.
+            CommandId::ExtractTo => zip_to_extract(tab).is_some(),
             CommandId::NewZip => todo!("#429"),
             CommandId::AddToZip => todo!("#430"),
             CommandId::CheckForUpdates => todo!("#475"),
@@ -749,6 +752,21 @@ fn in_recycle_bin(tab: &Tab) -> bool {
 }
 
 /// 탭의 항목이 실제 파일 시스템 항목인가: 위치가 실제 폴더이거나 검색 결과 위치다(결과 항목은 제 폴더 경로가 있다).
+/// 꺼낼 zip 파일: zip 위치면 보고 있는 zip, 실제 폴더면 커서 항목이 zip 파일([`crate::zip_provider::is_zip_file`])일 때
+/// 그 파일. 그 밖은 `None`.
+pub(crate) fn zip_to_extract(tab: &Tab) -> Option<std::path::PathBuf> {
+    if let Some(zip) = tab.location().zip_location() {
+        return Some(zip.archive().to_path_buf());
+    }
+    tab.location().file_system_path()?;
+    let item = tab.cursor_item()?;
+    if item.is_folder {
+        return None;
+    }
+    let path = tab.cursor_path()?;
+    crate::zip_provider::is_zip_file(&path).then_some(path)
+}
+
 fn has_real_items(tab: &Tab) -> bool {
     tab.location().file_system_path().is_some() || tab.location().is_search_results()
 }

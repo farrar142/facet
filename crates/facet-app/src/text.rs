@@ -96,9 +96,9 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::TogglePreview => "미리보기 영역",
         CommandId::KeepOnDevice | CommandId::FreeUpSpace => todo!("#455"),
         CommandId::DownloadForPreview => todo!("#456"),
-        CommandId::ExtractAllHere | CommandId::ExtractToFolder | CommandId::ExtractTo => {
-            todo!("#427")
-        }
+        CommandId::ExtractAllHere => "여기에 모두 꺼내기",
+        CommandId::ExtractToFolder => "zip 이름의 폴더로 꺼내기",
+        CommandId::ExtractTo => "꺼내기 위치…",
         CommandId::NewZip => todo!("#429"),
         CommandId::AddToZip => todo!("#430"),
         CommandId::CheckForUpdates => todo!("#475"),
