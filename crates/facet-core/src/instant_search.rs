@@ -252,7 +252,7 @@ pub(crate) fn found_from_hit(hit: &HitMessage) -> Found {
                 system: hit.attributes & SYSTEM != 0,
                 read_only: hit.attributes & READ_ONLY != 0,
                 online_only: crate::content_search::is_online_only(hit.attributes),
-                bits: 0, // #450
+                bits: hit.attributes,
             },
         },
     }

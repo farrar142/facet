@@ -232,7 +232,10 @@ pub fn choose_kind(path: &Path, item: &Item, has_handler: &dyn Fn(&str) -> bool)
     if item.is_folder {
         return PreviewKind::Folder;
     }
-    if item.attributes.online_only {
+    // 미리보기 자동 갱신은 배경 동작이라 내용 읽기 관문을 지난다.
+    if crate::content_gate::check_item(&item.attributes, crate::content_gate::Reader::Preview)
+        .is_err()
+    {
         return PreviewKind::Unavailable(PreviewProblem::OnlineOnly);
     }
     if crate::thumbnail::is_decodable(&item.name) {
