@@ -1467,7 +1467,10 @@ fn transfer_problem(rejection: &CopyRejection, plan: &TransferPlan) -> (Transfer
             source.display().to_string(),
         ),
         CopyRejection::Unsupported => (TransferProblem::Unsupported, String::new()),
-        CopyRejection::NotEnoughSpace { .. } => todo!("#426"),
+        CopyRejection::NotEnoughSpace { needed, available } => (
+            TransferProblem::NotEnoughSpace,
+            text::space_detail_text(*needed, *available),
+        ),
         CopyRejection::EncryptedArchive => todo!("#430"),
     }
 }

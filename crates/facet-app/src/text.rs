@@ -270,9 +270,34 @@ pub fn clipboard_failure_text(failure: &ClipboardFailure) -> String {
                 )
             }
             CopyRejection::Unsupported => "휴대폰과는 PC와만 주고받을 수 있습니다".to_owned(),
-            CopyRejection::NotEnoughSpace { .. } => todo!("#426"),
+            CopyRejection::NotEnoughSpace { needed, available } => {
+                format!(
+                    "빈 공간이 모자랍니다: {}",
+                    space_detail_text(*needed, *available)
+                )
+            }
             CopyRejection::EncryptedArchive => todo!("#430"),
         },
+    }
+}
+
+/// 빈 공간이 모자라 시작하지 못한 까닭의 수치: 「필요 …, 남은 공간 …」.
+pub fn space_detail_text(needed: u64, available: u64) -> String {
+    format!(
+        "필요 {}, 남은 공간 {}",
+        facet_core::file_list::format_size(needed),
+        facet_core::file_list::format_size(available)
+    )
+}
+
+/// zip 항목을 건너뛴 까닭.
+pub fn zip_skip_text(reason: &facet_core::job::ZipSkipReason) -> String {
+    use facet_core::job::ZipSkipReason;
+    match reason {
+        ZipSkipReason::UnsupportedMethod(method) => format!("지원하지 않는 압축 방식 {method}"),
+        ZipSkipReason::OutsideTarget => "대상 폴더 밖을 가리키는 이름".to_owned(),
+        ZipSkipReason::InvalidName(_) => "Windows에서 쓸 수 없는 이름".to_owned(),
+        ZipSkipReason::Symlink => "심볼릭 링크".to_owned(),
     }
 }
 
@@ -286,7 +311,12 @@ pub fn drop_rejected_text(rejection: &CopyRejection) -> String {
             format!("폴더를 그 안으로 놓을 수 없습니다: {}", source.display())
         }
         CopyRejection::Unsupported => "휴대폰과는 PC와만 주고받을 수 있습니다".to_owned(),
-        CopyRejection::NotEnoughSpace { .. } => todo!("#426"),
+        CopyRejection::NotEnoughSpace { needed, available } => {
+            format!(
+                "빈 공간이 모자랍니다: {}",
+                space_detail_text(*needed, *available)
+            )
+        }
         CopyRejection::EncryptedArchive => todo!("#430"),
     }
 }
@@ -545,9 +575,14 @@ pub fn not_done_text(summary: &Summary) -> String {
         .failures
         .iter()
         .map(|item| (&item.source, item_error_text(item.kind)));
+    let zip = summary
+        .zip_skipped
+        .iter()
+        .map(|item| format!("{} ({})", item.entry, zip_skip_text(&item.reason)));
     skipped
         .chain(failed)
         .map(|(path, why)| format!("{} ({why})", path.display()))
+        .chain(zip)
         .collect::<Vec<_>>()
         .join(" · ")
 }

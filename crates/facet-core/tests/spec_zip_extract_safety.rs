@@ -85,7 +85,6 @@ fn target_in(dir: &TempDir) -> (PathBuf, PathBuf) {
 }
 
 #[test]
-#[ignore = "#426"]
 fn names_pointing_outside_the_target_are_refused_and_listed() {
     let pid = std::process::id();
     let evil: Vec<String> = (1..=7)
@@ -168,7 +167,6 @@ fn names_pointing_outside_the_target_are_refused_and_listed() {
 }
 
 #[test]
-#[ignore = "#426"]
 fn reserved_and_forbidden_names_are_refused_by_the_name_check() {
     let dir = TempDir::new().unwrap();
     let zip = dir.path().join("이름.zip");
@@ -197,7 +195,6 @@ fn reserved_and_forbidden_names_are_refused_by_the_name_check() {
 }
 
 #[test]
-#[ignore = "#426"]
 fn symbolic_link_entries_are_skipped() {
     let dir = TempDir::new().unwrap();
     let zip = dir.path().join("링크.zip");
@@ -225,7 +222,6 @@ fn symbolic_link_entries_are_skipped() {
 }
 
 #[test]
-#[ignore = "#426"]
 fn a_zip_larger_than_the_free_space_is_refused_before_starting() {
     let dir = TempDir::new().unwrap();
     let zip = dir.path().join("폭탄.zip");
