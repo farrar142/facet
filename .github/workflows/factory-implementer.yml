@@ -495,6 +495,20 @@ jobs:
           done
           cargo xtask ci
 
+      # The push and the new PR go out as the factory GitHub App, not GITHUB_TOKEN: GitHub starts no
+      # workflow for GITHUB_TOKEN's pushes and PRs, so CI would never run on the PR. Only this token
+      # writes the branch and opens the PR (.github/factory/app-push.sh); everything else stays on
+      # GITHUB_TOKEN. The App needs Contents and Pull requests write, nothing more.
+      - name: Factory App token
+        id: app-token
+        if: steps.guard.outputs.go == 'true' && steps.wfguard.outputs.blocked != 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.FACTORY_APP_ID }}
+          private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
       # The PR body carries `Closes #N` and the commit `cargo xtask ci` passed on
       # (`<!-- factory-checked <sha> -->`): Verify skips its own `cargo xtask ci` when the PR head is
       # still that commit and sits on today's main.
@@ -504,7 +518,10 @@ jobs:
         env:
           MODE: ${{ steps.guard.outputs.mode }}
           CONFLICT_PR: ${{ steps.guard.outputs.pr }}
+          FACTORY_APP_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
+          # Without the App token, fail here rather than push as GITHUB_TOKEN (no CI would start).
+          bash .github/factory/app-push.sh check || exit 1
           sha=$(git rev-parse HEAD)
           if [ "$MODE" = conflict ]; then
             # Conflict mode merges main on top of the PR branch, so history is not rewritten: a plain
@@ -515,7 +532,7 @@ jobs:
             # A fresh implementation starts from main and replaces an earlier attempt's branch.
             pushargs=(--force origin "$BRANCH")
           fi
-          if git push "${pushargs[@]}" 2> .factory/push.log; then
+          if bash .github/factory/app-push.sh push "${pushargs[@]}" 2> .factory/push.log; then
             cat .factory/push.log
           else
             cat .factory/push.log
@@ -524,7 +541,9 @@ jobs:
             # (conflict mode merges, else rebase) and push once more (#417). The PR keeps `$sha` as
             # the checked commit: the caught-up head was not checked, so Verify runs `cargo xtask ci`.
             rc=0
-            bash .github/factory/workflow-guard.sh push-retry "$N" .factory/push.log "$MODE" "${pushargs[@]}" || rc=$?
+            # push-retry pushes again itself: authenticate its git as the App too.
+            bash .github/factory/app-push.sh git-env \
+              bash .github/factory/workflow-guard.sh push-retry "$N" .factory/push.log "$MODE" "${pushargs[@]}" || rc=$?
             case $rc in
               0) ;;
               3) exit 0 ;;
@@ -549,7 +568,7 @@ jobs:
           if [ -n "$url" ]; then
             gh pr edit "$url" --body-file "$body"
           else
-            url=$(gh pr create --repo "$REPO" --base main --head "$BRANCH" --title "$title" --body-file "$body")
+            url=$(bash .github/factory/app-push.sh gh pr create --repo "$REPO" --base main --head "$BRANCH" --title "$title" --body-file "$body")
           fi
           number=$(gh pr view "$url" --repo "$REPO" --json number --jq .number)
           echo "PR: $url"

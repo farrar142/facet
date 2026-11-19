@@ -40,7 +40,8 @@
 #                                       files to <reason>, writes resolve=false and exits 1: the caller
 #                                       runs `human`.
 #
-# Environment: REPO (or GITHUB_REPOSITORY), GH_TOKEN, BASE (default main); RUN_URL (link in comments,
+# Environment: REPO (or GITHUB_REPOSITORY), GH_TOKEN, FACTORY_APP_TOKEN (the merge, app-push.sh),
+# BASE (default main); RUN_URL (link in comments,
 # optional); FACTORY_DISPATCH_NEXT (command run instead of dispatch-next.sh, tests); FACTORY_PRUNE_RUNS
 # (command run with the branch instead of prune-runs.sh, tests);
 # FACTORY_MERGE_WAIT (seconds between merge attempts, default 15); ODIN_CONFLICT_LIMIT (conflict
@@ -193,8 +194,10 @@ pass() {
 
 $(cat "$report")" || echo "::warning::could not comment on PR #$pr"
   fi
+  # Merge as the factory App so the merge starts CI on main; without its token, merge nothing.
+  bash "$here/app-push.sh" check || return 1
   for attempt in 1 2 3 4; do
-    if gh api -X PUT "repos/$REPO/pulls/$pr/merge" -f merge_method=squash > /dev/null; then
+    if bash "$here/app-push.sh" gh api -X PUT "repos/$REPO/pulls/$pr/merge" -f merge_method=squash > /dev/null; then
       merged=true
       break
     fi

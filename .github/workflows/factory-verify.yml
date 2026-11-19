@@ -147,13 +147,29 @@ jobs:
           set -o pipefail
           cargo xtask ci 2>&1 | tee .factory/ci.log
 
+      # The push and the merge go out as the factory GitHub App, not GITHUB_TOKEN: GitHub starts no
+      # workflow for GITHUB_TOKEN's pushes and merges, so CI would not run on the PR's new head nor on
+      # main after the merge. Only these two writes use it (.github/factory/app-push.sh); the checks,
+      # labels and comments stay on GITHUB_TOKEN. The App needs Contents and Pull requests write. A
+      # token lasts an hour, so the merge gets its own, after the acceptance review.
+      - name: Factory App token (push)
+        id: app-token-push
+        if: steps.ci.outcome == 'success'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.FACTORY_APP_ID }}
+          private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
       # The merge must land exactly what was checked.
       - name: Push the merged branch
         id: push
         if: steps.ci.outcome == 'success'
         env:
           BRANCH: ${{ steps.pr.outputs.branch }}
-        run: git push --force-with-lease="$BRANCH" origin "$BRANCH"
+          FACTORY_APP_TOKEN: ${{ steps.app-token-push.outputs.token }}
+        run: bash .github/factory/app-push.sh push --force-with-lease="$BRANCH" origin "$BRANCH"
 
       - name: Install Claude Code
         id: claude
@@ -190,6 +206,16 @@ jobs:
         if: always() && steps.budget.outputs.go == 'true'
         run: bash .github/factory/ledger.sh record verify "$N"
 
+      - name: Factory App token (merge)
+        id: app-token-merge
+        if: always() && steps.pr.outputs.go == 'true' && steps.mech.outputs.mech == 'pass'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.FACTORY_APP_ID }}
+          private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
       - name: Merge or send back
         if: always() && steps.pr.outputs.go == 'true'
         env:
@@ -199,6 +225,7 @@ jobs:
           CI_OUTCOME: ${{ steps.ci.outcome }}
           PUSH_OUTCOME: ${{ steps.push.outcome }}
           CONFLICT_FILES: ${{ steps.base.outputs.files }}
+          FACTORY_APP_TOKEN: ${{ steps.app-token-merge.outputs.token }}
         run: |
           # the verdict and the conflicting files, for the ledger's conflict send-back ratio and
           # per-file conflict counts (ledger.sh stats, #286, #307)

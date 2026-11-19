@@ -7,6 +7,8 @@ here=$(cd "$(dirname "$0")" && pwd)
 odin="$here/../odin.sh"
 export PATH="$here/fake:$PATH"
 export REPO=owner/repo
+# The factory App token for merges, spec pushes and spec PRs (app-push.sh); the fake gh ignores it.
+export FACTORY_APP_TOKEN=app-token
 
 fails=0
 passes=0
@@ -214,6 +216,15 @@ eq "not merged" false "$(merged)"
 eq "no ticket approved" "" "$(approved)"
 eq "nothing dispatched" "" "$(dispatched)"
 lacks "branch kept" "git/refs/heads/factory/spec-50" "$(calls)"
+
+setup no-app-token
+# Without the App token nothing is merged with GITHUB_TOKEN instead: that merge would start no CI.
+FACTORY_APP_TOKEN= bash "$odin" pass 50 70 > "$tmp/log" 2>&1
+eq "exit" 1 "$?"
+has "says why" "no factory App token" "$(cat "$tmp/log")"
+lacks "no merge call" "/merge" "$(calls)"
+eq "not merged" false "$(merged)"
+eq "no ticket approved" "" "$(approved)"
 
 # --- empty spec PR --------------------------------------------------------------------------------
 

@@ -318,6 +318,23 @@ jobs:
           fi
           exit $r
 
+      # The push and the merge go out as the factory GitHub App, not GITHUB_TOKEN: GitHub starts no
+      # workflow for GITHUB_TOKEN's pushes and merges, so CI would not run on the spec PR's new head
+      # nor on main after the merge. Only these two writes use it (.github/factory/app-push.sh); the
+      # checks, labels, comments and dispatches stay on GITHUB_TOKEN. The App needs Contents and Pull
+      # requests write. The merge comes right after the push, so one token serves both.
+      - name: Factory App token
+        id: app-token
+        if: >-
+          steps.verdict.outputs.verdict == 'go' &&
+          (steps.check_first.outcome == 'success' || steps.check.outcome == 'success')
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.FACTORY_APP_ID }}
+          private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
       # Odin's fixes and the merge of main land on the factory branch with a plain push (#359): main
       # was merged in above, so the push fast-forwards. A branch that moved meanwhile refuses it.
       - name: Push Odin's fixes
@@ -327,12 +344,13 @@ jobs:
           (steps.check_first.outcome == 'success' || steps.check.outcome == 'success')
         env:
           BRANCH: ${{ steps.state.outputs.branch }}
+          FACTORY_APP_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           git add -A
           if ! git diff --cached --quiet; then
             git commit -q -m "스펙: Odin 검토 고침 (#$SPEC)"
           fi
-          git push origin "HEAD:refs/heads/$BRANCH"
+          bash .github/factory/app-push.sh push origin "HEAD:refs/heads/$BRANCH"
 
       - name: Merge, or ask, or hand to a human
         if: always() && steps.pr.outputs.go != ''
@@ -346,6 +364,7 @@ jobs:
           FIRST: ${{ steps.check_first.outcome }}
           SECOND: ${{ steps.check.outcome }}
           PUSH: ${{ steps.push.outcome }}
+          FACTORY_APP_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           if [ "$CANCELLED" = true ]; then
             echo "::warning::cancelled; spec PR #$PR stays open"

@@ -90,9 +90,25 @@ jobs:
         if: always() && (steps.state.outputs.mode == 'new' || steps.state.outputs.mode == 'decomposed')
         run: bash .github/factory/ledger.sh record decompose "$SPEC"
 
+      # The spec branch push and the spec PR go out as the factory GitHub App, not GITHUB_TOKEN:
+      # GitHub starts no workflow for GITHUB_TOKEN's pushes and PRs, so CI would never run on the spec
+      # PR. Only those two writes use it (.github/factory/app-push.sh); labels and the Odin dispatch
+      # stay on GITHUB_TOKEN. The App needs Contents and Pull requests write.
+      - name: Factory App token
+        id: app-token
+        if: steps.state.outputs.mode == 'new' || steps.state.outputs.mode == 'decomposed'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.FACTORY_APP_ID }}
+          private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
       # A question (needs-decision) ends here with no PR. Otherwise commit the acceptance tests on
       # factory/spec-<S>, open the spec PR (label spec-pr) and dispatch Odin, who reviews it, merges
       # it and labels the tickets ready-for-agent. Decomposed mode takes ready-for-agent off first.
       - name: Open the spec PR and hand it to Odin
         if: steps.state.outputs.mode == 'new' || steps.state.outputs.mode == 'decomposed'
+        env:
+          FACTORY_APP_TOKEN: ${{ steps.app-token.outputs.token }}
         run: bash .github/factory/decompose.sh finish "$SPEC" "${{ steps.state.outputs.mode }}"

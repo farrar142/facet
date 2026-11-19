@@ -22,7 +22,8 @@
 #   decompose.sh dispatch-odin <S>  dispatch factory-odin.yml with input spec=<S>. A failed dispatch (the workflow
 #                                   does not exist yet, or is disabled) only warns.
 #
-# Environment: REPO (or GITHUB_REPOSITORY), GH_TOKEN, BASE (base branch, default main), FACTORY_ROOT (the
+# Environment: REPO (or GITHUB_REPOSITORY), GH_TOKEN, FACTORY_APP_TOKEN (the push and the spec PR,
+# app-push.sh), BASE (base branch, default main), FACTORY_ROOT (the
 # checkout to search and commit in, default the repository this script is in). Needs bash, git, gh and jq.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
@@ -120,6 +121,8 @@ finish() {
   title=$(gh api "repos/$REPO/issues/$s" | j -r '.title')
   list=$(for n in $tickets; do echo "- #$n"; done)
   branch=$(branch_of "$s")
+  # The spec PR must start CI and wake Odin's merge: push and open it as the factory App.
+  bash "$here/app-push.sh" check || return 1
   (
     cd "$ROOT" || exit 1
     git checkout -q -B "$branch" || exit 1
@@ -135,7 +138,7 @@ finish() {
     git -c user.name='github-actions[bot]' \
       -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
       commit -q --allow-empty -m "스펙: $title 인수 시험 (#$s)" -m "$list" || exit 1
-    git push -q origin "HEAD:refs/heads/$branch"
+    bash "$here/app-push.sh" push -q origin "HEAD:refs/heads/$branch"
   ) || { echo "::error::could not commit or push $branch"; return 1; }
 
   body="Refs #$s
@@ -145,7 +148,7 @@ Decompose가 쓴 티켓별 인수 시험(\`#[ignore = \"#<티켓>\"]\`)이다. O
 ## 티켓
 
 $list"
-  pr=$(gh api "repos/$REPO/pulls" -f "title=스펙: $title 인수 시험 (#$s)" -f "head=$branch" -f "base=$BASE" \
+  pr=$(bash "$here/app-push.sh" gh api "repos/$REPO/pulls" -f "title=스펙: $title 인수 시험 (#$s)" -f "head=$branch" -f "base=$BASE" \
     -f "body=$body" | j -r '.number // empty')
   if [ -z "$pr" ]; then echo "::error::could not open the spec PR of #$s"; return 1; fi
   gh api "repos/$REPO/issues/$pr/labels" -f 'labels[]=spec-pr' > /dev/null \

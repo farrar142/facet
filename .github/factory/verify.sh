@@ -45,7 +45,8 @@
 #                                        and then the next ticket (dispatch-next.sh). Exits 1 when the
 #                                        PR could not be merged (nothing else is done then).
 #
-# Environment: REPO (or GITHUB_REPOSITORY), GH_TOKEN; RUN_URL (link in comments, optional);
+# Environment: REPO (or GITHUB_REPOSITORY), GH_TOKEN; FACTORY_APP_TOKEN (the merge, app-push.sh);
+# RUN_URL (link in comments, optional);
 # FACTORY_DISPATCH_NEXT (command run instead of dispatch-next.sh, tests); FACTORY_GUARD (command run
 # with the ticket instead of `ledger.sh guard` in next-verify, tests); FACTORY_PRUNE_RUNS (command
 # run with the branch instead of prune-runs.sh, tests); FACTORY_MERGE_WAIT
@@ -243,8 +244,10 @@ conflict_pr() {
 pass() {
   local n=$1 pr=$2 report=${3:-} branch attempt merged=false
   branch=$(pr_branch "$pr")
+  # Merge as the factory App so the merge starts CI on main; without its token, merge nothing.
+  bash "$here/app-push.sh" check || return 1
   for attempt in 1 2 3 4; do
-    if gh api -X PUT "repos/$REPO/pulls/$pr/merge" -f merge_method=squash >/dev/null; then
+    if bash "$here/app-push.sh" gh api -X PUT "repos/$REPO/pulls/$pr/merge" -f merge_method=squash >/dev/null; then
       merged=true; break
     fi
     echo "::notice::merge attempt $attempt of PR #$pr failed; GitHub may still be computing mergeability"

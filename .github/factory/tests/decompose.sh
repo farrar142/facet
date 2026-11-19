@@ -6,6 +6,8 @@ script="$here/../decompose.sh"
 workflow="$here/../../workflows/factory-decompose.yml"
 export PATH="$here/fake:$PATH"
 export REPO=owner/repo
+# The factory App token for merges, spec pushes and spec PRs (app-push.sh); the fake gh ignores it.
+export FACTORY_APP_TOKEN=app-token
 
 fails=0
 passes=0
@@ -217,6 +219,18 @@ finish 249 new
 eq code 0 "$(cat "$tmp/code")"
 eq result pr "$(out result)"
 has "warning" "could not dispatch factory-odin.yml" "$(cat "$tmp/log")"
+
+setup "finish: without the App token there is no push, no spec PR and no Odin"
+issue 249 spec
+issue 301 ""
+subs 249 301:open
+echo '// test' > "$FACTORY_ROOT/crates/facet-core/tests/spec_a_b.rs"
+FACTORY_APP_TOKEN= finish 249 new
+eq code 1 "$(cat "$tmp/code")"
+has "says why" "no factory App token" "$(cat "$tmp/log")"
+eq branch no "$(remote_branch 249)"
+eq "pull requests" 0 "$(pull_count)"
+eq dispatches 0 "$(dispatches)"
 
 setup "finish: no open tickets after a new decompose is an error, without a PR"
 issue 249 spec
