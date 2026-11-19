@@ -33,5 +33,7 @@ toml = "1"
 # 설정 파일(`settings.rs`)을 주석·순서·모르는 키를 보존하며 고쳐 쓴다.
 toml_edit = "0.25"
 encoding_rs = "0.8"
+# zip 항목의 Deflate 풀기(`zip_archive.rs`, #425). 이미 png가 쓰는 크레이트다.
+miniz_oxide = "0.9"
 jpeg-decoder = "0.3"
 image = { version = "0.25", default-features = false, features = ["png", "gif", "webp", "bmp"] }
