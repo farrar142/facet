@@ -35,6 +35,8 @@ pub struct JobEntry {
     pub question: Option<JobQuestion>,
     /// #456: 원본 가운데 동기화 폴더 항목이 있는가.
     pub in_sync_folder: bool,
+    /// zip 항목을 꺼내는 복사([`JobKind::Copy`])인가. 화면은 진행 표시 종류를 「꺼내기」로 보인다.
+    pub extract: bool,
 }
 
 impl JobEntry {
@@ -71,7 +73,15 @@ impl WorkArea {
             summary: None,
             question: None,
             in_sync_folder: false, // #456
+            extract: false,
         });
+    }
+
+    /// 작업 `id`를 zip 항목을 꺼내는 작업으로 적는다([`JobEntry::extract`]).
+    pub(crate) fn mark_extract(&mut self, id: JobId) {
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            entry.extract = true;
+        }
     }
 
     /// 대기열의 사건 하나를 반영한다. 모르는 작업의 사건이면 아무것도 하지 않고 `false`다.

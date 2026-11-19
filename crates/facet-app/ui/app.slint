@@ -33,6 +33,9 @@ export struct Row {
     deleted: string,
     // zip 안 파일의 압축된 크기 글자(폴더·zip 위치가 아니면 비어 있다).
     compressed: string,
+    // #451: 동기화 상태 배지의 글자(상태 이름, 배지가 없으면 비어 있다)와 이름 옆 배지 기호.
+    sync: string,
+    sync-glyph: string,
     // 선택한 항목인가.
     selected: bool,
     // 커서 항목인가(키보드가 가리키는 항목. 선택과 다르다).
@@ -141,6 +144,8 @@ export struct PanelData {
     content-results: bool,
     // 내 PC인가: 수정한 날짜·크기 열 대신 「전체 크기」「남은 공간」 열을 보이고 이름 열에 사용량 막대를 그린다.
     this-pc: bool,
+    // #451: 동기화 폴더(「상태」 열이 보인다).
+    sync-folder: bool,
     // 휴지통인가(「원래 위치」·「지운 날짜」 열을 보이고 「수정한 날짜」 열을 감춘다).
     recycle-bin: bool,
     // zip 위치인가(「압축된 크기」 열을 보인다), 같은 이름·손상 상태 글자(비면 줄 없음).
@@ -165,7 +170,7 @@ export enum JobStatus { queued, running, paused, awaiting-answer, finished, fail
 export enum JobAsk { none, conflict, error, not-recyclable }
 
 // 작업의 종류(코어의 `JobKind`): 복사, 이동, 실행취소, 다시 실행, 삭제(휴지통), 영구 삭제.
-export enum JobType { copy, move, undo, redo, recycle, delete, batch-rename, restore }
+export enum JobType { copy, move, undo, redo, recycle, delete, batch-rename, restore, extract }
 
 // 이름 충돌 대화의 덮어쓰기 경고: 덮어쓸 수 없음(파일과 폴더), 덮어쓴 파일이 휴지통으로 감(되살릴 수 있음), 되살릴 수
 // 없음(대상 위치에 휴지통이 없음).
@@ -184,7 +189,7 @@ export struct ConflictSide {
 export enum Compare { unknown, same, source, target }
 
 // 항목별 오류의 까닭(코어의 `FileOpErrorKind`). 문장은 화면이 `@tr()`로 만든다.
-export enum ErrorReason { locked, access-denied, disk-full, source-missing, other }
+export enum ErrorReason { locked, access-denied, disk-full, source-missing, corrupt, other }
 
 // 이름 충돌·항목별 오류 질문의 답.
 export enum ConflictChoice { overwrite, overwrite-if-newer, keep-both, skip }
@@ -346,7 +351,7 @@ export struct JobRow {
 }
 
 // 복사·이동 확인 줄에서 시작 전에 막힌 까닭(코어의 `CopyRejection`). 문장은 화면이 `@tr()`로 만든다.
-export enum TransferProblem { none, no-sources, target-missing, target-not-folder, into-itself, target-inside-source, nothing-to-delete, unsupported }
+export enum TransferProblem { none, no-sources, target-missing, target-not-folder, into-itself, target-inside-source, nothing-to-delete, unsupported, not-enough-space }
 
 // 삭제 확인 줄의 까닭(코어의 `DeleteWarning`): 확인 줄이 복사·이동이면 none, 영구 삭제(Shift+Delete), 휴지통이 없는 위치의
 // 삭제(Delete).
@@ -693,6 +698,7 @@ component ErrorQuestion inherits FocusScope {
                     : root.job.error-reason == ErrorReason.access-denied ? @tr("오류: 접근이 거부되었습니다")
                     : root.job.error-reason == ErrorReason.disk-full ? @tr("오류: 디스크가 가득 찼습니다")
                     : root.job.error-reason == ErrorReason.source-missing ? @tr("오류: 원본이 없습니다")
+                    : root.job.error-reason == ErrorReason.corrupt ? @tr("오류: 데이터가 손상되었습니다(CRC·크기가 맞지 않음)")
                     : @tr("오류: 이 항목을 처리하지 못했습니다");
                 font-weight: 700;
                 overflow: elide;
@@ -896,6 +902,7 @@ component JobView inherits Rectangle {
                     : root.job.kind == JobType.delete ? @tr("영구 삭제: {}", root.job.target)
                     : root.job.kind == JobType.batch-rename ? @tr("일괄 이름 바꾸기: {}", root.job.target)
                     : root.job.kind == JobType.restore ? @tr("복원: {}", root.job.target)
+                    : root.job.kind == JobType.extract ? @tr("꺼내기 → {}", root.job.target)
                     : root.job.kind == JobType.move ? @tr("이동 → {}", root.job.target) : @tr("복사 → {}", root.job.target);
                 horizontal-stretch: 1;
                 overflow: elide;
@@ -1418,6 +1425,7 @@ component PanelView inherits Rectangle {
     in-out property <length> original-location-width;
     in-out property <length> deleted-width;
     in-out property <length> compressed-width;
+    in-out property <length> sync-width;
     // 열 너비의 합(있으면 위치·일치·원래 위치·지운 날짜 열 포함, 휴지통은 수정한 날짜 열 없음,
     // 내 PC면 수정한 날짜·크기 대신 전체 크기·남은 공간): 자세히 보기 내용의 폭.
     // 목록보다 넓으면 가로 스크롤 막대가 생긴다.
@@ -1426,7 +1434,8 @@ component PanelView inherits Rectangle {
             : (root.data.recycle-bin ? 0px : root.modified-width) + root.size-width)
         + (root.data.results ? root.location-width : 0px) + (root.data.content-results ? root.matches-width : 0px)
         + (root.data.recycle-bin ? root.original-location-width + root.deleted-width : 0px)
-        + (root.data.zip ? root.compressed-width : 0px);
+        + (root.data.zip ? root.compressed-width : 0px)
+        + (root.data.sync-folder ? root.sync-width : 0px);
     in-out property <length> content-y <=> list.content-y;
     // 가로로 넘긴 거리(0 이하, ListView의 `content-x`). 사각형 선택이 목록 내용 기준 자리를 셈한다.
     out property <length> content-x: list.content-x;
@@ -2089,6 +2098,17 @@ component PanelView inherits Rectangle {
                         root.focus-list();
                     }
                 }
+                if root.data.sync-folder: Header {
+                    text: @tr("상태");
+                    column-width <=> root.sync-width;
+                    sorted: root.data.sort-column == 11;
+                    descending: root.data.sort-descending;
+                    sort => {
+                        root.activate();
+                        root.sort-by(11);
+                        root.focus-list();
+                    }
+                }
                 Rectangle { }
             }
         }
@@ -2538,6 +2558,26 @@ component PanelView inherits Rectangle {
                                     opacity: row.cut ? 0.45 : 1.0;
                                 }
                             }
+                            // #451: 이름 옆 동기화 상태 배지. 마우스를 올리면 상태 이름이 글로 보인다.
+                            if row.sync != "" && i != root.editing: Rectangle {
+                                width: badge-text.preferred-width + (badge-touch.has-hover ? 110px : 0px);
+                                badge-touch := TouchArea {
+                                    mouse-cursor: default;
+                                }
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    badge-text := Text {
+                                        text: row.sync-glyph;
+                                        vertical-alignment: center;
+                                        color: row.selected ? Palette.selection-foreground : Palette.accent-background;
+                                    }
+                                    if badge-touch.has-hover: Text {
+                                        text: row.sync;
+                                        vertical-alignment: center;
+                                        color: row.selected ? Palette.selection-foreground : Palette.foreground;
+                                    }
+                                }
+                            }
                             if i != root.editing: Text {
                                 opacity: row.cut ? 0.45 : 1.0;
                                 text: row.name;
@@ -2689,6 +2729,16 @@ component PanelView inherits Rectangle {
                                 text: row.compressed;
                                 overflow: elide;
                                 horizontal-alignment: right;
+                                vertical-alignment: center;
+                                color: row.selected ? Palette.selection-foreground : Palette.foreground;
+                            }
+                        }
+                        if root.data.sync-folder: HorizontalLayout {
+                            width: root.sync-width;
+                            padding-right: 8px;
+                            Text {
+                                text: row.sync;
+                                overflow: elide;
                                 vertical-alignment: center;
                                 color: row.selected ? Palette.selection-foreground : Palette.foreground;
                             }
@@ -3397,6 +3447,7 @@ export component AppWindow inherits Window {
     in-out property <length> original-location-width: 240px;
     in-out property <length> deleted-width: 140px;
     in-out property <length> compressed-width: 110px;
+    in-out property <length> sync-width: 130px;
 
     // 미리보기 영역(#340): 켜짐, 폭, 내용(코어 `App::preview`를 Rust가 옮긴 값).
     in property <bool> preview-visible;
@@ -3785,6 +3836,7 @@ export component AppWindow inherits Window {
             original-location-width <=> root.original-location-width;
             deleted-width <=> root.deleted-width;
             compressed-width <=> root.compressed-width;
+            sync-width <=> root.sync-width;
             activate => {
                 root.panel-pressed(0);
             }
@@ -3982,6 +4034,7 @@ export component AppWindow inherits Window {
             original-location-width <=> root.original-location-width;
             deleted-width <=> root.deleted-width;
             compressed-width <=> root.compressed-width;
+            sync-width <=> root.sync-width;
             activate => {
                 root.panel-pressed(1);
             }
@@ -4186,6 +4239,7 @@ export component AppWindow inherits Window {
                     : root.confirm-problem == TransferProblem.into-itself ? @tr("폴더를 그 폴더 자신으로 보낼 수 없습니다: {}", root.confirm-problem-path)
                     : root.confirm-problem == TransferProblem.nothing-to-delete ? @tr("지울 항목이 없습니다")
                     : root.confirm-problem == TransferProblem.unsupported ? @tr("휴대폰과는 PC와만 복사·이동할 수 있습니다")
+                    : root.confirm-problem == TransferProblem.not-enough-space ? @tr("빈 공간이 모자랍니다: {}", root.confirm-problem-path)
                     : @tr("대상 위치가 원본 폴더 안에 있습니다: {}", root.confirm-problem-path);
                 horizontal-stretch: 1;
                 vertical-alignment: center;
@@ -4558,6 +4612,7 @@ export component AppWindow inherits Window {
                     : root.target-transfer-problem == TransferProblem.target-not-folder ? @tr("대상이 폴더가 아닙니다: {}", root.target-transfer-problem-path)
                     : root.target-transfer-problem == TransferProblem.into-itself ? @tr("폴더를 그 폴더 자신으로 보낼 수 없습니다: {}", root.target-transfer-problem-path)
                     : root.target-transfer-problem == TransferProblem.unsupported ? @tr("휴대폰과는 PC와만 복사·이동할 수 있습니다")
+                    : root.target-transfer-problem == TransferProblem.not-enough-space ? @tr("빈 공간이 모자랍니다: {}", root.target-transfer-problem-path)
                     : @tr("대상 위치가 원본 폴더 안에 있습니다: {}", root.target-transfer-problem-path);
             }
             if target-list.content-height > target-list.height: ScrollBar {

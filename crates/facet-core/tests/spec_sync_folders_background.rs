@@ -119,7 +119,6 @@ fn index_of(app: &App, name: &str) -> usize {
 }
 
 #[test]
-#[ignore = "#452"]
 fn live_search_does_not_descend_into_unexpanded_online_folders_and_counts_them() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "실시간 탐색") else {
@@ -172,7 +171,6 @@ fn live_search_does_not_descend_into_unexpanded_online_folders_and_counts_them()
 }
 
 #[test]
-#[ignore = "#452"]
 fn content_search_skips_and_counts_online_only_files() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "내용 검색") else {
@@ -205,7 +203,6 @@ fn content_search_skips_and_counts_online_only_files() {
 }
 
 #[test]
-#[ignore = "#452"]
 fn thumbnails_do_not_download_online_only_images() {
     let dir = TempDir::new().unwrap();
     let cache = TempDir::new().unwrap();
@@ -263,7 +260,6 @@ fn thumbnails_do_not_download_online_only_images() {
 }
 
 #[test]
-#[ignore = "#452"]
 fn preview_refuses_online_only_items_without_downloading() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "미리보기") else {
@@ -299,7 +295,6 @@ fn preview_refuses_online_only_items_without_downloading() {
 }
 
 #[test]
-#[ignore = "#452"]
 fn online_only_exe_gets_no_per_file_icon() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "아이콘") else {

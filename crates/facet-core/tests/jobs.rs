@@ -844,7 +844,7 @@ mod windows {
         let mut queue = JobQueue::new();
         let id = queue.copy(vec![source.clone()], target.clone()).unwrap();
         collect_until_finished(&mut queue, &[id]);
-        assert_eq!(queue.state(id), None);
+        assert_eq!(queue.state(id), Some(JobState::Finished));
         assert!(!queue.pause(id));
         assert!(!queue.resume(id));
         assert!(!queue.cancel(id));

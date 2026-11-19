@@ -64,13 +64,13 @@ const DOS_FOLDER: u32 = 0x10;
 
 /// 연 zip 파일의 항목과 폴더 나무.
 pub struct Archive {
-    /// 연 zip 파일(뒤의 꺼내기가 쓴다).
-    #[allow(dead_code)]
+    /// 연 zip 파일(항목을 풀 때 다시 연다).
     path: PathBuf,
     entries: Vec<ArchiveEntry>,
     /// 기록마다 꺼내기에 쓸 값(`entries`와 같은 차례).
-    #[allow(dead_code)]
     records: Vec<RecordInfo>,
+    /// 경로 → 그 경로의 마지막 기록 번호(같은 경로는 뒤 기록, 폴더 나무와 같다).
+    by_path: HashMap<String, usize>,
     /// 폴더 경로("" 루트) → 바로 아래 이름 → 항목(같은 경로는 뒤 기록).
     folders: HashMap<String, BTreeMap<String, ArchiveEntry>>,
     encoding: NameEncoding,
@@ -81,14 +81,11 @@ pub struct Archive {
 
 /// central directory 기록 하나의 꺼내기용 값.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 struct RecordInfo {
     /// 로컬 머리의 자리.
     local_header: u64,
     /// 압축 해제한 내용의 CRC-32.
     crc: u32,
-    /// 일반 목적 비트.
-    flags: u16,
 }
 
 impl Archive {
@@ -152,9 +149,123 @@ impl Archive {
         self.encrypted
     }
 
-    /// #425: zip 안 파일 `path`를 풀어 내용을 돌려준다.
-    pub fn read_entry(&self, _path: &str, _password: Option<&str>) -> Result<Vec<u8>, EntryError> {
-        todo!("#425")
+    /// zip 안 파일 `path`(`/` 구분, `\`도 받음)를 풀어 내용을 돌려준다. 같은 경로가 둘 이상이면 뒤 기록(목록에 보이는
+    /// 것)이다. 압축 방식은 Stored(0)와 Deflate(8)만 푼다.
+    ///
+    /// 오류는 값이다: 없는 경로 [`EntryError::NotFound`], 폴더(기록이 없는 중간 폴더 포함) [`EntryError::NotAFile`],
+    /// 암호화된 항목 [`EntryError::PasswordNeeded`](암호 풀기는 #428이라 지금은 `password`를 주어도 같다), 그 밖의
+    /// 압축 방식 [`EntryError::UnsupportedMethod`], CRC 불일치·실제로 풀린 크기가 선언 크기와 다름·깨진 압축
+    /// 데이터·틀린 로컬 머리 [`EntryError::Corrupt`], 파일을 읽지 못함 [`EntryError::Io`].
+    pub fn read_entry(&self, path: &str, password: Option<&str>) -> Result<Vec<u8>, EntryError> {
+        let index = self.file_index(path)?;
+        let mut out = Vec::new();
+        let result = self.stream_entry(index, password, &mut |chunk| {
+            out.extend_from_slice(chunk);
+            Ok(true)
+        });
+        match result {
+            Ok(()) => Ok(out),
+            Err(StreamError::Entry(error)) => Err(error),
+            Err(StreamError::Write(error)) => Err(EntryError::Io(error.kind())),
+            Err(StreamError::Stopped) => Err(EntryError::Io(std::io::ErrorKind::Interrupted)),
+        }
+    }
+
+    /// 파일 `path`(`/` 구분)의 기록 번호(같은 경로는 뒤 기록). 없으면 `NotFound`, 폴더면 `NotAFile`.
+    pub(crate) fn file_index(&self, path: &str) -> Result<usize, EntryError> {
+        let path = normalize(path);
+        match self.by_path.get(&path) {
+            Some(&index) if !self.entries[index].is_folder => Ok(index),
+            Some(_) => Err(EntryError::NotAFile),
+            None if path.is_empty() || self.folders.contains_key(&path) => {
+                Err(EntryError::NotAFile)
+            }
+            None => Err(EntryError::NotFound),
+        }
+    }
+
+    /// 기록 `index`의 항목.
+    pub(crate) fn entry(&self, index: usize) -> &ArchiveEntry {
+        &self.entries[index]
+    }
+
+    /// 경로 `path`(`/` 구분)의 항목(같은 경로는 뒤 기록, 기록이 없는 중간 폴더도 폴더 항목). 루트("")나 없으면
+    /// `None`.
+    pub(crate) fn find(&self, path: &str) -> Option<ArchiveEntry> {
+        let path = normalize(path);
+        if path.is_empty() {
+            return None;
+        }
+        let (parent, name) = split_parent(&path);
+        self.folders.get(parent)?.get(name).cloned()
+    }
+
+    /// 기록 `index`의 파일 내용을 덩어리마다 `sink`에 넘기며 푼다(메모리에 다 올리지 않는다). `sink`가 `Ok(false)`를
+    /// 돌려주면 그만두고 [`StreamError::Stopped`]다. 넘긴 내용은 끝까지 맞는지(CRC·크기) 확인하기 전의 것이라,
+    /// 오류로 끝나면 부르는 쪽이 받은 것을 버린다. 선언 크기를 넘는 순간 곧바로 멈춘다.
+    pub(crate) fn stream_entry(
+        &self,
+        index: usize,
+        _password: Option<&str>,
+        sink: &mut dyn FnMut(&[u8]) -> std::io::Result<bool>,
+    ) -> Result<(), StreamError> {
+        let entry = &self.entries[index];
+        let record = self.records[index];
+        if entry.is_folder {
+            return Err(EntryError::NotAFile.into());
+        }
+        if entry.encrypted {
+            return Err(EntryError::PasswordNeeded.into());
+        }
+        if entry.method != METHOD_STORED && entry.method != METHOD_DEFLATE {
+            return Err(EntryError::UnsupportedMethod(entry.method).into());
+        }
+        let io = |e: std::io::Error| StreamError::Entry(EntryError::Io(e.kind()));
+        let mut file = File::open(&self.path).map_err(io)?;
+        let len = file.metadata().map_err(io)?.len();
+        // 로컬 머리: 서명, 이름·확장 필드 길이 뒤에 데이터가 온다(크기는 central directory 값을 쓴다).
+        let header = read_at(&mut file, record.local_header, LOCAL_LEN).map_err(|_| corrupt())?;
+        if le32(&header, 0) != Some(LOCAL_SIGNATURE) {
+            return Err(corrupt());
+        }
+        let name_len = u64::from(le16(&header, 26).ok_or_else(corrupt)?);
+        let extra_len = u64::from(le16(&header, 28).ok_or_else(corrupt)?);
+        let start = record.local_header + LOCAL_LEN as u64 + name_len + extra_len;
+        let fits = start
+            .checked_add(entry.compressed_size)
+            .is_some_and(|end| end <= len);
+        if !fits {
+            return Err(corrupt());
+        }
+        file.seek(SeekFrom::Start(start)).map_err(io)?;
+        let mut input = Limited {
+            file,
+            left: entry.compressed_size,
+        };
+        let mut check = Check {
+            crc: Crc32::new(),
+            written: 0,
+            size: entry.size,
+        };
+        if entry.method == METHOD_STORED {
+            let mut buf = vec![0u8; CHUNK];
+            loop {
+                let n = input.read(&mut buf).map_err(read_error)?;
+                if n == 0 {
+                    break;
+                }
+                check.take(&buf[..n])?;
+                if !sink(&buf[..n]).map_err(StreamError::Write)? {
+                    return Err(StreamError::Stopped);
+                }
+            }
+        } else {
+            inflate(&mut input, &mut check, sink)?;
+        }
+        if check.written != entry.size || check.crc.finish() != record.crc {
+            return Err(corrupt());
+        }
+        Ok(())
     }
 
     fn from_records(path: PathBuf, raw: Vec<RawRecord>, damaged: bool) -> Archive {
@@ -195,6 +306,7 @@ impl Archive {
             let is_encrypted = r.flags & FLAG_ENCRYPTED != 0;
             encrypted |= is_encrypted;
             entries.push(ArchiveEntry {
+                raw_name: name,
                 path,
                 name: last,
                 is_folder,
@@ -208,15 +320,21 @@ impl Archive {
             records.push(RecordInfo {
                 local_header: r.local_header,
                 crc: r.crc,
-                flags: r.flags,
             });
         }
 
         let (folders, duplicates) = build_tree(&entries);
+        let by_path = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| !e.path.is_empty())
+            .map(|(i, e)| (e.path.clone(), i))
+            .collect();
         Archive {
             path,
             entries,
             records,
+            by_path,
             folders,
             encoding,
             duplicates,
@@ -229,6 +347,8 @@ impl Archive {
 /// central directory 항목 하나.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchiveEntry {
+    /// zip에 기록된 이름 그대로(`..`·앞 `/`·`\`·드라이브 글자 포함, 풀어 쓸 때 안전한지 가리는 데 쓴다).
+    pub raw_name: String,
     /// zip 안 전체 경로, `/` 구분, 끝 `/` 없음.
     pub path: String,
     /// 마지막 조각.
@@ -271,23 +391,145 @@ pub enum ArchiveError {
     Io(std::io::Error),
 }
 
-/// #425: 항목을 풀지 못한 까닭.
+/// zip 항목을 풀지 못한 까닭([`Archive::read_entry`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntryError {
-    /// #425
+    /// 그 경로의 항목이 없다.
     NotFound,
-    /// #425
+    /// 파일이 아니다(폴더).
     NotAFile,
-    /// #425
+    /// 암호화된 항목이라 암호가 있어야 한다.
     PasswordNeeded,
-    /// #425
+    /// 암호가 틀렸다(#428).
     WrongPassword,
-    /// #425
+    /// 풀 수 없는 압축 방식(값은 방식 번호). Stored(0)·Deflate(8)만 푼다.
     UnsupportedMethod(u16),
-    /// #425
+    /// 데이터가 선언과 맞지 않는다: CRC 불일치, 실제로 풀린 크기가 선언 크기와 다름, 깨진 압축 데이터, 틀린 로컬 머리.
     Corrupt,
-    /// #425
+    /// zip 파일을 읽지 못했다.
     Io(std::io::ErrorKind),
+}
+
+/// 항목을 덩어리로 풀다 멈춘 까닭([`Archive::stream_entry`]).
+#[derive(Debug)]
+pub(crate) enum StreamError {
+    /// 항목을 풀지 못했다.
+    Entry(EntryError),
+    /// 받는 쪽이 쓰지 못했다.
+    Write(std::io::Error),
+    /// 받는 쪽이 그만두게 했다(취소).
+    Stopped,
+}
+
+impl From<EntryError> for StreamError {
+    fn from(error: EntryError) -> Self {
+        StreamError::Entry(error)
+    }
+}
+
+fn corrupt() -> StreamError {
+    StreamError::Entry(EntryError::Corrupt)
+}
+
+/// 압축된 데이터를 읽다 난 오류: 선언한 압축된 크기보다 파일이 짧으면 손상이다.
+fn read_error(error: std::io::Error) -> StreamError {
+    match error.kind() {
+        std::io::ErrorKind::UnexpectedEof => corrupt(),
+        kind => StreamError::Entry(EntryError::Io(kind)),
+    }
+}
+
+/// 로컬 머리 서명.
+const LOCAL_SIGNATURE: u32 = 0x0403_4B50;
+/// 로컬 머리의 고정 부분 길이.
+const LOCAL_LEN: usize = 30;
+/// 압축 방식: 그대로 저장.
+const METHOD_STORED: u16 = 0;
+/// 압축 방식: Deflate.
+const METHOD_DEFLATE: u16 = 8;
+/// 풀 때 한 번에 읽고 쓰는 덩어리 크기.
+const CHUNK: usize = 256 * 1024;
+
+/// 데이터 자리부터 압축된 크기만큼만 읽는다.
+struct Limited {
+    file: File,
+    left: u64,
+}
+
+impl Read for Limited {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let want = usize::try_from(self.left)
+            .unwrap_or(usize::MAX)
+            .min(buf.len());
+        if want == 0 {
+            return Ok(0);
+        }
+        let n = self.file.read(&mut buf[..want])?;
+        if n == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        self.left -= n as u64;
+        Ok(n)
+    }
+}
+
+/// 풀린 내용의 CRC와 크기를 세고 선언 크기를 넘으면 곧바로 멈춘다.
+struct Check {
+    crc: Crc32,
+    written: u64,
+    size: u64,
+}
+
+impl Check {
+    fn take(&mut self, chunk: &[u8]) -> Result<(), StreamError> {
+        self.written += chunk.len() as u64;
+        if self.written > self.size {
+            return Err(corrupt());
+        }
+        self.crc.update(chunk);
+        Ok(())
+    }
+}
+
+/// Deflate 데이터를 덩어리로 푼다.
+fn inflate(
+    input: &mut Limited,
+    check: &mut Check,
+    sink: &mut dyn FnMut(&[u8]) -> std::io::Result<bool>,
+) -> Result<(), StreamError> {
+    use miniz_oxide::inflate::stream::{InflateState, inflate};
+    use miniz_oxide::{DataFormat, MZError, MZFlush, MZStatus};
+
+    let mut state = InflateState::new_boxed(DataFormat::Raw);
+    let mut buf = vec![0u8; CHUNK];
+    let mut out = vec![0u8; CHUNK];
+    let (mut start, mut end) = (0usize, 0usize);
+    loop {
+        if start == end && input.left > 0 {
+            start = 0;
+            end = input.read(&mut buf).map_err(read_error)?;
+        }
+        let result = inflate(&mut state, &buf[start..end], &mut out, MZFlush::None);
+        start += result.bytes_consumed;
+        let written = &out[..result.bytes_written];
+        if !written.is_empty() {
+            check.take(written)?;
+            if !sink(written).map_err(StreamError::Write)? {
+                return Err(StreamError::Stopped);
+            }
+        }
+        match result.status {
+            Ok(MZStatus::StreamEnd) => return Ok(()),
+            Ok(_) | Err(MZError::Buf) => {
+                let stalled = result.bytes_consumed == 0 && result.bytes_written == 0;
+                // 더 줄 입력이 없거나, 입력이 남았는데도 나아가지 않는다: 데이터가 끝나기 전에 잘렸거나 깨졌다.
+                if stalled && (start < end || input.left == 0) {
+                    return Err(corrupt());
+                }
+            }
+            Err(_) => return Err(corrupt()),
+        }
+    }
 }
 
 // ---- 끝 기록과 central directory 읽기 ----
@@ -562,18 +804,51 @@ fn dos_time_to_system(date: u16, time: u16) -> Option<SystemTime> {
 
 /// zip의 CRC-32.
 fn crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for &b in data {
-        crc ^= u32::from(b);
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 {
-                0xEDB8_8320 ^ (crc >> 1)
+    let mut crc = Crc32::new();
+    crc.update(data);
+    crc.finish()
+}
+
+/// 바이트 하나씩의 CRC-32 표.
+const CRC_TABLE: [u32; 256] = {
+    let mut table = [0u32; 256];
+    let mut n = 0;
+    while n < 256 {
+        let mut c = n as u32;
+        let mut k = 0;
+        while k < 8 {
+            c = if c & 1 != 0 {
+                0xEDB8_8320 ^ (c >> 1)
             } else {
-                crc >> 1
+                c >> 1
             };
+            k += 1;
         }
+        table[n] = c;
+        n += 1;
     }
-    !crc
+    table
+};
+
+/// 덩어리마다 이어 세는 CRC-32.
+struct Crc32(u32);
+
+impl Crc32 {
+    fn new() -> Self {
+        Crc32(0xFFFF_FFFF)
+    }
+
+    fn update(&mut self, data: &[u8]) {
+        let mut crc = self.0;
+        for &b in data {
+            crc = CRC_TABLE[((crc ^ u32::from(b)) & 0xFF) as usize] ^ (crc >> 8);
+        }
+        self.0 = crc;
+    }
+
+    fn finish(&self) -> u32 {
+        !self.0
+    }
 }
 
 // ---- 이름 인코딩 ----
@@ -668,6 +943,7 @@ fn ensure_ancestors(folders: &mut HashMap<String, BTreeMap<String, ArchiveEntry>
             children.insert(
                 name.to_string(),
                 ArchiveEntry {
+                    raw_name: folder.to_string(),
                     path: folder.to_string(),
                     name: name.to_string(),
                     is_folder: true,

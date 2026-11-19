@@ -3609,11 +3609,17 @@ impl App {
     pub fn context_menu(&self, kind: MenuKind) -> Menu {
         let capabilities = self.active_tab().capabilities();
         let device = crate::shell_provider::is_device_folder(self.active_tab().location());
+        let zip = self.active_tab().location().zip_location().is_some();
         let mut menu = menu::build(&self.menu_context(kind));
         for entry in &mut menu.entries {
             if let menu::MenuEntry::Command(command) = entry {
                 if !command.id.is_allowed_by(&capabilities) {
                     command.enabled = false;
+                } else if zip
+                    && matches!(command.id, CommandId::CopyToOtherPanel | CommandId::CopyTo)
+                {
+                    // zip 안: 실제 폴더가 아니어도 꺼내기(복사)는 된다.
+                    command.enabled = self.can_execute(command.id);
                 } else if device && !self.can_execute(command.id) {
                     // 휴대폰 안: 실제 폴더로 본 맥락이 켠 것 가운데 명령이 실행할 수 없는 것(경로 복사 등)은 끈다.
                     command.enabled = false;
@@ -4421,6 +4427,14 @@ impl App {
             }
             return Some(sources);
         }
+        // zip 안 항목은 zip 항목 경로다(복사하면 꺼낸다).
+        if tab.location().zip_location().is_some() {
+            let mut sources = tab.selected_paths();
+            if sources.is_empty() {
+                sources.push(tab.cursor_path()?);
+            }
+            return Some(sources);
+        }
         // 실제 폴더이거나 검색 결과 위치여야 한다. 결과 항목은 항목마다 제 폴더 경로다.
         if tab.location().file_system_path().is_none() && !tab.location().is_search_results() {
             return None;
@@ -4512,8 +4526,11 @@ impl App {
         let (id, journal) =
             self.jobs
                 .submit_recorded(plan.kind, plan.sources.clone(), plan.target.clone())?;
+        let extract = plan.kind == JobKind::Copy && crate::job::is_extract(&plan.sources);
         let kind = if plan.kind == JobKind::Move {
             OperationKind::Move
+        } else if extract {
+            OperationKind::Extract
         } else {
             OperationKind::Copy
         };
@@ -4524,6 +4541,9 @@ impl App {
         }
         self.work_area
             .add(id, plan.kind, plan.target.clone(), plan.sources.len());
+        if extract {
+            self.work_area.mark_extract(id);
+        }
         // 넣자마자 온 대기 사건을 바로 반영한다.
         self.poll_jobs();
         Ok(id)

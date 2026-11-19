@@ -863,6 +863,7 @@ fn connect(ui: &AppWindow, w: WindowId) {
             8 => Column::TotalSize,
             9 => Column::FreeSpace,
             10 => Column::CompressedSize,
+            11 => Column::SyncState,
             _ => Column::Name,
         };
         with_view(w, |view| match CommandId::sort_by(column) {
@@ -1379,6 +1380,7 @@ fn job_row(entry: &JobEntry) -> JobRow {
     JobRow {
         id: job_number(entry.id),
         kind: match entry.kind {
+            JobKind::Copy if entry.extract => JobType::Extract,
             JobKind::Copy => JobType::Copy,
             JobKind::Move => JobType::Move,
             JobKind::Undo => JobType::Undo,
@@ -1471,7 +1473,10 @@ fn transfer_problem(rejection: &CopyRejection, plan: &TransferPlan) -> (Transfer
             source.display().to_string(),
         ),
         CopyRejection::Unsupported => (TransferProblem::Unsupported, String::new()),
-        CopyRejection::NotEnoughSpace { .. } => todo!("#426"),
+        CopyRejection::NotEnoughSpace { needed, available } => (
+            TransferProblem::NotEnoughSpace,
+            text::space_detail_text(*needed, *available),
+        ),
         CopyRejection::EncryptedArchive => todo!("#430"),
     }
 }
@@ -2379,7 +2384,7 @@ impl View {
                     Column::DateDeleted => 7,
                     Column::TotalSize => 8,
                     Column::FreeSpace => 9,
-                    Column::SyncState => todo!("#451"),
+                    Column::SyncState => 11,
                     Column::CompressedSize => 10,
                 },
                 sort_descending: sort.direction == Direction::Descending,
@@ -2390,6 +2395,7 @@ impl View {
                 recycle_bin: tab.location().virtual_folder()
                     == Some(facet_core::VirtualFolder::RecycleBin),
                 zip: tab.location().zip_location().is_some(),
+                sync_folder: tab.is_sync_folder(),
                 archive_notes: tab
                     .archive_notes()
                     .map(text::archive_notes_text)
@@ -5745,6 +5751,13 @@ impl Model for TabRows {
                 }),
             deleted: tab.recycled(row).map_or_else(SharedString::new, |entry| {
                 file_list::format_modified_local(entry.deleted).into()
+            }),
+            // #451: 동기화 상태 배지.
+            sync: tab.sync_state(row).map_or_else(SharedString::new, |state| {
+                text::sync_state_text(state).into()
+            }),
+            sync_glyph: tab.sync_state(row).map_or_else(SharedString::new, |state| {
+                text::sync_state_glyph(state).into()
             }),
             // zip 안 파일의 압축된 크기(폴더와 zip 위치가 아니면 비어 있다).
             compressed: tab

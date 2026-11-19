@@ -22,6 +22,7 @@ use crate::Item;
 use crate::file_list::format_modified_local;
 use crate::shell_provider::DriveSpace;
 use crate::shell_provider::RecycledEntry;
+use crate::sync_status::SyncState;
 use crate::zip_provider::ArchiveNotes;
 
 /// 자세히 보기의 열.
@@ -256,6 +257,8 @@ struct Entry {
     recycled: Option<Box<Recycled>>,
     /// zip 위치의 항목이면 압축된 크기(폴더는 0).
     compressed: Option<u64>,
+    /// #451: 동기화 상태 배지가 있는 항목인가(동기화 폴더의 항목, 즉시 검색 결과의 해당 항목).
+    sync: bool,
 }
 
 /// 휴지통 항목의 정보와 정렬·선택에 쓰는 값.
@@ -294,7 +297,14 @@ impl Entry {
             drive: None,
             recycled: None,
             compressed: None,
+            sync: false,
         }
+    }
+
+    /// #451: 동기화 상태 배지. 배지가 없는 항목은 `None`이다.
+    fn sync_state(&self) -> Option<SyncState> {
+        self.sync
+            .then(|| SyncState::from_attributes(self.item.attributes.bits))
     }
 
     /// 전체 크기·남은 공간 열의 값. 드라이브가 아니거나 모르면 `None`.
@@ -379,6 +389,16 @@ fn compare_entries(a: &Entry, b: &Entry, sort: Sort) -> Ordering {
         Direction::Ascending => ordering,
         Direction::Descending => ordering.reverse(),
     };
+    // #451: 상태 열은 폴더도 파일과 같은 상태끼리 묶는다(폴더 먼저가 아니다). 배지가 없는 항목은 방향과 상관없이
+    // 배지가 있는 항목 뒤다.
+    if sort.column == Column::SyncState {
+        return match (a.sync_state(), b.sync_state()) {
+            (Some(x), Some(y)) => directed(x.cmp(&y)).then_with(|| a.compare_names(b)),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => a.compare_names(b),
+        };
+    }
     // 폴더 먼저: 방향과 상관없다.
     let folders_first = b.item.is_folder.cmp(&a.item.is_folder);
     if folders_first != Ordering::Equal {
@@ -404,7 +424,7 @@ fn compare_entries(a: &Entry, b: &Entry, sort: Sort) -> Ordering {
             }
         }
         Column::OriginalLocation => a.original_folder_key().cmp(&b.original_folder_key()),
-        Column::SyncState => todo!("#451"),
+        Column::SyncState => unreachable!("위에서 처리"),
         Column::DateDeleted => a.date_deleted().cmp(&b.date_deleted()),
         // 압축된 크기를 모르는 항목(zip 위치가 아님)은 0으로 본다. 폴더는 가르지 않는다.
         Column::CompressedSize if a.item.is_folder => Ordering::Equal,
@@ -422,6 +442,8 @@ pub struct DetailsList {
     sort: Sort,
     /// zip 위치의 목록이면 같은 이름·손상 상태.
     archive_notes: Option<ArchiveNotes>,
+    /// #451: 동기화 폴더의 목록인가(항목마다 배지가 있다).
+    sync_folder: bool,
 }
 
 impl DetailsList {
@@ -431,6 +453,7 @@ impl DetailsList {
             entries: items.into_iter().map(Entry::new).collect(),
             sort,
             archive_notes: None,
+            sync_folder: false,
         };
         list.resort();
         list
@@ -454,6 +477,7 @@ impl DetailsList {
                 .collect(),
             sort,
             archive_notes: None,
+            sync_folder: false,
         };
         list.resort();
         list
@@ -478,6 +502,7 @@ impl DetailsList {
                 .collect(),
             sort,
             archive_notes: Some(notes),
+            sync_folder: false,
         };
         list.resort();
         list
@@ -528,7 +553,9 @@ impl DetailsList {
         for (name, item) in changes {
             added.retain(|entry: &Entry| entry.item.name != name);
             if let Some(item) = item {
-                added.push(Entry::new(item));
+                let mut entry = Entry::new(item);
+                entry.sync = self.sync_folder;
+                added.push(entry);
             }
             names.insert(name);
         }
@@ -547,6 +574,49 @@ impl DetailsList {
             .sort_unstable_by(|a, b| compare_entries(a, b, sort));
     }
 
+    /// #451: 동기화 폴더의 목록으로 적는다(항목마다 배지가 생기고, 앞으로 더하는 항목도 그렇다).
+    pub(crate) fn set_sync_folder(&mut self, sync: bool) {
+        self.sync_folder = sync;
+        for entry in &mut self.entries {
+            entry.sync = sync;
+        }
+        if self.sort.column == Column::SyncState {
+            self.resort();
+        }
+    }
+
+    /// #451: 동기화 폴더의 목록인가.
+    pub(crate) fn is_sync_folder(&self) -> bool {
+        self.sync_folder
+    }
+
+    /// #451: `index`번째 항목의 동기화 상태 배지.
+    pub fn sync_state(&self, index: usize) -> Option<SyncState> {
+        self.entries.get(index).and_then(Entry::sync_state)
+    }
+
+    /// #451: [`DetailsList::extend_found`]와 같고 즉시 검색 결과의 배지를 더한다: 온라인 전용·항상 유지는 인덱스가 준
+    /// 속성 값으로 가르고, 이 장치에 있음은 항목 폴더가 동기화 폴더일 때만이다(폴더마다 한 번 확인).
+    pub(crate) fn extend_found_badged(
+        &mut self,
+        found: impl IntoIterator<Item = (Arc<Path>, Item)>,
+        in_sync_root: impl Fn(&Path) -> bool,
+    ) {
+        let mut folders: HashMap<Arc<Path>, bool> = HashMap::new();
+        self.extend_entries(
+            found.into_iter().map(|(path, item)| (path, item, None)),
+            |entry| {
+                let state = SyncState::from_attributes(entry.item.attributes.bits);
+                entry.sync = state != SyncState::OnDevice || {
+                    let path = &entry.folder.as_ref().expect("검색 결과 항목의 폴더").path;
+                    *folders
+                        .entry(Arc::clone(path))
+                        .or_insert_with(|| in_sync_root(path))
+                };
+            },
+        );
+    }
+
     /// 검색 결과 항목들(든 폴더와 항목)을 더한다. 더한 것만 정렬해 이미 정렬된 목록과 합치므로 결과가 많아도 묶음마다
     /// 다시 정렬하지 않는다. 같은 폴더의 정렬 키는 한 번만 만든다.
     pub fn extend_found(&mut self, found: impl IntoIterator<Item = (Arc<Path>, Item)>) {
@@ -555,6 +625,14 @@ impl DetailsList {
 
     /// [`DetailsList::extend_found`]와 같고 항목마다 내용 검색의 일치(첫 일치 줄·일치 수)를 함께 받는다.
     pub fn extend_hits(&mut self, found: impl IntoIterator<Item = (Arc<Path>, Item, Option<Hit>)>) {
+        self.extend_entries(found, |_| {});
+    }
+
+    fn extend_entries(
+        &mut self,
+        found: impl IntoIterator<Item = (Arc<Path>, Item, Option<Hit>)>,
+        mut decorate: impl FnMut(&mut Entry),
+    ) {
         let mut keys: HashMap<Arc<Path>, Arc<[u8]>> = HashMap::new();
         let mut added: Vec<Entry> = found
             .into_iter()
@@ -565,6 +643,7 @@ impl DetailsList {
                     .clone();
                 let mut entry = Entry::in_folder(item, Some(Folder { path, key }));
                 entry.hit = hit;
+                decorate(&mut entry);
                 entry
             })
             .collect();
@@ -698,8 +777,10 @@ impl DetailsList {
             let mut item = entry.item.clone();
             item.name = name;
             let hit = entry.hit.take();
+            let sync = entry.sync;
             *entry = Entry::in_folder(item, Some(Folder { path, key }));
             entry.hit = hit;
+            entry.sync = sync;
             changed = true;
         }
         if changed {

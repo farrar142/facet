@@ -1218,6 +1218,7 @@ dependencies = [
  "facet-win",
  "image",
  "jpeg-decoder",
+ "miniz_oxide 0.9.1",
  "regex",
  "serde",
  "serde_json",

@@ -34,6 +34,7 @@ mod batch_rename;
 mod copy;
 mod delete;
 mod device;
+mod extract;
 mod moving;
 mod recycle;
 mod restore;
@@ -52,6 +53,11 @@ use std::time::{Duration, SystemTime};
 pub use batch_rename::RenameItem;
 pub use facet_win::file_ops::FileOpErrorKind;
 pub use recycle::RECYCLE_CHUNK;
+
+/// 원본이 zip 항목 경로라 복사가 꺼내기([`JobQueue::copy`])가 되는가.
+pub fn is_extract(sources: &[PathBuf]) -> bool {
+    extract::involves_zip(sources)
+}
 
 /// 진행 사건 사이의 가장 짧은 간격. 작업마다 진행 사건은 초당 10번 이하다.
 pub const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
@@ -234,29 +240,30 @@ pub struct Summary {
     /// 일괄 이름 바꾸기가 규칙이 이름을 바꾸지 않아 건너뛴 항목 수([`Summary::items_skipped`]에 든다). 다른 작업은
     /// 늘 0이다.
     pub names_unchanged: u64,
-    /// #425: 꺼내기가 규칙으로 건너뛴 zip 항목과 까닭.
-    pub zip_skipped: Vec<ZipSkipped>, // #425
+    /// 꺼내기가 묻지 않고 건너뛴 zip 항목과 그 까닭(풀 수 없는 압축 방식 등, [`Summary::items_skipped`]에 든다).
+    /// 하나라도 있으면 작업은 [`JobState::Failed`]로 끝난다. 다른 작업은 늘 비어 있다.
+    pub zip_skipped: Vec<ZipSkipped>,
 }
 
-/// #425: 꺼내기가 건너뛴 zip 항목.
+/// 꺼내기가 묻지 않고 건너뛴 zip 항목.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZipSkipped {
-    /// #425: zip 안 경로(`/` 구분, 기록된 그대로).
+    /// zip 안 경로(`/` 구분, 기록된 그대로).
     pub entry: String,
-    /// #425: 건너뛴 까닭.
+    /// 건너뛴 까닭.
     pub reason: ZipSkipReason,
 }
 
-/// #425: zip 항목을 건너뛴 까닭.
+/// zip 항목을 건너뛴 까닭.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ZipSkipReason {
-    /// #425
+    /// 풀 수 없는 압축 방식(값은 방식 번호). Stored·Deflate만 푼다.
     UnsupportedMethod(u16),
-    /// #426
+    /// 대상 폴더 밖을 가리키는 이름(`..`·절대 경로·드라이브 글자·UNC·`:` 스트림).
     OutsideTarget,
-    /// #426
+    /// Windows에서 쓸 수 없는 이름(예약 이름·금지 글자·끝 점·공백).
     InvalidName(crate::name_input::NameError),
-    /// #426
+    /// 심볼릭 링크 항목(링크로 만들지 않는다).
     Symlink,
 }
 
@@ -275,6 +282,7 @@ impl Summary {
             + self.not_reverted.len() as u64
             + self.not_recycled.len() as u64
             + self.names_unchanged
+            + self.zip_skipped.len() as u64
     }
 
     /// 끝낸 항목 수: 처리한 항목([`Summary::items_done`]) 가운데 건너뛰지 않은 것.
@@ -527,11 +535,11 @@ pub enum CopyRejection {
     TargetInsideSource(PathBuf),
     /// 이 위치 사이에서는 복사·이동할 수 없다(휴대폰 안·휴대폰끼리: 휴대폰과는 PC와만 주고받는다).
     Unsupported,
-    /// #426: 대상 볼륨의 빈 공간이 모자란다.
+    /// zip 꺼내기의 선언된 압축 해제 크기 합이 대상 볼륨의 빈 공간보다 크다.
     NotEnoughSpace {
-        /// #426
+        /// 선언된 압축 해제 크기의 합.
         needed: u64,
-        /// #426
+        /// 대상 볼륨의 남은 공간.
         available: u64,
     },
     /// #430: 암호 걸린 항목이 있는 zip에는 넣지 않는다.
@@ -555,6 +563,7 @@ enum Job {
     BatchRename(batch_rename::BatchRenameJob),
     Restore(restore::RestoreJob),
     Device(device::DeviceJob),
+    Extract(extract::ExtractJob),
 }
 
 impl Job {
@@ -569,6 +578,7 @@ impl Job {
             Job::BatchRename(job) => job.root_count(),
             Job::Restore(job) => job.root_count(),
             Job::Device(job) => job.root_count(),
+            Job::Extract(job) => job.root_count(),
         }
     }
 
@@ -583,6 +593,7 @@ impl Job {
             Job::BatchRename(job) => job.run(context),
             Job::Restore(job) => job.run(context),
             Job::Device(job) => job.run(context),
+            Job::Extract(job) => job.run(context),
         }
     }
 }
@@ -830,6 +841,8 @@ struct Board {
     turn: Option<JobId>,
     /// 대기열을 버렸다. 차례 일꾼은 더 시작할 작업이 없으면 끝난다.
     closed: bool,
+    /// 끝난 작업의 마지막 상태([`JobQueue::state`]가 준다). 작업 하나에 번호와 상태뿐이라 쌓아 둔다.
+    finished: HashMap<JobId, JobState>,
 }
 
 struct Slot {
@@ -955,9 +968,15 @@ impl JobQueue {
         !self.shared.board().jobs.is_empty()
     }
 
-    /// 끝나지 않은 작업의 지금 상태. 끝난(또는 없는) 작업이면 `None`.
+    /// 작업의 지금 상태. 끝난 작업이면 마지막 상태([`JobState::Finished`]·[`JobState::Failed`]·
+    /// [`JobState::Cancelled`], 끝남 사건을 보내기 전에 정해진다). 없는 작업이면 `None`.
     pub fn state(&self, job: JobId) -> Option<JobState> {
-        self.shared.board().jobs.get(&job).map(|slot| slot.state)
+        let board = self.shared.board();
+        board
+            .jobs
+            .get(&job)
+            .map(|slot| slot.state)
+            .or_else(|| board.finished.get(&job).copied())
     }
 
     /// 원본 항목들(파일·폴더)을 `target` 폴더 안으로 복사하는 작업을 넣는다.
@@ -993,10 +1012,21 @@ impl JobQueue {
     /// 원본이나 대상이 휴대폰 항목 경로([`crate::shell_provider::DEVICE_PATH_ROOT`] 아래)면 휴대폰과 PC 사이의 복사다:
     /// 셸로 주고받고, 일시정지는 항목 사이에서 듣고, 휴대폰 쪽 대상을 덮어쓰면 되살릴 수 없다(휴지통 없음). 휴대폰
     /// 안·휴대폰끼리는 [`CopyRejection::Unsupported`]다.
+    ///
+    /// 원본이 zip 항목 경로(zip 파일 경로 뒤에 zip 안 경로)면 **꺼내기**다: zip 안 항목을 풀어 `target` 안에 쓴다.
+    /// 원본은 모두 같은 zip의 항목이어야 한다(아니면 [`CopyRejection::Unsupported`]). 이름 충돌·항목별 오류·일시정지·
+    /// 취소는 복사와 같다. 압축 방식은 Stored·Deflate만 풀고, 그 밖의 방식 항목은 묻지 않고 건너뛰어
+    /// [`Summary::zip_skipped`]에 담는다(작업은 [`JobState::Failed`]로 끝난다). CRC 불일치·선언 크기 초과·깨진
+    /// 압축 데이터는 쓰다 만 파일을 지우고 항목별 오류([`FileOpErrorKind::Corrupt`])로 묻는다. 꺼낸 파일의 수정
+    /// 시각은 zip 항목의 시각이고, 폴더 기록이 없는 중간 폴더도 만든다.
     pub fn copy(&mut self, sources: Vec<PathBuf>, target: PathBuf) -> Result<JobId, CopyRejection> {
         if device::involves_device(&sources, Some(&target)) {
             let job = device::DeviceJob::prepare_transfer(device::DeviceOp::Copy, sources, target)?;
             return Ok(self.enqueue(Job::Device(job)));
+        }
+        if extract::involves_zip(&sources) {
+            let job = extract::ExtractJob::prepare(sources, target)?;
+            return Ok(self.enqueue(Job::Extract(job)));
         }
         let job = copy::CopyJob::prepare(sources, target)?;
         Ok(self.enqueue(Job::Copy(job)))
@@ -1028,6 +1058,10 @@ impl JobQueue {
         if device::involves_device(&sources, Some(&target)) {
             let job = device::DeviceJob::prepare_transfer(device::DeviceOp::Move, sources, target)?;
             return Ok(self.enqueue(Job::Device(job)));
+        }
+        // zip 안 항목은 옮길 수 없다(zip 안에서는 읽기만 한다).
+        if extract::involves_zip(&sources) {
+            return Err(CopyRejection::Unsupported);
         }
         let job = moving::MoveJob::prepare(sources, target)?;
         Ok(self.enqueue(Job::Move(job)))
@@ -1076,6 +1110,14 @@ impl JobQueue {
             let mut job = device::DeviceJob::prepare_transfer(op, sources, target)?;
             job.journal = Some(Arc::clone(&journal));
             return Ok((self.enqueue(Job::Device(job)), journal));
+        }
+        if extract::involves_zip(&sources) {
+            if kind != JobKind::Copy {
+                return Err(CopyRejection::Unsupported);
+            }
+            let mut job = extract::ExtractJob::prepare(sources, target)?;
+            job.journal = Some(Arc::clone(&journal));
+            return Ok((self.enqueue(Job::Extract(job)), journal));
         }
         let job = match kind {
             JobKind::Copy => {
@@ -1365,6 +1407,7 @@ impl JobQueue {
         }
         let slot = board.jobs.remove(&job).expect("방금 본 작업");
         board.pending.retain(|id| *id != job);
+        board.finished.insert(job, JobState::Cancelled);
         let summary = Summary {
             items_remaining: slot.job.as_ref().map_or(0, Job::root_count),
             ..Summary::default()
@@ -1423,13 +1466,16 @@ impl JobQueue {
         todo!("#428")
     }
 
-    /// #425: zip `archive` 전체를 `target` 폴더 안으로 꺼내는 작업.
+    /// zip 파일 `archive` 전체를 `target` 폴더 안으로 꺼내는 작업([`JobKind::Copy`])을 넣는다. zip의 루트 아래 항목이
+    /// `target` 바로 안에 놓인다. 꺼내기 규칙은 zip 항목을 원본으로 한 [`JobQueue::copy`]와 같다. `archive`가 파일이
+    /// 아니면 [`CopyRejection::NoSources`], 대상은 복사와 같이 확인한다.
     pub fn extract_all(
         &mut self,
-        _archive: PathBuf,
-        _target: PathBuf,
+        archive: PathBuf,
+        target: PathBuf,
     ) -> Result<JobId, CopyRejection> {
-        todo!("#425")
+        let job = extract::ExtractJob::prepare_all(archive, target)?;
+        Ok(self.enqueue(Job::Extract(job)))
     }
 
     /// 항목별 오류의 답을 기다리는 작업에 답한다. 다시 시도·건너뛰기·나머지 오류도 건너뛰기면 작업은
@@ -1586,7 +1632,11 @@ fn run_job(id: JobId, job: Job, control: &Control, shared: &Shared, outbox: &Out
     let result = panic::catch_unwind(AssertUnwindSafe(|| job.run(&context)));
     let (summary, state) = match result {
         Ok((summary, true)) => (summary, JobState::Cancelled),
-        Ok((summary, false)) if summary.failures.is_empty() && summary.not_reverted.is_empty() => {
+        Ok((summary, false))
+            if summary.failures.is_empty()
+                && summary.not_reverted.is_empty()
+                && summary.zip_skipped.is_empty() =>
+        {
             (summary, JobState::Finished)
         }
         Ok((summary, false)) => (summary, JobState::Failed),
@@ -1596,6 +1646,7 @@ fn run_job(id: JobId, job: Job, control: &Control, shared: &Shared, outbox: &Out
     let mut board = shared.board();
     // 끝남을 보내기 전에 판에서 빼, 끝남을 받은 쪽이 보면 이미 끝난 것으로 보인다.
     board.jobs.remove(&id);
+    board.finished.insert(id, state);
     if board.turn == Some(id) {
         board.turn = None;
     }
