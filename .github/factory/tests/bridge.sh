@@ -17,7 +17,7 @@ setup() {
   tmp=$(mktemp -d "$root/t.XXXXXX")
   export FAKE_GH="$tmp/gh" FAKE_MAIL="$tmp/mail" XDG_STATE_HOME="$tmp/state"
   export BRIDGE_SINCE=2026-11-01T00:00:00Z
-  unset BRIDGE_STATE_DIR BRIDGE_TO BRIDGE_CC SWITCHBOARD_PROFILE FACTORY_SPEC_QUEUE
+  unset BRIDGE_STATE_DIR BRIDGE_TO BRIDGE_CC SWITCHBOARD_PROFILE FACTORY_SPEC_QUEUE BRIDGE_TRUSTED_BOTS BRIDGE_HUMAN_CHECK_TO
   export FACTORY_REPO=owner/facet # the copy of this kit in any repository passes these tests as is (#437)
   export BRIDGE_TO_BOSS=test/boss BRIDGE_TO_COORD=test/coord
   mkdir -p "$FAKE_GH" "$FAKE_MAIL"
@@ -500,6 +500,127 @@ cp "$script" "$tmp/bare/bridge.sh"
 ( cd "$tmp/bare" && GIT_CEILING_DIRECTORIES="$tmp" bash "$tmp/bare/bridge.sh" > "$tmp/log" 2>&1; echo $? > "$tmp/code" )
 eq code 2 "$(code)"
 has reason "FACTORY_REPO" "$(cat "$tmp/log")"
+eq sends 0 "$(sent_count)"
+
+# --- #492: the kit shared by more repositories --------------------------------------------------------
+
+setup "a marker comment by a BRIDGE_TRUSTED_BOTS login is sent without a permission lookup (#492)"
+issue 900 open factory-ledger "장부"
+comment 51 900 "<!-- factory-stalled 2026-11-18 -->" "example-bot[bot]"
+comment 52 900 "<!-- factory-stalled 2026-11-19 -->" "other-bot[bot]"
+export BRIDGE_TRUSTED_BOTS="example-bot[bot], helper-bot[bot]"
+run
+eq code 0 "$(code)"
+eq sends 1 "$(sent_count)"
+has "trusted bot's comment" "issuecomment-51" "$(arg 0 --body)"
+has "the other bot is not trusted" "52 ignored" "$(state)"
+case "$(cat "$FAKE_GH/calls.log")" in *"collaborators/example-bot"*) bad "permission asked for a trusted bot" ;; *) ok ;; esac
+
+setup "without BRIDGE_TRUSTED_BOTS a bot that is not github-actions[bot] is not trusted (#492)"
+issue 900 open factory-ledger "장부"
+comment 51 900 "<!-- factory-stalled 2026-11-18 -->" "example-bot[bot]"
+run
+eq sends 0 "$(sent_count)"
+
+setup "a ready-for-human reason by a BRIDGE_TRUSTED_BOTS login is quoted (#492)"
+issue 301 open ready-for-human "티켓 하나"
+labeled 301 ready-for-human 2026-11-18T01:00:00Z
+icomment 301 71 "<!-- factory-human conflict -->
+충돌이 풀리지 않는다" "example-bot[bot]"
+export BRIDGE_TRUSTED_BOTS="example-bot[bot]"
+run
+has "reason quoted" "충돌이 풀리지 않는다" "$(arg 0 --body)"
+eq subject "[facet 공장] 사람 넘김(conflict): #301 티켓 하나" "$(arg 0 --subject)"
+
+setup "human-check goes to the coordinator by default with the check order (#492)"
+issue 311 open human-check "확인 남음" "- [ ] 한글 확인"
+labeled 311 human-check 2026-11-18T02:00:00Z
+export BRIDGE_CC=test/cc1
+run
+eq tos "test/coord test/cc1" "$(tos)"
+has "todo" "미체크 항목을 손으로 확인해 체크한다" "$(arg 0 --body)"
+has "next spec" "공장이 다음 spec으로 간다" "$(arg 0 --body)"
+
+setup "BRIDGE_HUMAN_CHECK_TO=boss sends human-check to the owner alone, as a plain mail (#492)"
+issue 311 open human-check "확인 남음" "- [ ] 한글 확인"
+labeled 311 human-check 2026-11-18T02:00:00Z
+issue 900 open factory-ledger "장부"
+comment 61 900 "<!-- factory-human-check 250 -->
+확인 이슈 #311"
+export BRIDGE_CC=test/cc1 BRIDGE_HUMAN_CHECK_TO=boss
+run
+eq code 0 "$(code)"
+eq tos "test/boss test/boss" "$(tos)"
+eq subject "[facet 공장] 사람 확인: #311 확인 남음" "$(arg 0 --subject)"
+eq "no processing order" no "$(case "$(arg 0 --body)" in *"처리 지시"*) echo yes ;; *) echo no ;; esac)"
+has "marker kind" "사람 확인" "$(arg 1 --subject)"
+has "marker todo" "미체크 항목을 손으로 확인해 체크한다" "$(arg 1 --body)"
+run
+eq "not again" 2 "$(sent_count)"
+
+setup "the factory-human-check marker goes to the coordinator and BRIDGE_CC by default (#492)"
+issue 900 open factory-ledger "장부"
+comment 61 900 "<!-- factory-human-check 250 -->"
+export BRIDGE_CC=test/cc1
+run
+eq tos "test/coord test/cc1" "$(tos)"
+
+setup "BRIDGE_HUMAN_CHECK_TO other than boss or coord stops with exit 2 (#492)"
+export BRIDGE_HUMAN_CHECK_TO=everyone
+run
+eq code 2 "$(code)"
+eq sends 0 "$(sent_count)"
+
+setup "human-check counts unchecked items with indents and * or + bullets (#492)"
+issue 312 open human-check "별표" "  * [ ] 들여쓴 별표"
+labeled 312 human-check 2026-11-18T02:00:00Z
+issue 313 open human-check "더하기" "+ [ ] 더하기"
+labeled 313 human-check 2026-11-18T02:00:00Z
+issue 314 open human-check "체크 아님" "- [x] 끝
+[ ] 글머리 없음"
+labeled 314 human-check 2026-11-18T02:00:00Z
+run
+eq sends 2 "$(sent_count)"
+
+setup "ready-for-human with local is mailed as 로컬 작업자 몫 (#492)"
+issue 320 open ready-for-human,local "워크플로 고침"
+labeled 320 ready-for-human 2026-11-18T01:00:00Z
+export BRIDGE_CC=test/cc1
+run
+eq tos "test/coord test/cc1" "$(tos)"
+eq subject "[facet 공장] 로컬 작업자 몫: #320 워크플로 고침" "$(arg 0 --subject)"
+has "local todo" "로컬 작업자가 구현한다" "$(arg 0 --body)"
+eq "cc line" "로컬 작업자 몫 #320 워크플로 고침" "$(arg 1 --body)"
+
+setup "BRIDGE_CC splits on spaces and tabs and drops repeats and the coordinator (#492)"
+issue 301 open ready-for-human "티켓 하나"
+labeled 301 ready-for-human 2026-11-18T01:00:00Z
+export BRIDGE_CC="test/cc1 test/cc2	test/cc1,test/coord , "
+run
+eq tos "test/coord test/cc1 test/cc2" "$(tos)"
+
+setup "--seed after a bridge that kept bare ids sends no copy to BRIDGE_CC later (#492)"
+markers
+mkdir -p "$XDG_STATE_HOME/facet-factory-bridge"
+printf '13\n14\n15\n16\n' > "$XDG_STATE_HOME/facet-factory-bridge/sent"
+export BRIDGE_CC=test/cc1
+run --seed
+eq "seed sends nothing" 0 "$(sent_count)"
+run
+eq "no cc copy afterwards" 0 "$(sent_count)"
+has "cc remembered" "13 test/cc1" "$(state)"
+
+setup "every old state line form is read without sending again (#492)"
+markers
+issue 301 open ready-for-human "티켓 하나"
+labeled 301 ready-for-human 2026-11-18T01:00:00Z
+issue 250 closed spec "검색"
+export FACTORY_SPEC_QUEUE=250
+mkdir -p "$XDG_STATE_HOME/facet-factory-bridge"
+printf '13\n14 test/coord\n15 ignored\n16\nlabel 301 ready-for-human 2026-11-18T01:00:00Z test/coord\nidle 250 test/coord\nlabels-seeded\n' \
+  > "$XDG_STATE_HOME/facet-factory-bridge/sent"
+run
+eq code 0 "$(code)"
 eq sends 0 "$(sent_count)"
 
 echo "bridge.sh: $passes passed, $fails failed"

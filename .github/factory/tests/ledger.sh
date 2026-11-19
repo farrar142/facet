@@ -105,6 +105,14 @@ bash "$ledger" record decompose 249 > /dev/null
 line=$(jq -r '.[-1].body' "$FAKE_GH/comments-900.json" | tr -d '\r' | sed -n 2p)
 eq "spec of a spec" "spec=#249 node=decompose issue=#249" "${line%% run=*}"
 
+setup "record: extra pairs go at the end of the line"
+with_ledger
+issue 249 spec "no parent here"
+execution_file
+bash "$ledger" record decompose 249 tickets=4 > /dev/null 2>&1
+line=$(jq -r '.[-1].body' "$FAKE_GH/comments-900.json" | tr -d '\r' | sed -n 2p)
+eq "extra" "cache_write=4000 tickets=4" "${line##*cache_read=30000 }"
+
 setup "record: no result in the execution file still leaves a zero line"
 with_ledger
 issue 5 "" "x"
@@ -153,6 +161,27 @@ eq "the sub-issue parent wins" 42 "$(bash "$ledger" spec-of 8)"
 issue 9 "" "x"
 eq "none: the issue itself" 9 "$(bash "$ledger" spec-of 9)"
 eq "parent-of none: empty" "" "$(bash "$ledger" parent-of 9)"
+
+setup "spec-of: a spec label issue is its own spec even with a parent"
+issue 174 spec "## Parent
+
+#45"
+echo '{"number": 45}' > "$FAKE_GH/parent-174.json"
+eq "spec with a Parent: itself" 174 "$(bash "$ledger" spec-of 174)"
+eq "parent-of still the umbrella" 45 "$(bash "$ledger" parent-of 174)"
+issue 193 "" "## Parent
+
+#174"
+eq "its ticket: the spec" 174 "$(bash "$ledger" spec-of 193)"
+issue 10 "bug" "## Parent
+
+#45"
+eq "no spec label: the parent" 45 "$(bash "$ledger" spec-of 10)"
+with_ledger
+execution_file
+bash "$ledger" record decompose 174 tickets=8 > /dev/null 2>&1
+eq "decompose of the spec goes to the spec" 1 \
+  "$(jq '[.[] | select(.body | contains("spec=#174 node=decompose issue=#174"))] | length' "$FAKE_GH/comments-900.json" | tr -d '\r')"
 
 # --- totals --------------------------------------------------------------------------------
 
