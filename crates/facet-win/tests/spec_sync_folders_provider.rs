@@ -85,8 +85,10 @@ fn names_in_child(folder: &Path) -> Vec<String> {
     assert!(output.status.success(), "dir 실패: {:?}", output.status);
     let units: Vec<u16> = output
         .stdout
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
         .collect();
     let mut names: Vec<String> = String::from_utf16(&units)
         .unwrap()
