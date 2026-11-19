@@ -25,23 +25,37 @@ pub enum Location {
     /// 셸 공급자가 읽는 가상 폴더(내 PC·휴지통·휴대폰 장치, [`crate::shell_provider`]). 실제 폴더가 아니다
     /// ([`Location::file_system_path`]가 `None`). 어느 가상 폴더인지는 [`Location::virtual_folder`]로 묻는다.
     Shell(ShellLocation),
-    /// #423: zip 파일 안의 위치(zip 공급자).
+    /// zip 파일 안의 위치(zip 공급자, [`crate::zip_provider`]). 실제 폴더가 아니다([`Location::file_system_path`]가
+    /// `None`).
     Zip(ZipLocation),
 }
 
-/// #423: zip 파일과 그 안의 경로.
+/// zip 위치: zip 파일의 실제 경로와 그 안의 경로(zip 공급자, [`crate::zip_provider`]). 실제 폴더가 아니다.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ZipLocation;
+pub struct ZipLocation {
+    archive: PathBuf,
+    /// zip 안 경로: `\` 구분, 앞뒤 구분자 없음, 루트는 "".
+    inner: String,
+}
 
 impl ZipLocation {
-    /// #423: zip 파일의 실제 경로.
+    /// zip 파일의 실제 경로.
     pub fn archive(&self) -> &Path {
-        todo!("#423")
+        &self.archive
     }
 
-    /// #423: zip 안 경로(`\` 구분, 루트는 "").
+    /// zip 안 경로(`\` 구분, 루트는 "").
     pub fn inner(&self) -> &str {
-        todo!("#423")
+        &self.inner
+    }
+
+    /// 항목 경로: zip 파일 경로 뒤에 zip 안 경로를 이은 것(루트면 zip 파일 경로).
+    pub fn path(&self) -> PathBuf {
+        if self.inner.is_empty() {
+            self.archive.clone()
+        } else {
+            self.archive.join(&self.inner)
+        }
     }
 }
 
@@ -143,12 +157,22 @@ impl Location {
         )
     }
 
-    /// #423: zip 파일 `archive` 안의 `inner` 위치.
-    pub fn zip(_archive: impl Into<PathBuf>, _inner: impl Into<String>) -> Location {
-        todo!("#423")
+    /// zip 파일 `archive` 안의 `inner`(zip 안 경로, `\` 구분, 루트는 "") 위치. `/`는 `\`로 바꾸고 빈 조각과 앞뒤
+    /// 구분자는 걷는다.
+    pub fn zip(archive: impl Into<PathBuf>, inner: impl Into<String>) -> Location {
+        let inner: String = inner.into();
+        let inner = inner
+            .split(['\\', '/'])
+            .filter(|part| !part.is_empty() && *part != ".")
+            .collect::<Vec<_>>()
+            .join("\\");
+        Location::Zip(ZipLocation {
+            archive: archive.into(),
+            inner,
+        })
     }
 
-    /// #423: zip 위치면 그 zip 파일과 zip 안 경로.
+    /// zip 위치면 그 zip 파일과 zip 안 경로.
     pub fn zip_location(&self) -> Option<&ZipLocation> {
         match self {
             Self::Zip(zip) => Some(zip),
@@ -251,7 +275,7 @@ impl fmt::Display for Location {
                 write!(f, "{} ? {}", scope.folder.display(), scope.query)
             }
             Self::Shell(shell) => f.write_str(&crate::shell_provider::display_name(shell)),
-            Self::Zip(_) => todo!("#423"),
+            Self::Zip(zip) => write!(f, "{}", zip.path().display()),
         }
     }
 }
@@ -310,7 +334,7 @@ pub enum ListError {
     /// 휴대폰(장치)이 꽂혀 있지만 저장소를 보여 주지 않는다: 잠겨 있거나 USB 사용이 「파일 전송」이 아니다. 화면은
     /// 빈 목록 대신 까닭과 할 일을 보인다.
     DeviceNotReady { location: Location },
-    /// #423: 열 수 없는 zip(central directory 없음 등).
+    /// 열 수 없는 zip(끝 기록·central directory를 읽을 수 없음). 탭은 원래 위치에 남는다.
     BrokenArchive { location: Location },
 }
 
@@ -355,7 +379,7 @@ impl fmt::Display for ListError {
             Self::DeviceNotReady { location } => {
                 write!(f, "장치가 저장소를 보여 주지 않습니다: {location}")
             }
-            Self::BrokenArchive { .. } => todo!("#423"),
+            Self::BrokenArchive { location } => write!(f, "zip을 열 수 없습니다: {location}"),
         }
     }
 }
