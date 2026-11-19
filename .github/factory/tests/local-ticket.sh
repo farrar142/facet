@@ -38,11 +38,41 @@ bash "$script" 80 > /dev/null 2>&1; eq "exit" 0 $?
 eq "local" true "$(res)"
 eq "labels" "local,model:sonnet,ready-for-human" "$(labels 80)"
 eq "one comment" 1 "$(ncomments 80)"
-eq "marker" "<!-- factory-human local-only -->|<!-- factory-local -->" "$(jq -r '.[0].body | split("
+eq "marker" "<!-- factory-human workflow-change -->|<!-- factory-local -->" "$(jq -r '.[0].body | split("
 ")[0:2] | join("|")' "$FAKE_GH/comments-80.json")"
 bash "$script" 80 > /dev/null 2>&1
 eq "again: no second comment" 1 "$(ncomments 80)"
 eq "again: labels the same" "local,model:sonnet,ready-for-human" "$(labels 80)"
+
+has_text() { case "$3" in *"$2"*) eq "$1" ok ok ;; *) eq "$1" "[$2]" "[$3]" ;; esac; }
+has_text "workflow wording" "workflow 파일 — 로컬 작업자 몫" "$(jq -r '.[0].body' "$FAKE_GH/comments-80.json")"
+
+setup "a ticket labelled local without a workflow is handed over as local-only (#437)"
+issue 84 local,ready-for-agent "코드 서명 인증서" "인증서와 비밀값을 사람이 준비한다"
+bash "$script" 84 > /dev/null 2>&1; eq "exit" 0 $?
+eq "local" true "$(res)"
+eq "labels" "local,ready-for-human" "$(labels 84)"
+eq "marker" "<!-- factory-human local-only -->|<!-- factory-local -->" "$(jq -r '.[0].body | split("
+")[0:2] | join("|")' "$FAKE_GH/comments-84.json")"
+has_text "person wording" "사람 몫 — 사람의 결정·비밀값·사람 기계가 필요한 티켓" "$(jq -r '.[0].body' "$FAKE_GH/comments-84.json")"
+case "$(jq -r '.[0].body' "$FAKE_GH/comments-84.json")" in *"workflow 파일"*) eq "no workflow wording" no yes ;; *) eq "no workflow wording" no no ;; esac
+
+setup "a local ticket a person deferred stays out of the factory and is not handed over again (#473)"
+issue 85 local,deferred "코드 서명 인증서" "인증서와 비밀값을 사람이 준비한다"
+bash "$script" 85 > /dev/null 2>&1; eq "exit" 0 $?
+eq "local" true "$(res)"
+eq "labels" "deferred,local" "$(labels 85)"
+eq "no comment" 0 "$(ncomments 85)"
+eq "hand-to-human not called" 0 "$(grep -c 'issues/85/labels' "$FAKE_GH/calls.log")"
+
+setup "a local ticket already handed over, whose ready-for-human a person took off, is not handed over again"
+issue 86 local "코드 서명 인증서" "인증서와 비밀값을 사람이 준비한다"
+jq -n '[{id: 1, created_at: "2026-11-17T00:00:00Z", body: "<!-- factory-human local-only -->\n<!-- factory-local -->\n까닭", user: {login: "github-actions[bot]"}}]' \
+  | tr -d '\r' > "$FAKE_GH/comments-86.json"
+bash "$script" 86 > /dev/null 2>&1; eq "exit" 0 $?
+eq "local" true "$(res)"
+eq "labels" "local" "$(labels 86)"
+eq "still one comment" 1 "$(ncomments 86)"
 
 setup "an ordinary ticket is left alone"
 issue 81 ready-for-agent "백엔드" "모델을 더한다"

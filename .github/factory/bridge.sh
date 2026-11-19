@@ -20,7 +20,8 @@
 #    again is a new mail. The label itself is trusted (only someone with write access can put it on).
 #    The reason in the mail is the issue's latest `<!-- factory-… -->` marker comment by a trusted
 #    author (below); without one the mail says 「까닭 댓글 없음」 and is sent anyway.
-#    needs-triage, needs-info and local are not mailed.
+#    needs-triage, needs-info and local are not mailed. An issue a person deferred (label `deferred`,
+#    #437) waits for nobody: it is not mailed as ready-for-human even when that label was left on.
 #
 #    For ready-for-human, factory-paused and human-check the BRIDGE_TO_COORD mail is a processing
 #    order (#437): its 할 일 is four steps (원인 확인 → 고침 → 재발 방지 장치 → 결과 보고) and says not
@@ -35,6 +36,7 @@
 #      <!-- factory-queue-empty S -->          the last spec S of FACTORY_SPEC_QUEUE was started
 #      <!-- factory-idle Q -->                 every spec of the queue is labelled; the factory is idle
 #      <!-- factory-stalled DATE -->           waiting tickets are blocked by issues handed to a person
+#      <!-- factory-stalled deferred-B-T -->   a deferred issue B blocks the waiting ticket T (once, #437)
 #      <!-- factory-bench-regression SHA -->   the hourly benchmark failed at SHA (#366)
 #
 #    Each comment goes to BRIDGE_TO_COORD and BRIDGE_CC once. Anyone can write those markers on a
@@ -241,6 +243,7 @@ for label in needs-decision ready-for-human factory-paused human-check; do
   numbers=$(printf '%s' "$list" | j -s -r --arg l "$label" 'add // [] | .[]
     | select(.state == "open" and any(.labels[]; .name == $l))
     | select($l != "human-check" or ((.body // "") | test("(^|\n)[ \t]*[-*] \\[ \\]")))
+    | select($l != "ready-for-human" or (any(.labels[]; .name == "deferred") | not))
     | .number')
   case $label in
     needs-decision)
@@ -383,7 +386,12 @@ while IFS=$'\t' read -r id kind n author value; do
       todo="FACTORY_SPEC_QUEUE에 spec을 넣고 dispatch-next를 다시 돌린다(조율자 몫)." ;;
     stalled)
       label="공장 막힘"
-      todo="위 사람 몫 이슈를 풀고 ready-for-human을 뗀다." ;;
+      todo="위 사람 몫 이슈를 풀고 ready-for-human을 뗀다."
+      # Once per pair (dispatch-next.sh): a deferred issue blocks a waiting ticket (#437).
+      case "$value" in deferred-*)
+        label="공장 막힘(미룸)"
+        todo="막힌 티켓도 미룰 것이면 deferred를 붙이고, 아니면 미룬 이슈의 막음을 푼다." ;;
+      esac ;;
     bench-regression)
       label="벤치 한도 초과"
       todo="위 커밋 구간에서 한도를 넘긴 커밋을 찾아 고칠 티켓을 낸다(조율자 몫)." ;;

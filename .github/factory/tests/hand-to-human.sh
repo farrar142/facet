@@ -79,6 +79,30 @@ eq code 0 "$(code)"
 eq "ledger event" "<!-- factory-event -->
 event=handover issue=#7 code=push-rejected run=55" "$(jq -r '[.[].body] | join("\n---\n")' "$FAKE_GH/comments-900.json" | tr -d '\r')"
 
+setup "a deferred issue is left as it is: no label, no comment, only a warning (#437, #473)" "local,deferred"
+run 7 local-only "까닭"
+eq code 0 "$(code)"
+eq labels "deferred,local" "$(labels)"
+eq "no comment" 0 "$(jq length "$FAKE_GH/comments-7.json" | tr -d '\r')"
+case "$(cat "$root/log")" in *'::warning::'*deferred*) ok ;; *) bad "warns about deferred: $(cat "$root/log")" ;; esac
+
+setup "an issue already handed over with the same code whose ready-for-human a person took off is not handed over again" "local"
+jq -n '[{id: 1, created_at: "2026-11-17T00:00:00Z", body: "<!-- factory-human local-only -->\n<!-- factory-local -->\n까닭", user: {login: "github-actions[bot]"}}]' \
+  | tr -d '\r' > "$FAKE_GH/comments-7.json"
+run 7 local-only "까닭"
+eq code 0 "$(code)"
+eq labels local "$(labels)"
+eq "still one comment" 1 "$(jq length "$FAKE_GH/comments-7.json" | tr -d '\r')"
+case "$(cat "$root/log")" in *'::warning::'*'already handed over'*) ok ;; *) bad "warns about the earlier hand-over: $(cat "$root/log")" ;; esac
+
+setup "a different code, or an issue put back in the factory, is handed over again" "ready-for-agent"
+jq -n '[{id: 1, created_at: "2026-11-17T00:00:00Z", body: "<!-- factory-human attempts-exhausted -->\n까닭", user: {login: "github-actions[bot]"}}]' \
+  | tr -d '\r' > "$FAKE_GH/comments-7.json"
+run 7 attempts-exhausted "까닭"
+eq "back in the factory" ready-for-human "$(labels)"
+run 7 conflict "다른 까닭"
+eq "other code" 3 "$(jq length "$FAKE_GH/comments-7.json" | tr -d '\r')"
+
 setup "no ledger issue is not a failure" ""
 run 7 other "까닭"
 eq code 0 "$(code)"

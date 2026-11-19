@@ -111,6 +111,23 @@ for step in "1. 원인 확인" "2. 고침" "3. 재발 방지 장치" "4. 결과 
 eq profile automation "$(jq -s -r '.[0].profile' "$FAKE_MAIL/sent.jsonl" | tr -d '\r')"
 eq state "label 301 ready-for-human 2026-11-18T01:00:00Z test/coord" "$(state)"
 
+setup "a deferred issue left with ready-for-human is not mailed (#437)"
+issue 301 open ready-for-human,deferred "미룬 티켓"
+labeled 301 ready-for-human 2026-11-18T01:00:00Z
+run
+eq code 0 "$(code)"
+eq sends 0 "$(sent_count)"
+
+setup "a deferred blocker marker is mailed as 공장 막힘(미룸) with its own what to do (#437)"
+issue 900 open factory-ledger "장부"
+comment 19 900 "<!-- factory-stalled deferred-301-302 -->
+공장 막힘(미룸): 미룬 #301(deferred)이 #302을 막는다."
+run
+eq code 0 "$(code)"
+eq sends 1 "$(sent_count)"
+has subject "공장 막힘(미룸)" "$(arg 0 --subject)"
+has todo "deferred를 붙이고" "$(arg 0 --body)"
+
 setup "the same state run again sends nothing"
 issue 301 open ready-for-human "티켓 하나"
 labeled 301 ready-for-human 2026-11-18T01:00:00Z

@@ -30,7 +30,8 @@
 #    busy. Two calls at the same moment can still both pick a ticket; the implement job's per-ticket
 #    concurrency group (`factory-ticket-N`) then holds the second run until the first claimed the
 #    ticket, and its guard finds the ticket no longer `ready-for-agent` and stops.
-# 2. With an empty track left (and, with one track, without --tickets-only): closes finished specs,
+# 2. With an empty track left (and, with one track, without --tickets-only): closes finished specs
+#    (every ticket closed, or the only open ones labelled `deferred`, named in the closing comment, #437),
 #    resumes a spec whose decompose stopped (no sub-issues and no decompose run going), and when
 #    fewer specs are running than there are tracks, labels the next spec of FACTORY_SPEC_QUEUE and
 #    dispatches its decompose (decision 2026-11-15, roadmap order), one spec per call. A spec is
@@ -215,14 +216,26 @@ echo "::notice::no unblocked approved ticket may start for track(s) $*"
 
 # Stalled (#410): a waiting ticket blocked by an issue handed to a person waits for that person, not
 # for the factory. Leave one `<!-- factory-stalled <KST date> -->` a day naming them; bridge.sh mails it.
+# A blocker a person deferred (label `deferred`, #437) waits for nobody, so it is not in that daily
+# marker, even when `ready-for-human` was left on it. The ticket it blocks still never starts, which the
+# person may not have meant: say so once per pair, `<!-- factory-stalled deferred-<b>-<t> -->` (the same
+# bridge kind, never repeated).
 stalled=
 for t in $blocked; do
-  for b in $(gh api "repos/$REPO/issues/$t/dependencies/blocked_by" \
-    --jq '.[] | select(.state == "open" and any(.labels[]; .name == "ready-for-human")) | .number' \
-    2> /dev/null | tr -d '\r'); do
-    stalled="$stalled- #$b(ready-for-human)이 #$t을 막는다
+  while IFS=$'\t' read -r b kind; do
+    [ -n "$b" ] || continue
+    if [ "$kind" = deferred ]; then
+      notify "<!-- factory-stalled deferred-$b-$t -->" "공장 막힘(미룸): 미룬 #$b(deferred)이 #$t을 막는다. #$t은 #$b이 닫히거나 막음이 풀릴 때까지 시작하지 않는다.
+#$t도 미룰 것이면 \`deferred\`를 붙이고, 아니면 #$b의 막음을 푼다."
+    else
+      stalled="$stalled- #$b(ready-for-human)이 #$t을 막는다
 "
-  done
+    fi
+  done < <(gh api "repos/$REPO/issues/$t/dependencies/blocked_by" \
+    --jq '.[] | select(.state == "open")
+      | (if any(.labels[]; .name == "deferred") then "deferred"
+         elif any(.labels[]; .name == "ready-for-human") then "human" else empty end) as $k
+      | "\(.number)\t\($k)"' 2> /dev/null | tr -d '\r')
 done
 if [ -n "$stalled" ]; then
   day=$(date -u -d "@$(( ${FACTORY_NOW:-$(date -u +%s)} + 32400 ))" +%F)
@@ -289,7 +302,18 @@ for s in $specs; do
     gh issue close "$s" --repo "$REPO" --reason completed --comment "All $total tickets merged."
     continue
   fi
-  subs=" $(gh api "repos/$REPO/issues/$s/sub_issues?per_page=100" --paginate --jq '.[].number' | tr -d '\r' | tr '\n' ' ')"
+  # "<number> open|closed|deferred" per sub-issue (`deferred`: open, put off by a person, #437).
+  subs_state=$(gh api "repos/$REPO/issues/$s/sub_issues?per_page=100" --paginate --jq '.[]
+    | "\(.number) \(if .state == "closed" then "closed"
+      elif any(.labels[]?; .name == "deferred") then "deferred" else "open" end)"' | tr -d '\r')
+  # A spec whose only open tickets are deferred is finished: close it, naming what was left open.
+  if [ -n "$subs_state" ] && ! printf '%s\n' "$subs_state" | grep -q ' open$'; then
+    left=$(printf '%s\n' "$subs_state" | awk '$2 == "deferred" { printf "%s#%s", (n++ ? " " : ""), $1 }')
+    gh issue close "$s" --repo "$REPO" --reason completed \
+      --comment "All $total tickets merged or deferred. Deferred, left open: $left."
+    continue
+  fi
+  subs=" $(printf '%s\n' "$subs_state" | cut -d' ' -f1 | tr '\n' ' ')"
   covered="$covered${subs# }"
   for n in $active; do
     case "$subs" in *" $n "*) running=$((running + 1)); break ;; esac

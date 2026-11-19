@@ -19,8 +19,10 @@
 #                          push-retry ran first, #417)
 #   attempts-exhausted     the ticket failed its limit of times
 #   agent-blocked          the Implementer said it is blocked, or stopped with a reason and no commit
-#   workflow-change        the ticket changes `.github/workflows/`, which the factory token cannot push
-#   local-only             the ticket needs a person's machine (label `local`)
+#   workflow-change        the ticket names `.github/workflows/`, which the factory token cannot push
+#                          (local-ticket.sh)
+#   local-only             the ticket is labelled `local` without naming a workflow: it needs a person's
+#                          decision, secret or machine (local-ticket.sh)
 #   spec-merge-failed      Odin could not merge the spec PR
 #   other                  anything else; the bridge counts an old marker without a code as this
 #
@@ -30,6 +32,11 @@
 # A person puts the issue back into the factory by taking `ready-for-human` off, adding
 # `ready-for-agent` and commenting a line starting with `<!-- factory-reset -->`: failures and
 # send-backs before that comment no longer count (factory-implementer.yml, verify.sh).
+#
+# A person puts an issue off instead (#437) by taking `ready-for-human` off, adding `deferred` and
+# commenting the decision (why, until when). A deferred issue stays open but waits for nobody: the bridge
+# does not mail it, dispatch-next.sh does not count it as a person's blocker (it says once that it blocks
+# a waiting ticket) and a spec whose only open tickets are deferred closes, naming them.
 #
 # Exits 0 when the label and the comment are there, 1 when either call failed (the others only warn).
 # Environment: REPO, GH_TOKEN.
@@ -48,6 +55,23 @@ LABEL=ready-for-human
 
 labels=$(gh api "repos/$REPO/issues/$n" --jq '[.labels[].name] | join(",")' | tr -d '\r') \
   || { echo "::warning::hand-to-human: could not read the labels of #$n"; labels=; }
+# A deferred issue was put off by a person: every caller (local-ticket, odin, decompose, implementer,
+# verify) leaves it as it is instead of putting ready-for-human back (#473).
+case ",$labels," in *,deferred,*)
+  echo "::warning::hand-to-human: #$n is deferred; not handing it over ($code)"
+  exit 0 ;;
+esac
+# Handed over once already with this code, and a person since took ready-for-human off without putting
+# the issue back in the factory (no ready-for-agent, no in-progress): they have it. Handing it over again
+# would put the label back and mail the same reason again (#473).
+case ",$labels," in *,ready-for-human,* | *,ready-for-agent,* | *,in-progress,*) ;; *)
+  said=$(gh api "repos/$REPO/issues/$n/comments?per_page=100" --paginate \
+    | jq -rs --arg m "$HUMAN" '[.[][] | select(.body | startswith($m))] | length' | tr -d '\r') || said=0
+  if [ "${said:-0}" -gt 0 ] 2> /dev/null; then
+    echo "::warning::hand-to-human: #$n was already handed over ($code) and a person took $LABEL off; leaving it"
+    exit 0
+  fi ;;
+esac
 for l in in-progress ready-for-agent; do
   case ",$labels," in *",$l,"*)
     gh api -X DELETE "repos/$REPO/issues/$n/labels/$l" > /dev/null \
