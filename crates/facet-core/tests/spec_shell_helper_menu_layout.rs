@@ -28,6 +28,7 @@ fn context(kind: MenuKind) -> MenuContext {
         can_go_forward: true,
         can_go_up: true,
         can_undo: true,
+        location_is_sync_folder: false,
     }
 }
 

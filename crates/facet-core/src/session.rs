@@ -659,6 +659,8 @@ impl TabV1 {
                     Column::Location | Column::Matches => ColumnV1::Name,
                     // 내 PC의 용량 열은 형식 버전을 올리지 않으려고 이름으로 남긴다(되살리면 이름 순서).
                     Column::TotalSize | Column::FreeSpace => ColumnV1::Name,
+                    // #451: 상태 열은 이름으로 남긴다.
+                    Column::SyncState => ColumnV1::Name,
                     Column::OriginalLocation => ColumnV1::OriginalLocation,
                     Column::DateDeleted => ColumnV1::DateDeleted,
                     Column::CompressedSize => todo!("#423"),

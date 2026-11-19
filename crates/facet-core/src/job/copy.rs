@@ -1464,6 +1464,7 @@ impl Reporter {
                 remaining,
                 current: self.current.clone(),
                 elapsed,
+                downloading: false, // #453
             },
         });
     }

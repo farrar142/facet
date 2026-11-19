@@ -272,6 +272,8 @@ pub struct Attributes {
     pub read_only: bool,
     /// #325: 온라인 전용(내용이 이 기계에 없음) 표시.
     pub online_only: bool,
+    /// #450: 열거 결과의 원래 속성 값(Windows가 아니면 0).
+    pub bits: u32,
 }
 
 /// 목록 읽기가 실패한 까닭.

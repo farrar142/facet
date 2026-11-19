@@ -57,6 +57,7 @@ use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 
 pub mod clipboard;
+pub mod cloud_files;
 pub mod devices;
 pub mod drag_source;
 pub mod drop_target;

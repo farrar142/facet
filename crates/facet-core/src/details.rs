@@ -47,6 +47,8 @@ pub enum Column {
     OriginalLocation,
     /// 지운 날짜: 휴지통 항목을 지운 시각(휴지통에만 뜻이 있다). 휴지통 항목이 아니면 이름 순서다.
     DateDeleted,
+    /// #451: 동기화 상태.
+    SyncState,
     /// #423: 압축된 크기(zip 위치에만 뜻이 있다).
     CompressedSize,
 }
@@ -398,6 +400,7 @@ fn compare_entries(a: &Entry, b: &Entry, sort: Sort) -> Ordering {
             }
         }
         Column::OriginalLocation => a.original_folder_key().cmp(&b.original_folder_key()),
+        Column::SyncState => todo!("#451"),
         Column::DateDeleted => a.date_deleted().cmp(&b.date_deleted()),
         Column::CompressedSize => todo!("#423"),
     };
