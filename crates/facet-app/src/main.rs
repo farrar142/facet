@@ -437,6 +437,12 @@ fn view_of(window: WindowId) -> Option<Rc<View>> {
 /// 코어 창 `window`의 Slint 창을 만들고 콜백을 잇는다. 보이기는 부르는 쪽이 한다. 측정 모드면 창마다 프레임 세기를 건다.
 fn open_view(app: &Rc<RefCell<App>>, window: WindowId) -> Result<Rc<View>, slint::PlatformError> {
     let ui = AppWindow::new()?;
+    ui.set_about_lines(ModelRc::from(Rc::new(VecModel::from(
+        text::about_lines()
+            .into_iter()
+            .map(slint::SharedString::from)
+            .collect::<Vec<_>>(),
+    ))));
     scrollbar::install(&ui);
     // Slint는 창마다 winit 이벤트 훅을 하나만 둔다: 키 위치를 적고(Ctrl+백슬래시), 그 창이 포커스를 얻으면 활성
     // 창으로 알리고, 측정 모드면 프레임을 센다.
@@ -2781,7 +2787,7 @@ impl View {
             Execution::NestedZip => todo!("#423"),
             Execution::ChooseExtractTarget => todo!("#427"),
             Execution::ChooseZipTarget => todo!("#430"),
-            Execution::ShowAbout => todo!("#459"),
+            Execution::ShowAbout => self.ui.set_show_about(true),
             Execution::UndoRefused(_) | Execution::Disabled | Execution::WindowClosed => {}
         }
     }

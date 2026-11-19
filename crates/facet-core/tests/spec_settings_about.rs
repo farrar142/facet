@@ -12,7 +12,6 @@ use facet_core::window::{App, Execution};
 use tempfile::TempDir;
 
 #[test]
-#[ignore = "#459"]
 fn the_about_command_has_a_stable_id_and_no_default_shortcut() {
     assert_eq!(CommandId::About.as_str(), "about");
     assert_eq!(CommandId::from_id("about"), Some(CommandId::About));
@@ -21,7 +20,6 @@ fn the_about_command_has_a_stable_id_and_no_default_shortcut() {
 }
 
 #[test]
-#[ignore = "#459"]
 fn the_about_command_is_always_enabled_and_hands_the_screen_the_about_page() {
     let dir = TempDir::new().unwrap();
     let mut app = App::new(Some(Location::file_system(dir.path())));

@@ -3700,7 +3700,7 @@ impl App {
             }
             CommandId::NewZip => todo!("#429"),
             CommandId::AddToZip => todo!("#430"),
-            CommandId::About => todo!("#459"),
+            CommandId::About => return Execution::ShowAbout,
             CommandId::OpenSettings | CommandId::OpenSettingsFile => todo!("#462"),
             CommandId::TogglePreview => {
                 let window = self.active_window_mut();

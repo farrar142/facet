@@ -208,7 +208,7 @@ pub enum DisabledReason {
 
 impl CommandId {
     /// 모든 명령. 명령 팔레트는 검색어가 없으면 이 순서로 보인다.
-    pub const ALL: [CommandId; 67] = [
+    pub const ALL: [CommandId; 68] = [
         CommandId::Open,
         CommandId::OpenWith,
         CommandId::Back,
@@ -276,6 +276,7 @@ impl CommandId {
         CommandId::OpenThisPc,
         CommandId::OpenRecycleBin,
         CommandId::ClearThumbnailCache,
+        CommandId::About,
     ];
 
     /// 바뀌지 않는 ID 글자. 화면 문장이 아니다.
@@ -618,7 +619,7 @@ impl CommandId {
             }
             CommandId::NewZip => todo!("#429"),
             CommandId::AddToZip => todo!("#430"),
-            CommandId::About => todo!("#459"),
+            CommandId::About => true,
             CommandId::OpenSettings | CommandId::OpenSettingsFile => todo!("#462"),
             CommandId::Refresh
             | CommandId::EditAddress
