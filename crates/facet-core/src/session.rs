@@ -632,6 +632,7 @@ impl TabV1 {
                     .map(|byte| format!("{byte:02x}"))
                     .collect(),
             },
+            Location::Zip(_) => todo!("#423"),
         };
         TabV1 {
             location,
@@ -660,6 +661,7 @@ impl TabV1 {
                     Column::TotalSize | Column::FreeSpace => ColumnV1::Name,
                     Column::OriginalLocation => ColumnV1::OriginalLocation,
                     Column::DateDeleted => ColumnV1::DateDeleted,
+                    Column::CompressedSize => todo!("#423"),
                 },
                 direction: match tab.sort.direction {
                     Direction::Ascending => DirectionV1::Ascending,

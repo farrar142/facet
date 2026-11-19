@@ -30,6 +30,8 @@ pub enum DropTarget {
     Folder(PathBuf),
     /// 파일 위처럼 놓을 수 없는 곳.
     NotAFolder,
+    /// #430: zip 위치(zip 파일 경로나 zip 항목 경로).
+    Zip(PathBuf),
 }
 
 /// 끌어 온 데이터의 종류.
@@ -131,8 +133,10 @@ pub fn decide(request: &DropRequest<'_>) -> Decision {
     if request.sources.is_empty() {
         return Decision::Refuse(Refusal::NoSources);
     }
-    let DropTarget::Folder(target) = request.target else {
-        return Decision::Refuse(Refusal::NotAFolder);
+    let target = match request.target {
+        DropTarget::Folder(target) => target,
+        DropTarget::NotAFolder => return Decision::Refuse(Refusal::NotAFolder),
+        DropTarget::Zip(_) => todo!("#430"),
     };
     if request
         .sources

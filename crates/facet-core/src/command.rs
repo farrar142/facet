@@ -176,6 +176,16 @@ pub enum CommandId {
     EmptyRecycleBin,
     /// #339: 미리보기 영역 켜고 끄기(`toggle-preview`, Alt+P).
     TogglePreview,
+    /// #427: 여기에 모두 꺼내기(`extract-all-here`).
+    ExtractAllHere,
+    /// #427: zip 이름의 폴더로 꺼내기(`extract-to-folder`).
+    ExtractToFolder,
+    /// #427: 꺼내기 위치…(`extract-to`).
+    ExtractTo,
+    /// #429: 새 zip으로 묶기(`new-zip`).
+    NewZip,
+    /// #430: zip에 넣기…(`add-to-zip`).
+    AddToZip,
 }
 
 impl CommandId {
@@ -326,6 +336,11 @@ impl CommandId {
             CommandId::Restore => "restore",
             CommandId::EmptyRecycleBin => "empty-recycle-bin",
             CommandId::TogglePreview => "toggle-preview",
+            CommandId::ExtractAllHere => "extract-all-here",
+            CommandId::ExtractToFolder => "extract-to-folder",
+            CommandId::ExtractTo => "extract-to",
+            CommandId::NewZip => "new-zip",
+            CommandId::AddToZip => "add-to-zip",
         }
     }
 
@@ -346,6 +361,7 @@ impl CommandId {
             Column::TotalSize => CommandId::SortByTotalSize,
             Column::FreeSpace => CommandId::SortByFreeSpace,
             Column::OriginalLocation | Column::DateDeleted => return None,
+            Column::CompressedSize => todo!("#423"),
         })
     }
 
@@ -463,6 +479,9 @@ impl CommandId {
             CommandId::Restore => &[],         // #353
             CommandId::EmptyRecycleBin => &[], // #354
             CommandId::TogglePreview => const { &[key(letter('P')).alt()] },
+            CommandId::ExtractAllHere | CommandId::ExtractToFolder | CommandId::ExtractTo => &[], // #427
+            CommandId::NewZip => &[],   // #429
+            CommandId::AddToZip => &[], // #430
         }
     }
 
@@ -563,6 +582,11 @@ impl CommandId {
             // 휴지통 위치인지는 되는 일([`CommandId::is_allowed_by`])이 본다.
             CommandId::EmptyRecycleBin => true,
             CommandId::TogglePreview => true,
+            CommandId::ExtractAllHere | CommandId::ExtractToFolder | CommandId::ExtractTo => {
+                todo!("#427")
+            }
+            CommandId::NewZip => todo!("#429"),
+            CommandId::AddToZip => todo!("#430"),
             CommandId::Refresh
             | CommandId::EditAddress
             | CommandId::ToggleHidden

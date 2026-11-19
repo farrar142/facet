@@ -1872,3 +1872,79 @@ pub fn measure_shell_list(count: usize, runs: usize) -> Result<Measurement, Stri
         times,
     })
 }
+
+/// #432: 시험 zip 항목 수.
+pub const ZIP_LIST_COUNT: usize = 0; // #432
+/// #432: zip 목록 열기 로컬 기준.
+pub const ZIP_LIST_TARGET: Duration = Duration::from_millis(0); // #432
+/// #432: zip 목록 열기 CI 상한.
+pub const ZIP_LIST_LIMIT: Duration = Duration::from_millis(0); // #432
+/// #432: zip 안 폴더 이동 로컬 기준.
+pub const ZIP_NAVIGATE_TARGET: Duration = Duration::from_millis(0); // #432
+/// #432: zip 안 폴더 이동 CI 상한.
+pub const ZIP_NAVIGATE_LIMIT: Duration = Duration::from_millis(0); // #432
+/// #432: Stored 꺼내기 처리량의 복사 대비 비율 하한.
+pub const ZIP_STORED_COPY_RATIO: f64 = 0.0; // #432
+/// #432: Deflate 꺼내기 처리량 하한(바이트/초).
+pub const ZIP_DEFLATE_THROUGHPUT_LIMIT: f64 = 0.0; // #432
+
+/// #432: 시험 zip의 `index`번째 항목 경로.
+pub fn zip_test_entry_path(_index: usize) -> String {
+    todo!("#432")
+}
+
+/// #432: 시험 zip을 만든다.
+pub fn make_test_zip(_path: &Path, _count: usize) -> Result<(), String> {
+    todo!("#432")
+}
+
+/// #432: zip 목록 열기를 잰다.
+pub fn measure_zip_list(_zip: &Path, _runs: usize) -> Result<Measurement, String> {
+    todo!("#432")
+}
+
+/// #432: zip 목록 열기 한도 판정.
+pub fn check_zip_list_limit(_m: &Measurement, _limit: Duration) -> Result<(), String> {
+    todo!("#432")
+}
+
+/// #432: zip 안 폴더 이동을 잰다.
+pub fn measure_zip_navigate(_zip: &Path, _runs: usize) -> Result<Measurement, String> {
+    todo!("#432")
+}
+
+/// #432: zip 안 폴더 이동 한도 판정.
+pub fn check_zip_navigate_limit(_m: &Measurement, _limit: Duration) -> Result<(), String> {
+    todo!("#432")
+}
+
+/// #432: 꺼내기 처리량 측정.
+#[derive(Debug, Clone)]
+pub struct ZipExtractMeasurement {
+    /// #432
+    pub bytes: u64,
+    /// #432
+    pub stored: Measurement,
+    /// #432
+    pub deflate: Measurement,
+    /// #432
+    pub copy: Measurement,
+}
+
+/// #432: Stored·Deflate 꺼내기와 복사를 잰다.
+pub fn measure_zip_extract(
+    _dir: &Path,
+    _size: u64,
+    _runs: usize,
+) -> Result<ZipExtractMeasurement, String> {
+    todo!("#432")
+}
+
+/// #432: 꺼내기 비율·하한 판정.
+pub fn check_zip_extract(
+    _m: &ZipExtractMeasurement,
+    _ratio: f64,
+    _deflate_min: f64,
+) -> Result<(), String> {
+    todo!("#432")
+}

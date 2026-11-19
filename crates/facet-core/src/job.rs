@@ -94,6 +94,8 @@ pub enum JobKind {
     BatchRename,
     /// **휴지통 복원**([`JobQueue::restore`]). 차례를 기다리지 않고 곧바로 시작한다.
     Restore,
+    /// #429: 새 zip으로 묶기.
+    NewZip,
 }
 
 /// 작업의 상태.
@@ -221,6 +223,30 @@ pub struct Summary {
     /// 일괄 이름 바꾸기가 규칙이 이름을 바꾸지 않아 건너뛴 항목 수([`Summary::items_skipped`]에 든다). 다른 작업은
     /// 늘 0이다.
     pub names_unchanged: u64,
+    /// #425: 꺼내기가 규칙으로 건너뛴 zip 항목과 까닭.
+    pub zip_skipped: Vec<ZipSkipped>, // #425
+}
+
+/// #425: 꺼내기가 건너뛴 zip 항목.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZipSkipped {
+    /// #425: zip 안 경로(`/` 구분, 기록된 그대로).
+    pub entry: String,
+    /// #425: 건너뛴 까닭.
+    pub reason: ZipSkipReason,
+}
+
+/// #425: zip 항목을 건너뛴 까닭.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ZipSkipReason {
+    /// #425
+    UnsupportedMethod(u16),
+    /// #426
+    OutsideTarget,
+    /// #426
+    InvalidName(crate::name_input::NameError),
+    /// #426
+    Symlink,
 }
 
 impl Summary {
@@ -290,6 +316,15 @@ pub enum JobEvent {
         /// 그 항목(경로·종류·크기·수정 시각).
         item: ConflictItem,
     },
+    /// #428: 암호가 필요하다.
+    PasswordNeeded {
+        /// #428
+        job: JobId,
+        /// #428
+        archive: PathBuf,
+        /// #428
+        retry: bool,
+    },
     /// 작업이 끝났다. 마지막 상태의 [`JobEvent::StateChanged`] 바로 뒤에 온다. 이 작업의 마지막 사건이다.
     Finished {
         /// 작업.
@@ -309,6 +344,13 @@ pub enum JobQuestion {
     Error(ItemFailure),
     /// 휴지통에 들어가지 않는 항목을 영구 삭제로 진행할지. [`JobQueue::answer_not_recyclable`]로 답한다.
     NotRecyclable(ConflictItem),
+    /// #428: 암호.
+    Password {
+        /// #428
+        archive: PathBuf,
+        /// #428
+        retry: bool,
+    },
 }
 
 /// 이름 충돌의 한 쪽 항목 종류.
@@ -474,6 +516,15 @@ pub enum CopyRejection {
     TargetInsideSource(PathBuf),
     /// 이 위치 사이에서는 복사·이동할 수 없다(휴대폰 안·휴대폰끼리: 휴대폰과는 PC와만 주고받는다).
     Unsupported,
+    /// #426: 대상 볼륨의 빈 공간이 모자란다.
+    NotEnoughSpace {
+        /// #426
+        needed: u64,
+        /// #426
+        available: u64,
+    },
+    /// #430: 암호 걸린 항목이 있는 zip에는 넣지 않는다.
+    EncryptedArchive,
 }
 
 /// 영구 삭제·휴지통 삭제를 시작하기 전에 막은 까닭. 이때는 작업을 만들지 않는다.
@@ -983,7 +1034,8 @@ impl JobQueue {
             | JobKind::Delete
             | JobKind::Recycle
             | JobKind::BatchRename
-            | JobKind::Restore => Err(CopyRejection::NoSources),
+            | JobKind::Restore
+            | JobKind::NewZip => Err(CopyRejection::NoSources),
         }
     }
 
@@ -1022,7 +1074,8 @@ impl JobQueue {
             | JobKind::Delete
             | JobKind::Recycle
             | JobKind::BatchRename
-            | JobKind::Restore => {
+            | JobKind::Restore
+            | JobKind::NewZip => {
                 return Err(CopyRejection::NoSources);
             }
         };
@@ -1337,6 +1390,24 @@ impl JobQueue {
         });
         slot.control.set_answer(Answer::Conflict(answer));
         Ok(())
+    }
+
+    /// #428: 암호 질문에 답한다. `None`이면 작업을 취소한다.
+    pub fn answer_password(
+        &mut self,
+        _job: JobId,
+        _password: Option<String>,
+    ) -> Result<(), AnswerError> {
+        todo!("#428")
+    }
+
+    /// #425: zip `archive` 전체를 `target` 폴더 안으로 꺼내는 작업.
+    pub fn extract_all(
+        &mut self,
+        _archive: PathBuf,
+        _target: PathBuf,
+    ) -> Result<JobId, CopyRejection> {
+        todo!("#425")
     }
 
     /// 항목별 오류의 답을 기다리는 작업에 답한다. 다시 시도·건너뛰기·나머지 오류도 건너뛰기면 작업은

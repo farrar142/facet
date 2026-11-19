@@ -63,6 +63,7 @@ pub fn view(question: Option<&JobQuestion>) -> QuestionView {
             source: side(item),
             ..QuestionView::default()
         },
+        Some(JobQuestion::Password { .. }) => todo!("#428"),
     }
 }
 
