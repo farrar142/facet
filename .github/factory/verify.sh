@@ -35,7 +35,9 @@
 #                                        and its PR is still open; nothing otherwise (#307).
 #   verify.sh next-verify [PR]           when no other Verify run is going, dispatch Verify for the
 #                                        oldest open PR still waiting for one (not [PR]); the guard
-#                                        against a lost pending run (#286).
+#                                        against a lost pending run (#286). Asks ledger.sh guard
+#                                        for each ticket first: skips one it stops, starts nothing
+#                                        on the daily budget (#501).
 #   verify.sh pass <N> <PR> [report]     squash-merge the PR (retrying while GitHub computes
 #                                        mergeability), delete its branch and its job-less bot
 #                                        ci.yml runs (prune-runs.sh), comment the report on the
@@ -44,7 +46,8 @@
 #                                        PR could not be merged (nothing else is done then).
 #
 # Environment: REPO (or GITHUB_REPOSITORY), GH_TOKEN; RUN_URL (link in comments, optional);
-# FACTORY_DISPATCH_NEXT (command run instead of dispatch-next.sh, tests); FACTORY_PRUNE_RUNS (command
+# FACTORY_DISPATCH_NEXT (command run instead of dispatch-next.sh, tests); FACTORY_GUARD (command run
+# with the ticket instead of `ledger.sh guard` in next-verify, tests); FACTORY_PRUNE_RUNS (command
 # run with the branch instead of prune-runs.sh, tests); FACTORY_MERGE_WAIT
 # (seconds between merge attempts, default 15). Needs bash, git, gh and jq.
 set -u
@@ -277,8 +280,24 @@ $(cat "$report")" >/dev/null || true
 # is going, start one for the oldest PR still waiting (open, `Closes #N` and the Implementer's
 # `<!-- factory-checked ` marker in its body, ticket #N open and `in-progress`, no Verify run going
 # for #N), other than <skip> (the PR this run was about, e.g. one it was cancelled on).
+# verify_guard <N>: "<go> <reason>" from ledger.sh guard for ticket <N> (its outputs go to a file of
+# their own, not to this step's GITHUB_OUTPUT). FACTORY_GUARD runs instead of ledger.sh (tests).
+verify_guard() {
+  local out go reason
+  out=$(mktemp)
+  if [ -n "${FACTORY_GUARD:-}" ]; then
+    GITHUB_OUTPUT=$out $FACTORY_GUARD "$1" < /dev/null >&2
+  else
+    GITHUB_OUTPUT=$out bash "$here/ledger.sh" guard "$1" < /dev/null >&2
+  fi
+  go=$(sed -n 's/^go=//p' "$out" | tr -d '\r' | tail -n 1)
+  reason=$(sed -n 's/^reason=//p' "$out" | tr -d '\r' | tail -n 1)
+  rm -f "$out"
+  echo "${go:-false} ${reason:-error}"
+}
+
 next_verify() {
-  local skip=${1:-0} others waiting p n
+  local skip=${1:-0} others waiting p n go reason
   others=$(gh run list --repo "$REPO" --workflow factory-verify.yml --limit 50 \
     --json databaseId,status,displayTitle \
     --jq "[.[] | select(.status != \"completed\" and .databaseId != ${GITHUB_RUN_ID:-0})] | length" | tr -d '\r') \
@@ -297,6 +316,18 @@ next_verify() {
     read -r state progress < <(gh api "repos/$REPO/issues/$n" \
       | j -r '[.state, (any(.labels[]; .name == "in-progress") | tostring)] | @tsv')
     [ "${state:-}" = open ] && [ "${progress:-}" = true ] || continue
+    # The Verify run started here would stop at its budget guard and, on its way out, start this
+    # step again for the other waiting PR: two guarded PRs woke each other forever (#501). Ask the
+    # guard first: skip a ticket it stops, and start nothing at all on the daily budget.
+    read -r go reason < <(verify_guard "$n")
+    if [ "${reason:-}" = daily ]; then
+      echo "::notice::the daily budget is spent; no Verify starts until KST midnight"
+      return 0
+    fi
+    if [ "${go:-}" != true ]; then
+      echo "::notice::the guard stops #$n (${reason:-unknown}); PR #$p keeps waiting"
+      continue
+    fi
     echo "PR #$p of #$n waits for Verify"
     gh workflow run factory-verify.yml --repo "$REPO" -f issue="$n" -f pr="$p" \
       || echo "::warning::could not dispatch Verify for PR #$p"
