@@ -306,7 +306,8 @@ pub struct Attributes {
     pub read_only: bool,
     /// #325: 온라인 전용(내용이 이 기계에 없음) 표시.
     pub online_only: bool,
-    /// #450: 열거 결과의 원래 속성 값(Windows가 아니면 0).
+    /// 열거 결과의 원래 속성 값(시스템 호출을 더 하지 않음, Windows가 아니면 0, 즉시 검색 결과는 인덱스가 준 값).
+    /// 내용 읽기 관문(`content_gate`)이 쓴다.
     pub bits: u32,
 }
 

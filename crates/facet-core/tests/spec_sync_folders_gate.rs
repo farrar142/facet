@@ -61,7 +61,6 @@ const ONLINE: [u32; 5] = [
 const NOT_EXPANDED: [u32; 2] = [RECALL_ON_OPEN, DIRECTORY | REPARSE_POINT | RECALL_ON_OPEN];
 
 #[test]
-#[ignore = "#450"]
 fn background_readers_refuse_online_only_items() {
     for reader in BACKGROUND {
         for bits in ONLINE {
@@ -75,7 +74,6 @@ fn background_readers_refuse_online_only_items() {
 }
 
 #[test]
-#[ignore = "#450"]
 fn background_readers_refuse_unexpanded_online_folders() {
     for reader in BACKGROUND {
         for bits in NOT_EXPANDED {
@@ -100,7 +98,6 @@ fn background_readers_refuse_unexpanded_online_folders() {
 }
 
 #[test]
-#[ignore = "#450"]
 fn background_readers_allow_local_items_without_download() {
     for reader in BACKGROUND {
         for bits in LOCAL {
@@ -113,7 +110,6 @@ fn background_readers_allow_local_items_without_download() {
 }
 
 #[test]
-#[ignore = "#450"]
 fn user_actions_always_allowed_and_download_online_items() {
     for reader in USER {
         for bits in LOCAL {
@@ -130,7 +126,6 @@ fn user_actions_always_allowed_and_download_online_items() {
 }
 
 #[test]
-#[ignore = "#450"]
 fn only_four_readers_are_user_actions() {
     for reader in USER {
         assert!(reader.is_user_action(), "{reader:?}");
@@ -142,7 +137,6 @@ fn only_four_readers_are_user_actions() {
 
 #[cfg(windows)]
 #[test]
-#[ignore = "#450"]
 fn listing_keeps_raw_attribute_bits() {
     use std::fs;
     use std::time::Duration;
