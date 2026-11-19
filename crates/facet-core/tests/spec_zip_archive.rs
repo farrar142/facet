@@ -52,7 +52,6 @@ fn cp949(text: &str) -> Vec<u8> {
 }
 
 #[test]
-#[ignore = "#422"]
 fn reads_entry_details() {
     let dir = TempDir::new().unwrap();
     let text = zip_support::repeated_text(40);
@@ -127,7 +126,6 @@ fn reads_entry_details() {
 }
 
 #[test]
-#[ignore = "#422"]
 fn builds_the_folder_tree_with_intermediate_folders() {
     let dir = TempDir::new().unwrap();
     let path = zip_at(
@@ -174,7 +172,6 @@ fn builds_the_folder_tree_with_intermediate_folders() {
 }
 
 #[test]
-#[ignore = "#422"]
 fn reads_utf8_flag_and_unicode_path_names() {
     let dir = TempDir::new().unwrap();
     let path = zip_at(
@@ -194,7 +191,6 @@ fn reads_utf8_flag_and_unicode_path_names() {
 }
 
 #[test]
-#[ignore = "#422"]
 fn reads_cp949_names_from_korean_windows() {
     let dir = TempDir::new().unwrap();
     let path = zip_at(
@@ -219,7 +215,6 @@ fn reads_cp949_names_from_korean_windows() {
 }
 
 #[test]
-#[ignore = "#422"]
 fn utf8_flagged_names_stay_utf8_next_to_cp949_names() {
     let dir = TempDir::new().unwrap();
     let path = zip_at(
@@ -239,7 +234,6 @@ fn utf8_flagged_names_stay_utf8_next_to_cp949_names() {
 }
 
 #[test]
-#[ignore = "#422"]
 fn falls_back_to_cp437_for_the_whole_zip() {
     let dir = TempDir::new().unwrap();
     // 0x82는 CP949의 앞 바이트인데 뒤에 '.'가 와서 CP949로 풀리지 않는다. CP437로는 é다.
@@ -278,7 +272,6 @@ fn falls_back_to_cp437_for_the_whole_zip() {
 }
 
 #[test]
-#[ignore = "#422"]
 fn the_later_record_wins_for_a_duplicate_path() {
     let dir = TempDir::new().unwrap();
     let path = zip_at(
@@ -303,7 +296,6 @@ fn the_later_record_wins_for_a_duplicate_path() {
 }
 
 #[test]
-#[ignore = "#422"]
 fn reads_zip64_with_seventy_thousand_entries() {
     let dir = TempDir::new().unwrap();
     let entries: Vec<Entry> = (0..70_000)
@@ -318,7 +310,6 @@ fn reads_zip64_with_seventy_thousand_entries() {
 }
 
 #[test]
-#[ignore = "#422"]
 fn reads_a_size_declared_beyond_four_gigabytes() {
     let dir = TempDir::new().unwrap();
     let big = Entry {
@@ -336,7 +327,6 @@ fn reads_a_size_declared_beyond_four_gigabytes() {
 }
 
 #[test]
-#[ignore = "#422"]
 fn files_that_are_not_zip_or_truncated_are_error_values() {
     let dir = TempDir::new().unwrap();
     let text = dir.path().join("글.zip");
@@ -362,7 +352,6 @@ fn files_that_are_not_zip_or_truncated_are_error_values() {
 }
 
 #[test]
-#[ignore = "#422"]
 fn a_wrong_central_directory_offset_does_not_panic() {
     let dir = TempDir::new().unwrap();
     let mut bytes = zip_support::build(&[Entry::stored("a.txt", b"aaaa")]);
@@ -378,7 +367,6 @@ fn a_wrong_central_directory_offset_does_not_panic() {
 }
 
 #[test]
-#[ignore = "#422"]
 fn a_broken_tail_of_the_central_directory_keeps_the_readable_entries() {
     let dir = TempDir::new().unwrap();
     let mut bytes = zip_support::build(&[
@@ -404,7 +392,6 @@ fn a_broken_tail_of_the_central_directory_keeps_the_readable_entries() {
 }
 
 #[test]
-#[ignore = "#422"]
 fn mangled_bytes_never_panic() {
     let dir = TempDir::new().unwrap();
     let original = zip_support::build_zip64(&[
