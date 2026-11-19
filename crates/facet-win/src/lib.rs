@@ -81,6 +81,8 @@ mod watch;
 #[cfg(windows)]
 mod windows_clipboard;
 #[cfg(windows)]
+mod windows_cloud_files;
+#[cfg(windows)]
 mod windows_devices;
 #[cfg(windows)]
 mod windows_drag_source;

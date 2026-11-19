@@ -36,19 +36,19 @@ setup "one infrastructure failure goes back to the queue"
 bash "$script" 7 infra https://example.invalid/run/1 > /dev/null 2>&1
 eq labels ready-for-agent "$(labels)"
 eq "failure marker" 1 "$(count '<!-- factory-implementer-infra-failed -->')"
-eq "no human marker" 0 "$(count '<!-- factory-human -->')"
+eq "no human marker" 0 "$(count '<!-- factory-human')"
 
 setup "three infrastructure failures leave the factory-human marker"
 fail_once infra; fail_once infra
 bash "$script" 7 infra https://example.invalid/run/1 > /dev/null 2>&1
 eq labels ready-for-human "$(labels)"
-eq "human marker" 1 "$(count '<!-- factory-human -->')"
+eq "human marker" 1 "$(count '<!-- factory-human attempts-exhausted -->')"
 
 setup "two code failures go to a person"
 fail_once code
 bash "$script" 7 code https://example.invalid/run/1 > /dev/null 2>&1
 eq labels ready-for-human "$(labels)"
-eq "human marker" 1 "$(count '<!-- factory-human -->')"
+eq "human marker" 1 "$(count '<!-- factory-human attempts-exhausted -->')"
 
 setup "failures before a reset do not count"
 fail_once infra; fail_once infra
@@ -56,7 +56,7 @@ say '<!-- factory-reset -->
 고쳤다.'
 bash "$script" 7 infra https://example.invalid/run/1 > /dev/null 2>&1
 eq labels ready-for-agent "$(labels)"
-eq "no human marker" 0 "$(count '<!-- factory-human -->')"
+eq "no human marker" 0 "$(count '<!-- factory-human')"
 
 setup "a blocked comment goes to a person at once without a failure"
 say '<!-- factory-implementer-blocked -->
@@ -64,7 +64,7 @@ ADR-0003과 부딪힌다.'
 bash "$script" 7 code https://example.invalid/run/1 > /dev/null 2>&1
 eq labels ready-for-human "$(labels)"
 eq "no failure marker" 0 "$(count '<!-- factory-implementer-failed -->')"
-eq "human marker" 1 "$(count '<!-- factory-human -->')"
+eq "human marker" 1 "$(count '<!-- factory-human agent-blocked -->')"
 eq "quotes the block" true "$(jq '.[-1].body | contains("ADR-0003과 부딪힌다.")' "$FAKE_GH/comments-7.json" | tr -d '\r')"
 
 say_at() { # say_at <time> <body>: a comment on #7 at that time
@@ -79,7 +79,7 @@ say_at 2026-11-17T02:05:00Z '.github/workflows/ci.yml에 단계를 하나 더해
 bash "$script" 7 infra https://example.invalid/run/1 2026-11-17T02:00:00Z > /dev/null 2>&1
 eq labels ready-for-human "$(labels)"
 eq "no new failure marker (only the one said above)" 1 "$(count '<!-- factory-implementer-infra-failed -->')"
-eq "human marker" 1 "$(count '<!-- factory-human -->')"
+eq "human marker" 1 "$(count '<!-- factory-human agent-blocked -->')"
 eq "quotes the reason" true "$(jq '.[-1].body | contains("ci.yml에 단계를")' "$FAKE_GH/comments-7.json" | tr -d '')"
 eq "not the older comment" false "$(jq '.[-1].body | contains("이전 run")' "$FAKE_GH/comments-7.json" | tr -d '')"
 
@@ -88,7 +88,7 @@ say_at 2026-11-17T00:30:00Z '이전 run의 이야기'
 bash "$script" 7 infra https://example.invalid/run/1 2026-11-17T02:00:00Z > /dev/null 2>&1
 eq labels ready-for-agent "$(labels)"
 eq "failure marker" 1 "$(count '<!-- factory-implementer-infra-failed -->')"
-eq "no human marker" 0 "$(count '<!-- factory-human -->')"
+eq "no human marker" 0 "$(count '<!-- factory-human')"
 
 setup "a reason goes into the failure comment (#434)"
 FAILURE_REASON='충돌을 풀지 않고 끝남: 풀리지 않은 파일이 남았다: a.rs' \
