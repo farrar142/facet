@@ -81,7 +81,7 @@ use crate::indexer_client::{ClientOptions, Connection, IndexerClient, IndexerEve
 use crate::instant_search::{DemotionReason, Follow};
 use crate::job::{
     AnswerError, ConflictAnswer, CopyRejection, DeleteRejection, ErrorAnswer, JobEvent, JobId,
-    JobKind, JobQueue, JournalSink, NotRecyclableAnswer, RenameItem, RevertJob,
+    JobKind, JobQueue, JobState, JournalSink, NotRecyclableAnswer, RenameItem, RevertJob,
 };
 use crate::launch::LaunchTarget;
 use crate::live_search::{LiveSearch, StartError};
@@ -1020,6 +1020,8 @@ pub struct App {
     history: History,
     /// 도는 복사·이동 작업이 한 일을 적는 곳. 끝나면 작업 기록으로 옮긴다.
     journals: HashMap<JobId, (OperationKind, JournalSink)>,
+    /// 온라인 전용 파일을 열려고 넣은 내려받기 작업과 열 파일·연 탭. 작업이 끝나면(건너뛴 것 없이) 그 파일을 연다.
+    downloads: HashMap<JobId, (TabId, PathBuf)>,
     /// 클립보드 스레드([`App::enable_clipboard`]). 띄우지 못했거나 아직이면 `None`.
     clipboard: Option<Arc<Clipboard>>,
     /// 클립보드 변경 알림이 알려 준 「파일이 있음」 요약. 붙여넣기를 켜고 끄는 데 쓴다(명령 실행 여부를 볼 때
@@ -1297,6 +1299,7 @@ impl App {
             work_area: WorkArea::new(),
             history: History::new(),
             journals: HashMap::new(),
+            downloads: HashMap::new(),
             clipboard: None,
             clipboard_files: Arc::default(),
             cut_marks: Arc::default(),
@@ -4028,6 +4031,9 @@ impl App {
             self.navigate(navigation);
             return Execution::Done;
         }
+        let downloads =
+            crate::content_gate::check_item(&item.attributes, crate::content_gate::Reader::Open)
+                .is_ok_and(|permit| permit.downloads());
         let id = self.active_tab_id();
         self.active_tab_mut().set_open_error(None);
         let Some(path) = path else {
@@ -4036,20 +4042,37 @@ impl App {
                 .set_open_error(Some(OpenError::Unsupported));
             return Execution::Done;
         };
+        if downloads {
+            // 온라인 전용 파일: 먼저 내려받기 작업으로 내려받고, 끝나면 연다(App::poll_jobs). 기다리지 않는다.
+            let target = path.parent().map(Path::to_path_buf).unwrap_or_default();
+            let job = self.jobs.download(path.clone());
+            self.downloads.insert(job, (id, path));
+            self.work_area.add(job, JobKind::Download, target, 1);
+            self.poll_jobs();
+            return Execution::Done;
+        }
+        self.open_with_default_program(id, path);
+        Execution::Done
+    }
+
+    /// 파일을 셸 일꾼 스레드에서 기본 프로그램으로 연다. 결과는 [`Update::Opened`]로 온다(탭 `id`에). 기다리지 않는다.
+    fn open_with_default_program(&mut self, id: TabId, path: PathBuf) {
         if self.shell.is_none() {
             match ShellWorker::spawn() {
                 Ok(worker) => self.shell = Some(worker),
                 Err(error) => {
-                    self.active_tab_mut().set_open_error(Some(OpenError::Other {
-                        code: 0,
-                        message: error.to_string(),
-                    }));
-                    return Execution::Done;
+                    if let Some(tab) = self.tab_mut(id) {
+                        tab.set_open_error(Some(OpenError::Other {
+                            code: 0,
+                            message: error.to_string(),
+                        }));
+                    }
+                    return;
                 }
             }
         }
         let Some(shell) = &self.shell else {
-            return Execution::Done;
+            return;
         };
         let reply = shell.open_with_default_program(path);
         let outbox = self.outbox.clone();
@@ -4062,7 +4085,6 @@ impl App {
             .name("facet-open".into())
             .spawn(forward)
             .expect("열기 결과를 기다리는 스레드를 만들지 못했다");
-        Execution::Done
     }
 
     /// 활성 탭의 항목 `original`(화면이 넘긴 이름 입력란의 항목, 선택이 여럿이면 커서 항목)의 이름을 `new_name`으로
@@ -4949,10 +4971,22 @@ impl App {
                 }
                 self.record_transfer(*job, summary);
                 self.finish_cut_paste(*job, summary);
+                self.finish_download(*job);
             }
             changed |= self.work_area.apply(&event);
         }
         changed
+    }
+
+    /// 열려고 넣은 내려받기 작업이 끝났으면, 건너뛴 것 없이 끝났을 때만 그 파일을 기본 프로그램으로 연다(취소·
+    /// 건너뛰기면 열지 않는다). 연 탭이 닫혔어도 연다(결과는 받을 탭이 없어 버려진다).
+    fn finish_download(&mut self, job: JobId) {
+        let Some((tab, path)) = self.downloads.remove(&job) else {
+            return;
+        };
+        if self.jobs.state(job) == Some(JobState::Finished) {
+            self.open_with_default_program(tab, path);
+        }
     }
 
     /// 끝난 복사·이동·영구 삭제(끝남·실패·취소 모두)를 작업 기록에 남긴다: 실제로 한 항목만 담고, 한 항목이 없으면

@@ -34,6 +34,7 @@ mod batch_rename;
 mod copy;
 mod delete;
 mod device;
+mod download;
 mod extract;
 mod moving;
 mod recycle;
@@ -62,8 +63,13 @@ pub fn is_extract(sources: &[PathBuf]) -> bool {
 /// 진행 사건 사이의 가장 짧은 간격. 작업마다 진행 사건은 초당 10번 이하다.
 pub const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
-/// #453: 내려받기 작업의 무응답 시간 제한 기본값.
-pub const DOWNLOAD_STALL_TIMEOUT: Duration = Duration::from_secs(0); // #453
+/// 내려받기 작업([`JobQueue::download`])의 무응답 시간 제한 기본값: 동기화 프로그램이 이만큼 아무 내용도 보내지
+/// 않으면 [`FileOpErrorKind::TimedOut`] 항목별 오류로 멈춘다.
+///
+/// 근거: 클라우드 파일 필터는 동기화 프로그램이 내용 요청에 60초 동안 답하지 않으면 그 요청을 실패로 끝낸다. 그
+/// 절반이면 사용자가 「멈췄다」고 느끼기 전에 까닭을 보이면서도, 느린 네트워크에서 큰 파일의 다음 덩어리를 기다리는
+/// 보통의 지연(수 초)에는 걸리지 않는다. 진행이 오면 처음부터 다시 센다.
+pub const DOWNLOAD_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 작업의 번호. 대기열 안에서 바뀌지 않고 다시 쓰이지 않는다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -103,7 +109,8 @@ pub enum JobKind {
     BatchRename,
     /// **휴지통 복원**([`JobQueue::restore`]). 차례를 기다리지 않고 곧바로 시작한다.
     Restore,
-    /// #453: 온라인 전용 파일 내려받기.
+    /// **내려받기**([`JobQueue::download`]): 온라인 전용 파일을 끝까지 읽어 이 장치에 내려받는다. 차례를 기다리지
+    /// 않고 곧바로 시작한다.
     Download,
     /// #455: 이 장치에 항상 유지(고정 상태 바꾸기).
     KeepOnDevice,
@@ -175,7 +182,7 @@ pub struct Progress {
     pub current: Option<PathBuf>,
     /// 작업을 시작한 뒤 흐른 시간(이 진행을 만든 때).
     pub elapsed: Duration,
-    /// #453: 내려받는 중인가.
+    /// 동기화 프로그램에서 내용을 내려받는 중인가(내려받기 작업, [`JobKind::Download`]).
     pub downloading: bool,
 }
 
@@ -564,6 +571,7 @@ enum Job {
     Restore(restore::RestoreJob),
     Device(device::DeviceJob),
     Extract(extract::ExtractJob),
+    Download(download::DownloadJob),
 }
 
 impl Job {
@@ -579,6 +587,7 @@ impl Job {
             Job::Restore(job) => job.root_count(),
             Job::Device(job) => job.root_count(),
             Job::Extract(job) => job.root_count(),
+            Job::Download(job) => job.root_count(),
         }
     }
 
@@ -594,6 +603,7 @@ impl Job {
             Job::Restore(job) => job.run(context),
             Job::Device(job) => job.run(context),
             Job::Extract(job) => job.run(context),
+            Job::Download(job) => job.run(context),
         }
     }
 }
@@ -683,6 +693,11 @@ impl Control {
     /// 취소됐는가(기다리지 않는다).
     fn is_cancelled(&self) -> bool {
         lock(&self.flags).cancelled
+    }
+
+    /// 일시정지됐는가(기다리지 않는다).
+    fn is_paused(&self) -> bool {
+        lock(&self.flags).paused
     }
 
     /// 일시정지면 풀리거나 취소될 때까지 기다린다. 계속해도 되면 `true`, 취소됐으면 `false`.
@@ -905,6 +920,8 @@ impl Shared {
 /// 대기열을 버려도 이미 시작한 작업과 대기 중인 작업은 끝까지 돈다(일시정지한 작업은 이을 쪽이 없으니 남는다).
 pub struct JobQueue {
     next_id: u64,
+    /// 내려받기 작업의 무응답 시간 제한([`DOWNLOAD_STALL_TIMEOUT`]).
+    stall_timeout: Duration,
     shared: Arc<Shared>,
     runner: bool,
     outbox: Outbox,
@@ -925,9 +942,28 @@ impl Drop for JobQueue {
 }
 
 impl JobQueue {
-    /// #453: 내려받기 무응답 시간 제한을 바꾼다.
-    pub fn set_stall_timeout(&mut self, _timeout: Duration) {
-        todo!("#453")
+    /// 내려받기 작업의 무응답 시간 제한을 바꾼다(기본 [`DOWNLOAD_STALL_TIMEOUT`], 시험이 줄인다). 이 뒤에 넣는
+    /// 내려받기 작업부터 쓴다.
+    pub fn set_stall_timeout(&mut self, timeout: Duration) {
+        self.stall_timeout = timeout;
+    }
+
+    /// 온라인 전용 파일 `source`를 **내려받는** 작업을 넣고 차례를 기다리지 않고 곧바로 시작한다
+    /// ([`JobKind::Download`]). 파일을 끝까지 읽어 동기화 프로그램이 내용을 이 장치에 내려받게 한다. 진행은 읽은
+    /// 바이트이고 [`Progress::downloading`]이 켜져 있다.
+    ///
+    /// 곧바로 시작하는 까닭: 사용자가 지금 열려는 파일이라, 앞에 큰 복사가 돌고 있다고 그 뒤로 미루면 더블 클릭한
+    /// 파일이 언제 열릴지 모른다. 내려받기는 네트워크를 기다리는 일이라 다른 작업의 디스크를 거의 쓰지 않는다.
+    ///
+    /// 내려받지 못하면(네트워크 끊김 등 동기화 프로그램의 실패, 동기화 프로그램이 꺼짐
+    /// [`FileOpErrorKind::SyncProviderNotRunning`], 무응답 시간 제한 [`FileOpErrorKind::TimedOut`]) 항목별 오류로
+    /// 묻는다([`JobQueue::answer_error`]): 다시 시도는 처음부터 다시 읽는다. 일시정지·취소는 덩어리를 기다리는 동안에도
+    /// 듣는다. 아무것도 바꾸지 않아 작업 기록에 남지 않는다.
+    pub fn download(&mut self, source: PathBuf) -> JobId {
+        self.start_at_once(Job::Download(download::DownloadJob::new(
+            source,
+            self.stall_timeout,
+        )))
     }
 
     /// 빈 대기열.
@@ -935,6 +971,7 @@ impl JobQueue {
         let (sender, receiver) = mpsc::channel();
         JobQueue {
             next_id: 1,
+            stall_timeout: DOWNLOAD_STALL_TIMEOUT,
             shared: Arc::default(),
             runner: false,
             outbox: Outbox {

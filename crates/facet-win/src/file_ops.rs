@@ -100,6 +100,15 @@ impl FileOpError {
         FileOpError::new(classify_win32(code), Some(code as i32))
     }
 
+    /// 표준 라이브러리 입출력 오류를 종류로 나눈다(운영체제 코드가 있으면 그 코드로, 없으면 그 밖). 코어가 파일을
+    /// 직접 읽을 때(온라인 전용 파일 내려받기, #453) 쓴다.
+    pub fn from_io(error: &std::io::Error) -> Self {
+        match error.raw_os_error() {
+            Some(code) => FileOpError::new(classify_win32(code as u32), Some(code)),
+            None => FileOpError::new(FileOpErrorKind::Other, None),
+        }
+    }
+
     #[cfg(not(windows))]
     pub(crate) fn unsupported() -> Self {
         FileOpError::new(FileOpErrorKind::Unsupported, None)

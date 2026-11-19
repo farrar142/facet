@@ -185,7 +185,6 @@ fn quiet(app: &mut App, watch: &mut Watch) {
 }
 
 #[test]
-#[ignore = "#453"]
 fn opening_online_only_file_downloads_then_opens() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "내려받은 뒤 열기") else {
@@ -227,7 +226,6 @@ fn opening_online_only_file_downloads_then_opens() {
 }
 
 #[test]
-#[ignore = "#453"]
 fn local_file_opens_without_download_job() {
     let dir = TempDir::new().unwrap();
     let Some(_root) = sync_root(dir.path(), "로컬 파일 열기") else {
@@ -242,7 +240,6 @@ fn local_file_opens_without_download_job() {
 }
 
 #[test]
-#[ignore = "#453"]
 fn cancelled_stalled_download_does_not_open() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "내려받기 취소") else {
@@ -263,7 +260,6 @@ fn cancelled_stalled_download_does_not_open() {
 }
 
 #[test]
-#[ignore = "#453"]
 fn stalled_provider_times_out_into_item_error_while_other_jobs_run() {
     let dir = TempDir::new().unwrap();
     let other = TempDir::new().unwrap();
@@ -305,7 +301,6 @@ fn stalled_provider_times_out_into_item_error_while_other_jobs_run() {
 }
 
 #[test]
-#[ignore = "#453"]
 fn failed_download_asks_and_retry_opens() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "내려받기 실패") else {
@@ -330,7 +325,6 @@ fn failed_download_asks_and_retry_opens() {
 }
 
 #[test]
-#[ignore = "#453"]
 fn provider_not_running_asks_without_hanging() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "동기화 프로그램 꺼짐") else {
@@ -354,7 +348,6 @@ fn provider_not_running_asks_without_hanging() {
 }
 
 #[test]
-#[ignore = "#453"]
 fn download_stall_timeout_defaults_to_30_seconds() {
     assert_eq!(DOWNLOAD_STALL_TIMEOUT, Duration::from_secs(30));
 }

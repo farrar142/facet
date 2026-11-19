@@ -145,6 +145,8 @@ pub fn error_reason(kind: FileOpErrorKind) -> ErrorReason {
         FileOpErrorKind::DiskFull => ErrorReason::DiskFull,
         FileOpErrorKind::SourceMissing => ErrorReason::SourceMissing,
         FileOpErrorKind::Corrupt => ErrorReason::Corrupt,
+        FileOpErrorKind::TimedOut => ErrorReason::TimedOut,
+        FileOpErrorKind::SyncProviderNotRunning => ErrorReason::SyncProviderNotRunning,
         _ => ErrorReason::Other,
     }
 }
@@ -335,6 +337,14 @@ mod tests {
         assert_eq!(
             error_reason(FileOpErrorKind::TargetExists),
             ErrorReason::Other
+        );
+        assert_eq!(
+            error_reason(FileOpErrorKind::TimedOut),
+            ErrorReason::TimedOut
+        );
+        assert_eq!(
+            error_reason(FileOpErrorKind::SyncProviderNotRunning),
+            ErrorReason::SyncProviderNotRunning
         );
         assert_eq!(super::view(None), QuestionView::default());
     }
