@@ -390,7 +390,7 @@ impl CommandId {
             Column::FreeSpace => CommandId::SortByFreeSpace,
             // 압축된 크기 열도 머리글로만 정렬한다(zip 위치에만 있다).
             Column::OriginalLocation | Column::DateDeleted | Column::CompressedSize => return None,
-            Column::SyncState => todo!("#451"),
+            Column::SyncState => return None,
         })
     }
 

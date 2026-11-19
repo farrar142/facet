@@ -205,6 +205,10 @@ impl ReadRequest {
                     .collect();
                     list.mark_drives(|name| drives.contains(name));
                 }
+                // #451: 동기화 폴더(위치마다 한 번 확인)의 항목은 열거한 속성 값으로 배지를 단다.
+                if let Some(path) = location.file_system_path() {
+                    list.set_sync_folder(facet_win::cloud_files::is_in_sync_root(path));
+                }
                 list
             });
             (list, watch)
@@ -864,12 +868,12 @@ impl Tab {
 
     /// #451: 위치가 동기화 폴더인가.
     pub fn is_sync_folder(&self) -> bool {
-        todo!("#451")
+        self.list.is_sync_folder()
     }
 
     /// #451: 보이는 번호의 항목 배지. 동기화 폴더가 아니면(즉시 검색 결과는 티켓의 규칙) `None`.
-    pub fn sync_state(&self, _index: usize) -> Option<crate::sync_status::SyncState> {
-        todo!("#451")
+    pub fn sync_state(&self, index: usize) -> Option<crate::sync_status::SyncState> {
+        self.list.sync_state(self.list_index(index)?)
     }
 
     pub(crate) fn set_open_error(&mut self, error: Option<OpenError>) {
@@ -2276,8 +2280,10 @@ impl Tab {
         }
         if !found.is_empty() {
             self.list_gen += 1;
-            self.list
-                .extend_found(found.into_iter().map(|found| (found.folder, found.item)));
+            self.list.extend_found_badged(
+                found.into_iter().map(|found| (found.folder, found.item)),
+                facet_win::cloud_files::is_in_sync_root,
+            );
         }
         self.update_visible();
         self.prune_selection();
@@ -2365,8 +2371,10 @@ impl Tab {
         }
         self.list_gen += 1;
         self.list = DetailsList::new(Vec::new(), self.sort);
-        self.list
-            .extend_found(found.into_iter().map(|found| (found.folder, found.item)));
+        self.list.extend_found_badged(
+            found.into_iter().map(|found| (found.folder, found.item)),
+            facet_win::cloud_files::is_in_sync_root,
+        );
         self.update_visible();
         self.prune_selection();
         self.reindex();

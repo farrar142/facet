@@ -1275,3 +1275,27 @@ mod preset_tests {
         assert!(text.contains("x.broken.toml"));
     }
 }
+
+/// #451: 동기화 상태의 이름(「상태」 열과 배지 위의 글).
+pub fn sync_state_text(state: facet_core::sync_status::SyncState) -> &'static str {
+    use facet_core::sync_status::SyncState;
+    match state {
+        SyncState::OnlineOnly => "온라인 전용",
+        SyncState::OnDevice => "이 장치에 있음",
+        SyncState::AlwaysKeep => "항상 유지",
+        SyncState::Syncing => "동기화 중",
+        SyncState::Error => "동기화 오류",
+    }
+}
+
+/// #451: 이름 옆에 그리는 동기화 상태 배지 기호.
+pub fn sync_state_glyph(state: facet_core::sync_status::SyncState) -> &'static str {
+    use facet_core::sync_status::SyncState;
+    match state {
+        SyncState::OnlineOnly => "☁",
+        SyncState::OnDevice => "✓",
+        SyncState::AlwaysKeep => "●",
+        SyncState::Syncing => "⟳",
+        SyncState::Error => "!",
+    }
+}
