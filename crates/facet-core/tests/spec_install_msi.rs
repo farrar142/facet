@@ -3,7 +3,9 @@
 // AC: #479: 설치한 facet으로 켠 지금 계정의 가로채기가 조용한 제거 뒤 원래대로이고 백업이 사라짐
 //! MSI 설치 프로그램을 이 기계에 실제로 설치·제거해 확인한다. 관리자 권한과 환경 변수 `FACET_TEST_MSI`(지금 MSI),
 //! 업그레이드·내려가기는 `FACET_TEST_MSI_OLDER`(더 낮은 제품 버전 MSI, `cargo xtask dist <label> --msi-version 0.0.1`)가
-//! 있을 때만 돌고, 없으면 건너뛰었다고 출력한다(평소 `cargo test`는 기계를 바꾸지 않는다). 태그·nightly 빌드가 이 변수를
+//! 있을 때만 돌고, 없으면(또는 관리자가 아니면) 설치하지 않고 저장소의 WiX 원본 `installer/facet.wxs`가 그 시험이 확인할
+//! 것(서비스 등록·지연 시작·도우미·설치 표지·끝내기 요청·다시 띄우기, 주 업그레이드, 내려가기 거절, 가로채기 복구 명령)을
+//! 선언하는지만 본다(평소 `cargo test`는 기계를 바꾸지 않는다). 태그·nightly 빌드가 이 변수를
 //! 주고 돌린다. 시험끼리 같은 설치를 다루므로 하나씩 돈다. 가로채기 시험은 지금 계정의 HKCU를 바꾸므로 이미 facet
 //! 가로채기 백업이 있는 계정이면 건너뛴다. Windows 전용.
 
@@ -38,14 +40,32 @@ fn is_admin() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
-/// 관리자이고 그 환경 변수의 MSI가 있으면 경로. 아니면 까닭을 출력하고 `None`.
-fn msi_from(var: &str) -> Option<PathBuf> {
+/// 저장소의 WiX 원본(`installer/facet.wxs`). 없으면 빈 글자.
+fn wix_source() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../installer/facet.wxs");
+    fs::read_to_string(path).unwrap_or_default()
+}
+
+/// 설치 시험을 할 수 없는 환경(변수 없음·관리자 아님)에서 대신 본다: WiX 원본이 있고 그 시험이 확인할 것을 선언한다.
+fn assert_source_declares(needles: &[&str]) {
+    let source = wix_source();
+    assert!(!source.is_empty(), "WiX 원본 installer/facet.wxs가 없다");
+    for needle in needles {
+        assert!(source.contains(needle), "WiX 원본에 {needle}이 없다");
+    }
+}
+
+/// 관리자이고 그 환경 변수의 MSI가 있으면 경로. 아니면 까닭을 출력하고 WiX 원본이 `needles`를 선언하는지만 본 뒤
+/// `None`.
+fn msi_from(var: &str, needles: &[&str]) -> Option<PathBuf> {
     let Some(path) = env::var_os(var).map(PathBuf::from) else {
-        eprintln!("{var}가 없어 설치 시험을 건너뛴다");
+        eprintln!("{var}가 없어 설치 시험 대신 WiX 원본만 본다");
+        assert_source_declares(needles);
         return None;
     };
     if !is_admin() {
-        eprintln!("관리자가 아니라 설치 시험을 건너뛴다");
+        eprintln!("관리자가 아니라 설치 시험 대신 WiX 원본만 본다");
+        assert_source_declares(needles);
         return None;
     }
     assert!(path.is_file(), "{var}={}가 없다", path.display());
@@ -216,9 +236,20 @@ fn ensure_user_settings() -> (PathBuf, bool) {
 
 #[test]
 #[ignore = "#477"]
-fn 조용한_설치는_파일_서비스_인덱스_바로_가기를_놓고_제거는_모두_걷되_설정은_남긴다() {
+fn quiet_install_places_everything_and_quiet_uninstall_removes_all_but_settings() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(msi) = msi_from("FACET_TEST_MSI") else {
+    let Some(msi) = msi_from(
+        "FACET_TEST_MSI",
+        &[
+            "ServiceInstall",
+            "DelayedAutoStart",
+            SERVICE,
+            "facet-shell-helper.exe",
+            INSTALL_MARKER,
+            "--request-quit",
+            "FACET_RELAUNCH",
+        ],
+    ) else {
         return;
     };
     clean(&[&msi]);
@@ -273,10 +304,13 @@ fn 조용한_설치는_파일_서비스_인덱스_바로_가기를_놓고_제거
 
 #[test]
 #[ignore = "#477"]
-fn 옛_버전_위에_설치하면_새_버전_하나가_되고_서비스가_돈다() {
+fn installing_over_an_older_version_upgrades_to_one_entry() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let (Some(msi), Some(older)) = (msi_from("FACET_TEST_MSI"), msi_from("FACET_TEST_MSI_OLDER"))
-    else {
+    let needles = ["MajorUpgrade"];
+    let (Some(msi), Some(older)) = (
+        msi_from("FACET_TEST_MSI", &needles),
+        msi_from("FACET_TEST_MSI_OLDER", &needles),
+    ) else {
         return;
     };
     clean(&[&msi, &older]);
@@ -304,10 +338,13 @@ fn 옛_버전_위에_설치하면_새_버전_하나가_되고_서비스가_돈�
 
 #[test]
 #[ignore = "#477"]
-fn 새_버전_위에_옛_버전을_설치하면_거절하고_그대로다() {
+fn installing_an_older_version_over_a_newer_one_is_refused() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let (Some(msi), Some(older)) = (msi_from("FACET_TEST_MSI"), msi_from("FACET_TEST_MSI_OLDER"))
-    else {
+    let needles = ["MajorUpgrade", "DowngradeErrorMessage"];
+    let (Some(msi), Some(older)) = (
+        msi_from("FACET_TEST_MSI", &needles),
+        msi_from("FACET_TEST_MSI_OLDER", &needles),
+    ) else {
         return;
     };
     clean(&[&msi, &older]);
@@ -325,9 +362,9 @@ fn 새_버전_위에_옛_버전을_설치하면_거절하고_그대로다() {
 
 #[test]
 #[ignore = "#479"]
-fn 제거하면_지금_계정의_가로채기가_원래대로_돌아온다() {
+fn uninstall_restores_this_accounts_interception() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(msi) = msi_from("FACET_TEST_MSI") else {
+    let Some(msi) = msi_from("FACET_TEST_MSI", &["--restore-interception-all-users"]) else {
         return;
     };
     let backup = PathBuf::from(env::var_os("APPDATA").expect("APPDATA"))

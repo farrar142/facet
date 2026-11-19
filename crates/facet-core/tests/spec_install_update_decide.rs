@@ -74,7 +74,7 @@ fn tags(list: &[Release]) -> Vec<&str> {
 
 #[test]
 #[ignore = "#471"]
-fn 버전을_해석하고_의미_버전_순서로_견준다() {
+fn versions_parse_and_compare_semantically() {
     assert_eq!(v("v1.2.3"), v("1.2.3"));
     assert_eq!(v("1.2.3").to_string(), "1.2.3");
     assert_eq!(v("v1.2.0-rc.1").to_string(), "1.2.0-rc.1");
@@ -89,7 +89,7 @@ fn 버전을_해석하고_의미_버전_순서로_견준다() {
 
 #[test]
 #[ignore = "#471"]
-fn 목록에서_초안과_버전_아닌_태그를_빼고_주소를_담는다() {
+fn release_list_drops_drafts_and_non_version_tags_and_keeps_urls() {
     let list = releases();
     assert_eq!(tags(&list), ["v1.2.0-rc.1", "v1.1.0", "v1.0.0"]);
 
@@ -118,7 +118,7 @@ fn 목록에서_초안과_버전_아닌_태그를_빼고_주소를_담는다() {
 
 #[test]
 #[ignore = "#471"]
-fn 깨진_목록은_오류다() {
+fn broken_release_list_is_an_error() {
     assert!(parse_releases("{ 깨짐").is_err());
     assert!(parse_releases("{\"message\": \"Not Found\"}").is_err());
     assert_eq!(parse_releases("[]"), Ok(Vec::new()));
@@ -126,7 +126,7 @@ fn 깨진_목록은_오류다() {
 
 #[test]
 #[ignore = "#471"]
-fn 더_높은_정식_버전이_있으면_그_릴리스로_있음이다() {
+fn higher_stable_version_is_available() {
     let list = releases();
     match decide(&list, &v("1.0.0"), Channel::Stable, None) {
         UpdateDecision::Available(release) => assert_eq!(release.tag, "v1.1.0"),
@@ -136,7 +136,7 @@ fn 더_높은_정식_버전이_있으면_그_릴리스로_있음이다() {
 
 #[test]
 #[ignore = "#471"]
-fn 지금이_가장_높거나_prerelease만_높으면_없음이다() {
+fn up_to_date_when_current_is_highest_or_only_prereleases_are_higher() {
     let list = releases();
     assert_eq!(
         decide(&list, &v("1.1.0"), Channel::Stable, None),
@@ -155,7 +155,7 @@ fn 지금이_가장_높거나_prerelease만_높으면_없음이다() {
 
 #[test]
 #[ignore = "#471"]
-fn 건너뛴_버전이면_건너뜀이고_더_새_버전은_다시_있음이다() {
+fn skipped_version_is_skipped_and_newer_is_available_again() {
     let list = releases();
     match decide(&list, &v("1.0.0"), Channel::Stable, Some(&v("1.1.0"))) {
         UpdateDecision::Skipped(release) => assert_eq!(release.tag, "v1.1.0"),
@@ -171,7 +171,7 @@ fn 건너뛴_버전이면_건너뜀이고_더_새_버전은_다시_있음이다(
 
 #[test]
 #[ignore = "#471"]
-fn nightly_채널은_늘_없음이다() {
+fn nightly_channel_is_always_up_to_date() {
     let list = releases();
     assert_eq!(
         decide(&list, &v("0.1.0"), Channel::Nightly, None),

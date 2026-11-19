@@ -192,6 +192,8 @@ pub enum CommandId {
     NewZip,
     /// #430: zip에 넣기…(`add-to-zip`).
     AddToZip,
+    /// #475: 업데이트 확인(`check-for-updates`).
+    CheckForUpdates,
 }
 
 /// #455: 명령이 꺼진 까닭(팔레트가 보인다).
@@ -356,6 +358,7 @@ impl CommandId {
             CommandId::ExtractTo => "extract-to",
             CommandId::NewZip => "new-zip",
             CommandId::AddToZip => "add-to-zip",
+            CommandId::CheckForUpdates => "check-for-updates",
         }
     }
 
@@ -498,8 +501,9 @@ impl CommandId {
             CommandId::KeepOnDevice | CommandId::FreeUpSpace => &[], // #455
             CommandId::DownloadForPreview => &[],                    // #456
             CommandId::ExtractAllHere | CommandId::ExtractToFolder | CommandId::ExtractTo => &[], // #427
-            CommandId::NewZip => &[],   // #429
-            CommandId::AddToZip => &[], // #430
+            CommandId::NewZip => &[],          // #429
+            CommandId::AddToZip => &[],        // #430
+            CommandId::CheckForUpdates => &[], // #475
         }
     }
 
@@ -607,6 +611,7 @@ impl CommandId {
             }
             CommandId::NewZip => todo!("#429"),
             CommandId::AddToZip => todo!("#430"),
+            CommandId::CheckForUpdates => todo!("#475"),
             CommandId::Refresh
             | CommandId::EditAddress
             | CommandId::ToggleHidden

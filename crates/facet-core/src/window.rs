@@ -542,6 +542,12 @@ pub enum Update {
     },
     /// #454: 셸 동기화 상태([`App::request_sync_states`])가 그 탭의 배지에 들어왔다.
     SyncStates,
+    /// #475: 업데이트 확인이 하나 끝났다([`App::update_check`]).
+    UpdateChecked,
+    /// #478: 설치 파일 받기·확인이 끝났다([`App::update_install`]).
+    UpdateInstall,
+    /// #480: 가로채기 확인이 끝났다([`App::interception_state`]).
+    Interception,
 }
 
 /// #330: 썸네일 켜기 설정.
@@ -3696,6 +3702,7 @@ impl App {
             }
             CommandId::NewZip => todo!("#429"),
             CommandId::AddToZip => todo!("#430"),
+            CommandId::CheckForUpdates => todo!("#475"),
             CommandId::TogglePreview => {
                 let window = self.active_window_mut();
                 let visible = !window.preview.visible;
@@ -5160,4 +5167,94 @@ fn filetime_of(time: std::time::SystemTime) -> Option<u64> {
 struct OpenShellMenu {
     menu: crate::shell_helper::ShellMenu,
     request: Option<crate::shell_helper::RequestId>,
+}
+
+/// #472: 설치 프로그램의 끝내기 요청에 대한 답.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuitReply {
+    Quitting,
+    Busy { jobs: usize },
+}
+
+/// #480: 앱의 폴더 열기 가로채기 상태.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterceptionState {
+    NotConfigured,
+    Portable,
+    Status(crate::interception::InterceptionStatus),
+}
+
+impl App {
+    /// #472: 끝내기 요청(작업이 있으면 거절, `cancel_jobs`면 취소하고 끝냄).
+    pub fn request_quit(&mut self, _cancel_jobs: bool) -> QuitReply {
+        todo!("#472")
+    }
+
+    /// #475: 업데이트 확인을 켠다.
+    pub fn enable_updates(&mut self, _options: crate::update::UpdateOptions) {
+        todo!("#475")
+    }
+
+    /// #475: 마지막으로 끝난 확인.
+    pub fn update_check(
+        &self,
+    ) -> Option<&Result<crate::update::UpdateDecision, crate::update::UpdateCheckError>> {
+        todo!("#475")
+    }
+
+    /// #475: 알릴 새 버전.
+    pub fn update_notice(&self) -> Option<&crate::update::Release> {
+        todo!("#475")
+    }
+
+    /// #475: 알리던 버전을 건너뛴다.
+    pub fn skip_update(&mut self) -> bool {
+        todo!("#475")
+    }
+
+    /// #476: 확인 주기를 바꾼다.
+    pub fn set_update_interval(&mut self, _interval: Option<Duration>) {
+        todo!("#476")
+    }
+
+    /// #478: 새 버전 설치를 시작한다.
+    pub fn install_update(
+        &mut self,
+    ) -> Result<crate::update::InstallStart, crate::update::InstallError> {
+        todo!("#478")
+    }
+
+    /// #478: 마지막 받기·확인 결과.
+    pub fn update_install(&self) -> Option<&Result<PathBuf, crate::update::InstallFailure>> {
+        todo!("#478")
+    }
+
+    /// #480: 가로채기와 설치 종류를 정한다.
+    pub fn set_interception(
+        &mut self,
+        _interception: crate::interception::Interception,
+        _kind: crate::build::InstallKind,
+    ) {
+        todo!("#480")
+    }
+
+    /// #480: 가로채기 상태.
+    pub fn interception_state(&self) -> InterceptionState {
+        todo!("#480")
+    }
+
+    /// #480: 가로채기를 켠다.
+    pub fn enable_interception(&mut self) -> Result<(), crate::interception::InterceptionError> {
+        todo!("#480")
+    }
+
+    /// #480: 가로채기를 끈다.
+    pub fn disable_interception(&mut self) -> Result<(), crate::interception::InterceptionError> {
+        todo!("#480")
+    }
+
+    /// #480: 작업 스레드에서 가로채기 상태를 확인한다.
+    pub fn check_interception(&mut self) {
+        todo!("#480")
+    }
 }

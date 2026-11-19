@@ -15,7 +15,7 @@ use facet_core::update::{self, interval_for};
 
 #[test]
 #[ignore = "#475"]
-fn 업데이트_확인_명령은_명령_목록에_있고_기본_단축키가_없다() {
+fn check_for_updates_command_is_listed_without_a_shortcut() {
     assert!(CommandId::ALL.contains(&CommandId::CheckForUpdates));
     assert_eq!(CommandId::CheckForUpdates.as_str(), "check-for-updates");
     assert_eq!(
@@ -27,7 +27,7 @@ fn 업데이트_확인_명령은_명령_목록에_있고_기본_단축키가_없
 
 #[test]
 #[ignore = "#475"]
-fn 기본_설정은_30초_뒤_하루마다_10초_제한이다() {
+fn default_options_are_30s_delay_daily_10s_timeout() {
     let dir = tempfile::TempDir::new().unwrap();
     let options = update::UpdateOptions::new(dir.path());
     assert_eq!(options.releases_url, update::RELEASES_URL);
@@ -51,7 +51,7 @@ fn 기본_설정은_30초_뒤_하루마다_10초_제한이다() {
 
 #[test]
 #[ignore = "#476"]
-fn 업데이트_확인_주기_설정이_정의돼_있다() {
+fn update_check_interval_setting_is_defined() {
     let definition = settings::definition("updates.check").expect("updates.check 정의");
     assert_eq!(definition.category, Category::General);
     assert_eq!(definition.kind, Kind::Choice(&["off", "daily", "weekly"]));
@@ -65,7 +65,7 @@ fn 업데이트_확인_주기_설정이_정의돼_있다() {
 
 #[test]
 #[ignore = "#476"]
-fn 설정_값을_주기로_바꾼다() {
+fn setting_values_map_to_intervals() {
     assert_eq!(interval_for("off"), None);
     assert_eq!(interval_for("daily"), Some(Duration::from_secs(24 * 3600)));
     assert_eq!(
@@ -258,7 +258,7 @@ mod with_server {
 
     #[test]
     #[ignore = "#475"]
-    fn 첫_확인은_첫_지연_뒤에_가고_새_버전을_알린다() {
+    fn first_check_waits_for_the_delay_and_announces_a_new_version() {
         let dir = TempDir::new().unwrap();
         let server = Server::start(Reply::Json(releases_json(&["v9.0.0", "v0.1.0"])));
         let mut app = app_at(dir.path());
@@ -299,7 +299,7 @@ mod with_server {
 
     #[test]
     #[ignore = "#475"]
-    fn 주기마다_다시_확인한다() {
+    fn checks_again_every_interval() {
         let dir = TempDir::new().unwrap();
         let server = Server::start(Reply::Json(releases_json(&["v0.1.0"])));
         let mut app = app_at(dir.path());
@@ -318,7 +318,7 @@ mod with_server {
 
     #[test]
     #[ignore = "#475"]
-    fn 주기를_끄면_저절로_확인하지_않고_명령은_바로_확인한다() {
+    fn no_interval_means_no_automatic_check_but_the_command_checks() {
         let dir = TempDir::new().unwrap();
         let server = Server::start(Reply::Json(releases_json(&["v2.0.0"])));
         let mut app = app_at(dir.path());
@@ -340,7 +340,7 @@ mod with_server {
 
     #[test]
     #[ignore = "#475"]
-    fn nightly_채널은_요청하지_않고_명령이_꺼진다() {
+    fn nightly_channel_sends_no_request_and_disables_the_command() {
         let dir = TempDir::new().unwrap();
         let server = Server::start(Reply::Json(releases_json(&["v9.0.0"])));
         let mut app = app_at(dir.path());
@@ -365,7 +365,7 @@ mod with_server {
 
     #[test]
     #[ignore = "#475"]
-    fn 서버가_답하지_않아도_기다리지_않고_시간_제한_뒤_결과만_남는다() {
+    fn silent_server_does_not_block_and_times_out() {
         let dir = TempDir::new().unwrap();
         let server = Server::start(Reply::Hang);
         let mut app = app_at(dir.path());
@@ -408,7 +408,7 @@ mod with_server {
 
     #[test]
     #[ignore = "#475"]
-    fn 서버_오류는_결과로만_남고_다음_주기에_다시_확인한다() {
+    fn server_error_is_only_a_result_and_is_retried_next_interval() {
         let dir = TempDir::new().unwrap();
         let server = Server::start(Reply::Status(500));
         let mut app = app_at(dir.path());
@@ -438,7 +438,7 @@ mod with_server {
 
     #[test]
     #[ignore = "#475"]
-    fn 건너뛴_버전은_다음_실행에도_알리지_않고_더_새_버전은_알린다() {
+    fn skipped_version_stays_skipped_next_run_but_newer_is_announced() {
         let dir = TempDir::new().unwrap();
         let state = dir.path().join("state");
         let server = Server::start(Reply::Json(releases_json(&["v9.0.0"])));
@@ -472,7 +472,7 @@ mod with_server {
 
     #[test]
     #[ignore = "#476"]
-    fn 주기를_켜면_곧바로_그_주기로_확인하고_끄면_멈춘다() {
+    fn setting_an_interval_starts_checking_and_clearing_it_stops() {
         let dir = TempDir::new().unwrap();
         let server = Server::start(Reply::Json(releases_json(&["v0.1.0"])));
         let mut app = app_at(dir.path());

@@ -7,9 +7,11 @@
 
 #![cfg(windows)]
 
+use std::io::Read;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use facet_core::build::{self, InstallKind};
@@ -22,29 +24,48 @@ fn facet_exe() -> &'static Path {
     Path::new(env!("CARGO_BIN_EXE_facet"))
 }
 
+/// `facet --version`을 띄워 끝나기를 `QUICK`까지 기다린다(창을 띄우고 끝나지 않으면 끝내고 실패). 종료 상태, 표준 출력,
+/// 걸린 시간.
+fn run_version() -> (ExitStatus, String, Duration) {
+    let started = Instant::now();
+    let mut child = Command::new(facet_exe())
+        .arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("facet --version 실행");
+    loop {
+        if let Some(status) = child.try_wait().expect("기다리기") {
+            let mut stdout = String::new();
+            if let Some(mut pipe) = child.stdout.take() {
+                let _ = pipe.read_to_string(&mut stdout);
+            }
+            return (status, stdout, started.elapsed());
+        }
+        if started.elapsed() > QUICK {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("--version이 {QUICK:?} 안에 끝나지 않았다(창을 띄웠나)");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[test]
 #[ignore = "#468"]
-fn 버전_인자는_버전_줄을_쓰고_곧바로_끝난다() {
-    let exe = facet_exe();
-    let exe_dir = exe.parent().expect("실행 파일 폴더");
+fn version_flag_prints_the_version_line_and_exits_at_once() {
+    let exe_dir = facet_exe().parent().expect("실행 파일 폴더");
     assert_eq!(
         build::install_kind(exe_dir),
         InstallKind::Portable,
         "빌드 폴더에는 설치 표지가 없다"
     );
 
-    let started = Instant::now();
-    let output = Command::new(exe)
-        .arg("--version")
-        .output()
-        .expect("facet --version 실행");
-    let took = started.elapsed();
+    let (status, stdout, took) = run_version();
 
-    assert!(output.status.success(), "종료 코드: {:?}", output.status);
-    let stdout = String::from_utf8(output.stdout).expect("UTF-8 출력");
-    let first = stdout.lines().next().expect("출력 한 줄");
+    assert!(status.success(), "종료 코드: {status:?}");
     assert_eq!(
-        first,
+        stdout.lines().next().unwrap_or(""),
         build::version_line(build::channel(), InstallKind::Portable)
     );
     assert!(took < QUICK, "--version이 {took:?} 걸렸다");
@@ -52,7 +73,7 @@ fn 버전_인자는_버전_줄을_쓰고_곧바로_끝난다() {
 
 #[test]
 #[ignore = "#468"]
-fn 버전_인자는_떠_있는_facet에_넘기지_않는다() {
+fn version_flag_does_not_forward_to_a_running_facet() {
     let name = InstanceName::facet();
     let mut owner = match single_instance::claim(&name).expect("주인 확인") {
         Claim::Owner(owner) => owner,
@@ -68,15 +89,9 @@ fn 버전_인자는_떠_있는_facet에_넘기지_않는다() {
         })
         .expect("수신기");
 
-    let output = Command::new(facet_exe())
-        .arg("--version")
-        .output()
-        .expect("facet --version 실행");
-    assert!(output.status.success(), "종료 코드: {:?}", output.status);
-    assert!(
-        String::from_utf8_lossy(&output.stdout).starts_with("facet "),
-        "버전 줄을 써야 한다"
-    );
+    let (status, stdout, _) = run_version();
+    assert!(status.success(), "종료 코드: {status:?}");
+    assert!(stdout.starts_with("facet "), "버전 줄을 써야 한다");
     assert!(
         receiver.recv_timeout(Duration::from_secs(1)).is_err(),
         "--version은 주인에게 인자를 넘기지 않는다"

@@ -110,6 +110,7 @@ fn name(command: CommandId) -> &'static str {
         CommandId::ExtractTo => "꺼내기 위치…",
         CommandId::NewZip => "새 zip으로 묶기",
         CommandId::AddToZip => "zip에 넣기…",
+        CommandId::CheckForUpdates => "업데이트 확인",
     }
 }
 

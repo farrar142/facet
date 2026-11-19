@@ -1,5 +1,5 @@
 // target: crates/facet-core/tests/spec_install_launch.rs
-// AC: #480: 탐색기식 인자(/select,·/e,·/root,·/n·내 PC 식별자·값이 다음 인자)를 해석하고 보통 경로는 그대로, 탐색기 넘기기 명령
+// AC: #480: 탐색기식 인자(/select,·/e,·/root,·/n·내 PC 식별자·값이 다음 인자)를 해석하고 보통 경로는 그대로(select 시험 끝), 탐색기 넘기기 명령
 //! 폴더 열기 가로채기로 facet이 받는 탐색기식 실행 인자(`resolve_launch`)와 시작 실패 때 탐색기에 넘기는 명령
 //! (`launch::explorer_fallback`)을 임시 폴더로 확인한다. `/`로 시작하는 인자가 스위치인 것은 Windows의 약속이라(다른
 //! 플랫폼에서는 절대 경로) Windows 전용이다.
@@ -42,7 +42,7 @@ fn one(dir: &Path, args: &[PathBuf]) -> LaunchTarget {
 
 #[test]
 #[ignore = "#480"]
-fn select는_그_폴더를_열고_그_항목을_고른다() {
+fn select_switch_opens_the_folder_and_selects_the_item() {
     let dir = tree();
     let file = sub(&dir).join("보고서.txt");
     let target = one(dir.path(), &[arg(format!("/select,{}", file.display()))]);
@@ -56,11 +56,19 @@ fn select는_그_폴더를_열고_그_항목을_고른다() {
     );
     assert_eq!(target.location, Location::file_system(dir.path()));
     assert_eq!(target.select, Some(OsString::from("폴더 하나")));
+
+    // 스위치가 없는 보통 경로 인자는 지금과 같다(폴더는 그 폴더, 파일은 그 폴더에서 그 파일).
+    let target = one(dir.path(), &[sub(&dir)]);
+    assert_eq!(target.location, Location::file_system(sub(&dir)));
+    assert_eq!(target.select, None);
+    let target = one(dir.path(), &[file]);
+    assert_eq!(target.location, Location::file_system(sub(&dir)));
+    assert_eq!(target.select, Some(OsString::from("보고서.txt")));
 }
 
 #[test]
 #[ignore = "#480"]
-fn 스위치의_값이_비면_다음_인자가_값이다() {
+fn empty_switch_value_takes_the_next_argument() {
     let dir = tree();
     let file = sub(&dir).join("보고서.txt");
     let target = one(dir.path(), &[arg("/select,".to_owned()), file]);
@@ -70,7 +78,7 @@ fn 스위치의_값이_비면_다음_인자가_값이다() {
 
 #[test]
 #[ignore = "#480"]
-fn e와_root는_그_폴더를_연다() {
+fn e_and_root_switches_open_the_folder() {
     let dir = tree();
     for switch in ["/e,", "/root,", "/n,/e,", "/E,"] {
         let target = one(
@@ -88,7 +96,7 @@ fn e와_root는_그_폴더를_연다() {
 
 #[test]
 #[ignore = "#480"]
-fn 경로_없는_스위치만이면_홈이다() {
+fn switches_without_a_path_open_home() {
     let dir = tree();
     for args in [vec!["/n"], vec!["/e"], vec!["/n", "/e"], vec!["/separate"]] {
         let args: Vec<PathBuf> = args.into_iter().map(PathBuf::from).collect();
@@ -100,7 +108,7 @@ fn 경로_없는_스위치만이면_홈이다() {
 
 #[test]
 #[ignore = "#480"]
-fn 내_PC_식별자는_내_PC다() {
+fn this_pc_identifier_opens_this_pc() {
     let dir = tree();
     for text in [
         "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}",
@@ -114,18 +122,7 @@ fn 내_PC_식별자는_내_PC다() {
 
 #[test]
 #[ignore = "#480"]
-fn 보통_경로_인자는_그대로다() {
-    let dir = tree();
-    let target = one(dir.path(), &[sub(&dir)]);
-    assert_eq!(target.location, Location::file_system(sub(&dir)));
-    let target = one(dir.path(), &[sub(&dir).join("보고서.txt")]);
-    assert_eq!(target.location, Location::file_system(sub(&dir)));
-    assert_eq!(target.select, Some(OsString::from("보고서.txt")));
-}
-
-#[test]
-#[ignore = "#480"]
-fn 탐색기_넘기기는_받은_인자_그대로다() {
+fn explorer_fallback_passes_the_arguments_unchanged() {
     let args = [
         OsString::from("/select,C:\\폴더 하나\\보고서.txt"),
         OsString::from("C:\\Windows"),

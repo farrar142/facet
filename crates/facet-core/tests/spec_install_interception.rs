@@ -144,7 +144,7 @@ fn interception_at(root: &TestRoot, backup: &Path) -> Interception {
 
 #[test]
 #[ignore = "#469"]
-fn 래퍼는_여러_형식의_값을_바이트_그대로_쓰고_읽는다() {
+fn wrapper_writes_and_reads_values_of_many_kinds_byte_for_byte() {
     let root = TestRoot::new();
     assert!(!root.exists("a"));
     assert_eq!(root.read("a", "x"), None, "없는 키의 값은 없음");
@@ -181,7 +181,7 @@ fn 래퍼는_여러_형식의_값을_바이트_그대로_쓰고_읽는다() {
 
 #[test]
 #[ignore = "#469"]
-fn 켜고_끄면_원래_값이_바이트까지_같고_없던_값과_키는_다시_없다() {
+fn enable_then_disable_restores_bytes_and_removes_new_values_and_keys() {
     let root = TestRoot::new();
     originals(&root);
     let dir = TempDir::new().unwrap();
@@ -202,7 +202,7 @@ fn 켜고_끄면_원래_값이_바이트까지_같고_없던_값과_키는_다�
 
 #[test]
 #[ignore = "#469"]
-fn 백업을_쓸_수_없으면_레지스트리를_바꾸지_않는다() {
+fn unwritable_backup_leaves_the_registry_unchanged() {
     let root = TestRoot::new();
     originals(&root);
     let dir = TempDir::new().unwrap();
@@ -222,7 +222,7 @@ fn 백업을_쓸_수_없으면_레지스트리를_바꾸지_않는다() {
 
 #[test]
 #[ignore = "#469"]
-fn 밖에서_바꾸면_풀림이고_다시_켜면_바뀐_값이_새_원래_값이다() {
+fn outside_change_is_lost_and_reenabling_backs_up_the_new_value() {
     let root = TestRoot::new();
     originals(&root);
     let dir = TempDir::new().unwrap();
@@ -250,7 +250,7 @@ fn 밖에서_바꾸면_풀림이고_다시_켜면_바뀐_값이_새_원래_값�
 
 #[test]
 #[ignore = "#469"]
-fn 백업이_없거나_깨졌으면_끄기가_아무것도_바꾸지_않는다() {
+fn disable_without_or_with_broken_backup_changes_nothing() {
     let root = TestRoot::new();
     originals(&root);
     let dir = TempDir::new().unwrap();
@@ -268,7 +268,7 @@ fn 백업이_없거나_깨졌으면_끄기가_아무것도_바꾸지_않는다()
 
 #[test]
 #[ignore = "#469"]
-fn 같은_백업을_다른_루트에서_되돌린다() {
+fn same_backup_restores_under_another_root() {
     let first = TestRoot::new();
     let second = TestRoot::new();
     originals(&first);
@@ -290,7 +290,7 @@ fn 같은_백업을_다른_루트에서_되돌린다() {
 
 #[test]
 #[ignore = "#469"]
-fn facet_값은_사용자_클래스_아래에서_facet_실행_파일을_가리킨다() {
+fn facet_values_live_under_user_classes_and_point_at_facet() {
     let exe = Path::new(r"C:\Program Files\facet\facet.exe");
     let backup = PathBuf::from(r"C:\Users\someone\AppData\Roaming\facet").join(BACKUP_FILE_NAME);
     let interception = Interception::for_facet(exe, &backup);
@@ -318,8 +318,10 @@ fn facet_값은_사용자_클래스_아래에서_facet_실행_파일을_가리�
             let units: Vec<u16> = change
                 .value
                 .data
-                .chunks_exact(2)
-                .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|b| u16::from_le_bytes(*b))
                 .collect();
             let text = String::from_utf16_lossy(&units);
             assert!(
@@ -333,7 +335,7 @@ fn facet_값은_사용자_클래스_아래에서_facet_실행_파일을_가리�
 
 #[test]
 #[ignore = "#479"]
-fn 프로필마다_되돌리고_백업_없음과_실패를_가른다() {
+fn profiles_are_restored_or_reported_no_backup_or_failed() {
     let broken_root = TestRoot::new();
     let enabled_root = TestRoot::new();
     let plain_root = TestRoot::new();

@@ -13,13 +13,7 @@ use tempfile::TempDir;
 
 #[test]
 #[ignore = "#468"]
-fn 버전_상수는_패키지_버전이다() {
-    assert_eq!(VERSION, env!("CARGO_PKG_VERSION"));
-}
-
-#[test]
-#[ignore = "#468"]
-fn 채널_환경_변수_없이_빌드하면_nightly다() {
+fn build_without_channel_variable_is_nightly() {
     match option_env!("FACET_CHANNEL") {
         Some("stable") => assert_eq!(build::channel(), Channel::Stable),
         _ => assert_eq!(build::channel(), Channel::Nightly),
@@ -30,7 +24,7 @@ fn 채널_환경_변수_없이_빌드하면_nightly다() {
 
 #[test]
 #[ignore = "#468"]
-fn 설치_표지가_있으면_설치한_것이고_없으면_portable이다() {
+fn install_marker_means_installed_otherwise_portable() {
     let dir = TempDir::new().unwrap();
     assert_eq!(install_kind(dir.path()), InstallKind::Portable);
 
@@ -55,7 +49,9 @@ fn 설치_표지가_있으면_설치한_것이고_없으면_portable이다() {
 
 #[test]
 #[ignore = "#468"]
-fn 버전_줄은_버전_채널_설치_종류다() {
+fn version_line_has_version_channel_and_install_kind() {
+    // 버전 상수는 패키지 버전이다.
+    assert_eq!(VERSION, env!("CARGO_PKG_VERSION"));
     assert_eq!(
         version_line(Channel::Stable, InstallKind::Installed),
         format!("facet {VERSION} (stable, installed)")

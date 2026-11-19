@@ -109,7 +109,7 @@ fn wait_interception(app: &mut App) {
 
 #[test]
 #[ignore = "#480"]
-fn 설정하기_전에는_설정_전_상태다() {
+fn state_is_not_configured_before_setting() {
     let dir = TempDir::new().unwrap();
     let mut app = app_at(dir.path());
     assert_eq!(app.interception_state(), InterceptionState::NotConfigured);
@@ -118,7 +118,7 @@ fn 설정하기_전에는_설정_전_상태다() {
 
 #[test]
 #[ignore = "#480"]
-fn portable은_켤_수_없고_레지스트리가_그대로다() {
+fn portable_cannot_enable_and_registry_stays() {
     let (_dir, root, mut app) = setup(InstallKind::Portable);
     assert_eq!(app.interception_state(), InterceptionState::Portable);
     assert_eq!(app.enable_interception(), Err(InterceptionError::Portable));
@@ -128,7 +128,7 @@ fn portable은_켤_수_없고_레지스트리가_그대로다() {
 
 #[test]
 #[ignore = "#480"]
-fn 켜고_끄면_상태와_값이_따라간다() {
+fn enable_and_disable_follow_state_and_values() {
     let (dir, root, mut app) = setup(InstallKind::Installed);
     assert_eq!(
         app.interception_state(),
@@ -154,7 +154,7 @@ fn 켜고_끄면_상태와_값이_따라간다() {
 
 #[test]
 #[ignore = "#480"]
-fn 밖에서_풀리면_확인이_풀림을_알리고_다시_켜면_새_원래_값을_남긴다() {
+fn check_reports_lost_and_reenabling_keeps_the_new_original() {
     let (_dir, root, mut app) = setup(InstallKind::Installed);
     app.enable_interception().unwrap();
 
@@ -179,7 +179,7 @@ fn 밖에서_풀리면_확인이_풀림을_알리고_다시_켜면_새_원래_�
 
 #[test]
 #[ignore = "#480"]
-fn 확인은_기다리지_않고_결과로_온다() {
+fn check_does_not_block_and_arrives_as_an_update() {
     let (_dir, _root, mut app) = setup(InstallKind::Installed);
     let started = Instant::now();
     app.check_interception();

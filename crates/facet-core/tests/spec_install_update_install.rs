@@ -285,7 +285,7 @@ fn leftovers(folder: &Path) -> Vec<PathBuf> {
 
 #[test]
 #[ignore = "#478"]
-fn 알릴_버전이_없으면_받지_않는다() {
+fn install_without_a_notice_downloads_nothing() {
     let dir = TempDir::new().unwrap();
     let mut app = app_at(dir.path());
     assert_eq!(app.install_update(), Err(InstallError::NoUpdate));
@@ -294,7 +294,7 @@ fn 알릴_버전이_없으면_받지_않는다() {
 
 #[test]
 #[ignore = "#478"]
-fn portable은_받지_않고_릴리스_페이지를_연다() {
+fn portable_opens_the_release_page_instead_of_downloading() {
     let dir = TempDir::new().unwrap();
     let server = Server::start();
     server.publish_release();
@@ -313,7 +313,7 @@ fn portable은_받지_않고_릴리스_페이지를_연다() {
 
 #[test]
 #[ignore = "#478"]
-fn 게시자_이름이_없는_빌드도_릴리스_페이지를_연다() {
+fn build_without_publisher_opens_the_release_page() {
     let dir = TempDir::new().unwrap();
     let server = Server::start();
     server.publish_release();
@@ -329,7 +329,7 @@ fn 게시자_이름이_없는_빌드도_릴리스_페이지를_연다() {
 
 #[test]
 #[ignore = "#478"]
-fn 끝나지_않은_작업이_있으면_받지_않는다() {
+fn unfinished_jobs_block_the_download() {
     let dir = TempDir::new().unwrap();
     let src = dir.path().join("src");
     let dst = dir.path().join("dst");
@@ -364,7 +364,7 @@ fn 끝나지_않은_작업이_있으면_받지_않는다() {
 
 #[test]
 #[ignore = "#478"]
-fn 체크섬이_맞지_않으면_설치하지_않고_받은_파일을_남기지_않는다() {
+fn checksum_mismatch_is_refused_and_leaves_no_files() {
     let dir = TempDir::new().unwrap();
     let server = Server::start();
     server.publish_release();
@@ -387,7 +387,7 @@ fn 체크섬이_맞지_않으면_설치하지_않고_받은_파일을_남기지_
 
 #[test]
 #[ignore = "#478"]
-fn 서명_없는_설치_파일은_설치하지_않고_남기지_않는다() {
+fn unsigned_installer_is_refused_and_leaves_no_files() {
     let dir = TempDir::new().unwrap();
     let payload = unsigned_pe(dir.path());
     let server = Server::start();
@@ -410,7 +410,7 @@ fn 서명_없는_설치_파일은_설치하지_않고_남기지_않는다() {
 
 #[test]
 #[ignore = "#478"]
-fn 설치_파일이_없으면_받기_실패다() {
+fn missing_installer_is_a_download_failure() {
     let dir = TempDir::new().unwrap();
     let server = Server::start();
     server.publish_release(); // MSI 경로는 404
@@ -428,7 +428,7 @@ fn 설치_파일이_없으면_받기_실패다() {
 
 #[test]
 #[ignore = "#478"]
-fn 받는_중에는_다시_받지_않고_시간_제한이면_받기_실패다() {
+fn busy_while_downloading_and_timeout_is_a_download_failure() {
     let dir = TempDir::new().unwrap();
     let server = Server::start();
     server.publish_release();
@@ -453,7 +453,7 @@ fn 받는_중에는_다시_받지_않고_시간_제한이면_받기_실패다() 
 
 #[test]
 #[ignore = "#478"]
-fn 신뢰하는_서명과_같은_게시자면_확인된_설치_파일_경로가_온다() {
+fn trusted_signature_and_same_publisher_give_the_verified_path() {
     let subject = format!("facet test update {}", std::process::id());
     let Some(cert) = TestCert::create(&subject) else {
         eprintln!("테스트 인증서를 신뢰 루트에 넣지 못해(관리자 아님?) 건너뛴다");
@@ -484,7 +484,7 @@ fn 신뢰하는_서명과_같은_게시자면_확인된_설치_파일_경로가_
 
 #[test]
 #[ignore = "#478"]
-fn 설치_명령은_msiexec에_다시_띄우기_속성을_준다() {
+fn installer_command_runs_msiexec_with_relaunch() {
     let msi = Path::new(r"C:\temp\facet-v9.0.0-windows-x64.msi");
     let command = installer_command(msi);
     let program = Path::new(command.get_program());

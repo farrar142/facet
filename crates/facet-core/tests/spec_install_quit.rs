@@ -23,7 +23,7 @@ fn app_at(path: &Path) -> App {
 
 #[test]
 #[ignore = "#472"]
-fn 작업이_없으면_창을_모두_닫고_끝난다() {
+fn quit_without_jobs_closes_all_windows_and_finishes() {
     let dir = TempDir::new().unwrap();
     let mut app = app_at(dir.path());
     app.open_window(Location::file_system(dir.path()));
@@ -95,7 +95,7 @@ mod with_jobs {
 
     #[test]
     #[ignore = "#472"]
-    fn 끝나지_않은_작업이_있으면_거절하고_아무것도_바꾸지_않는다() {
+    fn quit_with_unfinished_jobs_is_refused_and_changes_nothing() {
         let dir = conflicting_tree();
         let (mut app, job) = app_with_waiting_job(dir.path());
         let session = app.session();
@@ -114,7 +114,7 @@ mod with_jobs {
 
     #[test]
     #[ignore = "#472"]
-    fn 작업_수는_끝나지_않은_작업_수다() {
+    fn busy_counts_unfinished_jobs() {
         let dir = conflicting_tree();
         let (mut app, _first) = app_with_waiting_job(dir.path());
         // 같은 충돌을 하나 더 넣는다.
@@ -130,7 +130,7 @@ mod with_jobs {
 
     #[test]
     #[ignore = "#472"]
-    fn 작업_취소를_함께_청하면_작업을_취소하고_끝난다() {
+    fn quit_with_cancel_cancels_jobs_and_finishes() {
         let dir = conflicting_tree();
         let (mut app, job) = app_with_waiting_job(dir.path());
 

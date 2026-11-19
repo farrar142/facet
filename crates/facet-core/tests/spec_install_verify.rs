@@ -35,7 +35,7 @@ fn assert_removed(file: &Path, checksum: &Path) {
 
 #[test]
 #[ignore = "#474"]
-fn 체크섬이_다르면_거절하고_두_파일을_지운다() {
+fn checksum_mismatch_is_refused_and_both_files_removed() {
     let dir = TempDir::new().unwrap();
     let wrong = format!("{}  facet.msi\n", "0".repeat(64));
     let (file, checksum) = downloaded(dir.path(), "facet.msi", b"not the real msi", &wrong);
@@ -49,7 +49,7 @@ fn 체크섬이_다르면_거절하고_두_파일을_지운다() {
 
 #[test]
 #[ignore = "#474"]
-fn 체크섬_파일을_읽을_수_없으면_거절하고_두_파일을_지운다() {
+fn unreadable_checksum_is_refused_and_both_files_removed() {
     let dir = TempDir::new().unwrap();
     let (file, checksum) = downloaded(dir.path(), "facet.msi", b"msi", "이건 해시가 아님\n");
     assert_eq!(
@@ -71,7 +71,7 @@ fn 체크섬_파일을_읽을_수_없으면_거절하고_두_파일을_지운다
 
 #[test]
 #[ignore = "#474"]
-fn 게시자_이름은_빌드_때_넣은_값이다() {
+fn publisher_is_the_build_time_value() {
     let expected = option_env!("FACET_PUBLISHER").filter(|name| !name.is_empty());
     assert_eq!(update::publisher(), expected);
 }
@@ -188,7 +188,7 @@ mod signed {
 
     #[test]
     #[ignore = "#474"]
-    fn 서명_없는_파일은_체크섬이_맞아도_거절하고_지운다() {
+    fn unsigned_file_is_refused_even_with_matching_checksum() {
         let dir = TempDir::new().unwrap();
         let file = unsigned_pe(dir.path(), "facet-unsigned.exe");
         assert_eq!(authenticode::signer(&file), Err(SignatureError::NotSigned));
@@ -204,7 +204,7 @@ mod signed {
 
     #[test]
     #[ignore = "#474"]
-    fn 신뢰하는_서명과_같은_게시자는_통과하고_다른_게시자는_거절한다() {
+    fn trusted_signature_passes_for_same_publisher_and_fails_for_another() {
         let subject = format!("facet test publisher {}", std::process::id());
         let Some(cert) = test_cert(&subject) else {
             return;
@@ -232,7 +232,7 @@ mod signed {
 
     #[test]
     #[ignore = "#474"]
-    fn 서명한_뒤_바뀐_파일은_거절하고_지운다() {
+    fn file_changed_after_signing_is_refused_and_removed() {
         let subject = format!("facet test tamper {}", std::process::id());
         let Some(cert) = test_cert(&subject) else {
             return;
