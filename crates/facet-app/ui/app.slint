@@ -33,6 +33,9 @@ export struct Row {
     deleted: string,
     // zip 안 파일의 압축된 크기 글자(폴더·zip 위치가 아니면 비어 있다).
     compressed: string,
+    // #451: 동기화 상태 배지의 글자(상태 이름, 배지가 없으면 비어 있다)와 이름 옆 배지 기호.
+    sync: string,
+    sync-glyph: string,
     // 선택한 항목인가.
     selected: bool,
     // 커서 항목인가(키보드가 가리키는 항목. 선택과 다르다).
@@ -141,6 +144,8 @@ export struct PanelData {
     content-results: bool,
     // 내 PC인가: 수정한 날짜·크기 열 대신 「전체 크기」「남은 공간」 열을 보이고 이름 열에 사용량 막대를 그린다.
     this-pc: bool,
+    // #451: 동기화 폴더(「상태」 열이 보인다).
+    sync-folder: bool,
     // 휴지통인가(「원래 위치」·「지운 날짜」 열을 보이고 「수정한 날짜」 열을 감춘다).
     recycle-bin: bool,
     // zip 위치인가(「압축된 크기」 열을 보인다), 같은 이름·손상 상태 글자(비면 줄 없음).
@@ -1420,6 +1425,7 @@ component PanelView inherits Rectangle {
     in-out property <length> original-location-width;
     in-out property <length> deleted-width;
     in-out property <length> compressed-width;
+    in-out property <length> sync-width;
     // 열 너비의 합(있으면 위치·일치·원래 위치·지운 날짜 열 포함, 휴지통은 수정한 날짜 열 없음,
     // 내 PC면 수정한 날짜·크기 대신 전체 크기·남은 공간): 자세히 보기 내용의 폭.
     // 목록보다 넓으면 가로 스크롤 막대가 생긴다.
@@ -1428,7 +1434,8 @@ component PanelView inherits Rectangle {
             : (root.data.recycle-bin ? 0px : root.modified-width) + root.size-width)
         + (root.data.results ? root.location-width : 0px) + (root.data.content-results ? root.matches-width : 0px)
         + (root.data.recycle-bin ? root.original-location-width + root.deleted-width : 0px)
-        + (root.data.zip ? root.compressed-width : 0px);
+        + (root.data.zip ? root.compressed-width : 0px)
+        + (root.data.sync-folder ? root.sync-width : 0px);
     in-out property <length> content-y <=> list.content-y;
     // 가로로 넘긴 거리(0 이하, ListView의 `content-x`). 사각형 선택이 목록 내용 기준 자리를 셈한다.
     out property <length> content-x: list.content-x;
@@ -2091,6 +2098,17 @@ component PanelView inherits Rectangle {
                         root.focus-list();
                     }
                 }
+                if root.data.sync-folder: Header {
+                    text: @tr("상태");
+                    column-width <=> root.sync-width;
+                    sorted: root.data.sort-column == 11;
+                    descending: root.data.sort-descending;
+                    sort => {
+                        root.activate();
+                        root.sort-by(11);
+                        root.focus-list();
+                    }
+                }
                 Rectangle { }
             }
         }
@@ -2540,6 +2558,26 @@ component PanelView inherits Rectangle {
                                     opacity: row.cut ? 0.45 : 1.0;
                                 }
                             }
+                            // #451: 이름 옆 동기화 상태 배지. 마우스를 올리면 상태 이름이 글로 보인다.
+                            if row.sync != "" && i != root.editing: Rectangle {
+                                width: badge-text.preferred-width + (badge-touch.has-hover ? 110px : 0px);
+                                badge-touch := TouchArea {
+                                    mouse-cursor: default;
+                                }
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    badge-text := Text {
+                                        text: row.sync-glyph;
+                                        vertical-alignment: center;
+                                        color: row.selected ? Palette.selection-foreground : Palette.accent-background;
+                                    }
+                                    if badge-touch.has-hover: Text {
+                                        text: row.sync;
+                                        vertical-alignment: center;
+                                        color: row.selected ? Palette.selection-foreground : Palette.foreground;
+                                    }
+                                }
+                            }
                             if i != root.editing: Text {
                                 opacity: row.cut ? 0.45 : 1.0;
                                 text: row.name;
@@ -2691,6 +2729,16 @@ component PanelView inherits Rectangle {
                                 text: row.compressed;
                                 overflow: elide;
                                 horizontal-alignment: right;
+                                vertical-alignment: center;
+                                color: row.selected ? Palette.selection-foreground : Palette.foreground;
+                            }
+                        }
+                        if root.data.sync-folder: HorizontalLayout {
+                            width: root.sync-width;
+                            padding-right: 8px;
+                            Text {
+                                text: row.sync;
+                                overflow: elide;
                                 vertical-alignment: center;
                                 color: row.selected ? Palette.selection-foreground : Palette.foreground;
                             }
@@ -3397,6 +3445,7 @@ export component AppWindow inherits Window {
     in-out property <length> original-location-width: 240px;
     in-out property <length> deleted-width: 140px;
     in-out property <length> compressed-width: 110px;
+    in-out property <length> sync-width: 130px;
 
     // 미리보기 영역(#340): 켜짐, 폭, 내용(코어 `App::preview`를 Rust가 옮긴 값).
     in property <bool> preview-visible;
@@ -3785,6 +3834,7 @@ export component AppWindow inherits Window {
             original-location-width <=> root.original-location-width;
             deleted-width <=> root.deleted-width;
             compressed-width <=> root.compressed-width;
+            sync-width <=> root.sync-width;
             activate => {
                 root.panel-pressed(0);
             }
@@ -3982,6 +4032,7 @@ export component AppWindow inherits Window {
             original-location-width <=> root.original-location-width;
             deleted-width <=> root.deleted-width;
             compressed-width <=> root.compressed-width;
+            sync-width <=> root.sync-width;
             activate => {
                 root.panel-pressed(1);
             }
