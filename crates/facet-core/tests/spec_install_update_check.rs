@@ -33,7 +33,7 @@ fn default_options_are_30s_delay_daily_10s_timeout() {
     assert_eq!(options.releases_url, update::RELEASES_URL);
     assert_eq!(
         update::RELEASES_URL,
-        "https://api.github.com/repos/farrar142/facet/releases"
+        "https://api.github.com/repos/sandcorporation/facet/releases"
     );
     assert_eq!(options.first_delay, Duration::from_secs(30));
     assert_eq!(options.first_delay, update::FIRST_CHECK_DELAY);
@@ -134,7 +134,7 @@ mod with_server {
         }
 
         fn url(&self) -> String {
-            format!("http://{}/repos/farrar142/facet/releases", self.addr)
+            format!("http://{}/repos/sandcorporation/facet/releases", self.addr)
         }
 
         fn set(&self, reply: Reply) {
@@ -184,7 +184,7 @@ mod with_server {
             .iter()
             .map(|tag| {
                 format!(
-                    r#"{{"tag_name":"{tag}","html_url":"https://github.com/farrar142/facet/releases/tag/{tag}","draft":false,"prerelease":false,"assets":[]}}"#
+                    r#"{{"tag_name":"{tag}","html_url":"https://github.com/sandcorporation/facet/releases/tag/{tag}","draft":false,"prerelease":false,"assets":[]}}"#
                 )
             })
             .collect();
@@ -282,7 +282,7 @@ mod with_server {
         assert!(started.elapsed() >= Duration::from_millis(550));
         let head = requests[0].to_ascii_lowercase();
         assert!(
-            head.starts_with("get /repos/farrar142/facet/releases"),
+            head.starts_with("get /repos/sandcorporation/facet/releases"),
             "GET 하나: {head}"
         );
         assert!(head.contains("\r\nuser-agent:"), "User-Agent가 있다");

@@ -4,7 +4,7 @@
 
 ### Issue tracker
 
-Issues live in GitHub Issues for `farrar142/facet` (via the `gh` CLI). See `docs/agents/issue-tracker.md`.
+Issues live in GitHub Issues for `sandcorporation/facet` (via the `gh` CLI). See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

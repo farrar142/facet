@@ -17,7 +17,7 @@ const RELEASES: &str = r#"[
   {
     "tag_name": "nightly",
     "name": "Nightly",
-    "html_url": "https://github.com/farrar142/facet/releases/tag/nightly",
+    "html_url": "https://github.com/sandcorporation/facet/releases/tag/nightly",
     "draft": false,
     "prerelease": true,
     "assets": [
@@ -27,7 +27,7 @@ const RELEASES: &str = r#"[
   {
     "tag_name": "v1.3.0",
     "name": "v1.3.0",
-    "html_url": "https://github.com/farrar142/facet/releases/tag/v1.3.0",
+    "html_url": "https://github.com/sandcorporation/facet/releases/tag/v1.3.0",
     "draft": true,
     "prerelease": false,
     "assets": []
@@ -35,7 +35,7 @@ const RELEASES: &str = r#"[
   {
     "tag_name": "v1.2.0-rc.1",
     "name": "v1.2.0-rc.1",
-    "html_url": "https://github.com/farrar142/facet/releases/tag/v1.2.0-rc.1",
+    "html_url": "https://github.com/sandcorporation/facet/releases/tag/v1.2.0-rc.1",
     "draft": false,
     "prerelease": true,
     "assets": []
@@ -43,7 +43,7 @@ const RELEASES: &str = r#"[
   {
     "tag_name": "v1.1.0",
     "name": "v1.1.0",
-    "html_url": "https://github.com/farrar142/facet/releases/tag/v1.1.0",
+    "html_url": "https://github.com/sandcorporation/facet/releases/tag/v1.1.0",
     "draft": false,
     "prerelease": false,
     "body": "바뀐 점",
@@ -57,7 +57,7 @@ const RELEASES: &str = r#"[
   {
     "tag_name": "v1.0.0",
     "name": "v1.0.0",
-    "html_url": "https://github.com/farrar142/facet/releases/tag/v1.0.0",
+    "html_url": "https://github.com/sandcorporation/facet/releases/tag/v1.0.0",
     "draft": false,
     "prerelease": false,
     "assets": []
@@ -98,7 +98,7 @@ fn release_list_drops_drafts_and_non_version_tags_and_keeps_urls() {
     assert!(!stable.prerelease);
     assert_eq!(
         stable.page_url,
-        "https://github.com/farrar142/facet/releases/tag/v1.1.0"
+        "https://github.com/sandcorporation/facet/releases/tag/v1.1.0"
     );
     assert_eq!(
         stable.msi_url.as_deref(),

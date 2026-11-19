@@ -88,7 +88,7 @@ pub fn publisher() -> Option<&'static str> {
 }
 
 /// #475: 릴리스 목록 주소.
-pub const RELEASES_URL: &str = "https://api.github.com/repos/farrar142/facet/releases";
+pub const RELEASES_URL: &str = "https://api.github.com/repos/sandcorporation/facet/releases";
 /// #475: 첫 확인까지 기다리는 시간.
 pub const FIRST_CHECK_DELAY: Duration = Duration::ZERO; // #475
 /// #475: 기본 확인 주기.
