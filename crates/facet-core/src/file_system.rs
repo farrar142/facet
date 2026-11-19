@@ -126,7 +126,8 @@ impl Provider for FileSystemProvider {
     ///
     /// 앞뒤 공백과 감싼 큰따옴표를 걷고 `%NAME%`을 환경 변수 값으로 펼친다. 끝 구분자는 있어도 없어도
     /// 같다. 전체 경로여야 한다. 폴더면 그 폴더로, 파일이면 파일을 열지 않고 그 폴더로 가서 파일을 고르게 한다.
-    /// 가상 폴더의 이름(`내 PC`·`shell:MyComputerFolder`)이면 그 위치다.
+    /// 가상 폴더의 이름(`내 PC`·`shell:MyComputerFolder`)이면 그 위치다. zip 파일 자신이면 zip 루트, zip 안 경로면 그
+    /// zip 위치다(zip 안 파일이면 그 폴더에서 그 파일을 고른다, [`crate::zip_provider`]).
     fn resolve(&self, text: &str) -> Result<Resolved, ResolveError> {
         if let Some(location) = crate::shell_provider::resolve_alias(text) {
             return Ok(Resolved {
@@ -134,7 +135,12 @@ impl Provider for FileSystemProvider {
                 select: None,
             });
         }
-        resolve_path(parse_address(text)?)
+        let path = parse_address(text)?;
+        // zip 파일 자신이나 zip 안 경로면 zip 위치다.
+        if let Some(resolved) = crate::zip_provider::resolve_in_zip(&path) {
+            return resolved;
+        }
+        resolve_path(path)
     }
 
     /// 마지막 구분자 앞까지를 폴더로 보고, 그 하위 폴더 중 뒤쪽 글자로 시작하는 이름을 이름순으로 낸다.
@@ -150,7 +156,7 @@ impl Provider for FileSystemProvider {
         };
         let prefix: Vec<char> = typed.chars().flat_map(char::to_lowercase).collect();
         let Ok(entries) = fs::read_dir(&dir) else {
-            return Vec::new();
+            return crate::zip_provider::complete_in_zip(&dir, typed);
         };
         let mut found: Vec<Candidate> = entries
             .filter_map(Result::ok)

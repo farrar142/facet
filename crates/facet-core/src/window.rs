@@ -544,6 +544,12 @@ pub enum Update {
     Settings,
     /// #454: 셸 동기화 상태([`App::request_sync_states`])가 그 탭의 배지에 들어왔다.
     SyncStates,
+    /// #475: 업데이트 확인이 하나 끝났다([`App::update_check`]).
+    UpdateChecked,
+    /// #478: 설치 파일 받기·확인이 끝났다([`App::update_install`]).
+    UpdateInstall,
+    /// #480: 가로채기 확인이 끝났다([`App::interception_state`]).
+    Interception,
 }
 
 /// #330: 썸네일 켜기 설정.
@@ -895,7 +901,7 @@ pub enum Execution {
     NotAllowedHere,
     /// #354: 휴지통 비우기 전에 화면이 확인을 받는다.
     ConfirmEmptyRecycleBin,
-    /// #423: zip 안의 zip은 열 수 없다(위치는 그대로).
+    /// zip 안의 zip은 열 수 없다(위치는 그대로, 먼저 꺼내야 한다).
     NestedZip,
     /// #427: 「꺼내기 위치…」 대상 선택 창을 연다.
     ChooseExtractTarget,
@@ -3700,6 +3706,7 @@ impl App {
             }
             CommandId::NewZip => todo!("#429"),
             CommandId::AddToZip => todo!("#430"),
+            CommandId::CheckForUpdates => todo!("#475"),
             CommandId::About => todo!("#459"),
             CommandId::OpenSettings | CommandId::OpenSettingsFile => todo!("#462"),
             CommandId::TogglePreview => {
@@ -3953,6 +3960,33 @@ impl App {
         }
     }
 
+    /// zip과 관련된 열기: zip 안의 zip은 열지 않고 [`Execution::NestedZip`](위치 그대로), zip 안 파일은 아직 열 수 없어
+    /// 까닭을 남기고, 실제 zip 파일([`crate::zip_provider::is_zip_file`])은 그 zip 위치로 간다. 그 밖이면 `None`이다.
+    /// 사용자가 항목 하나를 열 때만이라 zip 시그니처(4바이트)를 UI 스레드에서 한 번 읽는다.
+    fn open_zip_item(&mut self, is_folder: bool, path: Option<&Path>) -> Option<Execution> {
+        if is_folder {
+            return None;
+        }
+        let path = path?;
+        if self.active_tab().location().zip_location().is_some() {
+            let nested = path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"));
+            if nested {
+                return Some(Execution::NestedZip);
+            }
+            // zip 안 파일은 실제 파일이 아니라 아직 열 수 없다(꺼내 여는 것은 따로 한다).
+            self.active_tab_mut()
+                .set_open_error(Some(OpenError::Unsupported));
+            return Some(Execution::Done);
+        }
+        if crate::zip_provider::is_zip_file(path) {
+            self.navigate(Navigation::Go(Location::zip(path, "")));
+            return Some(Execution::Done);
+        }
+        None
+    }
+
     fn open_cursor_item(&mut self) -> Execution {
         if self
             .active_tab()
@@ -3967,6 +4001,13 @@ impl App {
             return Execution::Disabled;
         };
         let path = tab.cursor_path();
+        if let Some(execution) = self.open_zip_item(item.is_folder, path.as_deref()) {
+            return execution;
+        }
+        let tab = self.active_tab();
+        let Some(item) = tab.cursor_item() else {
+            return Execution::Disabled;
+        };
         if item.is_folder {
             // 검색 결과 항목은 제 폴더 안에 있으므로 전체 경로로 간다. 가상 폴더의 항목은 실제 경로가 있으면(드라이브)
             // 파일 시스템 공급자의 그 위치로, 없으면 그 항목의 가상 폴더로 간다.
@@ -4348,8 +4389,10 @@ impl App {
         if !capabilities.copy_from && !capabilities.move_items {
             return None;
         }
-        // 휴대폰 항목은 실제 파일 경로가 없어 다른 앱으로 끌어 줄 수 없다(반대편 패널로 복사·이동으로 옮긴다).
-        if crate::shell_provider::is_device_folder(self.active_tab().location()) {
+        // 휴대폰 항목·zip 안 항목은 실제 파일 경로가 없어 다른 앱으로 끌어 줄 수 없다.
+        if crate::shell_provider::is_device_folder(self.active_tab().location())
+            || self.active_tab().location().zip_location().is_some()
+        {
             return None;
         }
         self.selected_sources()
@@ -5231,4 +5274,94 @@ fn filetime_of(time: std::time::SystemTime) -> Option<u64> {
 struct OpenShellMenu {
     menu: crate::shell_helper::ShellMenu,
     request: Option<crate::shell_helper::RequestId>,
+}
+
+/// #472: 설치 프로그램의 끝내기 요청에 대한 답.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuitReply {
+    Quitting,
+    Busy { jobs: usize },
+}
+
+/// #480: 앱의 폴더 열기 가로채기 상태.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterceptionState {
+    NotConfigured,
+    Portable,
+    Status(crate::interception::InterceptionStatus),
+}
+
+impl App {
+    /// #472: 끝내기 요청(작업이 있으면 거절, `cancel_jobs`면 취소하고 끝냄).
+    pub fn request_quit(&mut self, _cancel_jobs: bool) -> QuitReply {
+        todo!("#472")
+    }
+
+    /// #475: 업데이트 확인을 켠다.
+    pub fn enable_updates(&mut self, _options: crate::update::UpdateOptions) {
+        todo!("#475")
+    }
+
+    /// #475: 마지막으로 끝난 확인.
+    pub fn update_check(
+        &self,
+    ) -> Option<&Result<crate::update::UpdateDecision, crate::update::UpdateCheckError>> {
+        todo!("#475")
+    }
+
+    /// #475: 알릴 새 버전.
+    pub fn update_notice(&self) -> Option<&crate::update::Release> {
+        todo!("#475")
+    }
+
+    /// #475: 알리던 버전을 건너뛴다.
+    pub fn skip_update(&mut self) -> bool {
+        todo!("#475")
+    }
+
+    /// #476: 확인 주기를 바꾼다.
+    pub fn set_update_interval(&mut self, _interval: Option<Duration>) {
+        todo!("#476")
+    }
+
+    /// #478: 새 버전 설치를 시작한다.
+    pub fn install_update(
+        &mut self,
+    ) -> Result<crate::update::InstallStart, crate::update::InstallError> {
+        todo!("#478")
+    }
+
+    /// #478: 마지막 받기·확인 결과.
+    pub fn update_install(&self) -> Option<&Result<PathBuf, crate::update::InstallFailure>> {
+        todo!("#478")
+    }
+
+    /// #480: 가로채기와 설치 종류를 정한다.
+    pub fn set_interception(
+        &mut self,
+        _interception: crate::interception::Interception,
+        _kind: crate::build::InstallKind,
+    ) {
+        todo!("#480")
+    }
+
+    /// #480: 가로채기 상태.
+    pub fn interception_state(&self) -> InterceptionState {
+        todo!("#480")
+    }
+
+    /// #480: 가로채기를 켠다.
+    pub fn enable_interception(&mut self) -> Result<(), crate::interception::InterceptionError> {
+        todo!("#480")
+    }
+
+    /// #480: 가로채기를 끈다.
+    pub fn disable_interception(&mut self) -> Result<(), crate::interception::InterceptionError> {
+        todo!("#480")
+    }
+
+    /// #480: 작업 스레드에서 가로채기 상태를 확인한다.
+    pub fn check_interception(&mut self) {
+        todo!("#480")
+    }
 }

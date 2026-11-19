@@ -489,6 +489,9 @@ enum LocationV1 {
     /// 가상 폴더(내 PC 등): 종류와 셸 항목 식별자(PIDL) 바이트의 16진 글자. 형식 버전을 올리지 않고 더한 변형이라 앞선
     /// 파일도 그대로 읽힌다.
     Shell { folder: FolderV1, id: String },
+    /// zip 위치: zip 파일의 실제 경로와 zip 안 경로(`\` 구분, 루트는 ""). 형식 버전을 올리지 않고 더한 변형이라 앞선
+    /// 파일도 그대로 읽힌다.
+    Zip { archive: String, inner: String },
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
@@ -516,6 +519,8 @@ enum ColumnV1 {
     OriginalLocation,
     /// 휴지통의 지운 날짜(위와 같다).
     DateDeleted,
+    /// zip 위치의 압축된 크기(위와 같다).
+    CompressedSize,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -632,7 +637,10 @@ impl TabV1 {
                     .map(|byte| format!("{byte:02x}"))
                     .collect(),
             },
-            Location::Zip(_) => todo!("#423"),
+            Location::Zip(zip) => LocationV1::Zip {
+                archive: zip.archive().to_string_lossy().into_owned(),
+                inner: zip.inner().to_string(),
+            },
         };
         TabV1 {
             location,
@@ -663,7 +671,7 @@ impl TabV1 {
                     Column::SyncState => ColumnV1::Name,
                     Column::OriginalLocation => ColumnV1::OriginalLocation,
                     Column::DateDeleted => ColumnV1::DateDeleted,
-                    Column::CompressedSize => todo!("#423"),
+                    Column::CompressedSize => ColumnV1::CompressedSize,
                 },
                 direction: match tab.sort.direction {
                     Direction::Ascending => DirectionV1::Ascending,
@@ -688,6 +696,7 @@ impl TabV1 {
                     None => crate::window::home_location(),
                 }
             }
+            LocationV1::Zip { archive, inner } => Location::zip(archive, inner),
         };
         TabSession {
             location,
@@ -698,6 +707,7 @@ impl TabV1 {
                     ColumnV1::Type => Column::Type,
                     ColumnV1::Size => Column::Size,
                     ColumnV1::OriginalLocation => Column::OriginalLocation,
+                    ColumnV1::CompressedSize => Column::CompressedSize,
                     ColumnV1::DateDeleted => Column::DateDeleted,
                 },
                 direction: match self.sort.direction {
