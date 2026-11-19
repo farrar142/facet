@@ -1375,6 +1375,7 @@ fn job_row(entry: &JobEntry) -> JobRow {
             JobKind::Delete => JobType::Delete,
             JobKind::BatchRename => JobType::BatchRename,
             JobKind::Restore => JobType::Restore,
+            JobKind::NewZip => todo!("#429"),
         },
         target: shell_provider::display_path(&entry.target).into(),
         status: match entry.state {
@@ -1456,6 +1457,8 @@ fn transfer_problem(rejection: &CopyRejection, plan: &TransferPlan) -> (Transfer
             source.display().to_string(),
         ),
         CopyRejection::Unsupported => (TransferProblem::Unsupported, String::new()),
+        CopyRejection::NotEnoughSpace { .. } => todo!("#426"),
+        CopyRejection::EncryptedArchive => todo!("#430"),
     }
 }
 
@@ -2362,6 +2365,7 @@ impl View {
                     Column::DateDeleted => 7,
                     Column::TotalSize => 8,
                     Column::FreeSpace => 9,
+                    Column::CompressedSize => todo!("#423"),
                 },
                 sort_descending: sort.direction == Direction::Descending,
                 item_count: count(status.item_count),
@@ -2771,6 +2775,9 @@ impl View {
             Execution::ItemMissing => self.show_missing_item(),
             Execution::NotAllowedHere => self.ui.set_notice(text::NOT_ALLOWED_HERE.into()),
             Execution::ConfirmEmptyRecycleBin => self.open_empty_recycle_bin(),
+            Execution::NestedZip => todo!("#423"),
+            Execution::ChooseExtractTarget => todo!("#427"),
+            Execution::ChooseZipTarget => todo!("#430"),
             Execution::UndoRefused(_) | Execution::Disabled | Execution::WindowClosed => {}
         }
     }
@@ -5519,6 +5526,7 @@ fn list_problem(error: &ListError) -> (Problem, String, String) {
         ListError::NotResponding { .. } => (Problem::NotResponding, location, String::new()),
         ListError::Disconnected { .. } => (Problem::Disconnected, location, String::new()),
         ListError::DeviceNotReady { .. } => (Problem::DeviceNotReady, location, String::new()),
+        ListError::BrokenArchive { .. } => todo!("#423"),
     }
 }
 

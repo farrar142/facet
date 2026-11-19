@@ -1,5 +1,5 @@
 // target: crates/facet-core/tests/spec_zip_add.rs
-// AC: #430: zip(안 폴더)을 대상으로 한 복사가 넣기(옛 항목 그대로·새 항목), 이름 충돌과 폴더 합치기, 실패·취소에 원래 zip 그대로·임시 파일 없음, 원래 zip은 휴지통, 암호 zip·이동 거부, 반대편 패널로 복사가 넣기·이동은 꺼짐, 작업 기록과 실행취소, 「zip에 넣기…」
+// AC: #430: zip(안 폴더)을 대상으로 한 복사가 넣기(옛 항목 그대로·새 항목), 이름 충돌과 폴더 합치기, 실패·취소에 원래 zip 그대로·임시 파일 없음, 원래 zip은 휴지통, 암호 zip·이동 거부, 반대편 패널로 복사가 넣기·이동은 꺼짐, 작업 기록과 실행취소, 「zip에 넣기…」, zip 위치에 끌어 놓기는 늘 넣기(복사)
 //! 기존 zip에 넣기를 임시 폴더의 실제 파일로 확인한다. 명령 목록·id·팔레트는 모든 플랫폼에서, 작업 대기열의 넣기
 //! 작업(대상이 zip 파일 경로나 zip 항목 경로인 `JobQueue::copy`)과 앱의 반대편 패널로 복사·「zip에 넣기…」·작업
 //! 기록·실행취소는 Windows에서만 돈다(작업과 휴지통이 Windows 전용). 결과 zip은 facet의 리더로 다시 읽고, 원래
@@ -29,6 +29,83 @@ fn add_to_zip_is_a_palette_command() {
         app.search_commands("", |command| command.as_str())
             .iter()
             .any(|entry| entry.command == CommandId::AddToZip)
+    );
+}
+
+/// zip 위치에 놓는 끌어 놓기는 수식 키·볼륨과 상관없이 복사(넣기)다. 오른쪽 버튼 메뉴는 「여기에 복사」만.
+#[test]
+#[ignore = "#430"]
+fn dropping_onto_a_zip_location_always_copies() {
+    use std::path::PathBuf;
+
+    use facet_core::dragdrop::{
+        AllowedEffects, Decision, DropData, DropRequest, DropTarget, Modifiers, Refusal, decide,
+    };
+
+    let zip = PathBuf::from(r"C:\zips\자료.zip");
+    let sources = vec![PathBuf::from(r"C:\src\new.txt")];
+    let decision = |target: &DropTarget, modifiers: Modifiers, right_button, allowed| {
+        decide(&DropRequest {
+            sources: &sources,
+            target,
+            modifiers,
+            right_button,
+            allowed,
+            data: DropData::Files,
+        })
+    };
+    let shift = Modifiers {
+        ctrl: false,
+        shift: true,
+    };
+    for target in [
+        DropTarget::Zip(zip.clone()),
+        DropTarget::Zip(zip.join("docs")),
+    ] {
+        assert_eq!(
+            decision(&target, Modifiers::default(), false, AllowedEffects::ALL),
+            Decision::Copy,
+            "같은 볼륨이어도 이동이 아니라 넣기(복사): {target:?}"
+        );
+        assert_eq!(
+            decision(&target, shift, false, AllowedEffects::ALL),
+            Decision::Copy,
+            "Shift도 복사"
+        );
+        assert_eq!(
+            decision(&target, Modifiers::default(), true, AllowedEffects::ALL),
+            Decision::Menu {
+                copy: true,
+                mov: false
+            },
+            "오른쪽 버튼 메뉴는 「여기에 복사」만"
+        );
+        assert_eq!(
+            decision(
+                &target,
+                Modifiers::default(),
+                false,
+                AllowedEffects {
+                    copy: false,
+                    mov: true
+                }
+            ),
+            Decision::Refuse(Refusal::NoEffectAllowed),
+            "원본 앱이 이동만 허용하면 놓을 수 없다"
+        );
+    }
+    let itself = vec![zip.clone()];
+    assert_eq!(
+        decide(&DropRequest {
+            sources: &itself,
+            target: &DropTarget::Zip(zip.join("docs")),
+            modifiers: Modifiers::default(),
+            right_button: false,
+            allowed: AllowedEffects::ALL,
+            data: DropData::Files,
+        }),
+        Decision::Refuse(Refusal::IntoItself),
+        "zip을 자기 안에 놓을 수 없다"
     );
 }
 
@@ -149,6 +226,14 @@ mod run {
         }
     }
 
+    /// 넣기 작업을 만든다. 만들지 못하면 그 까닭으로 실패한다.
+    fn add(queue: &mut JobQueue, sources: Vec<PathBuf>, target: PathBuf) -> JobId {
+        match queue.copy(sources, target) {
+            Ok(job) => job,
+            Err(rejection) => panic!("넣기 작업을 만들지 못했다: {rejection:?}"),
+        }
+    }
+
     fn conflict(queue: &mut JobQueue, job: JobId) -> Conflict {
         match next(queue, job) {
             Next::Conflict(conflict) => conflict,
@@ -161,23 +246,23 @@ mod run {
     #[ignore = "#430"]
     fn copying_into_a_zip_adds_entries_and_keeps_the_old_ones() {
         let f = fixture();
-        let before = Archive::open(&f.zip).unwrap();
-        let old_compressed = before
-            .children("")
-            .unwrap()
-            .into_iter()
-            .find(|e| e.name == "old.txt")
-            .unwrap()
-            .compressed_size;
-        drop(before);
+        let old_compressed = {
+            let before = Archive::open(&f.zip).unwrap();
+            before
+                .children("")
+                .unwrap()
+                .into_iter()
+                .find(|e| e.name == "old.txt")
+                .unwrap()
+                .compressed_size
+        };
 
         let mut queue = JobQueue::new();
-        let job = queue
-            .copy(
-                vec![f.src.join("new.txt"), f.src.join("newdir")],
-                f.zip.clone(),
-            )
-            .expect("넣기 작업을 만든다");
+        let job = add(
+            &mut queue,
+            vec![f.src.join("new.txt"), f.src.join("newdir")],
+            f.zip.clone(),
+        );
         let (state, summary) = finish(&mut queue, job);
         assert_eq!(state, JobState::Finished);
         assert!(
@@ -222,9 +307,7 @@ mod run {
     fn copying_into_a_folder_inside_the_zip_adds_there() {
         let f = fixture();
         let mut queue = JobQueue::new();
-        let job = queue
-            .copy(vec![f.src.join("new.txt")], f.zip.join("docs"))
-            .unwrap();
+        let job = add(&mut queue, vec![f.src.join("new.txt")], f.zip.join("docs"));
         assert_eq!(finish(&mut queue, job).0, JobState::Finished);
         assert_eq!(read(&f.zip, "docs/new.txt"), b"new");
         assert_eq!(read(&f.zip, "docs/readme.txt"), b"old readme");
@@ -237,9 +320,11 @@ mod run {
 
         // 덮어쓰기: 옛 항목을 빼고 새 항목을 쓴다.
         let f = fixture();
-        let job = queue
-            .copy(vec![f.src.join("readme.txt")], f.zip.join("docs"))
-            .unwrap();
+        let job = add(
+            &mut queue,
+            vec![f.src.join("readme.txt")],
+            f.zip.join("docs"),
+        );
         let asked = conflict(&mut queue, job);
         assert!(asked.can_overwrite);
         queue
@@ -253,9 +338,11 @@ mod run {
 
         // 건너뛰기
         let f = fixture();
-        let job = queue
-            .copy(vec![f.src.join("readme.txt")], f.zip.join("docs"))
-            .unwrap();
+        let job = add(
+            &mut queue,
+            vec![f.src.join("readme.txt")],
+            f.zip.join("docs"),
+        );
         let _ = conflict(&mut queue, job);
         queue
             .answer_conflict(job, ConflictAnswer::once(Resolution::Skip))
@@ -265,9 +352,11 @@ mod run {
 
         // 둘 다 유지
         let f = fixture();
-        let job = queue
-            .copy(vec![f.src.join("readme.txt")], f.zip.join("docs"))
-            .unwrap();
+        let job = add(
+            &mut queue,
+            vec![f.src.join("readme.txt")],
+            f.zip.join("docs"),
+        );
         let _ = conflict(&mut queue, job);
         queue
             .answer_conflict(job, ConflictAnswer::once(Resolution::KeepBoth))
@@ -278,7 +367,7 @@ mod run {
 
         // 같은 이름 폴더는 묻지 않고 합친다.
         let f = fixture();
-        let job = queue.copy(vec![f.src.join("docs")], f.zip.clone()).unwrap();
+        let job = add(&mut queue, vec![f.src.join("docs")], f.zip.clone());
         assert_eq!(finish(&mut queue, job).0, JobState::Finished);
         let archive = Archive::open(&f.zip).unwrap();
         assert_eq!(names(&archive, "docs"), ["new2.txt", "readme.txt"]);
@@ -303,9 +392,11 @@ mod run {
             .share_mode(0)
             .open(&locked)
             .unwrap();
-        let job = queue
-            .copy(vec![f.src.join("new.txt"), locked.clone()], f.zip.clone())
-            .unwrap();
+        let job = add(
+            &mut queue,
+            vec![f.src.join("new.txt"), locked.clone()],
+            f.zip.clone(),
+        );
         let error = match next(&mut queue, job) {
             Next::Error(error) => error,
             Next::Conflict(conflict) => panic!("충돌이 아니다: {conflict:?}"),
@@ -333,7 +424,7 @@ mod run {
             .map(|n| (n.wrapping_mul(2_654_435_761) >> 13) as u8)
             .collect();
         fs::write(&big, &body).unwrap();
-        let job = queue.copy(vec![big], f.zip.clone()).unwrap();
+        let job = add(&mut queue, vec![big], f.zip.clone());
         let deadline = Instant::now() + WAIT;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -411,7 +502,7 @@ mod run {
             if let Some(entry) = app.work_area().entry(job)
                 && let Some(summary) = &entry.summary
             {
-                bin::purge(&summary.recycled);
+                // 휴지통 항목은 여기서 치우지 않는다: 뒤의 실행취소가 원래 zip을 휴지통에서 되살린다.
                 return (entry.state, summary.clone());
             }
             assert!(Instant::now() < deadline, "작업이 시간 안에 끝나지 않았다");
@@ -441,18 +532,50 @@ mod run {
         assert_eq!(plan.target, f.zip.join("docs"));
         assert_eq!(plan.sources, [f.src.join("new.txt")]);
         let job = app.start_transfer(&plan).expect("작업을 넣는다");
-        assert_eq!(wait_job(&mut app, job).0, JobState::Finished);
+        let (state, added) = wait_job(&mut app, job);
+        assert_eq!(state, JobState::Finished);
         assert_eq!(read(&f.zip, "docs/new.txt"), b"new");
         let record = app.history().records().next_back().expect("작업 기록");
         assert_eq!(record.kind(), OperationKind::AddToZip);
 
         let undo = app.undo().expect("실행취소");
-        assert_eq!(wait_job(&mut app, undo).0, JobState::Finished);
+        let (state, undone) = wait_job(&mut app, undo);
+        bin::purge(&added.recycled);
+        bin::purge(&undone.recycled);
+        assert_eq!(state, JobState::Finished);
         assert_eq!(
             fs::read(&f.zip).unwrap(),
             original,
             "실행취소하면 넣기 전 zip과 바이트 단위로 같다"
         );
+    }
+
+    /// 끌어 놓기: 놓을 자리가 zip 위치면 그 zip 항목 경로가 대상이고, 이동 효과로 놓아도 넣기(복사)라 원본이 남는다.
+    #[test]
+    #[ignore = "#430"]
+    fn dropping_onto_a_zip_location_adds_a_copy() {
+        let f = fixture();
+        assert_eq!(
+            facet_core::shell_provider::transfer_folder(&Location::zip(&f.zip, "docs")),
+            Some(f.zip.join("docs")),
+            "zip 위치에 놓을 대상은 zip 항목 경로다"
+        );
+        let mut app = app_at(Location::file_system(&f.src));
+        let job = match app.start_drop(
+            facet_core::dragdrop::DropEffect::Move,
+            vec![f.src.join("new.txt")],
+            f.zip.join("docs"),
+        ) {
+            Ok(job) => job,
+            Err(rejection) => panic!("zip에 놓으면 넣기 작업이 된다: {rejection:?}"),
+        };
+        let (state, summary) = wait_job(&mut app, job);
+        bin::purge(&summary.recycled);
+        assert_eq!(state, JobState::Finished);
+        assert_eq!(read(&f.zip, "docs/new.txt"), b"new");
+        assert!(f.src.join("new.txt").is_file(), "넣기는 원본을 남긴다");
+        let record = app.history().records().next_back().expect("작업 기록");
+        assert_eq!(record.kind(), OperationKind::AddToZip);
     }
 
     #[test]
@@ -475,7 +598,9 @@ mod run {
         assert_eq!(plan.target, f.zip);
         assert_eq!(plan.sources, [f.src.join("new.txt")]);
         let job = app.start_transfer(&plan).unwrap();
-        assert_eq!(wait_job(&mut app, job).0, JobState::Finished);
+        let (state, summary) = wait_job(&mut app, job);
+        bin::purge(&summary.recycled);
+        assert_eq!(state, JobState::Finished);
         assert_eq!(read(&f.zip, "new.txt"), b"new");
     }
 }

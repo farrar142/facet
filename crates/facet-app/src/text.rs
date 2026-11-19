@@ -94,6 +94,11 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::Restore => "복원",
         CommandId::EmptyRecycleBin => "휴지통 비우기",
         CommandId::TogglePreview => "미리보기 영역",
+        CommandId::ExtractAllHere | CommandId::ExtractToFolder | CommandId::ExtractTo => {
+            todo!("#427")
+        }
+        CommandId::NewZip => todo!("#429"),
+        CommandId::AddToZip => todo!("#430"),
     }
 }
 
@@ -217,7 +222,8 @@ pub fn edit_error_text(error: EditError) -> String {
             FileOpErrorKind::CrossVolume
             | FileOpErrorKind::Cancelled
             | FileOpErrorKind::TimedOut
-            | FileOpErrorKind::Other => "이름을 바꾸지 못했습니다".to_owned(),
+            | FileOpErrorKind::Other
+            | FileOpErrorKind::Corrupt => "이름을 바꾸지 못했습니다".to_owned(),
         },
     }
 }
@@ -258,6 +264,8 @@ pub fn clipboard_failure_text(failure: &ClipboardFailure) -> String {
                 )
             }
             CopyRejection::Unsupported => "휴대폰과는 PC와만 주고받을 수 있습니다".to_owned(),
+            CopyRejection::NotEnoughSpace { .. } => todo!("#426"),
+            CopyRejection::EncryptedArchive => todo!("#430"),
         },
     }
 }
@@ -272,6 +280,8 @@ pub fn drop_rejected_text(rejection: &CopyRejection) -> String {
             format!("폴더를 그 안으로 놓을 수 없습니다: {}", source.display())
         }
         CopyRejection::Unsupported => "휴대폰과는 PC와만 주고받을 수 있습니다".to_owned(),
+        CopyRejection::NotEnoughSpace { .. } => todo!("#426"),
+        CopyRejection::EncryptedArchive => todo!("#430"),
     }
 }
 
@@ -421,6 +431,9 @@ pub fn operation_name(record: &Record) -> String {
         (OperationKind::BatchRename, _) => {
             format!("일괄 이름 바꾸기({}개)", record.steps().len())
         }
+        (OperationKind::Extract, _) => todo!("#425"),
+        (OperationKind::NewZip, _) => todo!("#429"),
+        (OperationKind::AddToZip, _) => todo!("#430"),
     }
 }
 
@@ -479,6 +492,7 @@ pub fn item_error_text(kind: FileOpErrorKind) -> &'static str {
         | FileOpErrorKind::Cancelled
         | FileOpErrorKind::TimedOut
         | FileOpErrorKind::Other => "오류가 났습니다",
+        FileOpErrorKind::Corrupt => todo!("#425"),
     }
 }
 

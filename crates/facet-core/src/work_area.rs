@@ -82,6 +82,7 @@ impl WorkArea {
             | JobEvent::Conflict { job, .. }
             | JobEvent::ItemError { job, .. }
             | JobEvent::NotRecyclable { job, .. }
+            | JobEvent::PasswordNeeded { job, .. }
             | JobEvent::Finished { job, .. } => *job,
         };
         let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) else {
@@ -107,6 +108,7 @@ impl WorkArea {
                 entry.state = JobState::AwaitingAnswer;
                 entry.question = Some(JobQuestion::NotRecyclable(item.clone()));
             }
+            JobEvent::PasswordNeeded { .. } => todo!("#428"),
             JobEvent::Finished { summary, .. } => {
                 entry.summary = Some(summary.clone());
                 entry.question = None;

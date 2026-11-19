@@ -290,7 +290,7 @@ fn path_of(location: &Location) -> &Path {
     match location {
         Location::FileSystem(path) => path,
         Location::SearchResults(scope) => &scope.folder,
-        Location::Shell(_) => Path::new(""),
+        Location::Shell(_) | Location::Zip(_) => Path::new(""),
     }
 }
 

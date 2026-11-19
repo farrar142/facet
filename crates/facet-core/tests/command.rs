@@ -102,6 +102,11 @@ fn name(command: CommandId) -> &'static str {
         CommandId::EmptyRecycleBin => "휴지통 비우기",
         // 미리보기 영역(자세한 확인은 tests/spec_preview_app.rs).
         CommandId::TogglePreview => "미리보기 영역",
+        CommandId::ExtractAllHere => "여기에 모두 꺼내기",
+        CommandId::ExtractToFolder => "zip 이름의 폴더로 꺼내기",
+        CommandId::ExtractTo => "꺼내기 위치…",
+        CommandId::NewZip => "새 zip으로 묶기",
+        CommandId::AddToZip => "zip에 넣기…",
     }
 }
 

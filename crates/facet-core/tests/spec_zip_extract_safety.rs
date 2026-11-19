@@ -91,7 +91,7 @@ fn names_pointing_outside_the_target_are_refused_and_listed() {
     let evil: Vec<String> = (1..=7)
         .map(|n| format!("facet-evil-{pid}-{n}.txt"))
         .collect();
-    let outside_names = vec![
+    let outside_names = [
         format!("../{}", evil[0]),
         format!("..\\{}", evil[1]),
         format!("/{}", evil[2]),

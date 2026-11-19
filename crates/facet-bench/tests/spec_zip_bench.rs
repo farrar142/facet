@@ -42,8 +42,11 @@ fn constants_follow_the_spec() {
     assert_eq!(ZIP_LIST_LIMIT, ZIP_LIST_TARGET * 10);
     assert_eq!(ZIP_NAVIGATE_TARGET, ms(10));
     assert_eq!(ZIP_NAVIGATE_LIMIT, ZIP_NAVIGATE_TARGET * 10);
-    assert!((ZIP_STORED_COPY_RATIO - 0.9).abs() < f64::EPSILON);
-    assert!(ZIP_DEFLATE_THROUGHPUT_LIMIT > 0.0);
+    // 상수끼리의 단언은 clippy가 막으므로 값을 black_box로 감싼다(뜻은 같다).
+    let ratio = std::hint::black_box(ZIP_STORED_COPY_RATIO);
+    let deflate_floor = std::hint::black_box(ZIP_DEFLATE_THROUGHPUT_LIMIT);
+    assert!((ratio - 0.9).abs() < f64::EPSILON);
+    assert!(deflate_floor > 0.0);
 }
 
 #[test]

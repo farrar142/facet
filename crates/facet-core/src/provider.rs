@@ -177,5 +177,6 @@ pub fn provider_for(location: &Location) -> &'static dyn Provider {
         Location::FileSystem(_) => &FileSystemProvider,
         Location::SearchResults(_) => &crate::search_results::SearchResultsProvider,
         Location::Shell(_) => &crate::shell_provider::ShellProvider,
+        Location::Zip(_) => &crate::zip_provider::ZipProvider,
     }
 }

@@ -206,14 +206,6 @@ mod jobs {
         }
     }
 
-    fn item_error(queue: &mut JobQueue, job: JobId) -> ItemFailure {
-        match next(queue, job) {
-            Next::Error(error) => error,
-            Next::Conflict(conflict) => panic!("항목별 오류여야 한다: {conflict:?}"),
-            Next::Finished(_) => panic!("항목별 오류를 묻기 전에 끝났다"),
-        }
-    }
-
     #[test]
     #[ignore = "#425"]
     fn copying_zip_items_extracts_files_and_folders_with_their_times() {

@@ -2654,6 +2654,16 @@ impl Tab {
         self.list.recycled(self.list_index(index)?)
     }
 
+    /// #423: zip 위치의 보이는 항목 `index`면 그 압축된 크기.
+    pub fn compressed_size(&self, _index: usize) -> Option<u64> {
+        todo!("#423")
+    }
+
+    /// #423: zip 위치면 그 zip의 같은 이름 수와 손상 여부.
+    pub fn archive_notes(&self) -> Option<crate::zip_provider::ArchiveNotes> {
+        todo!("#423")
+    }
+
     /// 보이는 항목 `index`의 아이콘 캐시 키, 목록 밖이면 `None`. 실제 폴더·검색 결과 항목은
     /// [`crate::icons::icon_key`]이고, 가상 폴더 항목은 셸 공급자가 정한다(휴지통 항목은 원래 이름의 형식 키, 드라이브와
     /// 휴대폰은 그 항목의 셸 아이콘 키). 화면은 이 키로 아이콘 캐시에 묻는다.

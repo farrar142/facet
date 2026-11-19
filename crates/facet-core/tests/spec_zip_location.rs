@@ -65,13 +65,17 @@ fn names_of(items: &[facet_core::Item]) -> Vec<String> {
 
 fn app_at(location: Location) -> App {
     let mut app = App::new(Some(location));
-    let (_, outcome) = app.wait(WAIT).expect("첫 읽기");
+    let Some((_, outcome)) = app.wait(WAIT) else {
+        panic!("첫 읽기가 시간 안에 끝나지 않았다");
+    };
     assert_eq!(outcome, ReadOutcome::Committed);
     app
 }
 
 fn wait_read(app: &mut App) -> ReadOutcome {
-    let (_, outcome) = app.wait(WAIT).expect("읽기 결과");
+    let Some((_, outcome)) = app.wait(WAIT) else {
+        panic!("읽기가 시간 안에 끝나지 않았다");
+    };
     outcome
 }
 
@@ -211,6 +215,8 @@ fn typing_a_path_inside_a_zip_goes_there() {
 #[ignore = "#423"]
 fn opening_a_zip_file_and_moving_around_works_like_folders() {
     let f = fixture();
+    // zip 파일로 알아보지 못하면 열기가 기본 프로그램으로 넘어가므로 먼저 확인한다.
+    assert!(is_zip_file(&f.zip), "자료.zip은 zip 위치로 연다");
     let mut app = app_at(Location::file_system(f.dir.path()));
 
     assert_eq!(open_item(&mut app, "자료.zip"), Execution::Done);

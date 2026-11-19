@@ -67,6 +67,12 @@ pub enum OperationKind {
     /// 차례)이고 규칙이 바꾸지 않아 건너뛴 항목 수가 [`Record::items_skipped`]다. 실행취소·다시 실행은 **전부 아니면
     /// 전무**다: 한 항목이라도 밖에서 바뀌었으면 아무것도 바꾸지 않고 기록이 통째로 제자리에 남는다.
     BatchRename,
+    /// #425: 꺼내기.
+    Extract,
+    /// #429: 새 zip으로 묶기.
+    NewZip,
+    /// #430: zip에 넣기.
+    AddToZip,
 }
 
 /// 되돌릴 수 없는 까닭의 종류.
