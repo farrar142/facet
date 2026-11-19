@@ -192,6 +192,8 @@ pub enum CommandId {
     NewZip,
     /// #430: zip에 넣기…(`add-to-zip`).
     AddToZip,
+    /// #475: 업데이트 확인(`check-for-updates`).
+    CheckForUpdates,
     /// #459: facet 정보(`about`).
     About,
     /// #462: 설정(`open-settings`, Ctrl+,).
@@ -362,6 +364,7 @@ impl CommandId {
             CommandId::ExtractTo => "extract-to",
             CommandId::NewZip => "new-zip",
             CommandId::AddToZip => "add-to-zip",
+            CommandId::CheckForUpdates => "check-for-updates",
             CommandId::About => "about",
             CommandId::OpenSettings => "open-settings",
             CommandId::OpenSettingsFile => "open-settings-file",
@@ -507,9 +510,10 @@ impl CommandId {
             CommandId::KeepOnDevice | CommandId::FreeUpSpace => &[], // #455
             CommandId::DownloadForPreview => &[],                    // #456
             CommandId::ExtractAllHere | CommandId::ExtractToFolder | CommandId::ExtractTo => &[], // #427
-            CommandId::NewZip => &[],   // #429
-            CommandId::AddToZip => &[], // #430
-            CommandId::About => &[],    // #459
+            CommandId::NewZip => &[],          // #429
+            CommandId::AddToZip => &[],        // #430
+            CommandId::CheckForUpdates => &[], // #475
+            CommandId::About => &[],           // #459
             CommandId::OpenSettings | CommandId::OpenSettingsFile => &[], // #462
         }
     }
@@ -618,6 +622,7 @@ impl CommandId {
             }
             CommandId::NewZip => todo!("#429"),
             CommandId::AddToZip => todo!("#430"),
+            CommandId::CheckForUpdates => todo!("#475"),
             CommandId::About => todo!("#459"),
             CommandId::OpenSettings | CommandId::OpenSettingsFile => todo!("#462"),
             CommandId::Refresh

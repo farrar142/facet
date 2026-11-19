@@ -56,6 +56,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 
+pub mod authenticode;
 pub mod clipboard;
 pub mod cloud_files;
 pub mod devices;
@@ -68,6 +69,7 @@ pub mod preview;
 pub mod preview_handler;
 pub mod process;
 pub mod recycle;
+pub mod registry;
 pub mod shell_copy;
 pub mod shell_dialog;
 pub mod shell_folder;

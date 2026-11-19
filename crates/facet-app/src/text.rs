@@ -101,6 +101,7 @@ pub fn command_name(command: CommandId) -> &'static str {
         }
         CommandId::NewZip => todo!("#429"),
         CommandId::AddToZip => todo!("#430"),
+        CommandId::CheckForUpdates => todo!("#475"),
         CommandId::About => todo!("#459"),
         CommandId::OpenSettings | CommandId::OpenSettingsFile => todo!("#462"),
     }

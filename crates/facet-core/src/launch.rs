@@ -103,3 +103,8 @@ fn normalize(path: &Path) -> PathBuf {
     }
     out
 }
+
+/// #480: 시작 실패 때 탐색기(`%WINDIR%\explorer.exe`)에 받은 인자 그대로 넘기는 명령.
+pub fn explorer_fallback(_args: &[OsString]) -> std::process::Command {
+    todo!("#480")
+}
