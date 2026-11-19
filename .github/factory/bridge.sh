@@ -13,14 +13,18 @@
 #      ready-for-human  a ticket handed to a person (hand-to-human.sh)→ BRIDGE_TO_COORD + BRIDGE_CC
 #      factory-paused   a spec stopped at its budget                 → BRIDGE_TO_COORD + BRIDGE_CC
 #      human-check      a person must check something; only while the body still has an
-#                       unchecked `- [ ]` item                       → BRIDGE_TO_COORD + BRIDGE_CC
+#                       unchecked `- [ ]` item (`*`/`+` bullets and indents too)
+#                                                                    → BRIDGE_TO_COORD + BRIDGE_CC, or
+#                                                                      BRIDGE_TO_BOSS (BRIDGE_HUMAN_CHECK_TO=boss)
 #
 #    It is mailed once per (issue, label, time the label was put on, recipient). The time is the last
 #    `labeled` event of that label in the issue's timeline, so taking the label off and putting it on
 #    again is a new mail. The label itself is trusted (only someone with write access can put it on).
 #    The reason in the mail is the issue's latest `<!-- factory-… -->` marker comment by a trusted
 #    author (below); without one the mail says 「까닭 댓글 없음」 and is sent anyway.
-#    needs-triage, needs-info and local are not mailed. An issue a person deferred (label `deferred`,
+#    needs-triage, needs-info and local are not mailed; ready-for-human together with local is mailed as
+#    「로컬 작업자 몫」 (the factory left the ticket outside itself; a local worker implements it). An issue
+#    a person deferred (label `deferred`,
 #    #437) waits for nobody: it is not mailed as ready-for-human even when that label was left on.
 #
 #    For ready-for-human, factory-paused and human-check the BRIDGE_TO_COORD mail is a processing
@@ -38,9 +42,11 @@
 #      <!-- factory-stalled DATE -->           waiting tickets are blocked by issues handed to a person
 #      <!-- factory-stalled deferred-B-T -->   a deferred issue B blocks the waiting ticket T (once, #437)
 #      <!-- factory-bench-regression SHA -->   the hourly benchmark failed at SHA (#366)
+#      <!-- factory-human-check SPEC -->       a person must check the issue (routed like human-check)
 #
 #    Each comment goes to BRIDGE_TO_COORD and BRIDGE_CC once. Anyone can write those markers on a
-#    public repository, so only comments by `github-actions[bot]` or by someone with write access
+#    public repository, so only comments by `github-actions[bot]`, a BRIDGE_TRUSTED_BOTS login or someone
+#    with write access
 #    (collaborator permission admin, maintain or write) are sent; a comment by anyone else is never sent
 #    and its id is remembered. Each author's permission is asked once per run.
 #
@@ -62,7 +68,7 @@
 #   <comment id>                           a marker comment sent to BRIDGE_TO_COORD (as before #410;
 #                                          before #410 also a comment not trusted)
 #   <comment id> ignored                   a marker comment not trusted (never sent)
-#   <comment id> <recipient>               the copy of that comment to a BRIDGE_CC recipient
+#   <comment id> <recipient>               the copy of that comment to a BRIDGE_CC recipient (also read for the coordinator)
 #   label <n> <label> <time> <recipient>   a label mail
 #   idle <queue> <recipient>               an idle mail
 #
@@ -79,6 +85,13 @@
 #   BRIDGE_TO_BOSS        recipient of needs-decision (required; no default)
 #   BRIDGE_TO_COORD       recipient of everything else (required; no default)
 #   BRIDGE_CC             more recipients of everything but needs-decision, comma-separated (optional)
+#                         (BRIDGE_CC splits on commas, spaces and tabs; empty entries, repeats and
+#                         BRIDGE_TO_COORD itself are dropped)
+#   BRIDGE_TRUSTED_BOTS   bot logins (e.g. example-bot[bot]) whose marker comments are trusted like
+#                         github-actions[bot] without a permission lookup; same separators (optional)
+#   BRIDGE_HUMAN_CHECK_TO coord (default): human-check goes to BRIDGE_TO_COORD + BRIDGE_CC as a
+#                         processing order; boss: to BRIDGE_TO_BOSS alone, as a plain mail. Covers the
+#                         label and the `<!-- factory-human-check SPEC -->` marker comment
 #   BRIDGE_TO             removed and ignored (a warning is printed while it is set)
 #   FACTORY_SPEC_QUEUE    the spec queue (spec numbers, space- or comma-separated) for the idle check
 #   SWITCHBOARD_PROFILE   switchboard credential profile (default automation)
@@ -120,8 +133,16 @@ if [ -n "$missing" ]; then
   echo "bridge: set$missing (the recipients have no default); nothing sent" >&2
   exit 2
 fi
-# BRIDGE_CC: comma-separated, blanks dropped, one per line.
-CC=$(printf '%s' "${BRIDGE_CC:-}" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | sed '/^$/d')
+# BRIDGE_CC: split on commas, spaces and tabs; empty entries, repeats and BRIDGE_TO_COORD itself dropped;
+# one per line.
+CC=$(printf '%s' "${BRIDGE_CC:-}" | tr ', \t\r' '\n\n\n\n' | sed '/^$/d' | grep -vxF -- "$TO_COORD" | awk '!seen[$0]++')
+# BRIDGE_TRUSTED_BOTS: bot logins trusted like github-actions[bot] (same separators), one per line.
+BOTS=$(printf '%s' "${BRIDGE_TRUSTED_BOTS:-}" | tr ', \t\r' '\n\n\n\n' | sed '/^$/d')
+# BRIDGE_HUMAN_CHECK_TO: who gets human-check (the label and the factory-human-check marker).
+case "${BRIDGE_HUMAN_CHECK_TO:-coord}" in
+  boss | coord) HUMAN_CHECK_TO=${BRIDGE_HUMAN_CHECK_TO:-coord} ;;
+  *) echo "bridge: BRIDGE_HUMAN_CHECK_TO must be boss or coord, not ${BRIDGE_HUMAN_CHECK_TO}" >&2; exit 2 ;;
+esac
 export SWITCHBOARD_PROFILE=${SWITCHBOARD_PROFILE:-automation}
 STATE_DIR=${BRIDGE_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/$NAME-factory-bridge}
 SENT=$STATE_DIR/sent
@@ -158,6 +179,7 @@ trusted() {
   local login=$1 p v
   [ "$login" = "github-actions[bot]" ] && return 0
   [ -n "$login" ] || return 1
+  [ -n "$BOTS" ] && printf '%s\n' "$BOTS" | grep -qxF -- "$login" && return 0
   v=$(printf '%s\n' "$trust" | sed -n "s/^$login //p" | head -n 1)
   if [ -z "$v" ]; then
     p=$(gh api "repos/$REPO/collaborators/$login/permission") || return 2
@@ -198,6 +220,10 @@ deliver() {
 }
 
 coord_and_cc=$(printf '%s\n%s\n' "$TO_COORD" "$CC" | sed '/^$/d' | awk '!seen[$0]++')
+# human-check (the label and the factory-human-check marker) goes to the owner alone when
+# BRIDGE_HUMAN_CHECK_TO=boss, else to the coordinator and BRIDGE_CC like the rest.
+if [ "$HUMAN_CHECK_TO" = boss ]; then human_check_to=$TO_BOSS; else human_check_to=$coord_and_cc; fi
+human_check_todo="이 확인 이슈의 미체크 항목을 손으로 확인해 체크한다(문제는 새 이슈로). 모두 체크하거나 이슈를 닫으면 다음 dispatch 때 spec이 닫히고 공장이 다음 spec으로 간다."
 
 # --- 1. labels -------------------------------------------------------------------------------------
 
@@ -242,7 +268,7 @@ for label in needs-decision ready-for-human factory-paused human-check; do
     || { echo "bridge: could not list the issues labelled $label" >&2; failed=1; continue; }
   numbers=$(printf '%s' "$list" | j -s -r --arg l "$label" 'add // [] | .[]
     | select(.state == "open" and any(.labels[]; .name == $l))
-    | select($l != "human-check" or ((.body // "") | test("(^|\n)[ \t]*[-*] \\[ \\]")))
+    | select($l != "human-check" or ((.body // "") | test("(^|\n)[ \t]*[-*+] \\[ \\]")))
     | select($l != "ready-for-human" or (any(.labels[]; .name == "deferred") | not))
     | .number')
   case $label in
@@ -256,8 +282,8 @@ for label in needs-decision ready-for-human factory-paused human-check; do
       kind="spec 상한 멈춤"; recipients=$coord_and_cc
       todo="spec 본문의 \`예산: \$N\` 줄을 올리고 factory-paused 라벨을 떼면 이어 간다." ;;
     human-check)
-      kind="사람 확인"; recipients=$coord_and_cc
-      todo="본문의 체크리스트에서 아직 체크하지 않은 항목을 확인하고 체크한다." ;;
+      kind="사람 확인"; recipients=$human_check_to
+      todo=$human_check_todo ;;
   esac
   for n in $numbers; do
     tl=$(gh api "repos/$REPO/issues/$n/timeline?per_page=100" --paginate) \
@@ -277,7 +303,7 @@ for label in needs-decision ready-for-human factory-paused human-check; do
     url=$(printf '%s' "$issue" | j -r '.html_url')
     why=$(reason "$n")
     key="$NAME-factory-label-$n-$label-$(slug "$at")"
-    if [ "$label" = needs-decision ]; then
+    if [ "$label" = needs-decision ] || { [ "$label" = human-check ] && [ "$HUMAN_CHECK_TO" = boss ]; }; then
       text="종류: $kind ($label)
 이슈: $url
 제목: #$n $title
@@ -293,8 +319,15 @@ $why
     # The rest is a processing order for the coordinator (#437): it acts on this mail alone. BRIDGE_CC
     # gets one line only. A hand-over names its code (the latest trusted marker's; the old marker
     # without a code is `other`) in the subject and the first line.
-    what=$kind
+    what=$kind fix=$todo
     [ "$label" = ready-for-human ] && what="$kind($(handover_code "$n"))"
+    # ready-for-human + local: the factory left the ticket outside itself on purpose (workflow and .claude
+    # files); a local worker implements it.
+    if [ "$label" = ready-for-human ] && [ "$(printf '%s' "$list" | j -s --argjson n "$n" 'add // []
+        | map(select(.number == $n)) | .[0] | any(.labels[]?; .name == "local")')" = true ]; then
+      what="로컬 작업자 몫"
+      fix="공장이 이 티켓을 공장 밖에 두었다(ready-for-human + local, workflow·.claude 파일). 로컬 작업자가 구현한다."
+    fi
     text="종류: $what ($label)
 이슈: $url
 제목: #$n $title
@@ -305,7 +338,7 @@ $why
 
 할 일 — 이 메일이 처리 지시다. 다른 지시를 기다리지 않고 차례대로 끝낸다:
 1. 원인 확인: 위 까닭과 이슈·PR·run 로그를 읽고 왜 공장이 스스로 끝내지 못했는지 밝힌다.
-2. 고침: $todo
+2. 고침: $fix
 3. 재발 방지 장치: 같은 까닭으로 다시 사람에게 넘어오지 않게 공장 장치(스크립트·시험·workflow)를 고치는 티켓을 내거나 고친다.
 4. 결과 보고: 원인·고친 것·재발 방지 장치를 이슈 댓글로 남기고 보고한다."
     subject="[$NAME 공장] $what: #$n $title"
@@ -329,6 +362,7 @@ matches=$(printf '%s' "$comments" | j -s -r '
      elif ($b | contains("<!-- factory-idle ")) then "idle"
      elif ($b | contains("<!-- factory-stalled ")) then "stalled"
      elif ($b | contains("<!-- factory-bench-regression ")) then "bench-regression"
+     elif ($b | contains("<!-- factory-human-check ")) then "human-check"
      else empty end) as $k
   | ($b | capture("<!-- factory-" + $k + " (?<v>[^ ]*) -->").v // "") as $v
   | [(.id | tostring), $k, (.issue_url | sub(".*/"; "")), (.user.login // ""), $v] | @tsv')
@@ -339,6 +373,8 @@ ckey() { if [ "$2" = "$TO_COORD" ]; then echo "$1"; else echo "$1 $2"; fi; }
 while IFS=$'\t' read -r id kind n author value; do
   [ -n "$id" ] || continue
   sent "$id ignored" && continue
+  rcpts=$coord_and_cc
+  [ "$kind" = human-check ] && rcpts=$human_check_to
   # An idle marker shares its key with the direct idle check (part 3).
   if [ "$kind" = idle ]; then
     pending=
@@ -348,14 +384,15 @@ while IFS=$'\t' read -r id kind n author value; do
       [ "$to" = "$TO_COORD" ] && sent "$id" && continue # sent by a bridge before #410
       pending="$pending$to
 "
-    done <<< "$coord_and_cc"
+    done <<< "$rcpts"
   else
     pending=
     while IFS= read -r to; do
       [ -n "$to" ] || continue
-      sent "$(ckey "$id" "$to")" || pending="$pending$to
+      # The coordinator copy is the bare id; "<id> <coordinator>" (a copied bridge's form) counts too.
+      { sent "$(ckey "$id" "$to")" || sent "$id $to"; } || pending="$pending$to
 "
-    done <<< "$coord_and_cc"
+    done <<< "$rcpts"
   fi
   [ -n "$pending" ] || continue
   trusted "$author"
@@ -395,6 +432,9 @@ while IFS=$'\t' read -r id kind n author value; do
     bench-regression)
       label="벤치 한도 초과"
       todo="위 커밋 구간에서 한도를 넘긴 커밋을 찾아 고칠 티켓을 낸다(조율자 몫)." ;;
+    human-check)
+      label="사람 확인"
+      todo=$human_check_todo ;;
   esac
   text="종류: $label
 이슈: $url
