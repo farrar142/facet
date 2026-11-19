@@ -332,15 +332,43 @@ impl Provider for ZipProvider {
         FileSystemProvider.complete(text)
     }
 
-    /// 바깥 변경은 아직 따라가지 않는다: 감시를 걸 수 없다(「자동 새로 고침 안 됨」).
+    /// zip이 든 실제 폴더를 감시하다 그 zip 파일의 변경이 알려지면 목록을 다시 읽게 한다(크기·수정 시각이 달라진
+    /// zip은 캐시를 지나치지 않고 새로 열린다). zip이 지워졌으면 다시 읽기가 실패해 탭이 실제 상위 폴더로 옮긴다.
     fn watch(
         &self,
         location: &Location,
-        _on_event: Box<dyn FnMut(WatchEvent) + Send>,
+        mut on_event: Box<dyn FnMut(WatchEvent) + Send>,
     ) -> Result<Watch, WatchError> {
-        Err(WatchError::Unsupported {
+        let unsupported = || WatchError::Unsupported {
             location: location.clone(),
-        })
+        };
+        let zip = zip_of(location).ok_or_else(unsupported)?;
+        let folder = zip.archive().parent().ok_or_else(unsupported)?;
+        let file_name = zip
+            .archive()
+            .file_name()
+            .ok_or_else(unsupported)?
+            .to_owned();
+        let own = file_name.to_string_lossy().to_lowercase();
+        FileSystemProvider
+            .watch(
+                &Location::file_system(folder),
+                Box::new(move |event| match event {
+                    WatchEvent::Changed(name) => {
+                        if name.to_string_lossy().to_lowercase() == own {
+                            on_event(WatchEvent::Overflow);
+                        }
+                    }
+                    other => on_event(other),
+                }),
+            )
+            .map_err(|e| match e {
+                WatchError::Io { source, .. } => WatchError::Io {
+                    location: location.clone(),
+                    source,
+                },
+                WatchError::Unsupported { .. } => unsupported(),
+            })
     }
 
     fn item(&self, location: &Location, name: &OsStr) -> Result<Option<Item>, ListError> {
