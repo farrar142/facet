@@ -132,6 +132,10 @@ pub(crate) const ERROR_FILE_EXISTS: u32 = 80;
 pub(crate) const ERROR_DISK_FULL: u32 = 112;
 pub(crate) const ERROR_ALREADY_EXISTS: u32 = 183;
 pub(crate) const ERROR_PRIVILEGE_NOT_HELD: u32 = 1314;
+/// 동기화 루트에 연결된 동기화 프로그램이 없다(`ERROR_CLOUD_FILE_PROVIDER_NOT_RUNNING`, #449).
+pub(crate) const ERROR_CLOUD_FILE_PROVIDER_NOT_RUNNING: u32 = 362;
+/// 동기화 프로그램이 요청을 처리하다 끝났다(`ERROR_CLOUD_FILE_PROVIDER_TERMINATED`, #449).
+pub(crate) const ERROR_CLOUD_FILE_PROVIDER_TERMINATED: u32 = 404;
 
 /// Win32 오류 코드의 종류. 「찾을 수 없음」은 여기서 [`FileOpErrorKind::SourceMissing`]으로 두고, 원본이 실제로
 /// 있으면 부르는 쪽이 [`FileOpErrorKind::Other`]로 바꾼다(대상 폴더가 없을 때).
@@ -144,6 +148,9 @@ pub(crate) fn classify_win32(code: u32) -> FileOpErrorKind {
         ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => FileOpErrorKind::SourceMissing,
         ERROR_FILE_EXISTS | ERROR_ALREADY_EXISTS => FileOpErrorKind::TargetExists,
         ERROR_NOT_SAME_DEVICE => FileOpErrorKind::CrossVolume,
+        ERROR_CLOUD_FILE_PROVIDER_NOT_RUNNING | ERROR_CLOUD_FILE_PROVIDER_TERMINATED => {
+            FileOpErrorKind::SyncProviderNotRunning
+        }
         _ => FileOpErrorKind::Other,
     }
 }
@@ -577,6 +584,14 @@ mod tests {
             (ERROR_FILE_EXISTS, FileOpErrorKind::TargetExists),
             (ERROR_ALREADY_EXISTS, FileOpErrorKind::TargetExists),
             (ERROR_NOT_SAME_DEVICE, FileOpErrorKind::CrossVolume),
+            (
+                ERROR_CLOUD_FILE_PROVIDER_NOT_RUNNING,
+                FileOpErrorKind::SyncProviderNotRunning,
+            ),
+            (
+                ERROR_CLOUD_FILE_PROVIDER_TERMINATED,
+                FileOpErrorKind::SyncProviderNotRunning,
+            ),
             (87, FileOpErrorKind::Other),
         ];
         for (code, kind) in cases {

@@ -166,6 +166,8 @@ const TABLE: &[(&str, &[&str])] = &[
     ("crates/facet-win/src/clipboard/format.rs", &["clipboard"]),
     ("crates/facet-win/src/clipboard.rs", &[]),
     ("crates/facet-win/src/windows_clipboard.rs", &[]),
+    ("crates/facet-win/src/cloud_files.rs", &[]),
+    ("crates/facet-win/src/windows_cloud_files.rs", &[]),
     ("crates/facet-win/src/drag_source.rs", &[]),
     ("crates/facet-win/src/windows_drag_source.rs", &[]),
     ("crates/facet-win/src/drop_target.rs", &[]),
