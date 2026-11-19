@@ -18,7 +18,6 @@ const UNPINNED: u32 = 0x10_0000;
 const RECALL_ON_DATA_ACCESS: u32 = 0x40_0000;
 
 #[test]
-#[ignore = "#451"]
 fn attributes_decide_the_three_badges() {
     let cases = [
         (0, SyncState::OnDevice),
@@ -44,7 +43,6 @@ fn attributes_decide_the_three_badges() {
 }
 
 #[test]
-#[ignore = "#451"]
 fn state_order_runs_from_online_only_to_error() {
     // 속성으로 가른 셋이 그 순서이고, 셸 속성으로 받는 둘이 그 뒤다.
     let online = SyncState::from_attributes(RECALL_ON_DATA_ACCESS);
@@ -135,7 +133,6 @@ mod real {
     }
 
     #[test]
-    #[ignore = "#451"]
     fn sync_folder_items_get_badges_without_fetching() {
         let dir = TempDir::new().unwrap();
         let Some(root) = sync_root(dir.path(), "배지 셋") else {
@@ -163,7 +160,6 @@ mod real {
     }
 
     #[test]
-    #[ignore = "#451"]
     fn no_badges_outside_sync_folders() {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("a.txt"), b"a").unwrap();
@@ -178,7 +174,6 @@ mod real {
     }
 
     #[test]
-    #[ignore = "#451"]
     fn sorting_by_state_groups_and_reverses() {
         let dir = TempDir::new().unwrap();
         let Some(root) = sync_root(dir.path(), "상태 열 정렬") else {
@@ -217,7 +212,6 @@ mod real {
     }
 
     #[test]
-    #[ignore = "#451"]
     fn badges_follow_outside_pin_and_download_without_refresh() {
         let dir = TempDir::new().unwrap();
         let Some(root) = sync_root(dir.path(), "배지 따라가기") else {
