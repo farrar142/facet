@@ -210,7 +210,7 @@ pub enum DisabledReason {
 
 impl CommandId {
     /// 모든 명령. 명령 팔레트는 검색어가 없으면 이 순서로 보인다.
-    pub const ALL: [CommandId; 67] = [
+    pub const ALL: [CommandId; 68] = [
         CommandId::Open,
         CommandId::OpenWith,
         CommandId::Back,
@@ -278,6 +278,7 @@ impl CommandId {
         CommandId::OpenThisPc,
         CommandId::OpenRecycleBin,
         CommandId::ClearThumbnailCache,
+        CommandId::NewZip,
     ];
 
     /// 바뀌지 않는 ID 글자. 화면 문장이 아니다.
@@ -621,7 +622,8 @@ impl CommandId {
             CommandId::ExtractAllHere | CommandId::ExtractToFolder | CommandId::ExtractTo => {
                 todo!("#427")
             }
-            CommandId::NewZip => todo!("#429"),
+            // 실제 폴더에서 고른 항목(없으면 커서 항목)을 현재 폴더의 새 zip으로 묶는다(zip 안·검색 결과에서는 꺼짐).
+            CommandId::NewZip => tab.location().file_system_path().is_some() && has_sources(tab),
             CommandId::AddToZip => todo!("#430"),
             CommandId::CheckForUpdates => todo!("#475"),
             CommandId::About => todo!("#459"),

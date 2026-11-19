@@ -99,7 +99,7 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::ExtractAllHere | CommandId::ExtractToFolder | CommandId::ExtractTo => {
             todo!("#427")
         }
-        CommandId::NewZip => todo!("#429"),
+        CommandId::NewZip => "새 zip으로 묶기",
         CommandId::AddToZip => todo!("#430"),
         CommandId::CheckForUpdates => todo!("#475"),
         CommandId::About => todo!("#459"),
@@ -499,7 +499,8 @@ pub fn operation_name(record: &Record) -> String {
         }
         (OperationKind::Extract, Some(name)) => format!("「{name}」 꺼내기"),
         (OperationKind::Extract, None) => format!("항목 {n}개 꺼내기"),
-        (OperationKind::NewZip, _) => todo!("#429"),
+        (OperationKind::NewZip, Some(name)) => format!("새 zip 「{name}」 묶기"),
+        (OperationKind::NewZip, None) => format!("새 zip {n}개 묶기"),
         (OperationKind::AddToZip, _) => todo!("#430"),
     }
 }

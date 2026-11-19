@@ -154,6 +154,7 @@ const TABLE: &[(&str, &[&str])] = &[
     ("crates/facet-core/src/shell_helper.rs", &["shell-helper"]),
     ("crates/facet-core/src/work_area.rs", &[]),
     ("crates/facet-core/src/zip_archive.rs", &[]),
+    ("crates/facet-core/src/job/new_zip.rs", &[]),
     // facet-win.
     (
         "crates/facet-win/src/file_ops.rs",

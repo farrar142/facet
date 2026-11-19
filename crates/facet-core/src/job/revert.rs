@@ -455,6 +455,40 @@ impl Run<'_, '_> {
                 }),
             (Step::Recycled { path, item, .. }, Reversal::Undo) => restore_recycled(path, item),
             (Step::Recycled { path, stamp, .. }, Reversal::Redo) => recycle_again(path, stamp),
+            (
+                Step::CreatedZip {
+                    sources,
+                    path,
+                    stamp,
+                },
+                Reversal::Undo,
+            ) => match recycle_again(path, stamp) {
+                Attempt::Done(Step::Recycled { item, stamp, .. }) => {
+                    self.copier.summary.recycled.push(item);
+                    Attempt::Done(Step::CreatedZip {
+                        sources: sources.clone(),
+                        path: path.clone(),
+                        stamp,
+                    })
+                }
+                Attempt::Done(_) => Attempt::Failed(FileOpErrorKind::Other),
+                other => other,
+            },
+            (Step::CreatedZip { sources, path, .. }, Reversal::Redo) => {
+                match super::new_zip::rewrite(sources, path) {
+                    Ok(()) => match Stamp::read(path) {
+                        Some(stamp) => Attempt::Done(Step::CreatedZip {
+                            sources: sources.clone(),
+                            path: path.clone(),
+                            stamp,
+                        }),
+                        None => Attempt::Skip(RevertSkip::Missing),
+                    },
+                    Err(FileOpErrorKind::TargetExists) => Attempt::Skip(RevertSkip::NameTaken),
+                    Err(FileOpErrorKind::SourceMissing) => Attempt::Skip(RevertSkip::Missing),
+                    Err(kind) => Attempt::Failed(kind),
+                }
+            }
             // 영구 삭제한 항목은 `run`이 따로 다룬다(되돌릴 수 없는 기록의 것은 여기 오지 않는다).
             (Step::Deleted { .. }, _) => Attempt::Skip(RevertSkip::PermanentlyDeleted),
         }
@@ -938,7 +972,10 @@ fn current_path(step: &Step, reversal: Reversal) -> &Path {
             Reversal::Redo,
         ) => from,
         (
-            Step::CreatedFolder { path, .. } | Step::Deleted { path } | Step::Recycled { path, .. },
+            Step::CreatedFolder { path, .. }
+            | Step::CreatedZip { path, .. }
+            | Step::Deleted { path }
+            | Step::Recycled { path, .. },
             _,
         )
         | (Step::Copied { path, .. } | Step::Overwrote { path, .. }, Reversal::Undo) => path,

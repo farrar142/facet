@@ -178,6 +178,13 @@ pub enum Step {
         replaced: RecycledItem,
         replaced_stamp: Stamp,
     },
+    /// #429: 새 zip으로 묶기가 `sources`를 묶어 `path`에 zip을 만들었다. `stamp`는 그 zip의 모습이다. 되돌리기는 zip을
+    /// 휴지통으로 보내기(밖에서 바뀌었으면 건너뜀), 다시 하기는 같은 원본으로 같은 자리에 다시 쓰기다.
+    CreatedZip {
+        sources: Vec<PathBuf>,
+        path: PathBuf,
+        stamp: Stamp,
+    },
     /// 영구 삭제가 넘긴 원본 `path`(나 그 안의 항목)를 지웠다. 폴더 안의 항목은 따로 들지 않는다: 되살릴 것이
     /// 남지 않아 항목별 모습이 필요 없다(지운 항목 수는 [`Record::items_completed`]). 건너뛴 항목이 있어 폴더가
     /// 남았어도 그 안에서 지운 것이 있으면 든다. 되돌릴 수 없는 기록에만 있다.
@@ -202,6 +209,7 @@ impl Step {
         match self {
             Step::Renamed { to, .. } => to,
             Step::CreatedFolder { path, .. }
+            | Step::CreatedZip { path, .. }
             | Step::Copied { path, .. }
             | Step::Overwrote { path, .. }
             | Step::Deleted { path }
@@ -223,6 +231,7 @@ impl Step {
                 ..
             } => Some(source),
             Step::CreatedFolder { .. }
+            | Step::CreatedZip { .. }
             | Step::Copied { .. }
             | Step::Overwrote { .. }
             | Step::Deleted { .. } => None,

@@ -831,14 +831,14 @@ const CRC_TABLE: [u32; 256] = {
 };
 
 /// 덩어리마다 이어 세는 CRC-32.
-struct Crc32(u32);
+pub(crate) struct Crc32(u32);
 
 impl Crc32 {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Crc32(0xFFFF_FFFF)
     }
 
-    fn update(&mut self, data: &[u8]) {
+    pub(crate) fn update(&mut self, data: &[u8]) {
         let mut crc = self.0;
         for &b in data {
             crc = CRC_TABLE[((crc ^ u32::from(b)) & 0xFF) as usize] ^ (crc >> 8);
@@ -846,7 +846,7 @@ impl Crc32 {
         self.0 = crc;
     }
 
-    fn finish(&self) -> u32 {
+    pub(crate) fn finish(&self) -> u32 {
         !self.0
     }
 }

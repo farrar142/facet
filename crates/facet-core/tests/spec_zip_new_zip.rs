@@ -15,7 +15,6 @@ use facet_core::command::CommandId;
 use facet_core::window::App;
 
 #[test]
-#[ignore = "#429"]
 fn new_zip_is_a_palette_command() {
     assert_eq!(CommandId::NewZip.as_str(), "new-zip");
     assert!(CommandId::ALL.contains(&CommandId::NewZip));
@@ -135,7 +134,6 @@ mod run {
     }
 
     #[test]
-    #[ignore = "#429"]
     fn several_items_become_a_zip_named_after_the_folder() {
         let dir = TempDir::new().unwrap();
         let folder = bundle_folder(&dir);
@@ -206,7 +204,6 @@ mod run {
     }
 
     #[test]
-    #[ignore = "#429"]
     fn a_single_item_names_the_zip_and_numbers_avoid_clashes() {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("보고서.txt"), "보고서").unwrap();
@@ -239,7 +236,6 @@ mod run {
     }
 
     #[test]
-    #[ignore = "#429"]
     fn new_zip_is_off_without_items_or_outside_real_folders() {
         let dir = TempDir::new().unwrap();
         let empty = dir.path().join("빈");
@@ -256,7 +252,6 @@ mod run {
     }
 
     #[test]
-    #[ignore = "#429"]
     fn new_zip_is_recorded_and_undone() {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("보고서.txt"), "보고서").unwrap();
@@ -276,7 +271,6 @@ mod run {
     }
 
     #[test]
-    #[ignore = "#429"]
     fn more_than_65535_items_are_written_as_zip64() {
         const COUNT: usize = 65_600;
         let dir = TempDir::new().unwrap();

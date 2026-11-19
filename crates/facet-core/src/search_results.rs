@@ -140,7 +140,10 @@ impl PathChange {
                 moved: true,
                 ..
             } => Some(PathChange::Removed(source.clone())),
-            Step::Overwrote { .. } | Step::Copied { .. } | Step::CreatedFolder { .. } => None,
+            Step::Overwrote { .. }
+            | Step::Copied { .. }
+            | Step::CreatedFolder { .. }
+            | Step::CreatedZip { .. } => None,
         }
     }
 
@@ -158,9 +161,9 @@ impl PathChange {
                 from: to.clone(),
                 to: from.clone(),
             }),
-            Step::Copied { path, .. } | Step::CreatedFolder { path, .. } => {
-                Some(PathChange::Removed(path.clone()))
-            }
+            Step::Copied { path, .. }
+            | Step::CreatedFolder { path, .. }
+            | Step::CreatedZip { path, .. } => Some(PathChange::Removed(path.clone())),
             Step::Overwrote {
                 source,
                 path,
