@@ -102,7 +102,6 @@ fn names_in_child(folder: &Path) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "#449"]
 fn registered_root_is_sync_folder_plain_folder_and_dropped_root_are_not() {
     let dir = TempDir::new().unwrap();
     let other = TempDir::new().unwrap();
@@ -124,7 +123,6 @@ fn registered_root_is_sync_folder_plain_folder_and_dropped_root_are_not() {
 }
 
 #[test]
-#[ignore = "#449"]
 fn online_only_file_has_attributes_and_size_and_listing_does_not_fetch() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "온라인 전용 파일 속성") else {
@@ -147,7 +145,6 @@ fn online_only_file_has_attributes_and_size_and_listing_does_not_fetch() {
 }
 
 #[test]
-#[ignore = "#449"]
 fn reading_online_only_file_fetches_given_content() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "온라인 전용 파일 읽기") else {
@@ -160,7 +157,6 @@ fn reading_online_only_file_fetches_given_content() {
 }
 
 #[test]
-#[ignore = "#449"]
 fn unexpanded_online_folder_fetches_placeholders_when_listed() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "펼쳐지지 않은 온라인 폴더") else {
@@ -188,7 +184,6 @@ fn unexpanded_online_folder_fetches_placeholders_when_listed() {
 }
 
 #[test]
-#[ignore = "#449"]
 fn set_pin_state_pins_and_unpins() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "고정 상태 바꾸기") else {
@@ -206,7 +201,6 @@ fn set_pin_state_pins_and_unpins() {
 }
 
 #[test]
-#[ignore = "#449"]
 fn recursive_pin_applies_inside_folder() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "재귀 고정") else {
@@ -223,7 +217,6 @@ fn recursive_pin_applies_inside_folder() {
 }
 
 #[test]
-#[ignore = "#449"]
 fn set_pin_state_fails_outside_sync_root() {
     let dir = TempDir::new().unwrap();
     let file = dir.path().join("보통.txt");
@@ -233,7 +226,6 @@ fn set_pin_state_fails_outside_sync_root() {
 }
 
 #[test]
-#[ignore = "#449"]
 fn fail_mode_makes_reads_fail() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "내려받기 실패 모드") else {
@@ -247,7 +239,6 @@ fn fail_mode_makes_reads_fail() {
 }
 
 #[test]
-#[ignore = "#449"]
 fn stall_mode_blocks_reads_until_released() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "멈춤 모드") else {
@@ -271,7 +262,6 @@ fn stall_mode_blocks_reads_until_released() {
 }
 
 #[test]
-#[ignore = "#449"]
 fn disconnected_provider_fails_copy_quickly_with_not_running() {
     let dir = TempDir::new().unwrap();
     let target = TempDir::new().unwrap();
