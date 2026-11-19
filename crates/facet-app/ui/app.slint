@@ -3336,6 +3336,8 @@ export component AppWindow inherits Window {
     in-out property <length> candidate-content-y <=> candidate-list.content-y;
     out property <length> candidate-view-height: candidate-list.visible-height;
     in-out property <bool> show-about;
+    // 정보 화면의 줄(버전·커밋·빌드 날짜·MIT 고지·크레이트 목록).
+    in property <[string]> about-lines;
     // 세션 파일이 깨져 기본 창으로 시작했다(첫 창만). 「닫기」를 누르면 감춘다. `session-kept`는 원래 파일을 옆에 남긴
     // 자리이고, 남기지 못했으면 비어 있다.
     in-out property <bool> session-broken;
@@ -5161,15 +5163,21 @@ export component AppWindow inherits Window {
     // 정보 화면: Slint 로열티 프리 라이선스의 표시 의무(ADR-0002)로 AboutSlint를 보인다.
     if root.show-about: Rectangle {
         background: #00000080;
-        TouchArea { }
+        TouchArea {
+            clicked => {
+                root.show-about = false;
+                keys.focus();
+            }
+        }
         Rectangle {
-            width: 360px;
-            height: 320px;
+            width: min(520px, parent.width - 24px);
+            height: min(560px, parent.height - 24px);
             background: Palette.background;
             border-radius: 8px;
+            TouchArea { }
             VerticalLayout {
                 padding: 16px;
-                spacing: 12px;
+                spacing: 8px;
                 Text {
                     text: "facet";
                     font-size: 18px;
@@ -5180,7 +5188,15 @@ export component AppWindow inherits Window {
                     text: @tr("Windows 파일 탐색기를 대체하는 앱");
                     horizontal-alignment: center;
                 }
-                AboutSlint { }
+                AboutSlint {
+                    preferred-height: 90px;
+                }
+                ListView {
+                    for line in root.about-lines: Text {
+                        text: line;
+                        wrap: word-wrap;
+                    }
+                }
                 HorizontalLayout {
                     alignment: center;
                     Button {

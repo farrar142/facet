@@ -102,7 +102,7 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::NewZip => todo!("#429"),
         CommandId::AddToZip => todo!("#430"),
         CommandId::CheckForUpdates => todo!("#475"),
-        CommandId::About => todo!("#459"),
+        CommandId::About => "facet 정보",
         CommandId::OpenSettings | CommandId::OpenSettingsFile => todo!("#462"),
     }
 }
@@ -113,6 +113,23 @@ pub fn loading_text(count: usize) -> String {
 }
 
 /// 새 폴더의 처음 이름(바탕 이름). 있으면 코어가 「새 폴더 (2)」처럼 번호를 붙인다.
+/// 정보 화면의 줄: 버전·빌드 커밋·빌드 날짜(빌드 때 넣음)·MIT 고지·크레이트 이름·버전·라이선스 목록.
+pub fn about_lines() -> Vec<String> {
+    let mut lines = vec![
+        format!("facet {}", env!("CARGO_PKG_VERSION")),
+        format!("빌드 커밋: {}", include_str!(concat!(env!("OUT_DIR"), "/build_commit.txt"))),
+        format!("빌드 날짜: {}", include_str!(concat!(env!("OUT_DIR"), "/build_date.txt"))),
+        "라이선스: MIT. 이 소프트웨어는 MIT 라이선스로 배포되며 저작권 고지와 허가 고지(LICENSE)를 모든 사본에 포함해야 합니다. 소프트웨어는 어떠한 보증 없이 \"있는 그대로\" 제공됩니다.".to_owned(),
+        "사용한 크레이트 (이름 버전 라이선스):".to_owned(),
+    ];
+    lines.extend(
+        include_str!(concat!(env!("OUT_DIR"), "/crate_licenses.txt"))
+            .lines()
+            .map(str::to_owned),
+    );
+    lines
+}
+
 pub const NEW_FOLDER_BASE: &str = "새 폴더";
 
 /// 이름 입력란 곁에 보일, 쓸 수 없는 이름의 까닭.
