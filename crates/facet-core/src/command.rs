@@ -186,6 +186,12 @@ pub enum CommandId {
     NewZip,
     /// #430: zip에 넣기…(`add-to-zip`).
     AddToZip,
+    /// #459: facet 정보(`about`).
+    About,
+    /// #462: 설정(`open-settings`, Ctrl+,).
+    OpenSettings,
+    /// #462: 설정 파일 열기(`open-settings-file`).
+    OpenSettingsFile,
 }
 
 impl CommandId {
@@ -341,6 +347,9 @@ impl CommandId {
             CommandId::ExtractTo => "extract-to",
             CommandId::NewZip => "new-zip",
             CommandId::AddToZip => "add-to-zip",
+            CommandId::About => "about",
+            CommandId::OpenSettings => "open-settings",
+            CommandId::OpenSettingsFile => "open-settings-file",
         }
     }
 
@@ -482,6 +491,8 @@ impl CommandId {
             CommandId::ExtractAllHere | CommandId::ExtractToFolder | CommandId::ExtractTo => &[], // #427
             CommandId::NewZip => &[],   // #429
             CommandId::AddToZip => &[], // #430
+            CommandId::About => &[],    // #459
+            CommandId::OpenSettings | CommandId::OpenSettingsFile => &[], // #462
         }
     }
 
@@ -587,6 +598,8 @@ impl CommandId {
             }
             CommandId::NewZip => todo!("#429"),
             CommandId::AddToZip => todo!("#430"),
+            CommandId::About => todo!("#459"),
+            CommandId::OpenSettings | CommandId::OpenSettingsFile => todo!("#462"),
             CommandId::Refresh
             | CommandId::EditAddress
             | CommandId::ToggleHidden
@@ -747,6 +760,8 @@ pub enum Key {
     PageDown,
     /// 백슬래시 키: US 배열에서 「\」를 내는 자리(한국어 배열의 「₩」 키, 독일어 배열의 「#」 키).
     Backslash,
+    /// #462: 쉼표 키.
+    Comma,
 }
 
 impl Key {
@@ -856,6 +871,16 @@ impl Shortcut {
     pub const fn shift(mut self) -> Shortcut {
         self.shift = true;
         self
+    }
+
+    /// #460: 설정 파일의 키 글자(`Ctrl+Alt+Shift+` 차례와 키 이름).
+    pub fn to_text(self) -> String {
+        todo!("#460")
+    }
+
+    /// #460: 키 글자를 읽는다(대소문자 무시). 틀리면 `None`.
+    pub fn parse(_text: &str) -> Option<Shortcut> {
+        todo!("#460")
     }
 }
 

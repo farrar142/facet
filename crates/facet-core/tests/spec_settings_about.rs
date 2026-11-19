@@ -32,7 +32,7 @@ fn the_about_command_is_always_enabled_and_hands_the_screen_the_about_page() {
     let entry = found
         .iter()
         .find(|e| e.command == CommandId::About)
-        .expect("팔레트에 있어야 한다");
+        .unwrap_or_else(|| panic!("팔레트에 있어야 한다"));
     assert!(entry.enabled);
     assert!(entry.shortcuts.is_empty());
     assert!(app.can_execute(CommandId::About));

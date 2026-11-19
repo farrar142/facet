@@ -236,6 +236,7 @@ fn command_contexts_follow_the_ticket() {
         CommandId::Filter,
         CommandId::TogglePreview,
         CommandId::EditAddress,
+        CommandId::OpenSettings,
     ] {
         assert_eq!(keymap::context_of(command), Context::Global, "{command:?}");
     }
@@ -249,6 +250,8 @@ fn command_contexts_follow_the_ticket() {
         CommandId::SwitchPanel,
         CommandId::Refresh,
         CommandId::SelectAll,
+        CommandId::About,
+        CommandId::OpenSettingsFile,
     ] {
         assert_eq!(keymap::context_of(command), Context::List, "{command:?}");
     }
@@ -414,6 +417,8 @@ fn shortcut_text_round_trips() {
         (key(Key::Tab), "Tab"),
         (key(Key::Space).ctrl(), "Ctrl+Space"),
         (f(24), "F24"),
+        // 쉼표 키(#462의 「설정」 Ctrl+,)는 글자 그대로다.
+        (key(Key::Comma).ctrl(), "Ctrl+,"),
     ];
     for (shortcut, text) in cases {
         assert_eq!(shortcut.to_text(), text);

@@ -510,6 +510,7 @@ fn values_outside_the_definition_are_refused_with_the_range() {
 #[cfg(windows)]
 #[test]
 #[ignore = "#458"]
+#[allow(clippy::permissions_set_readonly_false)]
 fn a_failed_write_keeps_the_value_in_memory_and_says_why() {
     let dir = TempDir::new().unwrap();
     let original = "[view]\nfont_size = 11\n";
