@@ -9,7 +9,7 @@
 //! 번에 센다. 폴더 기록이 없는 중간 폴더도 폴더로 만든다.
 //!
 //! 건너뛰는 항목(묻지 않음, [`Summary::zip_skipped`]): 풀 수 없는 압축 방식(Stored·Deflate가 아님), 심볼릭 링크,
-//! 대상 폴더 밖을 가리키는 이름(`..`·드라이브 글자). 하나라도 있으면 작업은 실패로 끝난다. CRC 불일치·선언 크기
+//! 대상 폴더 밖을 가리키는 이름(`..`·절대 경로·드라이브 글자·UNC·`:` 스트림), 쓸 수 없는 이름(S4 `validate_name`). 하나라도 있으면 작업은 실패로 끝난다. CRC 불일치·선언 크기
 //! 초과·깨진 압축 데이터는 쓰다 만 파일을 지우고 항목별 오류([`FileOpErrorKind::Corrupt`])로 묻는다.
 
 use std::fs::{self, OpenOptions};
@@ -26,6 +26,7 @@ use super::{
     ConflictItem, Context, Control, CopyRejection, ItemKind, JournalSink, Summary, ZipSkipReason,
     ZipSkipped,
 };
+use crate::name_input::validate_name;
 use crate::zip_archive::{Archive, ArchiveEntry, EntryError, StreamError};
 
 /// 압축 방식: 그대로 저장.
@@ -75,8 +76,10 @@ impl ExtractJob {
             }
             roots.push(inner.replace('\\', "/"));
         }
+        let archive = archive.ok_or(CopyRejection::NoSources)?;
+        check_space(&archive, &roots, &target)?;
         Ok(ExtractJob {
-            archive: archive.ok_or(CopyRejection::NoSources)?,
+            archive,
             roots,
             target,
             journal: None,
@@ -89,9 +92,11 @@ impl ExtractJob {
             return Err(CopyRejection::NoSources);
         }
         check_target(&target)?;
+        let roots = vec![String::new()];
+        check_space(&archive, &roots, &target)?;
         Ok(ExtractJob {
             archive,
-            roots: vec![String::new()],
+            roots,
             target,
             journal: None,
         })
@@ -185,6 +190,37 @@ fn check_target(target: &Path) -> Result<(), CopyRejection> {
     Ok(())
 }
 
+/// 선언된 압축 해제 크기의 합이 대상 볼륨의 빈 공간보다 크면 막는다(#426). zip을 열지 못하거나 빈 공간을 알 수
+/// 없으면 막지 않고 작업 스레드가 다룬다.
+fn check_space(archive: &Path, roots: &[String], target: &Path) -> Result<(), CopyRejection> {
+    let Ok(opened) = crate::zip_provider::open_archive(archive) else {
+        return Ok(());
+    };
+    let source = ZipSource {
+        archive: opened,
+        root: archive.to_path_buf(),
+    };
+    let needed: u64 = plan(&source, roots, target)
+        .iter()
+        .map(|item| match item {
+            Item::Entry(Entry::File { size, .. }) => *size,
+            _ => 0,
+        })
+        .fold(0, u64::saturating_add);
+    if needed == 0 {
+        return Ok(());
+    }
+    if let Some(space) = facet_win::devices::disk_space(target)
+        && needed > space.free
+    {
+        return Err(CopyRejection::NotEnoughSpace {
+            needed,
+            available: space.free,
+        });
+    }
+    Ok(())
+}
+
 /// 꺼낼 항목 하나: 복사 엔진이 다룰 항목이거나, 묻지 않고 건너뛸 항목(과 그 크기).
 enum Item {
     Entry(Entry),
@@ -197,8 +233,7 @@ fn plan(source: &ZipSource, roots: &[String], target: &Path) -> Vec<Item> {
     let mut items = Vec::new();
     for root in roots {
         if root.is_empty() {
-            let children = source.archive.children("").unwrap_or_default();
-            walk(source, children, target, &mut items);
+            plan_all(source, target, &mut items);
             continue;
         }
         match source.archive.find(root) {
@@ -246,6 +281,10 @@ fn walk(source: &ZipSource, entries: Vec<ArchiveEntry>, target: &Path, items: &m
             items.push(skip(ZipSkipReason::Symlink));
             continue;
         }
+        if let Err(error) = validate_name(&entry.name) {
+            items.push(skip(ZipSkipReason::InvalidName(error)));
+            continue;
+        }
         let parent = targets.last().expect("대상 폴더").clone();
         let item_target = parent.join(&entry.name);
         let item_source = source.path_of(&entry.path);
@@ -264,6 +303,164 @@ fn walk(source: &ZipSource, entries: Vec<ArchiveEntry>, target: &Path, items: &m
                 source: item_source,
                 target: item_target,
                 size,
+            }));
+        }
+    }
+}
+
+/// 꺼낼 기록 하나: 원본 항목과 대상 폴더 안의 경로(`..`을 정리한 뒤).
+struct Node {
+    entry: ArchiveEntry,
+    /// 대상 폴더 안 경로(`/` 구분).
+    resolved: String,
+}
+
+impl Node {
+    /// 폴더 기록이 없는 중간 폴더.
+    fn folder(path: &str, name: &str) -> Node {
+        Node {
+            entry: ArchiveEntry {
+                raw_name: path.to_string(),
+                path: path.to_string(),
+                name: name.to_string(),
+                is_folder: true,
+                size: 0,
+                compressed_size: 0,
+                modified: None,
+                method: 0,
+                encrypted: false,
+                symlink: false,
+            },
+            resolved: path.to_string(),
+        }
+    }
+}
+
+/// 기록된 이름을 대상 폴더 안의 경로 조각들로 정리한다: `.`·빈 조각은 빼고 `..`은 앞 조각을 지운다(`a/../b`는
+/// `b`). 앞 `/`·`\`, 드라이브 글자·대체 데이터 스트림(`:`), 대상 밖으로 나가는 `..`은 [`ZipSkipReason::OutsideTarget`],
+/// 심볼릭 링크는 [`ZipSkipReason::Symlink`], 쓸 수 없는 이름은 [`ZipSkipReason::InvalidName`]이다. 정리하고 남는
+/// 조각이 없으면(`.`·`/`뿐) 빈 목록이다.
+fn resolve(entry: &ArchiveEntry) -> Result<Vec<String>, ZipSkipReason> {
+    let raw = entry.raw_name.as_str();
+    if raw.starts_with(['/', '\\']) {
+        return Err(ZipSkipReason::OutsideTarget);
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for part in raw.split(['/', '\\']) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if parts.pop().is_none() {
+                    return Err(ZipSkipReason::OutsideTarget);
+                }
+            }
+            _ if part.contains(':') => return Err(ZipSkipReason::OutsideTarget),
+            _ => parts.push(part.to_string()),
+        }
+    }
+    if entry.symlink {
+        return Err(ZipSkipReason::Symlink);
+    }
+    for part in &parts {
+        validate_name(part).map_err(ZipSkipReason::InvalidName)?;
+    }
+    if !entry.is_folder && entry.method != METHOD_STORED && entry.method != METHOD_DEFLATE {
+        return Err(ZipSkipReason::UnsupportedMethod(entry.method));
+    }
+    Ok(parts)
+}
+
+/// zip 전체를 기록된 이름대로 훑어 꺼낼 차례를 만든다. 이름은 [`resolve`]로 정리해 대상 폴더 안에 놓고, 거부할
+/// 기록은 기록된 이름 그대로 건너뛸 항목에 담는다.
+fn plan_all(source: &ZipSource, target: &Path, items: &mut Vec<Item>) {
+    use std::collections::{BTreeMap, HashMap};
+    // 폴더 경로("" 루트) → 바로 아래 이름 → 기록(같은 경로는 뒤 기록).
+    let mut folders: HashMap<String, BTreeMap<String, Node>> = HashMap::new();
+    folders.insert(String::new(), BTreeMap::new());
+    for entry in source.archive.entries() {
+        let parts = match resolve(entry) {
+            Ok(parts) => parts,
+            Err(reason) => {
+                let size = if entry.is_folder { 0 } else { entry.size };
+                items.push(Item::Skip(
+                    ZipSkipped {
+                        entry: entry.raw_name.clone(),
+                        reason,
+                    },
+                    size,
+                ));
+                continue;
+            }
+        };
+        if parts.is_empty() {
+            continue;
+        }
+        // 위 폴더들이 나무에 있게 한다.
+        let mut folder = String::new();
+        for part in &parts[..parts.len() - 1] {
+            let path = if folder.is_empty() {
+                part.clone()
+            } else {
+                format!("{folder}/{part}")
+            };
+            let children = folders.entry(folder.clone()).or_default();
+            if !children.get(part).is_some_and(|node| node.entry.is_folder) {
+                children.insert(part.clone(), Node::folder(&path, part));
+            }
+            folders.entry(path.clone()).or_default();
+            folder = path;
+        }
+        let name = parts[parts.len() - 1].clone();
+        let resolved = parts.join("/");
+        let mut node = Node {
+            entry: entry.clone(),
+            resolved: resolved.clone(),
+        };
+        node.entry.name = name.clone();
+        if entry.is_folder {
+            folders.entry(resolved).or_default();
+        }
+        folders.entry(folder).or_default().insert(name, node);
+    }
+
+    type Frame = (std::vec::IntoIter<Node>, Option<(PathBuf, PathBuf)>);
+    let take = |folders: &mut HashMap<String, BTreeMap<String, Node>>, path: &str| {
+        folders
+            .remove(path)
+            .map(|children| children.into_values().collect::<Vec<_>>())
+            .unwrap_or_default()
+            .into_iter()
+    };
+    let mut stack: Vec<Frame> = vec![(take(&mut folders, ""), None)];
+    let mut targets: Vec<PathBuf> = vec![target.to_path_buf()];
+    while let Some((rest, _)) = stack.last_mut() {
+        let Some(node) = rest.next() else {
+            let (_, folder) = stack.pop().expect("방금 본 폴더");
+            targets.pop();
+            if let Some((source, target)) = folder {
+                items.push(Item::Entry(Entry::FolderEnd { source, target }));
+            }
+            continue;
+        };
+        let entry = &node.entry;
+        let parent = targets.last().expect("대상 폴더").clone();
+        let item_target = parent.join(&entry.name);
+        let item_source = source.path_of(&entry.path);
+        if entry.is_folder {
+            items.push(Item::Entry(Entry::FolderStart {
+                source: item_source.clone(),
+                target: item_target.clone(),
+            }));
+            targets.push(item_target.clone());
+            stack.push((
+                take(&mut folders, &node.resolved),
+                Some((item_source, item_target)),
+            ));
+        } else {
+            items.push(Item::Entry(Entry::File {
+                source: item_source,
+                target: item_target,
+                size: entry.size,
             }));
         }
     }

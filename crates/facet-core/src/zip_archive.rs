@@ -306,6 +306,7 @@ impl Archive {
             let is_encrypted = r.flags & FLAG_ENCRYPTED != 0;
             encrypted |= is_encrypted;
             entries.push(ArchiveEntry {
+                raw_name: name,
                 path,
                 name: last,
                 is_folder,
@@ -346,6 +347,8 @@ impl Archive {
 /// central directory 항목 하나.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchiveEntry {
+    /// zip에 기록된 이름 그대로(`..`·앞 `/`·`\`·드라이브 글자 포함, 풀어 쓸 때 안전한지 가리는 데 쓴다).
+    pub raw_name: String,
     /// zip 안 전체 경로, `/` 구분, 끝 `/` 없음.
     pub path: String,
     /// 마지막 조각.
@@ -940,6 +943,7 @@ fn ensure_ancestors(folders: &mut HashMap<String, BTreeMap<String, ArchiveEntry>
             children.insert(
                 name.to_string(),
                 ArchiveEntry {
+                    raw_name: folder.to_string(),
                     path: folder.to_string(),
                     name: name.to_string(),
                     is_folder: true,

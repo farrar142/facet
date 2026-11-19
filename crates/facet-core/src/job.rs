@@ -259,11 +259,11 @@ pub struct ZipSkipped {
 pub enum ZipSkipReason {
     /// 풀 수 없는 압축 방식(값은 방식 번호). Stored·Deflate만 푼다.
     UnsupportedMethod(u16),
-    /// #426
+    /// 대상 폴더 밖을 가리키는 이름(`..`·절대 경로·드라이브 글자·UNC·`:` 스트림).
     OutsideTarget,
-    /// #426
+    /// Windows에서 쓸 수 없는 이름(예약 이름·금지 글자·끝 점·공백).
     InvalidName(crate::name_input::NameError),
-    /// #426
+    /// 심볼릭 링크 항목(링크로 만들지 않는다).
     Symlink,
 }
 
@@ -535,11 +535,11 @@ pub enum CopyRejection {
     TargetInsideSource(PathBuf),
     /// 이 위치 사이에서는 복사·이동할 수 없다(휴대폰 안·휴대폰끼리: 휴대폰과는 PC와만 주고받는다).
     Unsupported,
-    /// #426: 대상 볼륨의 빈 공간이 모자란다.
+    /// zip 꺼내기의 선언된 압축 해제 크기 합이 대상 볼륨의 빈 공간보다 크다.
     NotEnoughSpace {
-        /// #426
+        /// 선언된 압축 해제 크기의 합.
         needed: u64,
-        /// #426
+        /// 대상 볼륨의 남은 공간.
         available: u64,
     },
     /// #430: 암호 걸린 항목이 있는 zip에는 넣지 않는다.
