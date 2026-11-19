@@ -401,6 +401,52 @@ verifying 9 45 completed; verifying 7 40
 GITHUB_RUN_ID=$(jq '.[0].databaseId' "$FAKE_GH/runs-list.json" | tr -d '\r') bash "$verify" next-verify 40 > /dev/null
 eq "dispatched" "7 -f pr=41" "$(verify_dispatched)"
 
+# The guard (ledger.sh guard, #501): a Verify run stopped by its guard still runs next-verify on its
+# way out. Starting Verify for a PR whose guard stops it too made two such PRs wake each other
+# forever, so next-verify asks the guard before it starts one.
+under() { # under <ticket> <spec>: the ticket's "## Parent" is the spec
+  jq --arg b "## Parent
+#$2" '.body = $b' "$FAKE_GH/issue-$1.json" | tr -d '\r' > "$FAKE_GH/x" && mv "$FAKE_GH/x" "$FAKE_GH/issue-$1.json"
+}
+guarded_calls() { grep -c '^workflow run' "$FAKE_GH/calls.log"; }
+
+setup next-verify-both-guarded
+issue 8 in-progress; issue 9 in-progress
+issue 20 spec,factory-paused; issue 21 spec,needs-decision
+under 8 20; under 9 21
+waiting 41 8; waiting 45 9
+bash "$verify" next-verify 40 > "$tmp/out" 2>&1
+eq "exit" 0 "$?"
+eq "no Verify while both are stopped by the guard" "" "$(verify_dispatched)"
+eq "no workflow run at all" 0 "$(guarded_calls)"
+has "says why" "the guard stops #8 (factory-paused)" "$(cat "$tmp/out")"
+has "and for the other" "the guard stops #9 (needs-decision)" "$(cat "$tmp/out")"
+
+setup next-verify-one-guarded
+issue 8 in-progress; issue 9 in-progress
+issue 20 spec,factory-paused; issue 21 spec
+under 8 20; under 9 21
+waiting 41 8; waiting 45 9
+bash "$verify" next-verify 40 > /dev/null 2>&1
+eq "the PR the guard lets through" "9 -f pr=45" "$(verify_dispatched)"
+
+setup next-verify-daily-budget
+issue 8 in-progress; issue 9 in-progress
+issue 900 factory-ledger
+jq -n '[{id: 1, created_at: "2026-11-17T02:00:00Z", body: "<!-- ledger -->\nspec=#8 node=implementer issue=#8 run=1 cost=200 turns=1"}]' \
+  | tr -d '\r' > "$FAKE_GH/comments-900.json"
+waiting 41 8; waiting 45 9
+FACTORY_NOW=1794884400 bash "$verify" next-verify 40 > "$tmp/out" 2>&1 # 2026-11-17 12:00 KST
+eq "nothing on the daily budget" "" "$(verify_dispatched)"
+has "says so" "daily budget is spent" "$(cat "$tmp/out")"
+eq "one daily marker on the ledger" 1 "$(jq '[.[] | select(.body | contains("factory-budget-daily"))] | length' "$FAKE_GH/comments-900.json" | tr -d '\r')"
+
+setup next-verify-guard-error-skips
+issue 8 in-progress
+waiting 41 8
+FACTORY_GUARD=false bash "$verify" next-verify 40 > /dev/null 2>&1
+eq "a guard that answers nothing starts nothing" "" "$(verify_dispatched)"
+
 setup usage
 bash "$verify" sendback 7 > /dev/null 2>&1
 eq "usage exit" 2 "$?"
