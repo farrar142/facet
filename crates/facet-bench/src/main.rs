@@ -80,6 +80,9 @@ const USAGE: &str = "\
   facet-bench text-preview [--runs N] [--limit-ms N]
       메모리의 256KB CP949 텍스트를 인코딩 추정과 디코딩하는 시간을 N회(기본 5) 재어 중앙값이 상한(기본 50ms)을
       넘으면 실패한다.
+  facet-bench content-gate [--runs N] [--limit-ms N]
+      항목 10만 개의 속성 값을 내용 읽기 관문에 통과시키는 시간을 N회(기본 5) 재어(한 번 데운 뒤) 중앙값이
+      상한(기본 10ms)을 넘으면 실패한다.
   facet-bench shell-list [--count N] [--runs N] [--limit-ms N]
       가짜 셸 공급자 폴더(항목 N개, 기본 100000)를 새 탭이 흘려 읽어 확정하기까지(공급자 추상화를 지나는 목록 전달)의
       시간을 N회(기본 5) 재어(한 번 데운 뒤) 중앙값이 상한(기본 1500ms)을 넘으면 실패한다.
@@ -247,6 +250,7 @@ fn main() -> ExitCode {
         "thumbnail-decode" => thumbnail_decode(&args),
         "thumbnail-cache" => thumbnail_cache(&args),
         "text-preview" => text_preview(&args),
+        "content-gate" => content_gate(&args),
         "shell-list" => shell_list(&args),
         "compare-recycle" => compare_recycle(&args),
         "compare-copy" => compare_copy(&args),
@@ -1093,6 +1097,38 @@ fn text_preview(args: &Args) -> Result<(), String> {
         limit.as_millis()
     );
     check_text_preview_limit(&m, limit)?;
+    println!("  상한 안: 통과");
+    Ok(())
+}
+
+fn content_gate(args: &Args) -> Result<(), String> {
+    use facet_bench::{
+        CONTENT_GATE_COUNT, CONTENT_GATE_LIMIT, CONTENT_GATE_TARGET, check_content_gate_limit,
+        measure_content_gate,
+    };
+    if args.path.is_some() {
+        return Err(format!(
+            "content-gate 명령은 경로를 받지 않습니다
+
+{USAGE}"
+        ));
+    }
+    warn_debug();
+    let limit = args.limit.unwrap_or(CONTENT_GATE_LIMIT);
+    let m = measure_content_gate(args.runs())?;
+    println!(
+        "내용 읽기 관문 (항목 {CONTENT_GATE_COUNT}개, {}회):",
+        m.times.len()
+    );
+    print_times(&m);
+    println!(
+        "  중앙값 {:.3}ms, 최악 {:.3}ms / 로컬 기준 {}ms, CI 상한 {}ms",
+        ms(m.median()),
+        ms(m.max()),
+        CONTENT_GATE_TARGET.as_millis(),
+        limit.as_millis()
+    );
+    check_content_gate_limit(&m, limit)?;
     println!("  상한 안: 통과");
     Ok(())
 }

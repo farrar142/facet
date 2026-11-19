@@ -21,6 +21,7 @@ pub mod indexer_client;
 pub mod instant_search;
 pub mod interception;
 pub mod job;
+pub mod keymap;
 pub mod launch;
 pub mod live_search;
 mod location;

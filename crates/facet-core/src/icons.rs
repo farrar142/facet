@@ -47,8 +47,10 @@ pub const PER_FILE_EXTENSIONS: [&str; 4] = ["exe", "ico", "lnk", "url"];
 pub fn icon_key(folder: &Path, item: &Item) -> IconKey {
     match type_key(item) {
         IconKey::Extension(extension)
-            if !item.attributes.online_only
-                && PER_FILE_EXTENSIONS.contains(&extension.as_str()) =>
+            if PER_FILE_EXTENSIONS.contains(&extension.as_str())
+                // 파일 고유 아이콘은 파일 내용을 읽으므로 내용 읽기 관문을 지난다(배경 동작).
+                && crate::content_gate::check_item(&item.attributes, crate::content_gate::Reader::Thumbnail)
+                    .is_ok() =>
         {
             IconKey::File(folder.join(&item.name))
         }

@@ -111,6 +111,9 @@ fn name(command: CommandId) -> &'static str {
         CommandId::NewZip => "새 zip으로 묶기",
         CommandId::AddToZip => "zip에 넣기…",
         CommandId::CheckForUpdates => "업데이트 확인",
+        CommandId::About => "facet 정보",
+        CommandId::OpenSettings => "설정",
+        CommandId::OpenSettingsFile => "설정 파일 열기",
     }
 }
 

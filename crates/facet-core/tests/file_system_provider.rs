@@ -248,7 +248,12 @@ fn 속성이_없는_항목은_모두_꺼져_있다() {
     write_file(&dir.path().join("보통.txt"), 1);
     fs::create_dir(dir.path().join("보통 폴더")).unwrap();
     for item in list(dir.path()).unwrap() {
-        assert_eq!(item.attributes, Attributes::default(), "{:?}", item.name);
+        // `bits`는 열거 결과의 원래 속성 값(폴더 0x10, 보관 0x20 등)이라 견주지 않는다.
+        let flags = Attributes {
+            bits: 0,
+            ..item.attributes
+        };
+        assert_eq!(flags, Attributes::default(), "{:?}", item.name);
     }
 }
 

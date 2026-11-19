@@ -2781,6 +2781,7 @@ impl View {
             Execution::NestedZip => todo!("#423"),
             Execution::ChooseExtractTarget => todo!("#427"),
             Execution::ChooseZipTarget => todo!("#430"),
+            Execution::ShowAbout => todo!("#459"),
             Execution::UndoRefused(_) | Execution::Disabled | Execution::WindowClosed => {}
         }
     }
