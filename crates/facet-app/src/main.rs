@@ -1518,6 +1518,8 @@ struct View {
     marquee_timer: Timer,
     /// 복사·이동 대상 선택 창이 열려 있으면 그 상태. 화면의 `target-open`과 함께 바뀐다.
     target: RefCell<Option<TargetChooser>>,
+    /// 대상 선택 창이 「꺼내기 위치…」로 열렸는가(#427).
+    target_extract: Cell<bool>,
     /// 일괄 이름 바꾸기 창이 열려 있으면 그 상태. 화면의 `batch-open`과 함께 바뀐다.
     batch: RefCell<Option<batch_rename::BatchWindow>>,
     /// 대상 선택 창의 줄.
@@ -1629,6 +1631,7 @@ impl View {
             marquee: RefCell::default(),
             marquee_timer: Timer::default(),
             target: RefCell::default(),
+            target_extract: Cell::new(false),
             batch: RefCell::default(),
             target_rows,
             transfer: RefCell::default(),
@@ -1784,6 +1787,7 @@ impl View {
         self.close_address_edit();
         self.close_palette();
         self.close_transfer();
+        self.target_extract.set(false);
         let ui = &self.ui;
         ui.set_target_moving(kind == JobKind::Move);
         ui.set_target_items(count(choice.sources.len()));
@@ -1903,7 +1907,11 @@ impl View {
         else {
             return true;
         };
-        let planned = self.app.borrow().transfer_plan_to(kind, text);
+        let planned = if self.target_extract.get() {
+            self.app.borrow().extract_plan_to(text)
+        } else {
+            self.app.borrow().transfer_plan_to(kind, text)
+        };
         let plan = match planned {
             Ok(plan) => plan,
             Err(TargetError::Unavailable) => {
@@ -2795,7 +2803,10 @@ impl View {
             }
             Execution::ConfirmEmptyRecycleBin => self.open_empty_recycle_bin(),
             Execution::NestedZip => self.ui.set_notice(text::NESTED_ZIP.into()),
-            Execution::ChooseExtractTarget => todo!("#427"),
+            Execution::ChooseExtractTarget => {
+                self.open_target(JobKind::Copy);
+                self.target_extract.set(self.target.borrow().is_some());
+            }
             Execution::ChooseZipTarget => todo!("#430"),
             Execution::ShowAbout => todo!("#459"),
             Execution::UndoRefused(_) | Execution::Disabled | Execution::WindowClosed => {}

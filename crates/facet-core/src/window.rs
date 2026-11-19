@@ -3707,9 +3707,40 @@ impl App {
             CommandId::EmptyRecycleBin => return Execution::ConfirmEmptyRecycleBin,
             CommandId::KeepOnDevice | CommandId::FreeUpSpace => todo!("#455"),
             CommandId::DownloadForPreview => todo!("#456"),
-            CommandId::ExtractAllHere | CommandId::ExtractToFolder | CommandId::ExtractTo => {
-                todo!("#427")
+            CommandId::ExtractAllHere | CommandId::ExtractToFolder => {
+                let Some(archive) = crate::command::zip_to_extract(self.active_tab()) else {
+                    return Execution::Disabled;
+                };
+                let Some(folder) = archive.parent().map(Path::to_path_buf) else {
+                    return Execution::Disabled;
+                };
+                let target = if command == CommandId::ExtractToFolder {
+                    let stem = archive
+                        .file_stem()
+                        .map(|stem| stem.to_os_string())
+                        .unwrap_or_default();
+                    let target = folder.join(stem);
+                    if std::fs::create_dir_all(&target).is_err() {
+                        return Execution::Disabled;
+                    }
+                    target
+                } else {
+                    folder
+                };
+                let Some(sources) = Self::zip_root_sources(&archive) else {
+                    return Execution::Disabled;
+                };
+                let plan = TransferPlan {
+                    kind: JobKind::Copy,
+                    sources,
+                    target,
+                };
+                return match self.start_transfer(&plan) {
+                    Ok(_) => Execution::Done,
+                    Err(_) => Execution::Disabled,
+                };
             }
+            CommandId::ExtractTo => return Execution::ChooseExtractTarget,
             CommandId::NewZip => todo!("#429"),
             CommandId::AddToZip => todo!("#430"),
             CommandId::CheckForUpdates => todo!("#475"),
@@ -4495,8 +4526,59 @@ impl App {
     }
 
     /// #427: 「꺼내기 위치…」 대상 선택 창에 친 글자를 대상 폴더로 해석해 꺼낼 내용을 준다.
-    pub fn extract_plan_to(&self, _text: &str) -> Result<TransferPlan, TargetError> {
-        todo!("#427")
+    ///
+    /// 꺼낼 내용: 실제 폴더의 커서 zip 파일이면 zip 전체(루트의 항목들), zip 위치면 고른 항목(없으면 커서 항목, 그것도
+    /// 없으면 zip 전체).
+    pub fn extract_plan_to(&self, text: &str) -> Result<TransferPlan, TargetError> {
+        let tab = self.active_tab();
+        let archive = crate::command::zip_to_extract(tab).ok_or(TargetError::Unavailable)?;
+        let sources = if tab.location().zip_location().is_some() {
+            let mut sources = tab.selected_paths();
+            if sources.is_empty()
+                && let Some(path) = tab.cursor_path()
+            {
+                sources.push(path);
+            }
+            if sources.is_empty() {
+                Self::zip_root_sources(&archive)
+            } else {
+                Some(sources)
+            }
+        } else {
+            Self::zip_root_sources(&archive)
+        }
+        .ok_or(TargetError::Unavailable)?;
+        let resolved = provider_for(tab.location())
+            .resolve(text)
+            .map_err(TargetError::Resolve)?;
+        let not_a_folder = || TargetError::NotAFolder {
+            text: text.trim().to_string(),
+        };
+        if resolved.select.is_some() {
+            return Err(not_a_folder());
+        }
+        let target = resolved
+            .location
+            .file_system_path()
+            .ok_or_else(not_a_folder)?
+            .to_path_buf();
+        Ok(TransferPlan {
+            kind: JobKind::Copy,
+            sources,
+            target,
+        })
+    }
+
+    /// zip 파일의 루트 항목들의 zip 항목 경로.
+    fn zip_root_sources(archive: &Path) -> Option<Vec<PathBuf>> {
+        let entries = crate::zip_archive::Archive::open(archive)
+            .ok()?
+            .children("")?;
+        let sources: Vec<PathBuf> = entries
+            .iter()
+            .map(|entry| archive.join(&entry.name))
+            .collect();
+        (!sources.is_empty()).then_some(sources)
     }
 
     /// #430: 「zip에 넣기…」 대상 선택 창에 친 글자를 zip(또는 zip 안 위치)으로 해석해 넣을 내용을 준다.

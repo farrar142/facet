@@ -21,7 +21,6 @@ const COMMANDS: [(CommandId, &str); 3] = [
 ];
 
 #[test]
-#[ignore = "#427"]
 fn the_three_commands_are_in_the_palette_with_their_ids() {
     let app = App::new(None);
     let palette = app.search_commands("", |command| command.as_str());
@@ -151,7 +150,6 @@ mod run {
     }
 
     #[test]
-    #[ignore = "#427"]
     fn extract_all_here_from_a_zip_file_and_undo() {
         let f = fixture();
         let mut app = app_at(Location::file_system(f.dir.path()));
@@ -187,7 +185,6 @@ mod run {
     }
 
     #[test]
-    #[ignore = "#427"]
     fn extract_to_a_folder_named_after_the_zip_and_merge() {
         let f = fixture();
         let named = f.dir.path().join("자료.v2");
@@ -212,7 +209,6 @@ mod run {
     }
 
     #[test]
-    #[ignore = "#427"]
     fn extract_all_here_inside_the_zip_uses_the_zips_folder() {
         let f = fixture();
         let mut app = app_at(Location::zip(&f.zip, "문서"));
@@ -223,7 +219,6 @@ mod run {
     }
 
     #[test]
-    #[ignore = "#427"]
     fn the_commands_are_off_without_a_zip() {
         let f = fixture();
         let mut app = app_at(Location::file_system(f.dir.path()));
@@ -248,7 +243,6 @@ mod run {
     }
 
     #[test]
-    #[ignore = "#427"]
     fn extract_to_resolves_the_target_and_extracts() {
         let f = fixture();
         let other = f.dir.path().join("다른 곳");
