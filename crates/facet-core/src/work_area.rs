@@ -33,6 +33,8 @@ pub struct JobEntry {
     /// [`crate::window::App::answer_error`]) 작업이 답 기다림을 벗어나면(취소·끝남 포함) 없어진다. 화면은 이것이
     /// 있으면 그 작업의 진행 표시에 질문 대화를 붙인다.
     pub question: Option<JobQuestion>,
+    /// #456: 원본 가운데 동기화 폴더 항목이 있는가.
+    pub in_sync_folder: bool,
 }
 
 impl JobEntry {
@@ -68,6 +70,7 @@ impl WorkArea {
             progress: None,
             summary: None,
             question: None,
+            in_sync_folder: false, // #456
         });
     }
 

@@ -1267,6 +1267,25 @@ pub const FILTER_LIMIT: Duration = Duration::from_millis(160);
 
 /// #336: 미리보기 텍스트(256KB 추정+디코딩) 로컬 기준(5ms).
 pub const TEXT_PREVIEW_TARGET: Duration = Duration::from_millis(5);
+/// #450: 내용 읽기 관문 벤치마크의 항목 수.
+pub const CONTENT_GATE_COUNT: usize = 0; // #450
+
+/// #450: 내용 읽기 관문 로컬 기준.
+pub const CONTENT_GATE_TARGET: Duration = Duration::ZERO; // #450
+
+/// #450: 내용 읽기 관문 CI 상한.
+pub const CONTENT_GATE_LIMIT: Duration = Duration::ZERO; // #450
+
+/// #450: 중앙값이 상한을 넘으면 중앙값과 상한을 담은 `Err`.
+pub fn check_content_gate_limit(_m: &Measurement, _limit: Duration) -> Result<(), String> {
+    todo!("#450")
+}
+
+/// #450: 항목 10만 개 속성 값을 관문에 통과시키는 시간을 잰다.
+pub fn measure_content_gate(_runs: usize) -> Result<Measurement, String> {
+    todo!("#450")
+}
+
 /// #336: 미리보기 텍스트 CI 상한(기준 × 10).
 pub const TEXT_PREVIEW_LIMIT: Duration = Duration::from_millis(50);
 

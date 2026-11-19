@@ -224,6 +224,7 @@ mod tests {
             found: 7,
             folders_scanned: 30,
             folders_skipped: 2,
+            online_folders_skipped: 0,
             elapsed: Duration::from_millis(1500),
             end,
         }
@@ -238,6 +239,7 @@ mod tests {
                 found: 3,
                 folders_scanned: 9,
                 folders_skipped: 0,
+                online_folders_skipped: 0,
             },
             ..SearchStatus::default()
         };

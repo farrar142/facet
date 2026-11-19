@@ -94,6 +94,8 @@ pub fn command_name(command: CommandId) -> &'static str {
         CommandId::Restore => "복원",
         CommandId::EmptyRecycleBin => "휴지통 비우기",
         CommandId::TogglePreview => "미리보기 영역",
+        CommandId::KeepOnDevice | CommandId::FreeUpSpace => todo!("#455"),
+        CommandId::DownloadForPreview => todo!("#456"),
         CommandId::ExtractAllHere | CommandId::ExtractToFolder | CommandId::ExtractTo => {
             todo!("#427")
         }
@@ -226,6 +228,7 @@ pub fn edit_error_text(error: EditError) -> String {
             | FileOpErrorKind::TimedOut
             | FileOpErrorKind::Other
             | FileOpErrorKind::Corrupt => "이름을 바꾸지 못했습니다".to_owned(),
+            FileOpErrorKind::SyncProviderNotRunning => todo!("#453"),
         },
     }
 }
@@ -494,6 +497,7 @@ pub fn item_error_text(kind: FileOpErrorKind) -> &'static str {
         | FileOpErrorKind::Cancelled
         | FileOpErrorKind::TimedOut
         | FileOpErrorKind::Other => "오류가 났습니다",
+        FileOpErrorKind::SyncProviderNotRunning => todo!("#453"),
         FileOpErrorKind::Corrupt => todo!("#425"),
     }
 }

@@ -56,6 +56,9 @@ pub use recycle::RECYCLE_CHUNK;
 /// 진행 사건 사이의 가장 짧은 간격. 작업마다 진행 사건은 초당 10번 이하다.
 pub const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
+/// #453: 내려받기 작업의 무응답 시간 제한 기본값.
+pub const DOWNLOAD_STALL_TIMEOUT: Duration = Duration::from_secs(0); // #453
+
 /// 작업의 번호. 대기열 안에서 바뀌지 않고 다시 쓰이지 않는다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct JobId(u64);
@@ -94,6 +97,12 @@ pub enum JobKind {
     BatchRename,
     /// **휴지통 복원**([`JobQueue::restore`]). 차례를 기다리지 않고 곧바로 시작한다.
     Restore,
+    /// #453: 온라인 전용 파일 내려받기.
+    Download,
+    /// #455: 이 장치에 항상 유지(고정 상태 바꾸기).
+    KeepOnDevice,
+    /// #455: 공간 확보(고정 해제).
+    FreeUpSpace,
     /// #429: 새 zip으로 묶기.
     NewZip,
 }
@@ -160,6 +169,8 @@ pub struct Progress {
     pub current: Option<PathBuf>,
     /// 작업을 시작한 뒤 흐른 시간(이 진행을 만든 때).
     pub elapsed: Duration,
+    /// #453: 내려받는 중인가.
+    pub downloading: bool,
 }
 
 /// 항목 하나에서 난 오류(**항목별 오류**): 그 원본 항목과 오류 종류. 문장은 화면 몫이다(ADR-0007).
@@ -901,6 +912,11 @@ impl Drop for JobQueue {
 }
 
 impl JobQueue {
+    /// #453: 내려받기 무응답 시간 제한을 바꾼다.
+    pub fn set_stall_timeout(&mut self, _timeout: Duration) {
+        todo!("#453")
+    }
+
     /// 빈 대기열.
     pub fn new() -> Self {
         let (sender, receiver) = mpsc::channel();
@@ -1035,6 +1051,9 @@ impl JobQueue {
             | JobKind::Recycle
             | JobKind::BatchRename
             | JobKind::Restore
+            | JobKind::Download
+            | JobKind::KeepOnDevice
+            | JobKind::FreeUpSpace
             | JobKind::NewZip => Err(CopyRejection::NoSources),
         }
     }
@@ -1075,6 +1094,9 @@ impl JobQueue {
             | JobKind::Recycle
             | JobKind::BatchRename
             | JobKind::Restore
+            | JobKind::Download
+            | JobKind::KeepOnDevice
+            | JobKind::FreeUpSpace
             | JobKind::NewZip => {
                 return Err(CopyRejection::NoSources);
             }
