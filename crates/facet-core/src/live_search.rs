@@ -195,6 +195,7 @@ struct Shared {
     changed: Condvar,
     folders_scanned: AtomicUsize,
     folders_skipped: AtomicUsize,
+    online_folders_skipped: AtomicUsize,
 }
 
 #[derive(Default)]
@@ -224,7 +225,7 @@ impl Shared {
             found,
             folders_scanned: self.folders_scanned.load(Ordering::SeqCst),
             folders_skipped: self.folders_skipped.load(Ordering::SeqCst),
-            online_folders_skipped: 0, // #452
+            online_folders_skipped: self.online_folders_skipped.load(Ordering::SeqCst),
         }
     }
 }
@@ -276,6 +277,7 @@ impl LiveSearch {
             changed: Condvar::new(),
             folders_scanned: AtomicUsize::new(0),
             folders_skipped: AtomicUsize::new(0),
+            online_folders_skipped: AtomicUsize::new(0),
         });
         let matcher = Arc::new(matcher);
         let (found_sender, found_receiver) = mpsc::channel::<Vec<Found>>();
@@ -427,7 +429,17 @@ fn scan(
         }
         // 폴더 심볼릭 링크·정션은 따라 들어가지 않는다(표준 라이브러리는 둘 다 링크로 본다).
         if item.is_folder && !kind.is_symlink() {
-            subfolders.push(entry.path());
+            // #452: 펼쳐지지 않은 온라인 폴더는 내려가지 않는다(내려가면 목록 요청이 일어남). 폴더 자신은 아래에서 맞으면 나온다.
+            if crate::content_gate::check_item(
+                &item.attributes,
+                crate::content_gate::Reader::LiveSearchDescend,
+            )
+            .is_ok()
+            {
+                subfolders.push(entry.path());
+            } else {
+                shared.online_folders_skipped.fetch_add(1, Ordering::SeqCst);
+            }
         }
         if matcher.is_match(folder, &item) {
             found.push(Found {

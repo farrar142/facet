@@ -170,7 +170,7 @@ export enum JobStatus { queued, running, paused, awaiting-answer, finished, fail
 export enum JobAsk { none, conflict, error, not-recyclable }
 
 // 작업의 종류(코어의 `JobKind`): 복사, 이동, 실행취소, 다시 실행, 삭제(휴지통), 영구 삭제.
-export enum JobType { copy, move, undo, redo, recycle, delete, batch-rename, restore }
+export enum JobType { copy, move, undo, redo, recycle, delete, batch-rename, restore, extract }
 
 // 이름 충돌 대화의 덮어쓰기 경고: 덮어쓸 수 없음(파일과 폴더), 덮어쓴 파일이 휴지통으로 감(되살릴 수 있음), 되살릴 수
 // 없음(대상 위치에 휴지통이 없음).
@@ -189,7 +189,7 @@ export struct ConflictSide {
 export enum Compare { unknown, same, source, target }
 
 // 항목별 오류의 까닭(코어의 `FileOpErrorKind`). 문장은 화면이 `@tr()`로 만든다.
-export enum ErrorReason { locked, access-denied, disk-full, source-missing, other }
+export enum ErrorReason { locked, access-denied, disk-full, source-missing, corrupt, other }
 
 // 이름 충돌·항목별 오류 질문의 답.
 export enum ConflictChoice { overwrite, overwrite-if-newer, keep-both, skip }
@@ -698,6 +698,7 @@ component ErrorQuestion inherits FocusScope {
                     : root.job.error-reason == ErrorReason.access-denied ? @tr("오류: 접근이 거부되었습니다")
                     : root.job.error-reason == ErrorReason.disk-full ? @tr("오류: 디스크가 가득 찼습니다")
                     : root.job.error-reason == ErrorReason.source-missing ? @tr("오류: 원본이 없습니다")
+                    : root.job.error-reason == ErrorReason.corrupt ? @tr("오류: 데이터가 손상되었습니다(CRC·크기가 맞지 않음)")
                     : @tr("오류: 이 항목을 처리하지 못했습니다");
                 font-weight: 700;
                 overflow: elide;
@@ -901,6 +902,7 @@ component JobView inherits Rectangle {
                     : root.job.kind == JobType.delete ? @tr("영구 삭제: {}", root.job.target)
                     : root.job.kind == JobType.batch-rename ? @tr("일괄 이름 바꾸기: {}", root.job.target)
                     : root.job.kind == JobType.restore ? @tr("복원: {}", root.job.target)
+                    : root.job.kind == JobType.extract ? @tr("꺼내기 → {}", root.job.target)
                     : root.job.kind == JobType.move ? @tr("이동 → {}", root.job.target) : @tr("복사 → {}", root.job.target);
                 horizontal-stretch: 1;
                 overflow: elide;

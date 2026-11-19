@@ -44,6 +44,8 @@ pub enum Line {
         found: usize,
         folders: usize,
         files_skipped: Option<Skipped>,
+        /// 내려가지 않은 펼쳐지지 않은 온라인 폴더 수.
+        online_folders: usize,
     },
     /// 끝났다: 찾은 수·건너뛴 폴더 수·걸린 시간(내용 검색이면 종류별 건너뛴 파일 수도).
     Finished {
@@ -51,6 +53,8 @@ pub enum Line {
         skipped: usize,
         elapsed: Duration,
         files_skipped: Option<Skipped>,
+        /// 내려가지 않은 펼쳐지지 않은 온라인 폴더 수.
+        online_folders: usize,
     },
     /// 중지했다(결과는 남는다).
     Stopped {
@@ -58,6 +62,8 @@ pub enum Line {
         skipped: usize,
         elapsed: Duration,
         files_skipped: Option<Skipped>,
+        /// 내려가지 않은 펼쳐지지 않은 온라인 폴더 수.
+        online_folders: usize,
     },
 }
 
@@ -77,6 +83,7 @@ pub fn line_of(status: Option<&SearchStatus>) -> Option<Line> {
             found: status.progress.found,
             folders: status.progress.folders_scanned,
             files_skipped,
+            online_folders: status.progress.online_folders_skipped,
         });
     };
     let (found, skipped, elapsed) = (summary.found, summary.folders_skipped, summary.elapsed);
@@ -86,12 +93,14 @@ pub fn line_of(status: Option<&SearchStatus>) -> Option<Line> {
             skipped,
             elapsed,
             files_skipped,
+            online_folders: summary.online_folders_skipped,
         },
         SearchEnd::Cancelled => Line::Stopped {
             found,
             skipped,
             elapsed,
             files_skipped,
+            online_folders: summary.online_folders_skipped,
         },
     })
 }
@@ -249,7 +258,8 @@ mod tests {
             Line::Running {
                 found: 3,
                 folders: 9,
-                files_skipped: None
+                files_skipped: None,
+                online_folders: 0
             }
         );
         assert!(line.is_running());
@@ -281,7 +291,8 @@ mod tests {
                 found: 7,
                 skipped: 2,
                 elapsed: Duration::from_millis(1500),
-                files_skipped: None
+                files_skipped: None,
+                online_folders: 0
             })
         );
         let stopped = SearchStatus {
