@@ -246,7 +246,9 @@ pub fn edit_error_text(error: EditError) -> String {
             | FileOpErrorKind::TimedOut
             | FileOpErrorKind::Other
             | FileOpErrorKind::Corrupt => "이름을 바꾸지 못했습니다".to_owned(),
-            FileOpErrorKind::SyncProviderNotRunning => todo!("#453"),
+            FileOpErrorKind::SyncProviderNotRunning => {
+                "동기화 프로그램이 돌고 있지 않습니다".to_owned()
+            }
         },
     }
 }
@@ -572,11 +574,11 @@ pub fn item_error_text(kind: FileOpErrorKind) -> &'static str {
         FileOpErrorKind::Locked => "다른 프로그램이 쓰고 있습니다",
         FileOpErrorKind::DiskFull => "디스크가 가득 찼습니다",
         FileOpErrorKind::Unsupported => "이 환경에서는 할 수 없습니다",
-        FileOpErrorKind::CrossVolume
-        | FileOpErrorKind::Cancelled
-        | FileOpErrorKind::TimedOut
-        | FileOpErrorKind::Other => "오류가 났습니다",
-        FileOpErrorKind::SyncProviderNotRunning => todo!("#453"),
+        FileOpErrorKind::TimedOut => "응답이 없어 시간이 다 되었습니다",
+        FileOpErrorKind::SyncProviderNotRunning => "동기화 프로그램이 돌고 있지 않습니다",
+        FileOpErrorKind::CrossVolume | FileOpErrorKind::Cancelled | FileOpErrorKind::Other => {
+            "오류가 났습니다"
+        }
         FileOpErrorKind::Corrupt => "데이터가 손상되었습니다",
     }
 }
@@ -993,6 +995,18 @@ pub fn preview_problem_text(problem: facet_core::preview::PreviewProblem) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 내려받기_오류의_까닭_글자() {
+        assert_eq!(
+            item_error_text(FileOpErrorKind::TimedOut),
+            "응답이 없어 시간이 다 되었습니다"
+        );
+        assert_eq!(
+            item_error_text(FileOpErrorKind::SyncProviderNotRunning),
+            "동기화 프로그램이 돌고 있지 않습니다"
+        );
+    }
 
     #[test]
     fn 드라이브_용량_글자는_크기이고_모르면_줄표다() {

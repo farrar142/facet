@@ -1389,7 +1389,7 @@ fn job_row(entry: &JobEntry) -> JobRow {
             JobKind::Delete => JobType::Delete,
             JobKind::BatchRename => JobType::BatchRename,
             JobKind::Restore => JobType::Restore,
-            JobKind::Download => todo!("#453"),
+            JobKind::Download => JobType::Download,
             JobKind::KeepOnDevice | JobKind::FreeUpSpace => todo!("#455"),
             JobKind::NewZip => todo!("#429"),
         },
@@ -1421,6 +1421,7 @@ fn job_row(entry: &JobEntry) -> JobRow {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default()
             .into(),
+        downloading: progress.is_some_and(|p| p.downloading),
         finished: summary.is_some(),
         completed: summary.map_or(0, |s| count64(s.items_completed())),
         skipped: summary.map_or(0, |s| count64(s.items_skipped())),
