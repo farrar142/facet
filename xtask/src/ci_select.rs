@@ -58,6 +58,7 @@ const NO_BENCH: &[&str] = &[
 /// (`facet-core`·`facet-win`·`facet-index`·`facet-indexer`·`facet-protocol`)의 소스가 이 표에 없으면 모두 돌린다.
 /// 새 모듈을 더하면 여기에도 더한다(이 파일이 바뀌므로 그 PR에서는 어차피 모두 돈다).
 const TABLE: &[(&str, &[&str])] = &[
+    ("crates/facet-core/src/build.rs", &[]),
     // facet-core: 목록 읽기·탭·창.
     (
         "crates/facet-core/src/details.rs",

@@ -12,7 +12,6 @@ use facet_core::build::{
 use tempfile::TempDir;
 
 #[test]
-#[ignore = "#468"]
 fn build_without_channel_variable_is_nightly() {
     match option_env!("FACET_CHANNEL") {
         Some("stable") => assert_eq!(build::channel(), Channel::Stable),
@@ -23,7 +22,6 @@ fn build_without_channel_variable_is_nightly() {
 }
 
 #[test]
-#[ignore = "#468"]
 fn install_marker_means_installed_otherwise_portable() {
     let dir = TempDir::new().unwrap();
     assert_eq!(install_kind(dir.path()), InstallKind::Portable);
@@ -48,7 +46,6 @@ fn install_marker_means_installed_otherwise_portable() {
 }
 
 #[test]
-#[ignore = "#468"]
 fn version_line_has_version_channel_and_install_kind() {
     // 버전 상수는 패키지 버전이다.
     assert_eq!(VERSION, env!("CARGO_PKG_VERSION"));

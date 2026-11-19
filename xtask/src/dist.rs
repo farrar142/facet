@@ -15,6 +15,15 @@ use sha2::{Digest, Sha256};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, DateTime, ZipWriter};
 
+/// label이 `v*` 태그면 `stable`, 아니면 `nightly`(빌드 때 `FACET_CHANNEL`).
+pub fn channel_for_label(label: &str) -> &'static str {
+    if label.starts_with('v') {
+        "stable"
+    } else {
+        "nightly"
+    }
+}
+
 /// zip에 넣을 파일 하나: zip 안의 이름과 원본 경로.
 pub struct Entry {
     pub name: &'static str,
@@ -154,6 +163,12 @@ mod tests {
                 source: root.join("NOTICE.txt"),
             },
         ]
+    }
+
+    #[test]
+    fn channel_follows_label() {
+        assert_eq!(channel_for_label("nightly"), "nightly");
+        assert_eq!(channel_for_label("v0.1.0"), "stable");
     }
 
     #[test]

@@ -52,7 +52,6 @@ fn run_version() -> (ExitStatus, String, Duration) {
 }
 
 #[test]
-#[ignore = "#468"]
 fn version_flag_prints_the_version_line_and_exits_at_once() {
     let exe_dir = facet_exe().parent().expect("실행 파일 폴더");
     assert_eq!(
@@ -72,7 +71,6 @@ fn version_flag_prints_the_version_line_and_exits_at_once() {
 }
 
 #[test]
-#[ignore = "#468"]
 fn version_flag_does_not_forward_to_a_running_facet() {
     let name = InstanceName::facet();
     let mut owner = match single_instance::claim(&name).expect("주인 확인") {
