@@ -1,17 +1,20 @@
 // target: crates/facet-win/tests/spec_sync_folders_provider.rs
 // AC: #449: 동기화 폴더 판정(등록한 루트와 그 안 항목은 참, 보통 폴더·버린 뒤는 거짓)
 // AC: #449: 온라인 전용 파일의 속성·크기와 목록 읽기의 내용 요청 0, 읽으면 내용 요청과 같은 내용
-// AC: #449: 펼쳐지지 않은 온라인 폴더의 RECALL_ON_OPEN과 목록 요청, 고정 상태 바꾸기(항상 유지·공간 확보·재귀·동기화 폴더 밖 실패)
+// AC: #449: 펼쳐지지 않은 온라인 폴더의 온라인 전용 속성(RECALL_ON_DATA_ACCESS·OFFLINE)과 다른 프로세스의 열거가 부르는 목록 요청, 고정 상태 바꾸기(항상 유지·공간 확보·재귀·동기화 폴더 밖 실패)
 // AC: #449: 내려받기 실패·멈춤 모드, 연결을 끊은 뒤 복사의 SyncProviderNotRunning
 //! 안전 래퍼의 클라우드 파일 기능(`cloud_files`: 동기화 폴더 판정·고정 상태 바꾸기)과 시험용 동기화 공급자
 //! (`cloud_files::testing::TestSyncRoot`)를 임시 폴더로 확인한다. 속성은 상위 폴더의 열거 결과로 읽어 파일을 열지
-//! 않는다. Windows에서만 돈다. 동기화 루트를 등록할 수 없는 환경(클라우드 파일 필터 드라이버 없음)이면 테스트마다
+//! 않는다. 펼쳐지지 않은 폴더의 열거는 자식 프로세스로 한다(필터는 공급자 프로세스 자신의 열거에는 목록 요청을
+//! 보내지 않는다). Windows에서만 돈다. 동기화 루트를 등록할 수 없는 환경(클라우드 파일 필터 드라이버 없음)이면 테스트마다
 //! 건너뛰었다고 출력하고, 환경 변수 `FACET_REQUIRE_SYNC_ROOT`가 있으면 그 경우를 실패로 본다.
 #![cfg(windows)]
 
 use std::fs;
 use std::os::windows::fs::MetadataExt;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -24,7 +27,6 @@ use tempfile::TempDir;
 const WAIT: Duration = Duration::from_secs(30);
 
 const OFFLINE: u32 = 0x1000;
-const RECALL_ON_OPEN: u32 = 0x4_0000;
 const RECALL_ON_DATA_ACCESS: u32 = 0x40_0000;
 const PINNED: u32 = 0x8_0000;
 const UNPINNED: u32 = 0x10_0000;
@@ -67,6 +69,31 @@ fn names_in(folder: &Path) -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(folder)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// 폴더의 이름들을 자식 프로세스(`cmd /u`: 내부 명령의 출력이 UTF-16)로 읽는다. 클라우드 파일 필터는
+/// `CfConnectSyncRoot`를 부른 프로세스(이 시험) 자신의 열거에는 목록 요청을 보내지 않는다.
+fn names_in_child(folder: &Path) -> Vec<String> {
+    let output = Command::new("cmd")
+        .args(["/u", "/d", "/c"])
+        .raw_arg(format!("dir /b /a \"{}\"", folder.display()))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "dir 실패: {:?}", output.status);
+    let units: Vec<u16> = output
+        .stdout
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    let mut names: Vec<String> = String::from_utf16(&units)
+        .unwrap()
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
         .collect();
     names.sort();
     names
@@ -138,10 +165,15 @@ fn unexpanded_online_folder_fetches_placeholders_when_listed() {
         return;
     };
     let folder = root.add_online_folder("폴더", &[("x.txt", b"x"), ("y.txt", b"yy")]);
-    assert_ne!(attributes_of(&folder) & RECALL_ON_OPEN, 0);
+    let bits = attributes_of(&folder);
+    assert_ne!(
+        bits & (RECALL_ON_DATA_ACCESS | OFFLINE),
+        0,
+        "펼쳐지지 않은 폴더도 온라인 전용: {bits:#x}"
+    );
     assert_eq!(root.fetch_placeholders_count(), 0, "상위 목록만 읽었다");
     assert_eq!(
-        names_in(&folder),
+        names_in_child(&folder),
         vec!["x.txt".to_string(), "y.txt".to_string()]
     );
     assert!(root.fetch_placeholders_count() >= 1);
@@ -180,7 +212,7 @@ fn recursive_pin_applies_inside_folder() {
     };
     let folder = root.add_online_folder("모음", &[("1.txt", b"1"), ("2.txt", b"2")]);
     // 펼친 뒤 고정한다.
-    assert_eq!(names_in(&folder).len(), 2);
+    assert_eq!(names_in_child(&folder).len(), 2);
     set_pin_state(&folder, PinState::Pinned, true).unwrap();
     assert_ne!(attributes_of(&folder) & PINNED, 0);
     for name in ["1.txt", "2.txt"] {
