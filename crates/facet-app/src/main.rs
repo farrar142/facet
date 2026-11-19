@@ -760,10 +760,16 @@ fn poll_all() {
     for view in &views {
         view.remember_scroll();
     }
-    let (updates, jobs) = {
+    let (mut updates, jobs) = {
         let mut app = app.borrow_mut();
         (app.poll(), app.poll_jobs())
     };
+    // 「새 zip으로 묶기」가 끝났으면 만든 zip이 활성 탭 목록에 들어갔다: 다시 그리고 그 행에 이름 입력란을 연다.
+    let new_zip = app.borrow_mut().take_new_zip();
+    if new_zip.is_some() {
+        let tab = app.borrow().active_tab_id();
+        updates.push((tab, Update::Search));
+    }
     // 붙여넣기가 작업을 넣었으면 작업 영역을 다시 그린다. 클립보드 결과의 글자는 활성 창의 상태 줄에 보인다.
     let mut pasted = false;
     for (_, update) in &updates {
@@ -798,6 +804,10 @@ fn poll_all() {
     }
     for view in &views {
         view.receive(&updates);
+    }
+    if let Some(name) = new_zip.as_deref().and_then(std::path::Path::file_name) {
+        let active = app.borrow().active_window_id();
+        with_view(active, |view| view.begin_rename_of_new(name));
     }
     // 이동이 확정되거나 사라진 위치에서 옮겨 위치가 바뀌었을 수 있다.
     save_session();
@@ -1385,7 +1395,7 @@ fn job_row(entry: &JobEntry) -> JobRow {
             JobKind::Restore => JobType::Restore,
             JobKind::Download => todo!("#453"),
             JobKind::KeepOnDevice | JobKind::FreeUpSpace => todo!("#455"),
-            JobKind::NewZip => todo!("#429"),
+            JobKind::NewZip => JobType::NewZip,
         },
         target: shell_provider::display_path(&entry.target).into(),
         status: match entry.state {
@@ -4949,9 +4959,13 @@ impl View {
 
     /// 새 폴더를 만들었다: 그 행에 이름 입력란을 전체 선택으로 연다. 그만두면 「새 폴더」로 남는다.
     fn begin_new_folder_rename(&self, edited: &Edited) {
-        let Some(name) = edited.name() else {
-            return;
-        };
+        if let Some(name) = edited.name() {
+            self.begin_rename_of_new(name);
+        }
+    }
+
+    /// 방금 만든 항목(새 폴더·새 zip)의 행에 이름 입력란을 전체 선택으로 연다.
+    fn begin_rename_of_new(&self, name: &std::ffi::OsStr) {
         let Some(index) = self.row_of(name) else {
             return;
         };

@@ -36,6 +36,7 @@ mod delete;
 mod device;
 mod extract;
 mod moving;
+mod new_zip;
 mod recycle;
 mod restore;
 mod revert;
@@ -564,6 +565,7 @@ enum Job {
     Restore(restore::RestoreJob),
     Device(device::DeviceJob),
     Extract(extract::ExtractJob),
+    NewZip(new_zip::NewZipJob),
 }
 
 impl Job {
@@ -579,6 +581,7 @@ impl Job {
             Job::Restore(job) => job.root_count(),
             Job::Device(job) => job.root_count(),
             Job::Extract(job) => job.root_count(),
+            Job::NewZip(job) => job.root_count(),
         }
     }
 
@@ -594,6 +597,7 @@ impl Job {
             Job::Restore(job) => job.run(context),
             Job::Device(job) => job.run(context),
             Job::Extract(job) => job.run(context),
+            Job::NewZip(job) => job.run(context),
         }
     }
 }
@@ -1283,6 +1287,20 @@ impl JobQueue {
         let mut job = batch_rename::BatchRenameJob::new(items, unchanged);
         job.journal = Some(Arc::clone(&journal));
         (self.start_at_once(Job::BatchRename(job)), journal)
+    }
+
+    /// #429: `sources`를 `folder`에 새 zip(`base`.zip, 겹치면 「base (2).zip」 …)으로 묶는 작업을 차례대로 넣고 그
+    /// 작업이 한 일을 적을 곳을 함께 돌려준다(작업 기록에 남길 작업).
+    pub(crate) fn new_zip_recorded(
+        &mut self,
+        sources: Vec<PathBuf>,
+        folder: PathBuf,
+        base: String,
+    ) -> Result<(JobId, JournalSink), CopyRejection> {
+        let journal = JournalSink::default();
+        let mut job = new_zip::NewZipJob::prepare(sources, folder, base)?;
+        job.journal = Some(Arc::clone(&journal));
+        Ok((self.enqueue(Job::NewZip(job)), journal))
     }
 
     /// 작업을 넣고 차례를 기다리지 않고 곧바로 시작한다(실행취소·다시 실행, 삭제, 일괄 이름 바꾸기).

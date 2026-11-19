@@ -839,6 +839,30 @@ pub enum ClipboardFailure {
     Rejected(CopyRejection),
 }
 
+/// #429: 새 zip의 이름(확장자 `.zip`을 뺀 것): 항목이 하나면 그 이름(파일은 확장자를 뺀 이름), 여럿이면 `folder`의
+/// 이름(드라이브 루트면 드라이브 글자).
+fn new_zip_base(sources: &[PathBuf], folder: &Path) -> String {
+    if let [only] = sources {
+        let name = if only.is_dir() {
+            only.file_name()
+        } else {
+            only.file_stem()
+        };
+        if let Some(name) = name {
+            return name.to_string_lossy().into_owned();
+        }
+    }
+    folder
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .or_else(|| {
+            let text = folder.to_string_lossy();
+            let letters: String = text.chars().filter(|c| c.is_alphanumeric()).collect();
+            (!letters.is_empty()).then_some(letters)
+        })
+        .unwrap_or_else(|| "archive".to_string())
+}
+
 /// [`App::start_batch_rename`]이 작업을 만들지 않은 까닭.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchRenameError {
@@ -1020,6 +1044,8 @@ pub struct App {
     history: History,
     /// 도는 복사·이동 작업이 한 일을 적는 곳. 끝나면 작업 기록으로 옮긴다.
     journals: HashMap<JobId, (OperationKind, JournalSink)>,
+    /// #429: 끝난 「새 zip으로 묶기」가 만든 zip([`App::take_new_zip`]이 한 번 준다).
+    new_zip: Option<PathBuf>,
     /// 클립보드 스레드([`App::enable_clipboard`]). 띄우지 못했거나 아직이면 `None`.
     clipboard: Option<Arc<Clipboard>>,
     /// 클립보드 변경 알림이 알려 준 「파일이 있음」 요약. 붙여넣기를 켜고 끄는 데 쓴다(명령 실행 여부를 볼 때
@@ -1297,6 +1323,7 @@ impl App {
             work_area: WorkArea::new(),
             history: History::new(),
             journals: HashMap::new(),
+            new_zip: None,
             clipboard: None,
             clipboard_files: Arc::default(),
             cut_marks: Arc::default(),
@@ -3710,7 +3737,7 @@ impl App {
             CommandId::ExtractAllHere | CommandId::ExtractToFolder | CommandId::ExtractTo => {
                 todo!("#427")
             }
-            CommandId::NewZip => todo!("#429"),
+            CommandId::NewZip => return self.start_new_zip(),
             CommandId::AddToZip => todo!("#430"),
             CommandId::CheckForUpdates => todo!("#475"),
             CommandId::About => todo!("#459"),
@@ -4505,8 +4532,38 @@ impl App {
     }
 
     /// #429: 「새 zip으로 묶기」 작업이 만든 zip의 경로를 한 번 준다.
+    ///
+    /// 작업이 끝나 작업 기록에 남을 때 정해지고(그때 활성 탭이 그 폴더를 보고 있으면 만든 zip이 목록에 들어가 선택·커서가
+    /// 된다), 한 번 받으면 `None`이다. 화면은 받으면 그 행에 이름 입력란을 연다.
     pub fn take_new_zip(&mut self) -> Option<PathBuf> {
-        todo!("#429")
+        self.new_zip.take()
+    }
+
+    /// #429: 「새 zip으로 묶기」: 고른 항목(없으면 커서 항목)을 현재 폴더의 새 zip으로 묶는 작업을 대기열에 넣는다.
+    /// 이름은 항목이 하나면 그 이름(파일은 확장자를 뺀 이름), 여럿이면 현재 폴더 이름이다.
+    fn start_new_zip(&mut self) -> Execution {
+        let Some(folder) = self
+            .active_tab()
+            .location()
+            .file_system_path()
+            .map(Path::to_path_buf)
+        else {
+            return Execution::Disabled;
+        };
+        let Some(sources) = self.selected_sources() else {
+            return Execution::Disabled;
+        };
+        let base = new_zip_base(&sources, &folder);
+        let count = sources.len();
+        match self.jobs.new_zip_recorded(sources, folder.clone(), base) {
+            Ok((id, journal)) => {
+                self.journals.insert(id, (OperationKind::NewZip, journal));
+                self.work_area.add(id, JobKind::NewZip, folder, count);
+                self.poll_jobs();
+                Execution::Done
+            }
+            Err(_) => Execution::Disabled,
+        }
     }
 
     /// #428: 암호 질문에 답한다. `None`이면 작업을 취소한다.
@@ -4971,6 +5028,16 @@ impl App {
             .collect();
         self.apply_path_changes(&changes);
         if journal.steps.is_empty() && !journal.overwrote {
+            return;
+        }
+        if kind == OperationKind::NewZip {
+            if let Some(crate::history::Step::CreatedZip { path, .. }) = journal.steps.first() {
+                self.new_zip = Some(path.clone());
+                if let Some(edited) = crate::edit::created_file(path) {
+                    self.active_tab_mut().apply_edit(&edited);
+                }
+            }
+            self.history.record(Record::new(kind, journal.steps));
             return;
         }
         let all_deleted = kind == OperationKind::Recycle

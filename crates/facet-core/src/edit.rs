@@ -153,6 +153,18 @@ fn read_item(folder: &Path, name: &OsStr) -> Option<Item> {
         .flatten()
 }
 
+/// #429: 방금 만든 새 zip(파일) `path`를 다시 읽어 목록에 넣고 선택할 결과로 만든다(새 폴더와 같은 모양).
+pub(crate) fn created_file(path: &Path) -> Option<Edited> {
+    let folder = path.parent()?;
+    let item = read_item(folder, path.file_name()?)?;
+    Some(edited(
+        EditKind::NewFolder,
+        None,
+        path.to_path_buf(),
+        Some(item),
+    ))
+}
+
 fn edited(kind: EditKind, original: Option<PathBuf>, path: PathBuf, item: Option<Item>) -> Edited {
     let (is_folder, size, modified) = match &item {
         Some(item) => (item.is_folder, item.size, item.modified),
