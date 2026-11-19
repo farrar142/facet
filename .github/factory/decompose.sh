@@ -19,11 +19,25 @@
 #                                   factory/spec-<S>, pushes it, opens the spec PR (title "스펙: <title> 인수 시험
 #                                   (#S)", label `spec-pr`, body `Refs #S` and the ticket list) and dispatches Odin:
 #                                   result=pr, pr=<number>.
+#   decompose.sh budget <S>         when the spec body has no `예산:` line, appends `예산: $N` (whole dollars, rounded
+#                                   up): the spec's fixed share plus a price per sub-issue by its model label
+#                                   (`model:opus`, else the `model:sonnet` price). A line already there (written by a
+#                                   person or an earlier run) is left alone, so running it again changes nothing.
+#                                   `finish` calls it before opening the spec PR; a failure only warns.
 #   decompose.sh dispatch-odin <S>  dispatch factory-odin.yml with input spec=<S>. A failed dispatch (the workflow
 #                                   does not exist yet, or is disabled) only warns.
 #
 # Environment: REPO (or GITHUB_REPOSITORY), GH_TOKEN, BASE (base branch, default main), FACTORY_ROOT (the
-# checkout to search and commit in, default the repository this script is in). Needs bash, git, gh and jq.
+# checkout to search and commit in, default the repository this script is in), and the budget prices in dollars
+# (decimals allowed):
+#   FACTORY_BUDGET_SPEC_USD    fixed share of a spec, default 30: spec #28 (S13) spent $28.36 before its tickets
+#                              (Decompose $10.80, two Odin runs $17.56)
+#   FACTORY_BUDGET_OPUS_USD    per `model:opus` ticket, default 10: Implement+Verify of a finished opus ticket
+#                              cost $8~$9.5 on spec #28
+#   FACTORY_BUDGET_SONNET_USD  per other ticket (`model:sonnet` or none), default 3: a finished sonnet ticket
+#                              cost $1.5~$3 on spec #28
+# A spec that never went through Decompose has no line and keeps ledger.sh's floor ($60).
+# Needs bash, git, gh, jq and awk.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 REPO=${REPO:-${GITHUB_REPOSITORY:-}}
@@ -83,6 +97,48 @@ state() {
   fi
 }
 
+BUDGET_SPEC=${FACTORY_BUDGET_SPEC_USD:-30}
+BUDGET_OPUS=${FACTORY_BUDGET_OPUS_USD:-10}
+BUDGET_SONNET=${FACTORY_BUDGET_SONNET_USD:-3}
+
+# All sub-issues of a spec (open or closed), ascending, one per line.
+all_tickets() {
+  gh api "repos/$REPO/issues/$1/sub_issues?per_page=100" --paginate \
+    | j -s -r 'add // [] | map(.number) | sort | .[]'
+}
+
+budget() {
+  local s=$1 issue n opus=0 sonnet=0 usd tmp
+  issue=$(gh api "repos/$REPO/issues/$s") || { echo "::warning::could not read #$s for its budget"; return 1; }
+  # The same line ledger.sh reads ("예산:" at the start of a line); any such line counts as written.
+  if [ "$(printf '%s' "$issue" | j -r '(.body // "") | test("(^|\n)[ \t]*예산:")')" = true ]; then
+    echo "#$s already has a budget line"
+    return 0
+  fi
+  for n in $(all_tickets "$s"); do
+    if has_label "$n" model:opus; then opus=$((opus + 1)); else sonnet=$((sonnet + 1)); fi
+  done
+  if [ $((opus + sonnet)) -eq 0 ]; then
+    echo "::warning::#$s has no tickets; no budget line"
+    return 0
+  fi
+  usd=$(awk -v f="$BUDGET_SPEC" -v o="$BUDGET_OPUS" -v s="$BUDGET_SONNET" -v no="$opus" -v ns="$sonnet" \
+    'BEGIN { t = f + no * o + ns * s; c = int(t); if (c < t) c++; print c }')
+  tmp=$(mktemp) || return 1
+  # Built in jq so the rest of the body keeps its bytes (CRLF included).
+  printf '%s' "$issue" | jq --arg l "예산: \$$usd" \
+    '{body: ((.body // "") | if . == "" then $l elif endswith("\n") then . + "\n" + $l else . + "\n\n" + $l end)}' \
+    > "$tmp" || { rm -f "$tmp"; return 1; }
+  if gh api -X PATCH "repos/$REPO/issues/$s" --input "$tmp" > /dev/null; then
+    echo "#$s budget: \$$usd (fixed \$$BUDGET_SPEC + opus $opus x \$$BUDGET_OPUS + sonnet $sonnet x \$$BUDGET_SONNET)"
+  else
+    echo "::warning::could not write the budget line of #$s"
+    rm -f "$tmp"
+    return 1
+  fi
+  rm -f "$tmp"
+}
+
 dispatch_odin() {
   if gh api -X POST "repos/$REPO/actions/workflows/factory-odin.yml/dispatches" \
     -f "ref=$BASE" -f "inputs[spec]=$1" > /dev/null; then
@@ -116,6 +172,8 @@ finish() {
     echo "::error::#$s has no open tickets after Decompose"
     return 1
   fi
+
+  budget "$s" || echo "::warning::#$s keeps its budget unchanged"
 
   title=$(gh api "repos/$REPO/issues/$s" | j -r '.title')
   list=$(for n in $tickets; do echo "- #$n"; done)
@@ -157,7 +215,7 @@ $list"
 }
 
 usage() {
-  echo "usage: decompose.sh state <S> | finish <S> <mode> | dispatch-odin <S>" >&2
+  echo "usage: decompose.sh state <S> | finish <S> <mode> | budget <S> | dispatch-odin <S>" >&2
   exit 2
 }
 
@@ -165,6 +223,7 @@ usage() {
 case "${1:-}" in
   state) [ $# -eq 2 ] || usage; state "$2" ;;
   finish) [ $# -eq 3 ] || usage; finish "$2" "$3" ;;
+  budget) [ $# -eq 2 ] || usage; budget "$2" ;;
   dispatch-odin) [ $# -eq 2 ] || usage; dispatch_odin "$2" ;;
   *) usage ;;
 esac
