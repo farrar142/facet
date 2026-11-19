@@ -61,7 +61,6 @@ fn write_docs(zip: &Path, names: &[&str]) {
 }
 
 #[test]
-#[ignore = "#424"]
 fn a_zip_rewritten_outside_shows_the_new_list() {
     let dir = TempDir::new().unwrap();
     let zip = dir.path().join("자료.zip");
@@ -80,7 +79,6 @@ fn a_zip_rewritten_outside_shows_the_new_list() {
 }
 
 #[test]
-#[ignore = "#424"]
 fn a_deleted_zip_moves_the_tab_to_its_folder() {
     let dir = TempDir::new().unwrap();
     let zip = dir.path().join("자료.zip");
