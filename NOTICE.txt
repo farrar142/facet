@@ -1,5 +1,5 @@
 facet
-https://github.com/farrar142/facet
+https://github.com/sandcorporation/facet
 
 facet's own source code is licensed under the MIT License.
 See the LICENSE file for the full text.

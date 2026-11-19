@@ -33,7 +33,7 @@ use facet_core::window::{App, Update};
 use tempfile::TempDir;
 
 const WAIT: Duration = Duration::from_secs(30);
-const PAGE: &str = "https://github.com/farrar142/facet/releases/tag/v9.0.0";
+const PAGE: &str = "https://github.com/sandcorporation/facet/releases/tag/v9.0.0";
 
 #[derive(Clone)]
 enum Route {

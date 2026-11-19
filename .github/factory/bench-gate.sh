@@ -15,10 +15,10 @@
 #       (the limit lines; the end of the log when none matches). bridge.sh mails the marker to the
 #       coordinator. A comment with that marker by github-actions[bot] already there means "alerted".
 #
-# Environment: FACTORY_REPO owner/name (default farrar142/facet), BENCH_WORKFLOW the workflow file
+# Environment: FACTORY_REPO owner/name (default sandcorporation/facet), BENCH_WORKFLOW the workflow file
 # (default bench.yml). gh must be logged in. Needs bash, gh and jq.
 set -u -o pipefail
-REPO=${FACTORY_REPO:-farrar142/facet}
+REPO=${FACTORY_REPO:-sandcorporation/facet}
 WORKFLOW=${BENCH_WORKFLOW:-bench.yml}
 LABEL=bench-alert
 

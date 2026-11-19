@@ -17,9 +17,9 @@ facet은 Windows 파일 탐색기를 대체할 앱이다. 스택은 아직 정�
 
 | 서비스 | 제품 |
 | --- | --- |
-| Ticket tracker | GitHub Issues (`farrar142/facet`, 라벨은 `docs/agents/triage-labels.md`) |
+| Ticket tracker | GitHub Issues (`sandcorporation/facet`, 라벨은 `docs/agents/triage-labels.md`) |
 | Ticket source | 없음. 사람이 직접 등록한다 |
-| Git host | GitHub (`farrar142/facet`) |
+| Git host | GitHub (`sandcorporation/facet`) |
 | Orchestrator | GitHub Actions (workflow 파일이 곧 orchestrator) |
 | Runner | Actions 호스티드 러너. Implementer·Odin·Verify는 `windows-latest`, 나머지는 `ubuntu-latest` |
 | Observability platform | 없음. Actions run 페이지로 충분하다 (의도한 선택) |
