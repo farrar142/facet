@@ -45,11 +45,15 @@ pub mod view;
 pub mod watch;
 pub mod window;
 pub mod work_area;
+pub mod zip_archive;
+pub mod zip_open;
+pub mod zip_provider;
 
 pub use facet_win::OpenError;
 pub use file_system::FileSystemProvider;
 pub use location::{
     Attributes, Item, ListError, Location, SearchKind, SearchScope, ShellLocation, VirtualFolder,
+    ZipLocation,
 };
 pub use provider::{
     Candidate, Capabilities, PathSegment, Provider, ResolveError, Resolved, provider_for,

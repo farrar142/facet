@@ -724,6 +724,7 @@ fn read_subfolders(
             ListError::Disconnected { .. } | ListError::DeviceNotReady { .. } => {
                 SubfoldersError::Io(std::io::ErrorKind::NotConnected)
             }
+            ListError::BrokenArchive { .. } => SubfoldersError::Io(std::io::ErrorKind::InvalidData),
         })?;
     let mut folders: Vec<Candidate> = items
         .into_iter()
@@ -892,6 +893,12 @@ pub enum Execution {
     NotAllowedHere,
     /// #354: 휴지통 비우기 전에 화면이 확인을 받는다.
     ConfirmEmptyRecycleBin,
+    /// #423: zip 안의 zip은 열 수 없다(위치는 그대로).
+    NestedZip,
+    /// #427: 「꺼내기 위치…」 대상 선택 창을 연다.
+    ChooseExtractTarget,
+    /// #430: 「zip에 넣기…」 대상 선택 창을 연다.
+    ChooseZipTarget,
 }
 
 /// 경로의 항목이 디스크에 없는가(없음·경로 없음만. 권한 등 다른 오류는 있는 것으로 보아 여는 쪽에 맡긴다).
@@ -3684,6 +3691,11 @@ impl App {
             CommandId::EmptyRecycleBin => return Execution::ConfirmEmptyRecycleBin,
             CommandId::KeepOnDevice | CommandId::FreeUpSpace => todo!("#455"),
             CommandId::DownloadForPreview => todo!("#456"),
+            CommandId::ExtractAllHere | CommandId::ExtractToFolder | CommandId::ExtractTo => {
+                todo!("#427")
+            }
+            CommandId::NewZip => todo!("#429"),
+            CommandId::AddToZip => todo!("#430"),
             CommandId::TogglePreview => {
                 let window = self.active_window_mut();
                 let visible = !window.preview.visible;
@@ -4310,7 +4322,8 @@ impl App {
             | JobKind::Restore
             | JobKind::Download
             | JobKind::KeepOnDevice
-            | JobKind::FreeUpSpace => return None,
+            | JobKind::FreeUpSpace
+            | JobKind::NewZip => return None,
         };
         if !self.can_execute(command) {
             return None;
@@ -4416,6 +4429,30 @@ impl App {
     /// 번만 있고 다시 쓰면 앞으로 온다. 앱 전체에 하나이고 세션 파일에 남는다.
     pub fn recent_targets(&self) -> &[PathBuf] {
         &self.recent_targets
+    }
+
+    /// #427: 「꺼내기 위치…」 대상 선택 창에 친 글자를 대상 폴더로 해석해 꺼낼 내용을 준다.
+    pub fn extract_plan_to(&self, _text: &str) -> Result<TransferPlan, TargetError> {
+        todo!("#427")
+    }
+
+    /// #430: 「zip에 넣기…」 대상 선택 창에 친 글자를 zip(또는 zip 안 위치)으로 해석해 넣을 내용을 준다.
+    pub fn add_to_zip_plan(&self, _text: &str) -> Result<TransferPlan, TargetError> {
+        todo!("#430")
+    }
+
+    /// #429: 「새 zip으로 묶기」 작업이 만든 zip의 경로를 한 번 준다.
+    pub fn take_new_zip(&mut self) -> Option<PathBuf> {
+        todo!("#429")
+    }
+
+    /// #428: 암호 질문에 답한다. `None`이면 작업을 취소한다.
+    pub fn answer_password(
+        &mut self,
+        _job: JobId,
+        _password: Option<String>,
+    ) -> Result<(), crate::job::AnswerError> {
+        todo!("#428")
     }
 
     /// 확인한 복사·이동을 작업 대기열에 넣고 작업 영역에 더한다. 시작 전에 막힌 경우(자기 하위로 복사, 대상 위치

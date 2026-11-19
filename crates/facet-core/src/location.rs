@@ -25,6 +25,24 @@ pub enum Location {
     /// 셸 공급자가 읽는 가상 폴더(내 PC·휴지통·휴대폰 장치, [`crate::shell_provider`]). 실제 폴더가 아니다
     /// ([`Location::file_system_path`]가 `None`). 어느 가상 폴더인지는 [`Location::virtual_folder`]로 묻는다.
     Shell(ShellLocation),
+    /// #423: zip 파일 안의 위치(zip 공급자).
+    Zip(ZipLocation),
+}
+
+/// #423: zip 파일과 그 안의 경로.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ZipLocation;
+
+impl ZipLocation {
+    /// #423: zip 파일의 실제 경로.
+    pub fn archive(&self) -> &Path {
+        todo!("#423")
+    }
+
+    /// #423: zip 안 경로(`\` 구분, 루트는 "").
+    pub fn inner(&self) -> &str {
+        todo!("#423")
+    }
 }
 
 /// 가상 폴더 위치: 셸 항목 식별자(PIDL)를 바이트로 직렬화한 값과 그 종류. 표시 이름은 위치에 담지 않고 셸 공급자가
@@ -115,6 +133,19 @@ impl Location {
         )
     }
 
+    /// #423: zip 파일 `archive` 안의 `inner` 위치.
+    pub fn zip(_archive: impl Into<PathBuf>, _inner: impl Into<String>) -> Location {
+        todo!("#423")
+    }
+
+    /// #423: zip 위치면 그 zip 파일과 zip 안 경로.
+    pub fn zip_location(&self) -> Option<&ZipLocation> {
+        match self {
+            Self::Zip(zip) => Some(zip),
+            Self::FileSystem(_) | Self::SearchResults(_) | Self::Shell(_) => None,
+        }
+    }
+
     /// 가상 폴더 위치면 그 종류(휴대폰 장치 안의 폴더도 [`VirtualFolder::Device`]), 아니면 `None`.
     pub fn virtual_folder(&self) -> Option<VirtualFolder> {
         self.shell_location().map(ShellLocation::folder)
@@ -124,7 +155,7 @@ impl Location {
     pub fn shell_location(&self) -> Option<&ShellLocation> {
         match self {
             Self::Shell(shell) => Some(shell),
-            Self::FileSystem(_) | Self::SearchResults(_) => None,
+            Self::FileSystem(_) | Self::SearchResults(_) | Self::Zip(_) => None,
         }
     }
 
@@ -176,7 +207,7 @@ impl Location {
     pub fn file_system_path(&self) -> Option<&Path> {
         match self {
             Self::FileSystem(path) => Some(path),
-            Self::SearchResults(_) | Self::Shell(_) => None,
+            Self::SearchResults(_) | Self::Shell(_) | Self::Zip(_) => None,
         }
     }
 
@@ -184,7 +215,7 @@ impl Location {
     pub fn search_scope(&self) -> Option<&SearchScope> {
         match self {
             Self::SearchResults(scope) => Some(scope),
-            Self::FileSystem(_) | Self::Shell(_) => None,
+            Self::FileSystem(_) | Self::Shell(_) | Self::Zip(_) => None,
         }
     }
 
@@ -210,6 +241,7 @@ impl fmt::Display for Location {
                 write!(f, "{} ? {}", scope.folder.display(), scope.query)
             }
             Self::Shell(shell) => f.write_str(&crate::shell_provider::display_name(shell)),
+            Self::Zip(_) => todo!("#423"),
         }
     }
 }
@@ -267,6 +299,8 @@ pub enum ListError {
     /// 휴대폰(장치)이 꽂혀 있지만 저장소를 보여 주지 않는다: 잠겨 있거나 USB 사용이 「파일 전송」이 아니다. 화면은
     /// 빈 목록 대신 까닭과 할 일을 보인다.
     DeviceNotReady { location: Location },
+    /// #423: 열 수 없는 zip(central directory 없음 등).
+    BrokenArchive { location: Location },
 }
 
 impl ListError {
@@ -288,6 +322,7 @@ impl ListError {
             | Self::NotResponding { location }
             | Self::Disconnected { location }
             | Self::DeviceNotReady { location }
+            | Self::BrokenArchive { location }
             | Self::Io { location, .. } => location,
         }
     }
@@ -309,6 +344,7 @@ impl fmt::Display for ListError {
             Self::DeviceNotReady { location } => {
                 write!(f, "장치가 저장소를 보여 주지 않습니다: {location}")
             }
+            Self::BrokenArchive { .. } => todo!("#423"),
         }
     }
 }

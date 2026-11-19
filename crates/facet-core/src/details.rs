@@ -49,6 +49,8 @@ pub enum Column {
     DateDeleted,
     /// #451: 동기화 상태.
     SyncState,
+    /// #423: 압축된 크기(zip 위치에만 뜻이 있다).
+    CompressedSize,
 }
 
 /// 정렬 방향.
@@ -400,6 +402,7 @@ fn compare_entries(a: &Entry, b: &Entry, sort: Sort) -> Ordering {
         Column::OriginalLocation => a.original_folder_key().cmp(&b.original_folder_key()),
         Column::SyncState => todo!("#451"),
         Column::DateDeleted => a.date_deleted().cmp(&b.date_deleted()),
+        Column::CompressedSize => todo!("#423"),
     };
     directed(key).then_with(|| a.compare_names(b))
 }

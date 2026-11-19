@@ -66,6 +66,8 @@ pub enum FileOpErrorKind {
     SyncProviderNotRunning,
     /// 그 밖의 오류. 원래 코드는 [`FileOpError::code`]에 있다.
     Other,
+    /// #425: 데이터가 선언과 맞지 않음(CRC 불일치, 선언 크기 초과, 깨진 압축 데이터).
+    Corrupt,
 }
 
 /// 파일 연산의 실패: 종류와 운영체제가 돌려준 원래 코드.
