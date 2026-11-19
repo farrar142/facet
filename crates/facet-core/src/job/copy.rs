@@ -498,6 +498,9 @@ pub(super) struct Copier<'a> {
     pub(super) refused: bool,
     /// 마지막 덮어쓰기가 휴지통으로 보낸 원래 대상과 보내기 전 모습(`place`가 적는다).
     pub(super) last_replaced: Option<(RecycledItem, Stamp)>,
+    /// 꺼내기(#425): 원본이 zip 항목이다. 파일 내용은 zip에서 풀어 쓰고, 원본의 시각·크기는 zip 항목에서 읽으며,
+    /// 폴더 시각·속성은 맞추지 않는다.
+    pub(super) zip: Option<Arc<super::extract::ZipSource>>,
 }
 
 /// 덮어쓰기에서 원래 대상을 어떻게 치웠는가.
@@ -583,7 +586,13 @@ impl<'a> Copier<'a> {
             permanent_overwrite: true,
             refused: false,
             last_replaced: None,
+            zip: None,
         }
+    }
+
+    /// 건너뛰는 폴더(이름 충돌·항목별 오류로 건너뛰기) 안인가.
+    pub(super) fn skipping(&self) -> bool {
+        self.skip_depth > 0
     }
 
     /// 파일·링크 하나를 `source`에서 `target`으로 복사했다(이동이면 옮겼다). 작업 기록에 적는다. 원래 대상을
@@ -695,7 +704,7 @@ impl<'a> Copier<'a> {
         (summary, self.cancelled)
     }
 
-    fn handle(&mut self, entry: Entry) {
+    pub(super) fn handle(&mut self, entry: Entry) {
         if self.skip_depth > 0 {
             self.skip(entry);
             self.reporter.maybe_emit(self.context.control);
@@ -767,6 +776,10 @@ impl<'a> Copier<'a> {
         target: &Path,
         snapshot: Option<&fs::Metadata>,
     ) {
+        // 꺼낸 폴더는 시각·속성을 맞추지 않는다(zip 항목에는 실제 폴더의 메타데이터가 없다).
+        if self.zip.is_some() {
+            return;
+        }
         let apply = |target: &Path| match snapshot {
             Some(metadata) => file_ops::apply_folder_metadata(metadata, target),
             None => file_ops::copy_folder_metadata(source, target),
@@ -961,7 +974,10 @@ impl<'a> Copier<'a> {
         can_overwrite: bool,
     ) -> Option<Resolution> {
         let conflict = Conflict {
-            source: conflict_item(source),
+            source: match &self.zip {
+                Some(zip) => zip.conflict_item(source),
+                None => conflict_item(source),
+            },
             target: conflict_item(target),
             can_overwrite,
             // 휴지통이 있는 위치면 원래 대상을 휴지통으로 보낸 뒤 덮어쓰므로 되살릴 수 있다.
@@ -1201,7 +1217,11 @@ impl<'a> Copier<'a> {
             Resolution::Overwrite => self.overwrite(source, target, size, base),
             Resolution::OverwriteIfNewer => {
                 let modified = |path: &Path| fs::metadata(path).and_then(|m| m.modified()).ok();
-                match (modified(source), modified(target)) {
+                let source_time = match &self.zip {
+                    Some(zip) => zip.modified(source),
+                    None => modified(source),
+                };
+                match (source_time, modified(target)) {
                     (Some(source_time), Some(target_time)) if source_time > target_time => {
                         self.overwrite(source, target, size, base)
                     }
@@ -1338,6 +1358,9 @@ impl<'a> Copier<'a> {
     fn write_file(&mut self, source: &Path, target: &Path, size: u64, base: u64) -> FileOutcome {
         let reporter = &mut self.reporter;
         let control = self.context.control;
+        if let Some(zip) = &self.zip {
+            return zip.write(source, target, size, base, reporter, control);
+        }
         let result = file_ops::copy_file(source, target, &mut |progress| {
             // 훑은 뒤 파일이 커졌거나 대체 데이터 스트림이 있어도 센 크기를 넘지 않게 한다.
             reporter.bytes_done = base + progress.copied.min(size);

@@ -467,7 +467,8 @@ pub fn operation_name(record: &Record) -> String {
         (OperationKind::BatchRename, _) => {
             format!("일괄 이름 바꾸기({}개)", record.steps().len())
         }
-        (OperationKind::Extract, _) => todo!("#425"),
+        (OperationKind::Extract, Some(name)) => format!("「{name}」 꺼내기"),
+        (OperationKind::Extract, None) => format!("항목 {n}개 꺼내기"),
         (OperationKind::NewZip, _) => todo!("#429"),
         (OperationKind::AddToZip, _) => todo!("#430"),
     }
@@ -529,7 +530,7 @@ pub fn item_error_text(kind: FileOpErrorKind) -> &'static str {
         | FileOpErrorKind::TimedOut
         | FileOpErrorKind::Other => "오류가 났습니다",
         FileOpErrorKind::SyncProviderNotRunning => todo!("#453"),
-        FileOpErrorKind::Corrupt => todo!("#425"),
+        FileOpErrorKind::Corrupt => "데이터가 손상되었습니다",
     }
 }
 
@@ -1205,6 +1206,16 @@ mod tests {
             vec![copied(r"C:\b\1.jpg"), copied(r"C:\b\2.jpg")],
         );
         assert_eq!(operation_name(&copy), "항목 2개 복사");
+        let extract = Record::new(
+            OperationKind::Extract,
+            vec![copied(r"C:\b\문서"), copied(r"C:\b\문서\readme.txt")],
+        );
+        assert_eq!(operation_name(&extract), "「문서」 꺼내기");
+        let extract = Record::new(
+            OperationKind::Extract,
+            vec![copied(r"C:\b\1.txt"), copied(r"C:\b\2.txt")],
+        );
+        assert_eq!(operation_name(&extract), "항목 2개 꺼내기");
         let moved = Record::not_undoable(
             OperationKind::Move,
             vec![facet_core::history::Step::Moved {

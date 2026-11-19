@@ -27,7 +27,6 @@ fn archive_of(entries: &[Entry]) -> (TempDir, PathBuf, Archive) {
 }
 
 #[test]
-#[ignore = "#425"]
 fn read_entry_unpacks_stored_and_deflate() {
     let text = zip_support::repeated_text(30);
     let (_dir, _path, archive) = archive_of(&[
@@ -44,7 +43,6 @@ fn read_entry_unpacks_stored_and_deflate() {
 }
 
 #[test]
-#[ignore = "#425"]
 fn read_entry_reports_errors_as_values() {
     let bad_crc = Entry {
         crc: 0xDEAD_BEEF,
@@ -207,7 +205,6 @@ mod jobs {
     }
 
     #[test]
-    #[ignore = "#425"]
     fn copying_zip_items_extracts_files_and_folders_with_their_times() {
         let f = fixture();
         let mut queue = JobQueue::new();
@@ -233,7 +230,6 @@ mod jobs {
     }
 
     #[test]
-    #[ignore = "#425"]
     fn extract_all_extracts_the_whole_zip() {
         let f = fixture();
         let mut queue = JobQueue::new();
@@ -291,7 +287,6 @@ mod jobs {
     }
 
     #[test]
-    #[ignore = "#425"]
     fn conflicts_offer_the_four_answers() {
         // 덮어쓰기
         let f = conflict_fixture();
@@ -364,7 +359,6 @@ mod jobs {
     }
 
     #[test]
-    #[ignore = "#425"]
     fn pause_resume_and_cancel_leave_no_partial_files() {
         let dir = TempDir::new().unwrap();
         let zip = dir.path().join("큰.zip");
@@ -428,7 +422,6 @@ mod jobs {
     }
 
     #[test]
-    #[ignore = "#425"]
     fn unsupported_methods_are_skipped_and_listed() {
         let dir = TempDir::new().unwrap();
         let zip = dir.path().join("섞임.zip");
@@ -465,7 +458,6 @@ mod jobs {
     }
 
     #[test]
-    #[ignore = "#425"]
     fn corrupt_entries_are_asked_as_item_errors() {
         let dir = TempDir::new().unwrap();
         let zip = dir.path().join("상함.zip");
@@ -535,7 +527,6 @@ mod jobs {
     }
 
     #[test]
-    #[ignore = "#425"]
     fn copying_to_the_other_panel_extracts_and_undo_removes_it() {
         let f = fixture();
         let mut app = app_at(Location::zip(&f.zip, "문서"));
