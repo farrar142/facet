@@ -11,7 +11,7 @@
 #                                               the push log holds that refusal: catch up with main and
 #                                               push once more (#417), else hand over (below)
 #
-# check and push-failed: when it applies, hand-to-human.sh hands the issue to a person with the reason, `blocked=true` goes to $GITHUB_OUTPUT (stdout when unset)
+# check and push-failed: when it applies, hand-to-human.sh hands the issue to a person with the reason (code workflow-change, or push-rejected when the push-retry already failed), `blocked=true` goes to $GITHUB_OUTPUT (stdout when unset)
 # and the exit code is 0. Otherwise `blocked=false` and exit code 1 (the caller goes on / fails as before).
 #
 # push-retry (#417): the refusal also comes when the branch touches no workflow file but main changed
@@ -34,8 +34,8 @@ output() {
   if [ -n "${GITHUB_OUTPUT:-}" ]; then printf '%s\n' "$@" >> "$GITHUB_OUTPUT"; else printf '%s\n' "$@"; fi
 }
 
-handover() { # handover <issue> <reason>
-  bash "$here/hand-to-human.sh" "$1" "$2" || echo "::warning::workflow-guard: could not hand #$1 to a human"
+handover() { # handover <issue> <code> <reason>
+  bash "$here/hand-to-human.sh" "$1" "$2" "$3" || echo "::warning::workflow-guard: could not hand #$1 to a human"
   output blocked=true
 }
 
@@ -48,7 +48,7 @@ case "${1:-}" in
     [ $# -eq 3 ] || { echo 'usage: workflow-guard.sh check <issue> <base>' >&2; exit 2; }
     files=$(git diff --name-only "$3"...HEAD -- .github/workflows/ | head -n 5 | tr '\n' ' ')
     if [ -n "$files" ]; then
-      handover "$2" "사유: workflow 파일. 이 티켓은 \`.github/workflows/\` 를 바꾼다(${files% }). 공장의 GITHUB_TOKEN 은 workflow 파일을 push 할 수 없어 사람이 처리한다. 실패 횟수는 늘리지 않았고 다시 돌리지 않는다."
+      handover "$2" workflow-change "사유: workflow 파일. 이 티켓은 \`.github/workflows/\` 를 바꾼다(${files% }). 공장의 GITHUB_TOKEN 은 workflow 파일을 push 할 수 없어 사람이 처리한다. 실패 횟수는 늘리지 않았고 다시 돌리지 않는다."
       exit 0
     fi
     output blocked=false
@@ -56,7 +56,7 @@ case "${1:-}" in
   push-failed)
     [ $# -eq 3 ] || { echo 'usage: workflow-guard.sh push-failed <issue> <log>' >&2; exit 2; }
     if refused "$3"; then
-      handover "$2" "사유: workflow 파일. push 가 workflow 파일 때문에 거절됐다(공장의 GITHUB_TOKEN 에 \`workflows\` 권한이 없다). 사람이 처리한다. 실패 횟수는 늘리지 않았고 다시 돌리지 않는다."
+      handover "$2" workflow-change "사유: workflow 파일. push 가 workflow 파일 때문에 거절됐다(공장의 GITHUB_TOKEN 에 \`workflows\` 권한이 없다). 사람이 처리한다. 실패 횟수는 늘리지 않았고 다시 돌리지 않는다."
       exit 0
     fi
     output blocked=false
@@ -67,12 +67,12 @@ case "${1:-}" in
     shift 4
     if ! refused "$log"; then output blocked=false; exit 1; fi
     if ! git fetch -q origin main; then
-      handover "$issue" "사유: workflow 파일. push 가 workflow 파일 때문에 거절됐고 main 을 받아 오지 못해 다시 시도하지 못했다. 사람이 처리한다. 실패 횟수는 늘리지 않았고 다시 돌리지 않는다."
+      handover "$issue" push-rejected "사유: workflow 파일. push 가 workflow 파일 때문에 거절됐고 main 을 받아 오지 못해 다시 시도하지 못했다. 사람이 처리한다. 실패 횟수는 늘리지 않았고 다시 돌리지 않는다."
       exit 3
     fi
     files=$(git diff --name-only origin/main...HEAD -- .github/workflows/ | head -n 5 | tr '\n' ' ')
     if [ -n "$files" ]; then
-      handover "$issue" "사유: workflow 파일. 이 티켓은 \`.github/workflows/\` 를 바꾼다(${files% }). push 가 거절됐고 공장의 GITHUB_TOKEN 은 workflow 파일을 push 할 수 없어 사람이 처리한다. 실패 횟수는 늘리지 않았고 다시 돌리지 않는다."
+      handover "$issue" workflow-change "사유: workflow 파일. 이 티켓은 \`.github/workflows/\` 를 바꾼다(${files% }). push 가 거절됐고 공장의 GITHUB_TOKEN 은 workflow 파일을 push 할 수 없어 사람이 처리한다. 실패 횟수는 늘리지 않았고 다시 돌리지 않는다."
       exit 3
     fi
     caught=true
@@ -84,7 +84,7 @@ case "${1:-}" in
       git rebase -q origin/main > /dev/null 2>&1 || { git rebase --abort > /dev/null 2>&1; caught=false; }
     fi
     if [ "$caught" = false ]; then
-      handover "$issue" "사유: workflow 파일. push 가 workflow 파일 때문에 거절됐다(그 사이 main 이 workflow 파일을 바꾼 듯하다). main 을 따라잡으려 했지만 $how 가 충돌했다. 사람이 처리한다. 실패 횟수는 늘리지 않았고 다시 돌리지 않는다."
+      handover "$issue" push-rejected "사유: workflow 파일. push 가 workflow 파일 때문에 거절됐다(그 사이 main 이 workflow 파일을 바꾼 듯하다). main 을 따라잡으려 했지만 $how 가 충돌했다. 사람이 처리한다. 실패 횟수는 늘리지 않았고 다시 돌리지 않는다."
       exit 3
     fi
     echo "::notice::workflow-guard: push refused over workflow files; caught up with main ($how), pushing again"
@@ -95,7 +95,7 @@ case "${1:-}" in
     fi
     cat "$log"
     if refused "$log"; then
-      handover "$issue" "사유: workflow 파일. push 가 workflow 파일 때문에 거절됐고, main 을 따라잡은 뒤에도($how) 거절됐다(공장의 GITHUB_TOKEN 에 \`workflows\` 권한이 없다). 사람이 처리한다. 실패 횟수는 늘리지 않았고 다시 돌리지 않는다."
+      handover "$issue" push-rejected "사유: workflow 파일. push 가 workflow 파일 때문에 거절됐고, main 을 따라잡은 뒤에도($how) 거절됐다(공장의 GITHUB_TOKEN 에 \`workflows\` 권한이 없다). 사람이 처리한다. 실패 횟수는 늘리지 않았고 다시 돌리지 않는다."
       exit 3
     fi
     output blocked=false

@@ -20,7 +20,15 @@
 #    again is a new mail. The label itself is trusted (only someone with write access can put it on).
 #    The reason in the mail is the issue's latest `<!-- factory-… -->` marker comment by a trusted
 #    author (below); without one the mail says 「까닭 댓글 없음」 and is sent anyway.
-#    needs-triage, needs-info and local are not mailed.
+#    needs-triage, needs-info and local are not mailed. An issue a person deferred (label `deferred`,
+#    #437) waits for nobody: it is not mailed as ready-for-human even when that label was left on.
+#
+#    For ready-for-human, factory-paused and human-check the BRIDGE_TO_COORD mail is a processing
+#    order (#437): its 할 일 is four steps (원인 확인 → 고침 → 재발 방지 장치 → 결과 보고) and says not
+#    to wait for another order; BRIDGE_CC gets one line only (kind, issue, title) with the same key
+#    per recipient. For ready-for-human the kind carries the hand-over code from the latest trusted
+#    `<!-- factory-human <code> -->` comment (`사람 넘김(conflict)`), in the subject and the first line;
+#    the old marker without a code counts as `other`. needs-decision mail is as before.
 #
 # 2. Marker comments without a label, left on the ledger issue (or the `bench-alert` issue):
 #
@@ -28,6 +36,7 @@
 #      <!-- factory-queue-empty S -->          the last spec S of FACTORY_SPEC_QUEUE was started
 #      <!-- factory-idle Q -->                 every spec of the queue is labelled; the factory is idle
 #      <!-- factory-stalled DATE -->           waiting tickets are blocked by issues handed to a person
+#      <!-- factory-stalled deferred-B-T -->   a deferred issue B blocks the waiting ticket T (once, #437)
 #      <!-- factory-bench-regression SHA -->   the hourly benchmark failed at SHA (#366)
 #
 #    Each comment goes to BRIDGE_TO_COORD and BRIDGE_CC once. Anyone can write those markers on a
@@ -63,7 +72,10 @@
 # what already waits does not all arrive at once.
 #
 # Environment:
-#   FACTORY_REPO          owner/name (default farrar142/facet); gh must be logged in
+#   FACTORY_REPO          owner/name; without it, the `origin` remote of the git checkout holding this
+#                         script (then of the working directory) when that is a GitHub URL, else exit 2
+#                         (#437: no repository is named here, so a copy serves any repository).
+#                         gh must be logged in
 #   BRIDGE_TO_BOSS        recipient of needs-decision (required; no default)
 #   BRIDGE_TO_COORD       recipient of everything else (required; no default)
 #   BRIDGE_CC             more recipients of everything but needs-decision, comma-separated (optional)
@@ -78,7 +90,23 @@
 # Exits 1 when a read or a send failed (the rest is still sent), 2 on a usage or setup error.
 # Needs bash, gh, jq and switchboard.
 set -u
-REPO=${FACTORY_REPO:-farrar142/facet}
+# origin_repo <dir>: owner/name of the GitHub `origin` remote of the git checkout at <dir>, or nothing.
+origin_repo() {
+  local u
+  u=$(git -C "$1" remote get-url origin 2>/dev/null) || return 0
+  u=${u%.git}
+  case "$u" in *github.com[:/]*/*) ;; *) return 0 ;; esac
+  u=${u#*github.com}; u=${u#[:/]}
+  case "$u" in */*/* | /* | */) return 0 ;; esac
+  printf '%s' "$u"
+}
+REPO=${FACTORY_REPO:-}
+[ -n "$REPO" ] || REPO=$(origin_repo "$(cd "$(dirname "$0")" && pwd)")
+[ -n "$REPO" ] || REPO=$(origin_repo .)
+if [ -z "$REPO" ]; then
+  echo "bridge: set FACTORY_REPO=owner/name (no GitHub origin remote found to fall back to)" >&2
+  exit 2
+fi
 NAME=${REPO##*/}
 if [ -n "${BRIDGE_TO:-}" ]; then
   echo "bridge: BRIDGE_TO is ignored; use BRIDGE_TO_BOSS (needs-decision) and BRIDGE_TO_COORD (the rest)" >&2
@@ -190,12 +218,32 @@ reason() {
   echo "까닭 댓글 없음"
 }
 
+# handover_code <issue number>: the code of the issue's latest `<!-- factory-human <code> -->` comment by
+# a trusted author (#437); `other` for the old marker without a code, or when there is none.
+handover_code() {
+  local n=$1 cs lines id author code
+  cs=$(gh api "repos/$REPO/issues/$n/comments?per_page=100" --paginate) || { echo other; return; }
+  # Hand-over markers newest first: id <TAB> author <TAB> code (empty for the old marker).
+  lines=$(printf '%s' "$cs" | j -s -r 'add // [] | map(select((.body // "") | contains("<!-- factory-human")))
+    | sort_by(.created_at) | reverse | .[]
+    | [(.id | tostring), (.user.login // ""),
+       ((.body | capture("<!-- factory-human (?<c>[a-z-]+) -->").c) // "")] | @tsv')
+  while IFS=$'\t' read -r id author code; do
+    [ -n "$id" ] || continue
+    trusted "$author" || continue
+    echo "${code:-other}"
+    return
+  done <<< "$lines"
+  echo other
+}
+
 for label in needs-decision ready-for-human factory-paused human-check; do
   list=$(gh api "repos/$REPO/issues?state=open&labels=$label&per_page=100" --paginate) \
     || { echo "bridge: could not list the issues labelled $label" >&2; failed=1; continue; }
   numbers=$(printf '%s' "$list" | j -s -r --arg l "$label" 'add // [] | .[]
     | select(.state == "open" and any(.labels[]; .name == $l))
     | select($l != "human-check" or ((.body // "") | test("(^|\n)[ \t]*[-*] \\[ \\]")))
+    | select($l != "ready-for-human" or (any(.labels[]; .name == "deferred") | not))
     | .number')
   case $label in
     needs-decision)
@@ -228,7 +276,9 @@ for label in needs-decision ready-for-human factory-paused human-check; do
     title=$(printf '%s' "$issue" | j -r '.title')
     url=$(printf '%s' "$issue" | j -r '.html_url')
     why=$(reason "$n")
-    text="종류: $kind ($label)
+    key="$NAME-factory-label-$n-$label-$(slug "$at")"
+    if [ "$label" = needs-decision ]; then
+      text="종류: $kind ($label)
 이슈: $url
 제목: #$n $title
 라벨 붙은 시각: $at
@@ -237,8 +287,31 @@ for label in needs-decision ready-for-human factory-paused human-check; do
 $why
 
 할 일: $todo"
-    deliver "$base" "$NAME-factory-label-$n-$label-$(slug "$at")" "$recipients" \
-      "[$NAME 공장] $kind: #$n $title" "$text" "$label #$n"
+      deliver "$base" "$key" "$recipients" "[$NAME 공장] $kind: #$n $title" "$text" "$label #$n"
+      continue
+    fi
+    # The rest is a processing order for the coordinator (#437): it acts on this mail alone. BRIDGE_CC
+    # gets one line only. A hand-over names its code (the latest trusted marker's; the old marker
+    # without a code is `other`) in the subject and the first line.
+    what=$kind
+    [ "$label" = ready-for-human ] && what="$kind($(handover_code "$n"))"
+    text="종류: $what ($label)
+이슈: $url
+제목: #$n $title
+라벨 붙은 시각: $at
+
+까닭:
+$why
+
+할 일 — 이 메일이 처리 지시다. 다른 지시를 기다리지 않고 차례대로 끝낸다:
+1. 원인 확인: 위 까닭과 이슈·PR·run 로그를 읽고 왜 공장이 스스로 끝내지 못했는지 밝힌다.
+2. 고침: $todo
+3. 재발 방지 장치: 같은 까닭으로 다시 사람에게 넘어오지 않게 공장 장치(스크립트·시험·workflow)를 고치는 티켓을 내거나 고친다.
+4. 결과 보고: 원인·고친 것·재발 방지 장치를 이슈 댓글로 남기고 보고한다."
+    subject="[$NAME 공장] $what: #$n $title"
+    deliver "$base" "$key" "$TO_COORD" "$subject" "$text" "$label #$n"
+    cc=$(printf '%s\n' "$CC" | grep -vxF -- "$TO_COORD")
+    deliver "$base" "$key" "$cc" "$subject" "$what #$n $title" "$label #$n (one line)"
   done
 done
 
@@ -313,7 +386,12 @@ while IFS=$'\t' read -r id kind n author value; do
       todo="FACTORY_SPEC_QUEUE에 spec을 넣고 dispatch-next를 다시 돌린다(조율자 몫)." ;;
     stalled)
       label="공장 막힘"
-      todo="위 사람 몫 이슈를 풀고 ready-for-human을 뗀다." ;;
+      todo="위 사람 몫 이슈를 풀고 ready-for-human을 뗀다."
+      # Once per pair (dispatch-next.sh): a deferred issue blocks a waiting ticket (#437).
+      case "$value" in deferred-*)
+        label="공장 막힘(미룸)"
+        todo="막힌 티켓도 미룰 것이면 deferred를 붙이고, 아니면 미룬 이슈의 막음을 푼다." ;;
+      esac ;;
     bench-regression)
       label="벤치 한도 초과"
       todo="위 커밋 구간에서 한도를 넘긴 커밋을 찾아 고칠 티켓을 낸다(조율자 몫)." ;;

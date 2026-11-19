@@ -40,7 +40,7 @@ setup "a diff with .github/workflows is handed to a person"
 commit_file .github/workflows/x.yml
 ( cd "$repo" && bash "$script" check 70 main > "$tmp/log" 2>&1 ); eq "exit" 0 $?
 eq "labels" "ready-for-human" "$(labels)"
-eq "marker" "<!-- factory-human -->" "$(comment_first)"
+eq "marker" "<!-- factory-human workflow-change -->" "$(comment_first)"
 has "blocked" "blocked=true" "$(cat "$GITHUB_OUTPUT")"
 eq "nothing dispatched" 0 "$(grep -c 'workflow run' "$FAKE_GH/calls.log")"
 eq "no failure comment" 0 "$(jq '[.[] | select(.body | contains("factory-implementer"))] | length' "$FAKE_GH/comments-70.json")"
@@ -55,7 +55,7 @@ setup "the push refusal is not a failure"
 printf '%s\n' "! [remote rejected] agent/issue-70 -> agent/issue-70 (refusing to allow a GitHub App to create or update workflow \`.github/workflows/a.yml\` without \`workflows\` permission)" > "$tmp/push.log"
 bash "$script" push-failed 70 "$tmp/push.log" > /dev/null 2>&1; eq "exit" 0 $?
 eq "labels" "ready-for-human" "$(labels)"
-eq "marker" "<!-- factory-human -->" "$(comment_first)"
+eq "marker" "<!-- factory-human workflow-change -->" "$(comment_first)"
 
 setup "another push error stays a failure"
 echo "fatal: unable to access: Could not resolve host" > "$tmp/push.log"

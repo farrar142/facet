@@ -354,7 +354,8 @@ for l in "impl-start issue=#1 track=1 wait=100" "impl-start issue=#2 track=2 wai
          "verify-end issue=#2 pr=#41 outcome=conflict files=AGENTS.md,crates/app/src/text.rs" \
          "verify-end issue=#3 pr=#42 outcome=rebase-ci" \
          "verify-end issue=#5 pr=#44 outcome=conflict files=crates/app/src/main.rs,AGENTS.md" \
-         "verify-end issue=#4 pr=#43 outcome=review"; do
+         "verify-end issue=#4 pr=#43 outcome=review" "handover issue=#6 code=conflict" \
+         "handover issue=#7 code=push-rejected" "handover issue=#8 code=conflict" "handover issue=#9"; do
   jq --arg b "<!-- factory-event -->
 event=$l run=1" '. + [{id: (length + 1), created_at: "2026-11-17T01:00:00Z", body: $b}]' \
     "$FAKE_GH/comments-900.json" 2>/dev/null | tr -d '\r' > "$FAKE_GH/c.new" || true
@@ -368,6 +369,10 @@ eq "stats" "verify: 5 runs, conflict send-backs 3 (ratio 60%)
 implementer wait, track 1: n=2 mean=150s max=200s
 implementer wait, track 2: n=1 mean=300s max=300s
 verify wait: n=2 mean=30s max=50s
+hand-overs per code: 4 in all
+  2 conflict
+  1 other
+  1 push-rejected
 conflicts per file:
   2 AGENTS.md
   1 crates/app/src/main.rs
@@ -380,6 +385,7 @@ jq -n '[{id: 1, created_at: "2026-11-17T01:00:00Z",
   body: "<!-- factory-event -->\nevent=verify-end issue=#1 pr=#40 outcome=merged run=1"}]' \
   | tr -d '\r' > "$FAKE_GH/comments-900.json"
 eq "none" "conflicts per file: none" "$(bash "$ledger" stats | tr -d '\r' | tail -n 1)"
+eq "no hand-overs" "hand-overs per code: none" "$(bash "$ledger" stats | tr -d '\r' | grep '^hand-overs')"
 
 echo "ledger: $passes passed, $fails failed"
 [ "$fails" -eq 0 ]
