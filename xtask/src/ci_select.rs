@@ -4,7 +4,7 @@
 //! 바뀐 파일은 부르는 쪽이 git으로 모아 넘긴다(기준과의 merge-base 대비, 작업 공간 루트 기준 `/` 구분 경로).
 
 /// 벤치마크 이름. `cargo xtask bench`·`ci`가 이 차례로 돌린다(`facet-bench`의 하위 명령 이름과 같다).
-pub const BENCHES: [&str; 19] = [
+pub const BENCHES: [&str; 20] = [
     "list",
     "index",
     "mft",
@@ -22,6 +22,7 @@ pub const BENCHES: [&str; 19] = [
     "thumbnail-decode",
     "thumbnail-cache",
     "text-preview",
+    "content-gate",
     "shell-helper",
     "shell-list",
 ];
@@ -116,6 +117,7 @@ const TABLE: &[(&str, &[&str])] = &[
         &["thumbnail-cache"],
     ),
     ("crates/facet-core/src/preview.rs", &["text-preview"]),
+    ("crates/facet-core/src/content_gate.rs", &["content-gate"]),
     ("crates/facet-core/src/thumbnail_queue.rs", &[]),
     ("crates/facet-core/src/query_syntax.rs", &["query-syntax"]),
     ("crates/facet-core/src/live_search.rs", &["search"]),

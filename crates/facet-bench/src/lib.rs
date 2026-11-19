@@ -1267,23 +1267,90 @@ pub const FILTER_LIMIT: Duration = Duration::from_millis(160);
 
 /// #336: 미리보기 텍스트(256KB 추정+디코딩) 로컬 기준(5ms).
 pub const TEXT_PREVIEW_TARGET: Duration = Duration::from_millis(5);
-/// #450: 내용 읽기 관문 벤치마크의 항목 수.
-pub const CONTENT_GATE_COUNT: usize = 0; // #450
+/// 내용 읽기 관문 벤치마크(#450)에서 관문에 통과시키는 항목 수: 큰 폴더 하나(10만 항목)의 속성 값.
+pub const CONTENT_GATE_COUNT: usize = 100_000;
 
-/// #450: 내용 읽기 관문 로컬 기준.
-pub const CONTENT_GATE_TARGET: Duration = Duration::ZERO; // #450
+/// 항목 10만 개를 내용 읽기 관문에 통과시키는 시간의 로컬 기준(릴리스 빌드): 1ms.
+///
+/// 관문은 비트 연산 몇 개라 항목당 수 나노초다(10만 개에 수십~수백 마이크로초). 썸네일·미리보기·아이콘이 목록의
+/// 모든 항목에 관문을 부르므로, 10만 항목 목록을 다시 그리는 한 프레임(16ms) 가운데 작은 몫(1ms) 안이어야 한다.
+pub const CONTENT_GATE_TARGET: Duration = Duration::from_millis(1);
 
-/// #450: 내용 읽기 관문 CI 상한.
-pub const CONTENT_GATE_LIMIT: Duration = Duration::ZERO; // #450
+/// CI가 실패시키는 내용 읽기 관문 시간 상한: 로컬 기준 [`CONTENT_GATE_TARGET`]의 10배([`LIST_LIMIT`]과 같은
+/// 까닭: 공유 러너의 편차를 견디면서 항목당 상수 시간이 아니게 되는 실수(할당·시스템 호출)만 잡는다).
+pub const CONTENT_GATE_LIMIT: Duration = Duration::from_millis(10);
 
-/// #450: 중앙값이 상한을 넘으면 중앙값과 상한을 담은 `Err`.
-pub fn check_content_gate_limit(_m: &Measurement, _limit: Duration) -> Result<(), String> {
-    todo!("#450")
+/// 중앙값이 상한을 넘으면 중앙값과 상한을 담은 `Err`.
+pub fn check_content_gate_limit(m: &Measurement, limit: Duration) -> Result<(), String> {
+    if m.median() > limit {
+        return Err(format!(
+            "내용 읽기 관문 상한 초과: 중앙값 {:.3}ms > 상한 {}ms (최악 {:.3}ms)",
+            m.median().as_secs_f64() * 1000.0,
+            limit.as_millis(),
+            m.max().as_secs_f64() * 1000.0
+        ));
+    }
+    Ok(())
 }
 
-/// #450: 항목 10만 개 속성 값을 관문에 통과시키는 시간을 잰다.
-pub fn measure_content_gate(_runs: usize) -> Result<Measurement, String> {
-    todo!("#450")
+/// 항목 [`CONTENT_GATE_COUNT`]개의 속성 값(보통 파일·온라인 전용·펼쳐지지 않은 폴더를 섞음)을 동작 종류를
+/// 돌려 가며 관문에 통과시키는 시간을 한 번 데우고 `runs`회 잰다. 허락·거절 수가 기대와 다르면 실패한다.
+pub fn measure_content_gate(runs: usize) -> Result<Measurement, String> {
+    use facet_core::content_gate::{
+        ATTRIBUTE_OFFLINE, ATTRIBUTE_RECALL_ON_DATA_ACCESS, ATTRIBUTE_RECALL_ON_OPEN, Reader, check,
+    };
+    const READERS: [Reader; 10] = [
+        Reader::Thumbnail,
+        Reader::Preview,
+        Reader::ContentSearch,
+        Reader::FolderSize,
+        Reader::TypeSniff,
+        Reader::LiveSearchDescend,
+        Reader::Copy,
+        Reader::CrossVolumeMove,
+        Reader::Open,
+        Reader::PreviewDownload,
+    ];
+    const ARCHIVE: u32 = 0x20;
+    const REPARSE_POINT: u32 = 0x400;
+    let bits: Vec<u32> = (0..CONTENT_GATE_COUNT)
+        .map(|i| match i % 4 {
+            0 => ARCHIVE,
+            1 => ARCHIVE | REPARSE_POINT | ATTRIBUTE_RECALL_ON_DATA_ACCESS,
+            2 => 0x10 | REPARSE_POINT | ATTRIBUTE_RECALL_ON_OPEN,
+            _ => ATTRIBUTE_OFFLINE,
+        })
+        .collect();
+    let run = || {
+        let mut allowed = 0usize;
+        for (i, &b) in bits.iter().enumerate() {
+            let reader = READERS[i % READERS.len()];
+            if check(std::hint::black_box(b), reader).is_ok() {
+                allowed += 1;
+            }
+        }
+        allowed
+    };
+    // 기대: 보통 파일은 모두 허락, 나머지는 사용자 동작(10개 중 4개)만 허락.
+    let expected = (0..CONTENT_GATE_COUNT)
+        .filter(|i| i % 4 == 0 || READERS[i % READERS.len()].is_user_action())
+        .count();
+    let got = run();
+    if got != expected {
+        return Err(format!(
+            "내용 읽기 관문의 허락 수가 다릅니다: {got} (기대 {expected})"
+        ));
+    }
+    let mut times = Vec::with_capacity(runs);
+    for _ in 0..runs {
+        let start = Instant::now();
+        std::hint::black_box(run());
+        times.push(start.elapsed());
+    }
+    Ok(Measurement {
+        item_count: CONTENT_GATE_COUNT,
+        times,
+    })
 }
 
 /// #336: 미리보기 텍스트 CI 상한(기준 × 10).
