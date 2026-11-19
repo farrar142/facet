@@ -38,7 +38,7 @@ case "$labels" in *,local,*) ;; *)
 esac
 # hand-to-human.sh takes ready-for-agent off and leaves the marker the bridge mails; once.
 case "$labels" in *,ready-for-human,*) ;; *)
-  bash "$here/hand-to-human.sh" "$n" '<!-- factory-local -->
+  bash "$here/hand-to-human.sh" "$n" local-only '<!-- factory-local -->
 workflow 파일 — 로컬 작업자 몫. 이 티켓은 `.github/workflows/` 를 건드리므로 공장(GITHUB_TOKEN)이 push 할 수 없다. `local` 로 공장 밖에 두고 사람(로컬 작업자)에게 넘긴다.'     || echo "::warning::local-ticket: could not hand #$n to a human" ;;
 esac
 output local=true

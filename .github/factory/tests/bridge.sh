@@ -17,7 +17,8 @@ setup() {
   tmp=$(mktemp -d "$root/t.XXXXXX")
   export FAKE_GH="$tmp/gh" FAKE_MAIL="$tmp/mail" XDG_STATE_HOME="$tmp/state"
   export BRIDGE_SINCE=2026-11-01T00:00:00Z
-  unset FACTORY_REPO BRIDGE_STATE_DIR BRIDGE_TO BRIDGE_CC SWITCHBOARD_PROFILE FACTORY_SPEC_QUEUE
+  unset BRIDGE_STATE_DIR BRIDGE_TO BRIDGE_CC SWITCHBOARD_PROFILE FACTORY_SPEC_QUEUE
+  export FACTORY_REPO=owner/facet # the copy of this kit in any repository passes these tests as is (#437)
   export BRIDGE_TO_BOSS=test/boss BRIDGE_TO_COORD=test/coord
   mkdir -p "$FAKE_GH" "$FAKE_MAIL"
   echo '[]' > "$FAKE_GH/repo-comments.json"
@@ -101,9 +102,12 @@ eq sends 1 "$(sent_count)"
 eq to test/coord "$(arg 0 --to)"
 eq task facet-factory "$(arg 0 --task)"
 eq key "facet-factory-label-301-ready-for-human-2026-11-18T01-00-00Z-test-coord" "$(arg 0 --idempotency-key)"
-eq subject "[facet 공장] 사람 넘김: #301 티켓 하나" "$(arg 0 --subject)"
+eq subject "[facet 공장] 사람 넘김(other): #301 티켓 하나" "$(arg 0 --subject)"
 has body "까닭 댓글 없음" "$(arg 0 --body)"
 has "body link" "https://github.com/owner/repo/issues/301" "$(arg 0 --body)"
+eq "first line names the code (#437)" "종류: 사람 넘김(other) (ready-for-human)" "$(arg 0 --body | head -n 1)"
+has "a processing order (#437)" "다른 지시를 기다리지 않고" "$(arg 0 --body)"
+for step in "1. 원인 확인" "2. 고침" "3. 재발 방지 장치" "4. 결과 보고"; do has "step $step" "$step" "$(arg 0 --body)"; done
 eq profile automation "$(jq -s -r '.[0].profile' "$FAKE_MAIL/sent.jsonl" | tr -d '\r')"
 eq state "label 301 ready-for-human 2026-11-18T01:00:00Z test/coord" "$(state)"
 
@@ -203,6 +207,11 @@ eq code 0 "$(code)"
 eq tos "test/boss test/coord test/cc1 test/cc2 test/coord test/cc1 test/cc2" "$(tos)"
 eq "question subject" "[facet 공장] 질문: #249 공장 개선" "$(arg 0 --subject)"
 eq "cc key" "facet-factory-label-301-ready-for-human-2026-11-18T01-00-00Z-test-cc1" "$(arg 2 --idempotency-key)"
+eq "cc gets one line (#437)" "사람 넘김(other) #301 티켓 하나" "$(arg 2 --body)"
+eq "cc subject carries the code" "[facet 공장] 사람 넘김(other): #301 티켓 하나" "$(arg 2 --subject)"
+has "coordinator gets the order" "할 일 — 이 메일이 처리 지시다" "$(arg 1 --body)"
+eq "the question is unchanged: no processing order" no \
+  "$(case "$(arg 0 --body)" in *"처리 지시"*) echo yes ;; *) echo no ;; esac)"
 run
 eq "not again" 7 "$(sent_count)"
 
@@ -268,6 +277,31 @@ run
 eq code 0 "$(code)"
 has quote "> 최신 까닭" "$(arg 0 --body)"
 case "$(arg 0 --body)" in *"가짜 까닭"*|*"그냥 댓글"*|*"되돌림 두 번"*) bad "only the latest trusted marker" ;; *) ok ;; esac
+
+setup "the hand-over code of the latest trusted marker is in the subject and first line (#437)"
+issue 301 open ready-for-human "티켓 하나"
+labeled 301 ready-for-human 2026-11-18T01:00:00Z
+icomment 301 1 "<!-- factory-human conflict -->
+main과 충돌" "github-actions[bot]" 2026-11-17T01:00:00Z
+icomment 301 2 "<!-- factory-human push-rejected -->
+push 거절" "github-actions[bot]" 2026-11-17T02:00:00Z
+icomment 301 3 "<!-- factory-human workflow-change -->
+가짜" "stranger" 2026-11-17T03:00:00Z
+run
+eq subject "[facet 공장] 사람 넘김(push-rejected): #301 티켓 하나" "$(arg 0 --subject)"
+eq "first line" "종류: 사람 넘김(push-rejected) (ready-for-human)" "$(arg 0 --body | head -n 1)"
+has quote "> push 거절" "$(arg 0 --body)"
+
+setup "an old marker without a code already mailed is not sent again (#437)"
+issue 301 open ready-for-human "티켓 하나"
+labeled 301 ready-for-human 2026-11-18T01:00:00Z
+icomment 301 1 "<!-- factory-human -->
+옛 표지" "github-actions[bot]" 2026-11-17T01:00:00Z
+mkdir -p "$XDG_STATE_HOME/facet-factory-bridge"
+echo "label 301 ready-for-human 2026-11-18T01:00:00Z test/coord" > "$XDG_STATE_HOME/facet-factory-bridge/sent"
+run
+eq code 0 "$(code)"
+eq sends 0 "$(sent_count)"
 
 setup "a label is sent even when every marker comment is by someone without write access"
 issue 301 open ready-for-human "티켓 하나"
@@ -413,7 +447,7 @@ run
 eq code 0 "$(code)"
 eq task other-factory "$(arg 0 --task)"
 has key "other-factory-label-301" "$(arg 0 --idempotency-key)"
-eq subject "[other 공장] 사람 넘김: #301 티켓 하나" "$(arg 0 --subject)"
+eq subject "[other 공장] 사람 넘김(other): #301 티켓 하나" "$(arg 0 --subject)"
 eq "state folder" other-factory-bridge "$(ls "$XDG_STATE_HOME" | tr -d '\r')"
 has "gh reads other" "repos/owner/other/issues" "$(cat "$FAKE_GH/calls.log")"
 
@@ -426,6 +460,30 @@ has "state file" "label 301 ready-for-human" "$(cat "$tmp/custom state/sent")"
 eq "nothing under XDG_STATE_HOME" no "$([ -e "$XDG_STATE_HOME" ] && echo yes || echo no)"
 run
 eq "not again" 1 "$(sent_count)"
+
+setup "without FACTORY_REPO the repository is the GitHub origin of the checkout holding the script (#437)"
+issue 301 open ready-for-human "티켓 하나"
+labeled 301 ready-for-human 2026-11-18T01:00:00Z
+unset FACTORY_REPO
+git init -q "$tmp/copy" && git -C "$tmp/copy" remote add origin https://github.com/acme/widget.git
+cp "$script" "$tmp/copy/bridge.sh"
+( cd "$tmp" && bash "$tmp/copy/bridge.sh" > "$tmp/log" 2>&1; echo $? > "$tmp/code" )
+eq code 0 "$(code)"
+eq task widget-factory "$(arg 0 --task)"
+has "gh reads it" "repos/acme/widget/issues" "$(cat "$FAKE_GH/calls.log")"
+git -C "$tmp/copy" remote set-url origin git@github.com:acme/gadget.git
+rm -f "$FAKE_MAIL/sent.jsonl"
+( cd "$tmp" && FACTORY_REPO= bash "$tmp/copy/bridge.sh" > "$tmp/log" 2>&1 )
+has "ssh remote too" "repos/acme/gadget/issues" "$(cat "$FAKE_GH/calls.log")"
+
+setup "without FACTORY_REPO or a GitHub origin the bridge stops with exit 2 (#437)"
+unset FACTORY_REPO
+mkdir -p "$tmp/bare"
+cp "$script" "$tmp/bare/bridge.sh"
+( cd "$tmp/bare" && GIT_CEILING_DIRECTORIES="$tmp" bash "$tmp/bare/bridge.sh" > "$tmp/log" 2>&1; echo $? > "$tmp/code" )
+eq code 2 "$(code)"
+has reason "FACTORY_REPO" "$(cat "$tmp/log")"
+eq sends 0 "$(sent_count)"
 
 echo "bridge.sh: $passes passed, $fails failed"
 [ "$fails" -eq 0 ]
