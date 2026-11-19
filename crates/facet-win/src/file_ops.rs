@@ -62,6 +62,8 @@ pub enum FileOpErrorKind {
     TimedOut,
     /// 이 환경(Windows가 아닌 곳)에서는 할 수 없다.
     Unsupported,
+    /// #449: 동기화 프로그램이 돌지 않아 온라인 전용 항목을 읽지 못한다.
+    SyncProviderNotRunning,
     /// 그 밖의 오류. 원래 코드는 [`FileOpError::code`]에 있다.
     Other,
 }

@@ -176,6 +176,18 @@ pub enum CommandId {
     EmptyRecycleBin,
     /// #339: 미리보기 영역 켜고 끄기(`toggle-preview`, Alt+P).
     TogglePreview,
+    /// #455: 이 장치에 항상 유지(`keep-on-device`).
+    KeepOnDevice,
+    /// #455: 공간 확보(`free-up-space`).
+    FreeUpSpace,
+    /// #456: 미리 보기 내려받기(`download-for-preview`).
+    DownloadForPreview,
+}
+
+/// #455: 명령이 꺼진 까닭(팔레트가 보인다).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisabledReason {
+    NotSyncFolder,
 }
 
 impl CommandId {
@@ -326,6 +338,9 @@ impl CommandId {
             CommandId::Restore => "restore",
             CommandId::EmptyRecycleBin => "empty-recycle-bin",
             CommandId::TogglePreview => "toggle-preview",
+            CommandId::KeepOnDevice => "keep-on-device",
+            CommandId::FreeUpSpace => "free-up-space",
+            CommandId::DownloadForPreview => "download-for-preview",
         }
     }
 
@@ -346,6 +361,7 @@ impl CommandId {
             Column::TotalSize => CommandId::SortByTotalSize,
             Column::FreeSpace => CommandId::SortByFreeSpace,
             Column::OriginalLocation | Column::DateDeleted => return None,
+            Column::SyncState => todo!("#451"),
         })
     }
 
@@ -463,6 +479,8 @@ impl CommandId {
             CommandId::Restore => &[],         // #353
             CommandId::EmptyRecycleBin => &[], // #354
             CommandId::TogglePreview => const { &[key(letter('P')).alt()] },
+            CommandId::KeepOnDevice | CommandId::FreeUpSpace => &[], // #455
+            CommandId::DownloadForPreview => &[],                    // #456
         }
     }
 
@@ -563,6 +581,8 @@ impl CommandId {
             // 휴지통 위치인지는 되는 일([`CommandId::is_allowed_by`])이 본다.
             CommandId::EmptyRecycleBin => true,
             CommandId::TogglePreview => true,
+            CommandId::KeepOnDevice | CommandId::FreeUpSpace => todo!("#455"),
+            CommandId::DownloadForPreview => todo!("#456"),
             CommandId::Refresh
             | CommandId::EditAddress
             | CommandId::ToggleHidden

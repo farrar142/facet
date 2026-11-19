@@ -55,6 +55,8 @@ pub struct MenuContext {
     pub can_go_up: bool,
     /// 실행취소 대상이 있는가.
     pub can_undo: bool,
+    /// #455: 탭 위치가 동기화 폴더인가. 참이면 항목 메뉴의 「삭제」 뒤에 구분선과 「이 장치에 항상 유지」·「공간 확보」가 붙는다.
+    pub location_is_sync_folder: bool,
 }
 
 /// 메뉴 항목에 붙는 표시.

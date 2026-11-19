@@ -12,7 +12,7 @@ use facet_core::command::CommandId;
 
 #[test]
 #[ignore = "#455"]
-fn 두_명령은_팔레트에_있고_단축키가_없다() {
+fn pin_commands_are_in_palette_without_shortcuts() {
     for (command, id) in [
         (CommandId::KeepOnDevice, "keep-on-device"),
         (CommandId::FreeUpSpace, "free-up-space"),
@@ -139,7 +139,7 @@ mod real {
 
     #[test]
     #[ignore = "#455"]
-    fn 항상_유지와_공간_확보가_고정_상태를_바꾸고_배지가_따라오며_기록에_남지_않는다() {
+    fn keep_and_free_change_pin_state_update_badge_and_skip_history() {
         let dir = TempDir::new().unwrap();
         let Some(root) = sync_root(dir.path(), "항상 유지·공간 확보") else {
             return;
@@ -171,7 +171,7 @@ mod real {
 
     #[test]
     #[ignore = "#455"]
-    fn 폴더에_내리면_안의_항목에도_적용된다() {
+    fn pin_commands_apply_inside_folders() {
         let dir = TempDir::new().unwrap();
         let Some(root) = sync_root(dir.path(), "폴더에 항상 유지") else {
             return;
@@ -190,7 +190,7 @@ mod real {
 
     #[test]
     #[ignore = "#455"]
-    fn 동기화_폴더가_아니면_까닭과_함께_꺼진다() {
+    fn pin_commands_disabled_with_reason_outside_sync_folders() {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("a.txt"), b"a").unwrap();
         let mut app = app_at(dir.path());
@@ -213,7 +213,7 @@ mod real {
 
     #[test]
     #[ignore = "#455"]
-    fn 동기화_폴더에서_원본이_없으면_꺼지고_까닭은_없다() {
+    fn pin_commands_disabled_without_reason_when_no_source() {
         let dir = TempDir::new().unwrap();
         let Some(_root) = sync_root(dir.path(), "원본 없음") else {
             return;
@@ -240,7 +240,7 @@ mod real {
 
     #[test]
     #[ignore = "#455"]
-    fn 동기화_폴더의_항목_메뉴에만_두_줄이_삭제_아래에_붙는다() {
+    fn only_sync_folder_item_menu_gets_two_rows_after_delete() {
         let dir = TempDir::new().unwrap();
         let Some(root) = sync_root(dir.path(), "메뉴") else {
             return;

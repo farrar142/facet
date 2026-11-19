@@ -82,7 +82,7 @@ fn index_for(dir: &Path, files: &[(&str, u32)]) -> (String, Index) {
 
 #[test]
 #[ignore = "#451"]
-fn 즉시_검색_결과는_인덱스_속성으로_온라인_전용과_항상_유지를_구분한다() {
+fn instant_results_badge_from_index_attributes() {
     let dir = TempDir::new().unwrap();
     let (volume, index) = index_for(
         dir.path(),

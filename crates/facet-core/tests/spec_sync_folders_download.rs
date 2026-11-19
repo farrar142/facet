@@ -186,7 +186,7 @@ fn quiet(app: &mut App, watch: &mut Watch) {
 
 #[test]
 #[ignore = "#453"]
-fn 온라인_전용_파일을_열면_내려받은_뒤_연다() {
+fn opening_online_only_file_downloads_then_opens() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "내려받은 뒤 열기") else {
         return;
@@ -228,7 +228,7 @@ fn 온라인_전용_파일을_열면_내려받은_뒤_연다() {
 
 #[test]
 #[ignore = "#453"]
-fn 이_장치에_있는_파일은_내려받기_작업_없이_연다() {
+fn local_file_opens_without_download_job() {
     let dir = TempDir::new().unwrap();
     let Some(_root) = sync_root(dir.path(), "로컬 파일 열기") else {
         return;
@@ -243,7 +243,7 @@ fn 이_장치에_있는_파일은_내려받기_작업_없이_연다() {
 
 #[test]
 #[ignore = "#453"]
-fn 멈춘_내려받기를_취소하면_열지_않는다() {
+fn cancelled_stalled_download_does_not_open() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "내려받기 취소") else {
         return;
@@ -264,7 +264,7 @@ fn 멈춘_내려받기를_취소하면_열지_않는다() {
 
 #[test]
 #[ignore = "#453"]
-fn 공급자가_응답하지_않으면_시간_제한_뒤_항목_오류가_되고_다른_작업은_계속된다() {
+fn stalled_provider_times_out_into_item_error_while_other_jobs_run() {
     let dir = TempDir::new().unwrap();
     let other = TempDir::new().unwrap();
     let target = TempDir::new().unwrap();
@@ -306,7 +306,7 @@ fn 공급자가_응답하지_않으면_시간_제한_뒤_항목_오류가_되고
 
 #[test]
 #[ignore = "#453"]
-fn 내려받기가_실패하면_묻고_다시_시도하면_열린다() {
+fn failed_download_asks_and_retry_opens() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "내려받기 실패") else {
         return;
@@ -331,7 +331,7 @@ fn 내려받기가_실패하면_묻고_다시_시도하면_열린다() {
 
 #[test]
 #[ignore = "#453"]
-fn 동기화_프로그램이_꺼져_있으면_멈추지_않고_까닭을_묻는다() {
+fn provider_not_running_asks_without_hanging() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "동기화 프로그램 꺼짐") else {
         return;
@@ -355,6 +355,6 @@ fn 동기화_프로그램이_꺼져_있으면_멈추지_않고_까닭을_묻는�
 
 #[test]
 #[ignore = "#453"]
-fn 무응답_시간_제한의_기본값은_30초다() {
+fn download_stall_timeout_defaults_to_30_seconds() {
     assert_eq!(DOWNLOAD_STALL_TIMEOUT, Duration::from_secs(30));
 }

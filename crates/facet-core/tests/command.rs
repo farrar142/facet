@@ -102,6 +102,9 @@ fn name(command: CommandId) -> &'static str {
         CommandId::EmptyRecycleBin => "휴지통 비우기",
         // 미리보기 영역(자세한 확인은 tests/spec_preview_app.rs).
         CommandId::TogglePreview => "미리보기 영역",
+        CommandId::KeepOnDevice => "이 장치에 항상 유지",
+        CommandId::FreeUpSpace => "공간 확보",
+        CommandId::DownloadForPreview => "미리 보기 내려받기",
     }
 }
 

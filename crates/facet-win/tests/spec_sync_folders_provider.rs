@@ -74,7 +74,7 @@ fn names_in(folder: &Path) -> Vec<String> {
 
 #[test]
 #[ignore = "#449"]
-fn 등록한_루트와_그_안의_항목은_동기화_폴더이고_보통_폴더와_버린_뒤는_아니다() {
+fn registered_root_is_sync_folder_plain_folder_and_dropped_root_are_not() {
     let dir = TempDir::new().unwrap();
     let other = TempDir::new().unwrap();
     fs::write(other.path().join("보통.txt"), b"x").unwrap();
@@ -96,7 +96,7 @@ fn 등록한_루트와_그_안의_항목은_동기화_폴더이고_보통_폴더
 
 #[test]
 #[ignore = "#449"]
-fn 온라인_전용_파일은_속성과_크기가_있고_목록을_읽어도_내용을_요청하지_않는다() {
+fn online_only_file_has_attributes_and_size_and_listing_does_not_fetch() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "온라인 전용 파일 속성") else {
         return;
@@ -119,7 +119,7 @@ fn 온라인_전용_파일은_속성과_크기가_있고_목록을_읽어도_내
 
 #[test]
 #[ignore = "#449"]
-fn 온라인_전용_파일을_읽으면_내용을_요청하고_준_내용이_읽힌다() {
+fn reading_online_only_file_fetches_given_content() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "온라인 전용 파일 읽기") else {
         return;
@@ -132,7 +132,7 @@ fn 온라인_전용_파일을_읽으면_내용을_요청하고_준_내용이_읽
 
 #[test]
 #[ignore = "#449"]
-fn 펼쳐지지_않은_온라인_폴더는_목록을_읽을_때_목록을_요청한다() {
+fn unexpanded_online_folder_fetches_placeholders_when_listed() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "펼쳐지지 않은 온라인 폴더") else {
         return;
@@ -155,7 +155,7 @@ fn 펼쳐지지_않은_온라인_폴더는_목록을_읽을_때_목록을_요청
 
 #[test]
 #[ignore = "#449"]
-fn 고정_상태를_항상_유지와_공간_확보로_바꾼다() {
+fn set_pin_state_pins_and_unpins() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "고정 상태 바꾸기") else {
         return;
@@ -173,7 +173,7 @@ fn 고정_상태를_항상_유지와_공간_확보로_바꾼다() {
 
 #[test]
 #[ignore = "#449"]
-fn 폴더에_재귀로_주면_안의_파일에도_적용된다() {
+fn recursive_pin_applies_inside_folder() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "재귀 고정") else {
         return;
@@ -190,7 +190,7 @@ fn 폴더에_재귀로_주면_안의_파일에도_적용된다() {
 
 #[test]
 #[ignore = "#449"]
-fn 동기화_폴더가_아닌_곳의_고정_상태_바꾸기는_실패한다() {
+fn set_pin_state_fails_outside_sync_root() {
     let dir = TempDir::new().unwrap();
     let file = dir.path().join("보통.txt");
     fs::write(&file, b"x").unwrap();
@@ -200,7 +200,7 @@ fn 동기화_폴더가_아닌_곳의_고정_상태_바꾸기는_실패한다() {
 
 #[test]
 #[ignore = "#449"]
-fn 실패_모드에서는_읽기가_실패한다() {
+fn fail_mode_makes_reads_fail() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "내려받기 실패 모드") else {
         return;
@@ -214,7 +214,7 @@ fn 실패_모드에서는_읽기가_실패한다() {
 
 #[test]
 #[ignore = "#449"]
-fn 멈춤_모드에서는_읽기가_끝나지_않다가_풀면_끝난다() {
+fn stall_mode_blocks_reads_until_released() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "멈춤 모드") else {
         return;
@@ -238,7 +238,7 @@ fn 멈춤_모드에서는_읽기가_끝나지_않다가_풀면_끝난다() {
 
 #[test]
 #[ignore = "#449"]
-fn 연결을_끊으면_복사가_동기화_프로그램이_돌지_않음으로_곧_실패한다() {
+fn disconnected_provider_fails_copy_quickly_with_not_running() {
     let dir = TempDir::new().unwrap();
     let target = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "동기화 프로그램 꺼짐") else {

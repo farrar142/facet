@@ -509,6 +509,7 @@ mod tests {
             can_go_forward: false,
             can_go_up: false,
             can_undo: false,
+            location_is_sync_folder: false,
         }
     }
 

@@ -102,7 +102,7 @@ fn sync_updates_for(app: &mut App, during: Duration) -> usize {
 
 #[test]
 #[ignore = "#454"]
-fn 도우미가_알린_동기화_중과_오류가_배지에_들어온다() {
+fn helper_reported_syncing_and_error_reach_badges() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "동기화 중·오류 배지") else {
         return;
@@ -140,7 +140,7 @@ fn 도우미가_알린_동기화_중과_오류가_배지에_들어온다() {
 
 #[test]
 #[ignore = "#454"]
-fn 동기화_폴더가_아니면_요청하지_않는다() {
+fn no_request_outside_sync_folders() {
     let dir = TempDir::new().unwrap();
     for name in ["syncing-a.txt", "error-b.txt"] {
         fs::write(dir.path().join(name), b"x").unwrap();
@@ -155,7 +155,7 @@ fn 동기화_폴더가_아니면_요청하지_않는다() {
 
 #[test]
 #[ignore = "#454"]
-fn 도우미가_없으면_속성_배지_그대로다() {
+fn without_helper_attribute_badges_stay() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "도우미 없음") else {
         return;

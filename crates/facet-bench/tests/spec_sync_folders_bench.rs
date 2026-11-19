@@ -12,7 +12,7 @@ use facet_bench::{
 
 #[test]
 #[ignore = "#450"]
-fn 십만_항목에_기준_1ms_상한은_그_10배다() {
+fn gate_bench_is_100k_items_1ms_target_and_10x_limit() {
     assert_eq!(CONTENT_GATE_COUNT, 100_000);
     assert_eq!(CONTENT_GATE_TARGET, Duration::from_millis(1));
     assert_eq!(CONTENT_GATE_LIMIT, CONTENT_GATE_TARGET * 10);
@@ -20,7 +20,7 @@ fn 십만_항목에_기준_1ms_상한은_그_10배다() {
 
 #[test]
 #[ignore = "#450"]
-fn 중앙값이_상한을_넘으면_수치와_함께_실패한다() {
+fn gate_limit_fails_with_median_and_limit_when_exceeded() {
     let ms = Duration::from_millis;
     let m = Measurement {
         item_count: CONTENT_GATE_COUNT,
@@ -37,7 +37,7 @@ fn 중앙값이_상한을_넘으면_수치와_함께_실패한다() {
 
 #[test]
 #[ignore = "#450"]
-fn 작은_회차로_재면_회차마다_시간이_있다() {
+fn gate_measure_has_a_time_per_run() {
     let m = measure_content_gate(3).expect("측정한다");
     assert_eq!(m.times.len(), 3, "회차 수만큼");
     assert_eq!(m.item_count, CONTENT_GATE_COUNT);

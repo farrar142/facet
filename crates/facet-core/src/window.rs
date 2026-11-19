@@ -540,6 +540,8 @@ pub enum Update {
         result: Result<Arc<Thumbnail>, ThumbnailError>,
         from_cache: bool,
     },
+    /// #454: 셸 동기화 상태([`App::request_sync_states`])가 그 탭의 배지에 들어왔다.
+    SyncStates,
 }
 
 /// #330: 썸네일 켜기 설정.
@@ -1990,6 +1992,16 @@ impl App {
     /// #330: 썸네일을 켠다(곧바로 돌아옴, 캐시는 처음 쓸 때 연다).
     pub fn enable_thumbnails(&mut self, options: ThumbnailOptions) {
         self.thumbnails = Some(Thumbs::new(options, &self.outbox));
+    }
+
+    /// #454: 그 탭의 보이는 행 범위의 셸 동기화 상태를 도우미에 요청한다(기다리지 않음).
+    pub fn request_sync_states(&mut self, _tab: TabId, _rows: std::ops::Range<usize>) {
+        todo!("#454")
+    }
+
+    /// #455: 명령이 꺼진 까닭(동기화 폴더가 아님). 다른 까닭이거나 켜져 있으면 `None`.
+    pub fn disabled_reason(&self, _command: CommandId) -> Option<command::DisabledReason> {
+        todo!("#455")
     }
 
     /// #330: 그 탭 목록의 순번 범위의 썸네일을 요청한다(크기는 탭의 칸 크기).
@@ -3572,6 +3584,7 @@ impl App {
             can_go_forward: tab.can_go_forward(),
             can_go_up: tab.can_go_up(),
             can_undo: self.history().undo_target().is_some(),
+            location_is_sync_folder: false, // #455
         }
     }
 
@@ -3669,6 +3682,8 @@ impl App {
                 };
             }
             CommandId::EmptyRecycleBin => return Execution::ConfirmEmptyRecycleBin,
+            CommandId::KeepOnDevice | CommandId::FreeUpSpace => todo!("#455"),
+            CommandId::DownloadForPreview => todo!("#456"),
             CommandId::TogglePreview => {
                 let window = self.active_window_mut();
                 let visible = !window.preview.visible;
@@ -4292,7 +4307,10 @@ impl App {
             | JobKind::Delete
             | JobKind::Recycle
             | JobKind::BatchRename
-            | JobKind::Restore => return None,
+            | JobKind::Restore
+            | JobKind::Download
+            | JobKind::KeepOnDevice
+            | JobKind::FreeUpSpace => return None,
         };
         if !self.can_execute(command) {
             return None;

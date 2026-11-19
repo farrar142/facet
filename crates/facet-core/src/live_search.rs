@@ -140,6 +140,8 @@ pub struct SearchProgress {
     pub folders_scanned: usize,
     /// 읽지 못해 건너뛴 폴더 수(권한 없음 등).
     pub folders_skipped: usize,
+    /// #452: 내려가지 않은 펼쳐지지 않은 온라인 폴더 수.
+    pub online_folders_skipped: usize,
 }
 
 /// 탐색이 어떻게 끝났는가.
@@ -160,6 +162,8 @@ pub struct SearchSummary {
     pub folders_scanned: usize,
     /// 읽지 못해 건너뛴 폴더 수.
     pub folders_skipped: usize,
+    /// #452: 내려가지 않은 펼쳐지지 않은 온라인 폴더 수.
+    pub online_folders_skipped: usize,
     /// 시작부터 끝까지 걸린 시간.
     pub elapsed: Duration,
     /// 끝남·취소.
@@ -220,6 +224,7 @@ impl Shared {
             found,
             folders_scanned: self.folders_scanned.load(Ordering::SeqCst),
             folders_skipped: self.folders_skipped.load(Ordering::SeqCst),
+            online_folders_skipped: 0, // #452
         }
     }
 }
@@ -505,6 +510,7 @@ fn batch(
         found: progress.found,
         folders_scanned: progress.folders_scanned,
         folders_skipped: progress.folders_skipped,
+        online_folders_skipped: progress.online_folders_skipped,
         elapsed: start.elapsed(),
         end,
     }));

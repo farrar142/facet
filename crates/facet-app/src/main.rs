@@ -1375,6 +1375,8 @@ fn job_row(entry: &JobEntry) -> JobRow {
             JobKind::Delete => JobType::Delete,
             JobKind::BatchRename => JobType::BatchRename,
             JobKind::Restore => JobType::Restore,
+            JobKind::Download => todo!("#453"),
+            JobKind::KeepOnDevice | JobKind::FreeUpSpace => todo!("#455"),
         },
         target: shell_provider::display_path(&entry.target).into(),
         status: match entry.state {
@@ -2362,6 +2364,7 @@ impl View {
                     Column::DateDeleted => 7,
                     Column::TotalSize => 8,
                     Column::FreeSpace => 9,
+                    Column::SyncState => todo!("#451"),
                 },
                 sort_descending: sort.direction == Direction::Descending,
                 item_count: count(status.item_count),

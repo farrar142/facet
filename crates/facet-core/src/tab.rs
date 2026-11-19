@@ -852,6 +852,16 @@ impl Tab {
         self.open_error.as_ref()
     }
 
+    /// #451: 위치가 동기화 폴더인가.
+    pub fn is_sync_folder(&self) -> bool {
+        todo!("#451")
+    }
+
+    /// #451: 보이는 번호의 항목 배지. 동기화 폴더가 아니면(즉시 검색 결과는 티켓의 규칙) `None`.
+    pub fn sync_state(&self, _index: usize) -> Option<crate::sync_status::SyncState> {
+        todo!("#451")
+    }
+
     pub(crate) fn set_open_error(&mut self, error: Option<OpenError>) {
         self.open_error = error;
     }
@@ -1573,6 +1583,7 @@ impl Tab {
                             found: progress.found,
                             folders_scanned: progress.folders_scanned,
                             folders_skipped: progress.folders_skipped,
+                            online_folders_skipped: 0, // #452
                         };
                         results.status.content = Some(ContentStatus {
                             skipped: progress.skipped,
@@ -1590,6 +1601,7 @@ impl Tab {
                             found: progress.found,
                             folders_scanned: progress.folders_scanned,
                             folders_skipped: progress.folders_skipped,
+                            online_folders_skipped: 0, // #452
                         };
                         results.status.content = Some(ContentStatus {
                             skipped: progress.skipped,
@@ -1600,6 +1612,7 @@ impl Tab {
                             found: progress.found,
                             folders_scanned: progress.folders_scanned,
                             folders_skipped: progress.folders_skipped,
+                            online_folders_skipped: 0, // #452
                             elapsed: summary.elapsed,
                             end: match summary.end {
                                 ContentEnd::Finished => SearchEnd::Finished,

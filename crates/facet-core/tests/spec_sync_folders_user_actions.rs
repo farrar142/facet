@@ -13,7 +13,7 @@ use facet_core::command::CommandId;
 
 #[test]
 #[ignore = "#456"]
-fn 미리_보기_내려받기는_팔레트에_있고_단축키가_없다() {
+fn download_for_preview_is_in_palette_without_shortcut() {
     let command = CommandId::DownloadForPreview;
     assert!(CommandId::ALL.contains(&command));
     assert!(command.shortcuts().is_empty());
@@ -115,7 +115,7 @@ mod real {
 
     #[test]
     #[ignore = "#456"]
-    fn 온라인_전용_파일을_복사하면_내려받는_중이_보인다() {
+    fn copying_online_only_file_shows_downloading() {
         let dir = TempDir::new().unwrap();
         let target = TempDir::new().unwrap();
         let Some(root) = sync_root(dir.path(), "복사의 내려받는 중") else {
@@ -147,7 +147,7 @@ mod real {
 
     #[test]
     #[ignore = "#456"]
-    fn 같은_동기화_폴더_안의_이동과_이름바꾸기는_내용을_읽지_않는다() {
+    fn move_and_rename_inside_sync_folder_do_not_fetch() {
         let dir = TempDir::new().unwrap();
         let Some(root) = sync_root(dir.path(), "같은 폴더 이동") else {
             return;
@@ -222,7 +222,7 @@ mod real {
 
     #[test]
     #[ignore = "#456"]
-    fn 동기화_폴더의_휴지통_삭제는_묻지_않고_알림을_든다() {
+    fn recycle_in_sync_folder_does_not_ask_and_carries_notice() {
         let dir = TempDir::new().unwrap();
         let plain = TempDir::new().unwrap();
         if !job::has_recycle_bin(plain.path()) {
@@ -243,7 +243,7 @@ mod real {
 
     #[test]
     #[ignore = "#456"]
-    fn 미리_보기_내려받기는_내려받은_뒤_글을_보이고_열지_않는다() {
+    fn download_for_preview_shows_text_without_opening() {
         let dir = TempDir::new().unwrap();
         let Some(root) = sync_root(dir.path(), "미리 보기 내려받기") else {
             return;

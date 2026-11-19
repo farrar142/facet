@@ -3,9 +3,9 @@
 // AC: #450: 배경 동작은 보통 파일을 허락하고 내려받기가 아님, 사용자 동작은 늘 허락하고 온라인 항목이면 내려받기, 허락 값은 누가 읽는지를 가짐
 // AC: #450: is_user_action은 사용자 동작 넷만 참, 목록 읽기가 Attributes::bits에 원래 속성 값을 담음(기본값 0)
 //! 내용 읽기 관문(`content_gate::check`)의 규칙을 속성 값과 동작 종류로 확인한다(순수 함수라 파일이 필요 없다). 목록
-//! 항목의 원래 속성 값(`Attributes::bits`)은 임시 폴더의 실제 파일로 Windows에서 확인한다. 나머지는 모든 플랫폼에서 돈다.
+//! 항목의 원래 속성 값(`Attributes::bits`, 기본값 0 포함)은 임시 폴더의 실제 파일로 Windows에서 확인한다. 나머지는 모든
+//! 플랫폼에서 돈다.
 
-use facet_core::Attributes;
 use facet_core::content_gate::{Reader, Refusal, check};
 
 const READONLY: u32 = 0x1;
@@ -62,7 +62,7 @@ const NOT_EXPANDED: [u32; 2] = [RECALL_ON_OPEN, DIRECTORY | REPARSE_POINT | RECA
 
 #[test]
 #[ignore = "#450"]
-fn 배경_동작은_온라인_전용_항목을_온라인_전용으로_거절한다() {
+fn background_readers_refuse_online_only_items() {
     for reader in BACKGROUND {
         for bits in ONLINE {
             assert_eq!(
@@ -76,7 +76,7 @@ fn 배경_동작은_온라인_전용_항목을_온라인_전용으로_거절한�
 
 #[test]
 #[ignore = "#450"]
-fn 배경_동작은_펼쳐지지_않은_온라인_폴더를_펼쳐지지_않음으로_거절한다() {
+fn background_readers_refuse_unexpanded_online_folders() {
     for reader in BACKGROUND {
         for bits in NOT_EXPANDED {
             assert_eq!(
@@ -101,7 +101,7 @@ fn 배경_동작은_펼쳐지지_않은_온라인_폴더를_펼쳐지지_않음�
 
 #[test]
 #[ignore = "#450"]
-fn 배경_동작은_이_장치에_있는_항목을_허락하고_내려받기가_아니다() {
+fn background_readers_allow_local_items_without_download() {
     for reader in BACKGROUND {
         for bits in LOCAL {
             let permit = check(bits, reader)
@@ -114,7 +114,7 @@ fn 배경_동작은_이_장치에_있는_항목을_허락하고_내려받기가_
 
 #[test]
 #[ignore = "#450"]
-fn 사용자_동작은_늘_허락하고_온라인_항목이면_내려받기가_일어난다() {
+fn user_actions_always_allowed_and_download_online_items() {
     for reader in USER {
         for bits in LOCAL {
             let permit = check(bits, reader).expect("사용자 동작은 허락");
@@ -131,7 +131,7 @@ fn 사용자_동작은_늘_허락하고_온라인_항목이면_내려받기가_�
 
 #[test]
 #[ignore = "#450"]
-fn 사용자_동작은_넷뿐이다() {
+fn only_four_readers_are_user_actions() {
     for reader in USER {
         assert!(reader.is_user_action(), "{reader:?}");
     }
@@ -140,23 +140,18 @@ fn 사용자_동작은_넷뿐이다() {
     }
 }
 
-#[test]
-#[ignore = "#450"]
-fn 속성_값의_기본값은_0이다() {
-    assert_eq!(Attributes::default().bits, 0);
-}
-
 #[cfg(windows)]
 #[test]
 #[ignore = "#450"]
-fn 목록_읽기가_항목의_원래_속성_값을_담는다() {
+fn listing_keeps_raw_attribute_bits() {
     use std::fs;
     use std::time::Duration;
 
-    use facet_core::Location;
     use facet_core::tab::ReadOutcome;
     use facet_core::window::App;
+    use facet_core::{Attributes, Location};
 
+    assert_eq!(Attributes::default().bits, 0, "기본값은 0이다");
     let dir = tempfile::TempDir::new().unwrap();
     fs::write(dir.path().join("보통.txt"), b"x").unwrap();
     let hidden = dir.path().join("숨김.txt");

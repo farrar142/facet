@@ -92,6 +92,7 @@ fn context(selected_count: usize, folder: bool, results: bool) -> MenuContext {
         can_go_forward: false,
         can_go_up: true,
         can_undo: false,
+        location_is_sync_folder: false,
     }
 }
 

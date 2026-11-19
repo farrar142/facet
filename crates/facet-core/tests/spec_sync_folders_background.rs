@@ -120,7 +120,7 @@ fn index_of(app: &App, name: &str) -> usize {
 
 #[test]
 #[ignore = "#452"]
-fn 실시간_탐색은_펼쳐지지_않은_온라인_폴더로_내려가지_않고_그_수를_센다() {
+fn live_search_does_not_descend_into_unexpanded_online_folders_and_counts_them() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "실시간 탐색") else {
         return;
@@ -173,7 +173,7 @@ fn 실시간_탐색은_펼쳐지지_않은_온라인_폴더로_내려가지_않�
 
 #[test]
 #[ignore = "#452"]
-fn 내용_검색은_온라인_전용_파일을_건너뛰고_센다() {
+fn content_search_skips_and_counts_online_only_files() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "내용 검색") else {
         return;
@@ -206,7 +206,7 @@ fn 내용_검색은_온라인_전용_파일을_건너뛰고_센다() {
 
 #[test]
 #[ignore = "#452"]
-fn 썸네일은_온라인_전용_이미지를_내려받지_않는다() {
+fn thumbnails_do_not_download_online_only_images() {
     let dir = TempDir::new().unwrap();
     let cache = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "썸네일") else {
@@ -264,7 +264,7 @@ fn 썸네일은_온라인_전용_이미지를_내려받지_않는다() {
 
 #[test]
 #[ignore = "#452"]
-fn 미리보기는_온라인_전용_항목을_보이지_않고_내려받지_않는다() {
+fn preview_refuses_online_only_items_without_downloading() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "미리보기") else {
         return;
@@ -300,7 +300,7 @@ fn 미리보기는_온라인_전용_항목을_보이지_않고_내려받지_않�
 
 #[test]
 #[ignore = "#452"]
-fn 온라인_전용_실행_파일은_파일_고유_아이콘을_얻지_않는다() {
+fn online_only_exe_gets_no_per_file_icon() {
     let dir = TempDir::new().unwrap();
     let Some(root) = sync_root(dir.path(), "아이콘") else {
         return;

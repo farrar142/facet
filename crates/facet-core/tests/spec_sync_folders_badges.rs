@@ -19,7 +19,7 @@ const RECALL_ON_DATA_ACCESS: u32 = 0x40_0000;
 
 #[test]
 #[ignore = "#451"]
-fn 속성_값으로_배지_셋을_가른다() {
+fn attributes_decide_the_three_badges() {
     let cases = [
         (0, SyncState::OnDevice),
         (ARCHIVE | REPARSE_POINT, SyncState::OnDevice),
@@ -45,10 +45,17 @@ fn 속성_값으로_배지_셋을_가른다() {
 
 #[test]
 #[ignore = "#451"]
-fn 상태_순서는_온라인_전용부터_오류까지다() {
-    assert!(SyncState::OnlineOnly < SyncState::OnDevice);
-    assert!(SyncState::OnDevice < SyncState::AlwaysKeep);
-    assert!(SyncState::AlwaysKeep < SyncState::Syncing);
+fn state_order_runs_from_online_only_to_error() {
+    // 속성으로 가른 셋이 그 순서이고, 셸 속성으로 받는 둘이 그 뒤다.
+    let online = SyncState::from_attributes(RECALL_ON_DATA_ACCESS);
+    let on_device = SyncState::from_attributes(ARCHIVE);
+    let always_keep = SyncState::from_attributes(PINNED);
+    assert_eq!(online, SyncState::OnlineOnly);
+    assert_eq!(on_device, SyncState::OnDevice);
+    assert_eq!(always_keep, SyncState::AlwaysKeep);
+    assert!(online < on_device);
+    assert!(on_device < always_keep);
+    assert!(always_keep < SyncState::Syncing);
     assert!(SyncState::Syncing < SyncState::Error);
 }
 
@@ -129,7 +136,7 @@ mod real {
 
     #[test]
     #[ignore = "#451"]
-    fn 동기화_폴더를_열면_항목마다_배지가_맞고_내용을_요청하지_않는다() {
+    fn sync_folder_items_get_badges_without_fetching() {
         let dir = TempDir::new().unwrap();
         let Some(root) = sync_root(dir.path(), "배지 셋") else {
             return;
@@ -157,7 +164,7 @@ mod real {
 
     #[test]
     #[ignore = "#451"]
-    fn 동기화_폴더가_아니면_배지가_없다() {
+    fn no_badges_outside_sync_folders() {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("a.txt"), b"a").unwrap();
         fs::create_dir(dir.path().join("폴더")).unwrap();
@@ -172,7 +179,7 @@ mod real {
 
     #[test]
     #[ignore = "#451"]
-    fn 상태_열로_정렬하면_상태대로_묶이고_방향을_바꾸면_반대다() {
+    fn sorting_by_state_groups_and_reverses() {
         let dir = TempDir::new().unwrap();
         let Some(root) = sync_root(dir.path(), "상태 열 정렬") else {
             return;
@@ -211,7 +218,7 @@ mod real {
 
     #[test]
     #[ignore = "#451"]
-    fn 밖에서_고정하거나_내려받으면_새로_고침_없이_배지가_바뀐다() {
+    fn badges_follow_outside_pin_and_download_without_refresh() {
         let dir = TempDir::new().unwrap();
         let Some(root) = sync_root(dir.path(), "배지 따라가기") else {
             return;
